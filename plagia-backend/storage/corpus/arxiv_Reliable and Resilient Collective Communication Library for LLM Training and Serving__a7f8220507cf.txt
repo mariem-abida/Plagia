@@ -1,0 +1,1269 @@
+Reliable and Resilient Collective Communication Library for
+LLM Training and Serving
+Wei Wang, Nengneng Yu, Sixian Xiong, Zaoxing Liu†
+University of Maryland, College Park
+January 1, 2026
+Abstract
+Modern ML training and inference now span tens to tens of thousands of GPUs, where
+network faults can waste 10–15% of GPU hours due to slow recovery. Common network er-
+rors and link fluctuations trigger timeouts that often terminate entire jobs, forcing expensive
+checkpoint rollback during training and request reprocessing during inference. We present
+R2CCL, a fault-tolerant communication library that provides lossless, low-overhead failover
+by exploiting multi-NIC hardware. R2CCL performs rapid connection migration, bandwidth-
+aware load redistribution, and resilient collective algorithms to maintain progress under failures.
+We evaluate R2CCL on two 8-GPU H100 InfiniBand servers and via large-scale ML simulators
+modeling hundreds of GPUs with diverse failure patterns. Experiments show that R2CCL is
+highly robust to NIC failures, incurring less than 1% training and less than 3% inference over-
+heads. R2CCL outperforms baselines AdapCC and DéjàVu by 12.18× and 47×, respectively.
+https://github.com/r2cc-project/R-2CCL.
+1
+Introduction
+The recent success of large-scale machine learning models is fundamentally reshaping the com-
+puting landscape (Hu et al., 2024; Choudhury et al., 2024; Gangidi et al., 2024; Qian et al., 2024).
+Training and serving large models requires massive distributed GPU clusters: a fragile and resource
+intensive endeavor, highly susceptible to various hardware and software failures (Jiang et al.,
+2024; Gandhi et al., 2024). For example, pre-training of LLaMA3 on a cluster of 16,384 GPUs
+experienced 466 job interruptions during a 54-day training period (Grattafiori et al., 2024) and the
+mean-time-to-failure was only 2.7 hours. Once a failure occurs, a noticeable recovery time is often
+required (He et al., 2023; Jiang et al., 2024).
+While network communication is one of the key performance bottlenecks in ML training
+(Jin et al., 2025; Zhou et al., 2025; Wang et al., 2023a; Song et al., 2023), network failures and
+†Correspondence to weics@umd.edu and zaoxing@umd.edu.
+1
+arXiv:2512.25059v1 [cs.DC] 31 Dec 2025
+
+interruptions are an often overlooked issue (Wang et al., 2024; Yu et al., 2023) among all types of
+hardware failures in AI clusters. For instance, in a large language model (LLM) training scenario,
+the GPUs will conduct frequent data exchange between each other to synchronize model updates
+in each iteration (i.e., collective communications). Recent reports (He et al., 2023; Grattafiori et al.,
+2024; Kokolis et al., 2025a; Liu et al., 2024a) from industry show that network issues such as NIC
+failures and cable problems can account for up to half of all failed training jobs. Similarly, such
+network failures jeopardize LLM inference pipeline, where even a single stalled collective can
+inflate the tail latency or provoke costly request retries (Strati et al., 2024c; Zhu et al., 2024).
+To recover from failures, checkpointing systems (Wan et al., 2025a; Eisenman et al., 2022;
+Gupta et al., 2024; Mohan et al., 2021; Wang et al., 2023b) have been widely used. In these systems,
+recovery is initiated by the underlying ML framework, such as PyTorch or TensorFlow, in response
+to faults such as timeouts, stalls, or crashes. The entire recovery process is often heavyweight,
+necessitating a complete relaunch of the framework to restore the model’s state from the most recent
+checkpoint. In addition to storage overhead, the recovery process incurs a significant latency due to
+a sequence of time-consuming operations, including failure detection, resource re-allocation, state
+reloading, and re-computation of iterations lost since the most recent checkpoint. Consequently,
+recent reports (He et al., 2023; Jiang et al., 2024) show that the median recovery time from a single
+failure can be as high as 68 min. For large-scale training jobs that utilize hundreds or thousands of
+GPUs, this prolonged downtime results in a substantial waste of computational resources (Wang
+et al., 2023b). Similarly, existing LLM serving systems do not efficiently handle failures; when the
+network fails, it crashes and halts ongoing requests.
+Figure 1: R2CCL vs. Checkpoint.
+Fundamentally, having a backup ready is
+considered a safe choice for failure handling,
+but, to borrow the old proverb, “a single flaw
+can spoil the whole”, indicating that even a sin-
+gle failure will interrupt the entire job and one
+needs to pay high recovery costs. In this paper,
+we want to explore whether there are alterna-
+tive cases in which the network should find a way
+to continue the job with the remaining connec-
+tivity rather than restarting and reloading. One
+opportunity in modern multi-NIC GPU clusters
+is that there are increasingly heterogeneous types of network links between GPUs (e.g., PCI-E and
+NVLink), creating possibly redundant network paths for communication even if some network
+paths may fail. Thus, we ask, if a NIC or link fails, what would be a good strategy to leverage the
+remaining links to recover from the failure with little impact on performance? If successful, this
+would allow both training and latency-sensitive inference jobs to continue uninterrupted, avoiding
+the high cost of a full restart.
+2
+
+Our response to the question above is R2CCL, a Reliable and Resilient Collective Communi-
+cation Library (CCL) that automatically heals from network failures when possible. R2CCL is
+designed as a drop-in replacement for popular collective communication libraries such as NCCL
+(NCCL, 2025) and RCCL (RCCL, 2025), which complements checkpoint systems to minimize full
+job terminations from network failures. As shown in Figure 1, R2CCL performs hot repair, which
+automatically detects network failures during collective operations and mitigates them by migrat-
+ing failed connections to other backup connections. Next, R2CCL performs online optimizations:
+if a better collective schedule is possible given the remaining connectivity, R2CCL optimizes the
+collective schedule with two online strategies to better utilize and balance bandwidth across the
+remaining links. To realize the above workflow, we need to address the following key challenges.
+#1: How to detect and locate the failure in an ongoing collective operation (e.g., AllReduce)?
+We introduce bilateral failure awareness using an out-of-band (OOB) notification path plus probe-
+based fault localization. When any node detects an error, it immediately notifies its peer and
+triangulates the fault using lightweight RDMA probes.
+#2: How to losslessly migrate the failed connection to another connection via alternative
+links? R2CCL performs live migration using two techniques. First, multi-NIC GPU buffer registration
+enables all NICs to access the same GPU buffers without re-registration. Second, DMA-buffer rollback
+rewinds both endpoints to the last acknowledged chunk and safely retransmits remaining data.
+These techniques allow collectives to resume seamlessly on a backup NIC.
+#3: How to perform failure-aware collective online optimization with single or multiple
+failures? R2CCL selects from several failure-aware optimizations. R2CCL-Balance redistributes
+traffic across remaining NICs (PCIe-, NUMA-, and PXN-aware) for all collectives. R2CCL-AllReduce
+modifies the AllReduce schedule to reduce the workload on the degraded server, combining global
+and partial AllReduce operations. Third, for multi-failure scenarios, topology-aware recursive
+R2CCL-AllReduce can navigate bandwidth asymmetry and rail mismatches.
+We evaluate R2CCL with an integration into NCCL. Our testbed consists of two GPU servers,
+each equipped with 8 x H100 GPUs and 8 InfiniBand 400Gbps NICs. We complement this with
+large-scale simulations using a state-of-the-art training simulator SimAI (Wang et al., 2025) to
+model clusters of thousands of GPUs under diverse failure patterns. With a single NIC failure
+injected (i.e., a 12.5% bandwidth loss on the affected server), our experiments show that R2CCL
+incurs less than 1% overhead for training and less than 3% for inference. Compared with recent
+fault-tolerant systems AdapCC (training) (Zhao et al., 2024) and DéjàVu (inference) (Strati et al.,
+2024a), R2CCL achieves 12.18× and 47× lower overheads respectively.
+2
+Background and Motivation
+In this section, we first discuss the background of modern GPU clusters and collective communica-
+tion. We then describe common network failures in machine learning jobs and what opportunities
+3
+
+we can leverage to improve failure handling.
+2.1
+GPU Cluster & Collective Communication
+Modern clusters for AI workloads consist of two–tier interconnect: an intra-node fabric (NVLink
+and NVSwitch) and inter-node RDMA NICs behind a PCIe topology. Production clusters often
+deploy multiple NIC per node and leverage collective algorithms of multiple channels (e.g., GPU
+form multiple rings/trees) to aggregate bandwidth while keeping the affinity of the GPU-NIC
+along the PCIe topology. To utilize the aggregate bandwidth of multiple NICs, CCLs partition the
+data across multiple channels that execute in parallel; each channel implements a communication
+pattern (ring, tree, or point-to-point) across GPUs and is bound to a specific NIC on each server.
+On top of this hardware, popular CCLs like NCCL implement collectives in two stages: a
+one–time bootstrap and a steady-state execution phase. During bootstrap, each rank (the unique
+identifier assigned to each participant) calls ncclCommInitRank from a host thread to form a
+communicator and brings up a lightweight out–of–band (OOB) bootstrap network (e.g., over MPI
+with TCP/UCX). The OOB network is used to exchange lightweight information to decide how
+many channels to create, how to arrange ranks into a ring or tree within each channel, and which
+NIC each rank should use as its transport endpoint. For every edge in these per-channel rings or
+trees, NCCL sets up the resources needed to send data between adjacent ranks, (e.g. an RDMA
+queue pair or a TCP socket). The underlying connections may be created lazily on first use, but
+the topology itself is fixed once bootstrap completes. In the steady state, every collective (e.g.,
+ncclAllReduce) is issued by the application’s host thread but executed by persistent GPU kernels
+over these precomputed channels.
+While this stack delivers high throughput under steady state, it is brittle when a bound NIC or
+link fails mid-collective, as current libraries provide no in-flight failover semantics. Mainstream
+collective libraries, assume a fixed communication graph after communicator initialization, and
+expose an asynchronous error-abort model rather than in-flight failover.
+Recent systems improve when and with whom to communicate, but reconfigure between
+collectives, not within a running one. A recent design, AdapCC (Zhao et al., 2024), is to have a
+coordinator collect short heartbeats before each collective to decide which ranks participate in
+the upcoming operation, and to profile links during idle intervals to rebuild the communication
+topology for subsequent rounds. Such mechanisms reduce iteration-level variance and avoid
+unnecessary restarts; however, if a NIC or link fault occurs during a collective, the ongoing
+operation still aborts.
+2.2
+Network Failures in ML Jobs
+Network failures in training jobs. While GPU failures are widely acknowledged as primary
+contributors to inefficiencies, network-related interruptions also emerge prominently as a critical
+4
+
+bottleneck in large-scale training environments, as large models require frequent collective com-
+munication. Recent data from Alibaba indicates that nearly 50% of their failed training tasks were
+directly attributed to network issues (He et al., 2023). Similarly, network interruptions accounted
+for 12% of total software and hardware interruptions at Meta (Grattafiori et al., 2024). These
+statistics highlight the importance of addressing network reliability, highlighting it as a major
+contributor to performance degradation alongside GPU reliability.
+Network failures in inference jobs. In LLM inference, the common response to a failure is to abort
+the request and restart it from the beginning. Since LLMs need previously computed attention
+keys and values to generate the next token, restarting from the beginning requires reconstructing
+the entire KV cache, which doubles tail latency. Recent systems such as DéjàVu replicate the KV
+cache in host memory or neighboring GPUs and reroute requests to healthy nodes upon failure,
+recomputing only the KV cache that was not yet replicated (Strati et al., 2024c), yet they still incur
+substantial memory and bandwidth overheads for maintaining replicas.
+Challenges and opportunity. To recover from network failures, typical checkpoint-based recovery
+encompass several stages. Initial failure detection can take 3 to 30 min, followed by node isolation,
+which adds an additional 9 to 14 min. Subsequently, loading checkpoints typically require between
+15 and 47 min. Further, reconstructing communication pathways can vary from 17 seconds to
+up to 20 min. Altogether, the median total recovery time is reported at approximately 68 min,
+accounting for about 12.7% of the job duration (He et al., 2023; Jiang et al., 2024).
+This long interruption time in work can be due to just a NIC failure. A promising opportunity
+is to explore how to efficiently leverage the remaining heterogeneous links to continue the job by
+switching between multiple network interfaces available on the servers and optimize bandwidth
+usage between them. However, this approach introduces notable challenges. Firstly, ensuring
+seamless data transfer without data loss during network path transitions is essential to maintain
+training continuity. Secondly, rerouting traffic may lead to uneven distribution across network
+links, resulting in potential performance degradation due to congestion and bottlenecks. Thus,
+addressing these challenges effectively requires solutions that balance seamless data transfer
+continuity and dynamic traffic redistribution to optimize overall performance and reliability.
+3
+R2CCL Overview
+Figure 2 summarizes how R2CCL handles network failures during collective communication.
+R2CCL works as a plugin to an existing collective communication library such as NCCL and RCCL
+with RRDMA support, which are the most popular deployments for ML training and inference. To
+recover from a failure, R2CCL has the following three logical steps:
+Step 1: Fault detection and localization. When a connection error (e.g., timeout) occurs during a
+collective, R2CCL intercepts it to avoid crashing, quickly identifies the failure location (e.g., NIC
+or cable), and uses this information to migrate communication to another link and drive later
+5
+
+failure-aware optimizations.
+Figure 2: R2CCL Overview.
+Step 2: Live migration for failure mitiga-
+tion. After pinpointing the faulty NIC or cable,
+R2CCL migrates the ongoing collective to a pre-
+established backup RDMA connection on an
+alternate NIC, avoiding connection reinitializa-
+tion. It rolls sender and receiver back to the last
+acknowledged chunk and retransmits only the
+remaining data. Together, Steps 1 and 2 enable
+seamless hot repair.
+Step 3: Failure-aware collective optimization.
+Hot repair alone does not adapt the collective
+schedule to the new heterogeneous topology.
+R2CCL-Balance automatically redistributes traf-
+fic from the failed NIC across remaining paths
+(e.g., PCIe forwarding, NVLink PXN†) without
+changing collective algorithms and applies to
+all collectives except AllReduce.
+For AllReduce, R2CCL-AllReduce explicitly handles bandwidth heterogeneity by modifying
+the standard ring algorithm to reduce data sent to and from the impaired server, improving
+performance under degraded connectivity.
+Supported failure types: R2CCL supports inter-server failures such as NIC hardware or port faults,
+downed links, cables, or ToR ports, and RDMA transport or QP-level errors on a single path. It also
+handles partial degradations that manifest as transport failures, including link flapping or CRC
+issues, driver/firmware or PCIe problems that disable only some NICs, and degraded GPU–NIC
+paths when other inter-node routes remain available. Failures outside R2CCL’s scope include
+intra-node fabric faults (NVLink/NVSwitch), full network partitions or switch-wide outages with
+no alternate paths. A full list is in the Appendix Table 2.
+3.1
+Challenges and Key Ideas
+C1: Error visibility and live migration for hot repair in NCCL. Hot repair requires quickly
+identifying failures and switching connections before NCCL’s default crash-on-error behavior
+triggers. In practice, NIC failures surface only as generic connection errors: the network stack
+cannot tell which endpoint failed, which creates asymmetric error visibility. Even when the faulty
+NIC is known, NCCL’s tight GPU–NIC binding prevents ongoing collectives from switching to
+alternative paths.
+†NVIDIA PXN routes inter-server GPU traffic through intermediate GPUs as proxies.
+6
+
+Key Idea: R2CCL introduces bilateral failure awareness over a bootstrap network plus lightweight
+probing to rapidly locate the faulty endpoint. When a link between servers A and B fails, R2CCL
+notifies both sides to avoid half-open states where one endpoint continues waiting on a dead
+connection.
+To break NCCL’s GPU–NIC binding, R2CCL pre-establishes idle backup connections among all
+GPUs and NICs at initialization. These “sleep” connections enable collectives to roll back to the
+last acknowledged chunk and resume on any healthy connection without reinitializing NCCL.
+C2: Collective bandwidth optimization under a single failure. After a failure, the remaining links
+create a heterogeneous topology. Simply redirecting all traffic to one backup NIC as Hot Repair
+overloads it and slows collectives. Solver-based schedule synthesis could find optimal routing but
+is too slow for online recovery. The key challenge is to quickly utilize remaining bandwidth with a
+failure-aware schedule on the degraded network.
+Key idea. R2CCL-Balance treats NICs as a shared pool and redistributes traffic across healthy
+interfaces in a topology-aware manner. R2CCL-AllReduce refines the standard AllReduce algorithm
+so slower nodes process proportionally less data than healthy ones.
+C3: Joint optimization under concurrent failures. Multiple failures can interact in ways that
+single-failure strategies cannot handle. Adjacent nodes may lose different rails (e.g., A loses rail 1,
+B loses rail 2), collapsing their shared bandwidth to the small intersection of surviving rails. Per-
+node balancing cannot resolve such mismatches. Moreover, multiple failures create a bandwidth
+spectrum: allocating data across nodes with different capacities requires joint optimization to
+prevent any degraded node from becoming the new bottleneck.
+Key idea. R2CCL resolves rail mismatches via topology-aware logical re-ranking that inserts
+bridge nodes with broad rail connectivity between incompatible neighbors. It extends the single-
+failure AllReduce decomposition by recursively applying it across multiple bottleneck nodes.
+4
+Failure Detection and Mitigation
+When network errors occur during active communication, CCLs typically trigger crashes that
+disrupt the entire ML job. In this section, we discuss R2CCL’s real-time failure detection and
+mitigation mechanism that consists of (1) bilateral failure awareness to quickly identify where there
+is a problem, (2) precise fault localization to tell where the failure is, and (3) live migration to continue
+the communication with alterative connections. This mechanism captures and processes network
+exceptions before they escalate into fatal crashes.
+4.1
+Bilateral Error Awareness
+When a network error occurs, the server node that detects the fault typically crashes, while others
+in the collective remain unaware and continue polling for progress that will never occur. This
+asymmetric failure visibility stems from collective frameworks like NCCL, whose asynchronous,
+7
+
+pipelined backends (e.g., RDMA, TCP) provide no fine-grained, in-band failure signaling. RDMA
+in this case is especially problematic: NICs autonomously handle retries and one-sided operations,
+delaying error propagation to the CPU.
+Our approach: R2CCL provides bilateral failure awareness through an out-of-band (OOB)
+notification path. When either endpoint detects an error, it immediately alerts its peer via a separate
+bootstrap network, using MPI over a non-datapath NIC. This prevents peers from spinning for a
+long time on dead connections, reducing detection time from minutes to milliseconds.
+4.2
+Precise Fault Localization
+A connection failure may stem from either endpoint, such as faulty NIC hardware, driver issues, or
+the physical link, but RDMA exposes only coarse transport errors (e.g., retry-exceeded), offering
+no indication of whether the fault lies in the local NIC, the remote NIC, or the link. All RDMA
+communication occurs through Queue Pairs (QPs), yet their error signals lack the granularity.
+R2CCL introduces dedicated probe QP pools, isolated from data paths, to localize failures.
+When an error is detected, R2CCL performs three-point triangulation (for clusters with ≥3 nodes):
+both endpoints and an auxiliary NIC issue zero-byte RDMA Writes as probes. These one-sided
+operations provide an ideal test primitive by generating completions without payloads or receiver
+involvement.
+Our approach. A failed NIC produces immediate local probe errors, while its peer observes
+timeouts; a broken link yields timeouts at both endpoints, with the auxiliary NIC distinguishing
+single-endpoint vs. dual-endpoint impairment. By correlating probe outcomes, R2CCL precisely
+identifies the fault and broadcasts it to all ranks via the OOB channel. R2CCL also periodically
+reprobes to detect component recovery (e.g., NIC resets, cable fixes), adapting probe frequency and
+strategy based on observed failure and recovery patterns.
+4.3
+Live Migration for Failure Mitigation
+After detecting and localizing a failure, the system must quickly resume collectives using the
+remaining healthy links. This requires fast, lossless connection migration so in-flight data is
+preserved with two challenges: (1) backup NICs cannot access GPU buffers unless those buffers
+were pre-registered with them, and (2) both sender and receiver must maintain data integrity
+during migration.
+Technique I: GPU-NIC multi-registration.
+In current GPU collective systems, an RDMA NIC can
+access a GPU buffer only if that buffer was explicitly registered with that NIC. Because registration
+is costly, systems typically register each buffer with only one or a subset of NICs. This becomes a
+problem during failover: an unregistered backup NIC cannot access the buffer, and registering it on
+demand is too slow (GPU memory registration takes milliseconds per buffer and RDMA connection
+8
+
+Strategy
+Communication Primitives
+R2CCL-Balance
+ReduceScatter, AllGather, Broadcast,
+Reduce, P2P (Send/Recv, All-to-All),
+AllReduce (latency-bound)
+R2CCL-AllReduce
+AllReduce (throughput-oriented)
+Table 1: R2CCL strategies for different collectives.
+setup tens of milliseconds (Silberstein et al., 2016)), often far slower than steady-state collective
+execution.
+R2CCL avoids this cost by proactively registering each GPU buffer with multiple NICs at ini-
+tialization. This multi-registration removes registration from the recovery path, keeping migration
+latency in the low-millisecond range. R2CCL also orders backup NICs by PCIe distance, activating
+the closest healthy NIC during migration. The ordered NIC chain supports successive failovers
+under multiple failures, while the overhead remains low since registration only installs mapping
+entries rather than duplicating data.
+Technique II: DMA buffer rollback for data integrity.
+Failures may occur mid–chunk transfer
+during a collective, leaving some chunks completed and others only partially transferred. A safe
+hot repair requires both endpoints to roll back to a consistent pre-failure state; otherwise, data loss
+or corruption can occur.
+We observe a useful property of NCCL-style collectives that send buffers remain intact until
+their RDMA operations complete, and receive buffers are not consumed by GPU kernels before
+completion. On the sender side, NIC-registered DMA buffers are not overwritten until a work
+completion is polled, so fully sent chunks remain available for retransmission. On the receiver side,
+partial writes are harmless because kernels read only after completion, allowing retransmissions to
+safely overwrite incomplete data.
+R2CCL uses this to implement DMA-buffer rollback. After receiving an OOB failure notification,
+the sender rewinds to the first chunk without a completion, and the receiver resets to the last
+confirmed chunk. The system retransmits all subsequent chunks over the selected backup NIC. If
+that NIC later fails, R2CCL moves to the next NIC in the failover chain and retransmits from the
+same rollback point. Since all backup NICs pre-register the same DMA buffers, this preserves data
+integrity and avoids corrupting previously completed chunks.
+5
+Optimize Scheduling Under a Single Failure
+When a failure is hot repaired, all in-flight messages are migrated from the failed NIC to a backup
+connection, which must now share bandwidth with other GPUs (Figure 3). If the collective
+9
+
+continues to use its original schedule, all traffic formerly on the failed NIC now flows into the
+backup NIC, effectively doubling its load and significantly slowing communication.
+We show that such a performance bottleneck can be largely mitigated via a failure-aware design
+for all collectives (as summarized in Table 1): (1) R2CCL-Balance a simple but generic load-balancing
+technique on top of NCCL’s existing schedules. This technique evenly distributes traffic across the
+remaining healthy NICs and works for all collectives. (2) R2CCL-AllReduce is a novel AllReduce
+schedule that further improves throughput under failures.
+5.1
+R2CCL Load Balancing
+Figure 3: R2CCL-HotRepair vs. R2CCL-Balance.
+R2CCL-Balance.
+Our first technique is a NIC-
+level load-balancing strategy that leaves NCCL
+collective algorithms unchanged.
+R2CCL-
+Balance treats NCCL schedules as fixed and
+intervenes only at the network layer, making
+it applicable to all collective types. For each
+collective invocation, NCCL’s algorithm (ring,
+tree, or hierarchical variants using NVSwitch
+multicast) determines the participating GPUs
+and the amount of inter-server data each server
+i must send, denoted Di. Rather than redesigning the collective, R2CCL-Balance exploits one
+remaining degree of freedom: when a NIC or link on server i fails, it redistributes the portion of
+Di that would have used the failed NIC across the remaining healthy NICs in proportion to their
+available bandwidth.
+PXN- and NUMA-aware load balancing.
+When rerouting traffic from a GPU to a backup NIC,
+R2CCL can either send it directly over PCIe or relay it via NVLink using GPU proxy forwarding
+(PXN). R2CCL selects between these options on a per-flow basis using a topology-aware policy. A
+failed NIC frees its PCIe lane from the affinity GPU, creating additional headroom that R2CCL can
+exploit for detoured flows. Thus, R2CCL prioritizes direct PCIe forwarding: if the backup NIC is
+on the same NUMA node and its PCIe path has sufficient bandwidth headroom, the source GPU
+forwards traffic via PCIe. If the target NIC lies on a different NUMA node, R2CCL compares the
+cost of traversing the CPU interconnect (e.g., QPI/UPI) with the NVLink headroom available for
+PXN. It then chooses the lower-cost path: either PCIe plus CPU-interconnect forwarding, or PXN
+forwarding to a proxy GPU co-located with the target NIC.
+Overhead Analysis.
+NCCL’s existing schedules already drive each server’s cross-server traffic
+close to the semantic minimum for core collectives. For total data size Dtotal: a ReduceScatter
+retains only a 1/n shard and must send n−1
+n Dtotal; an AllGather must receive the same amount; and
+10
+
+in a Broadcast, the root sends Dtotal while all others receive it. The NCCL’s ring algorithm (Figure 4)
+realizes these lower bounds in homogeneous systems.
+After a NIC failure, these volumes do not change: server i must still exchange Di bytes, even
+though its aggregate NIC bandwidth is reduced to Brem
+i
+. Because these collectives inherently
+require Θ(Dtotal) cross-server traffic, no schedule can substantially reduce Di; the only leverage
+is how efficiently the remaining bandwidth is used. R2CCL-Balance therefore redistributes the
+portion of Di originally routed through the failed NIC across the healthy NICs, allowing their
+combined throughput to approach Brem
+i
+. So collective completion time is dictated primarily by the
+reduced capacity of the slowest server.
+5.2
+R2CCL AllReduce
+Figure 4: ReduceScatter, AllGather and AllRe-
+duce.
+Standard AllReduce algorithms.
+Ring-based
+AllReduce is typically realized as a two-stage
+protocol (e.g., in NCCL and RCCL): A Re-
+duceScatter over all GPUs followed by an All-
+Gather over all GPUs, while tree-based AllRe-
+duce corresponds to a Reduction on a tree fol-
+lowed by a Broadcast on the same tree. Recent
+efforts in optimizing AllReduce are to individu-
+ally synthesize better schedules for ReduceScat-
+ter and AllGather. TACCL (Shah et al., 2023)
+first synthesizes an AllGather schedule, derives
+a ReduceScatter as its inverse, and then concate-
+nates these two phases to obtain an AllReduce
+algorithm, so every server still sends and receives roughly D data. TE-CCL (Liu et al., 2024b)
+similarly treats an AllReduce as a small number of demand matrices as fixed, user-specified input
+and only optimizes communication within individual matrices; it cannot automatically discover
+novel AllReduce schedules with respect to failures. These strategies often miss global optimization
+opportunities in inter-node heterogeneous failure scenarios.
+Partial AllReduce.
+To AllReduce D size data per GPU, in ReduceScatter operation, a server
+must transmit all D size data via its NIC, excluding the portion reduced onto itself; conversely,
+in AllGather, it must receive D size data from at least from others. Because the two operations
+execute sequentially rather than concurrently, the peak load on a server consists of transmitting
+roughly D during ReduceScatter and receiving roughly D during AllGather, leading to a combined
+data volume of approximately 2D.
+In contrast, for an AllReduce operation, a key insight is that a server can wait for other nodes
+to complete a partial AllReduce that excludes itself, and subsequently send and receive only the
+11
+
+Figure 5: R2CCL-AllReduce reduce bottleneck server workload from 2D to 1.75D based on the
+lost bandwidth. Total data size D with 4 chunks, ring Allreduce each worker need to send and receive
+nearly 2D size. Broadcast need to send and receive D size. R2CCL decompose it to allreduce and broadcast
+combination according the bandwidth ratio to reduce the completion time.
+data it requires (broadcast) to satisfy the full operation demand. Moreover, partial AllReduce
+can proportionally reduce the load on a specific server such as a server with a failed NIC, to improve
+the overall AllReduce performance. In practice, the failure server node retains some healthy NICs;
+we can allow it to participate in the global AllReduce across all ranks over a subset of the data,
+while the remaining data are handled by a partial AllReduce that excludes the failure node.
+R2CCL-AllReduce.
+Based on above insights, we propose a novel AllReduce algorithm (Figure 5).
+When NIC failures induce inter-node bandwidth heterogeneity, we partition the AllReduce into
+two stages:
+(1) The first stage executes a global AllReduce and a partial AllReduce concurrently. The global
+AllReduce spans all servers, including the one with the failed NIC, and is therefore throttled by
+the reduced effective bandwidth of the affected server. In parallel, the partial AllReduce excludes
+the failure node and utilizes the remaining capacity of the healthy servers to process its share of
+data at full speed.
+(2) The second stage executes a tailored broadcast that completes the partial-AllReduce plus
+broadcast path. This process comprises a broadcast initiated from the failure server node, a
+pipelined ring broadcast across the healthy servers, and the final delivery of the partial-AllReduce
+result from the last node in the ring back to the failure node, ensuring that all servers obtain the
+full correct AllReduce result.
+Data Partition Analysis. We then discuss the optimal data partition under this algorithm.
+12
+
+Let D be the total AllReduce data size, B be the bandwidth of healthy nodes, n be the number
+of servers, and g be the number of GPUs per server. The time for a ring AllReduce is given
+by 2(ng−1)
+ng
+× D
+B . Assume the failure node has lost a fraction X of its total bandwidth, and the
+proportion of data assigned to the partial AllReduce is Y . In the first stage, the time for the global
+AllReduce is T1(Y ) = 2(ng−1)
+ng
+× (1−Y )D
+(1−X)B . The partial AllReduce involves n −1 servers, and its time is
+T2(Y ) = 2((n−1)g−1)
+(n−1)g
+× Y D
+XB . The time for the second stage is the broadcast time, utilizing the remaining
+bandwidth of all healthy nodes: T3(Y ) = Y D
+XB .
+The total time is calculated as
+T (Y ) = max
+
+T1(Y ),T2(Y )
+
++ T3(Y ).
+In Appendix A, we prove that there exists a threshold on the lost-bandwidth fraction X such
+that when 0 < X ≤
+ng
+3ng−2 the standard ring AllReduce achieves a better completion time, while
+when
+ng
+3ng−2 < X < 1, R2CC-AllReduce is strictly better. In practice, when 0 < X < 1
+3, we use the
+standard ring AllReduce; when 1
+3 ≤X < 1, we use R2CC-AllReduce.
+6
+Optimize Scheduling Under Multi-Failure
+Figure 6: Topology-aware logical re-ranking.
+Large-scale distributed GPU clusters often face
+concurrent failures (Kokolis et al., 2025b). Here
+we expand from single-failure handling to sup-
+port multi-failure resilience introduces two
+formidable challenges: (1) Topological Frag-
+mentation: In rail-optimized topologies, asym-
+metric failures on adjacent nodes (e.g., Node A
+loses NIC 1, while Node B loses NIC 2) disrupt
+the alignment of parallel rails, rendering sim-
+ple local load balancing insufficient. (2) Band-
+width Spectrum: Multiple failures create a spec-
+trum of available bandwidth capacities across
+nodes, rather than a binary healthy/faulty dis-
+tinction. In this section, we present how R2CCL
+generalizes its scheduling primitives to address
+these complexities through Topology-Aware Log-
+ical Re-ranking and Recursive AllReduce Decomposition.
+Topology-Aware Logical Re-ranking.
+NCCL typically fixes ring/tree order by physical locality
+or static configuration. When adjacent nodes experience disjoint NIC failures (e.g., node u loses
+rail r while neighbor v loses rail r′), their shared bandwidth drops to the narrow intersection of
+surviving rails, and local load balancing can no longer compensate.
+13
+
+We observe that most collective algorithms are symmetric and agnostic to node ordering,
+enabling safe reordering. It performs topology-aware logical re-ranking (Figure 6): pairs of
+neighbors whose rail overlap falls below a bandwidth threshold are separated by inserting “bridge”
+nodes with broader rail connectivity. This targeted repair modifies only the problematic edges
+rather than rebuilding the entire ring, preserving most RDMA connections.
+Recursive R2CCL-AllReduce.
+The R2CCL-AllReduce strategy in Section 5 isolates a single bottle-
+neck node and reduces its communication load, assuming the remaining nodes are homogeneous.
+Under concurrent failures, however, clusters develop a bandwidth spectrum, and treating all
+non-bottleneck nodes as a single group forces faster nodes to operate at the speed of moderately
+degraded ones, leaving substantial bandwidth unused.
+R2CCL addresses this by generalizing dual-ring decomposition into a recursive scheduling
+strategy. The system first forms a global ring running at the slowest node’s rate. It then isolates
+that node and builds a faster sub-ring from the remaining participants. If bandwidth variance
+persists, R2CCL recursively peels off further sub-rings, each handling a data chunk proportional to
+the incremental bandwidth of its members. Logical re-ranking is applied at every level to avoid
+rail mismatches introduced by skipping slower nodes.
+R2CCL executes the reduction phases of all rings in parallel to saturate available bandwidth.
+Broadcast phases impose dependencies—slower nodes must wait for partial results from faster
+sub-rings—but bandwidth asymmetry often allows faster nodes to finish their smaller broadcasts
+concurrently with slower nodes’ ongoing operations. To formalize these decisions, R2CCL extends
+NCCL’s performance model (α–β) to evaluate expected completion time at each recursion depth, in-
+corporating per-node bandwidth and overlap. The planner then selects among standard Ring/Tree,
+R2CCL-Balance, or recursive R2CCL-AllReduce to best navigate latency–throughput trade-offs.
+7
+Implementation
+We implement R2CCL as a drop-in extension of 3K lines of C++ code to NCCL 2.23.4, allowing
+existing ML frameworks to leverage it without any modifications. Our implementation introduces
+integrates R2CCL strategies on the host transport layer and collective scheduling logic, plus a
+customized broadcast kernel to support the specific requirements of the R2CCL-AllReduce phase.
+Transport hooks and backup paths. R2CCL intercepts NCCL’s communicator initialization at the
+ncclNet plugin layer to establish backup connections alongside the primary connection. We extend
+the memory registration path to register each GPU buffer with all NICs of the server, and augment
+the connection setup logic to create additional queue pairs over backup NICs. The resulting
+handles are organized into a per-channel failover list ordered by PCIe distance to the source GPU,
+allowing the failure recovery logic to select the topologically closest healthy NIC.
+Failure detection and live migration. R2CCL augments the net plugin and proxy send receive
+14
+
+progress loops to handle network failures without crashing the application process. The modified
+InfiniBand plugin monitors Completion Queue (CQ) and Queue Pair (QP) errors, reporting them
+as failed requests to the proxy. Upon error, the plugin issues a lightweight RDMA probe and
+exchanges messages via the bootstrap network to confirm the failure location. Once a failure is
+confirmed, the proxy rolls the channel back to the last chunk with a confirmed completion, purges
+outstanding work requests, transitions the channel to the backup connection, and reissues the
+remaining chunks.
+R2CCL-Balance and R2CCL-AllReduce. R2CCL-Balance is integrated into NCCL’s enqueue and
+planning logic. Before NCCL selects an algorithm and instantiates rings or trees, R2CCL inspects
+the health status records of NICs on each node. The planner then redistributes the affected channels
+across the remaining healthy NICs on the same node. R2CCL-AllReduce leverages NCCL’s channel
+abstraction to execute the mutlie-phase schedule. In the first phase, we partition channels into
+two groups: one group runs a global AllReduce across all nodes (throttled by the degraded node),
+while the other runs a Partial AllReduce that excludes the degraded node. Both groups execute
+concurrently to saturate available bandwidth. In the second phase, a custom CUDA broadcast
+kernel disseminates the Partial AllReduce result to the degraded node.
+8
+Evaluation
+We evaluate R2CCL extensively on a real testbed and large-scale simulations. We find that:
+• R2CCL achieves less than 1% overhead on training and less than 3% on inference under failure,
+reducing overhead by up to 12.18× compared to AdapCC and 47× compared to DéjàVu. (§8.2
+§8.3).
+• R2CCL demonstrates robust scalability, incurring only 4.3% overhead with 10 concurrent failures
+across a simulated 512-GPU cluster. (§8.2).
+• R2CCL maintains up to 93% of baseline throughput for collective operations during failures.
+(§8.4).
+8.1
+Methodology
+Testbed. Our physical testbed consists of two server nodes interconnected via InfiniBand fabric.
+Each node is equipped with 8 NVIDIA H100-80GB SXM5 GPUs†, and 8 ConnectX-7 400Gbps
+InfiniBand NICs. The intra-node GPUs support NVLink 4.0, providing 900GB/s bidirectional
+bandwidth. This configuration represents a typical production GPU cluster setup, allowing us to
+evaluate R2CCL under realistic network conditions and failure scenarios.
+For simulation experiments, we leverage SimAI (Wang et al., 2025), a state-of-the-art ML
+training simulator that provides end-to-end training performance along with cycle-accurate net-
+†We disabled NVIDIA SHARP in all experiments to ensure our results generalize to diverse hardware configurations.
+15
+
+work modeling and precise collective communication time. SimAI is configured with NVIDIA’s
+Spectrum-X RoCE-v2 rail-optimized topology, and each simulated server is equipped with eight
+NVIDIA A100 GPUs and eight 200 Gbps NICs. To evaluate R2CCL’s scalability, we simulate clusters
+ranging from 32 to 1024 GPUs, enabling us to study failure patterns and recovery behaviors at
+scales beyond our physical testbed.
+Baselines. For training experiments, we compile PyTorch v2.10.0 with NCCL v2.23.4 and with
+R2CCL, and compare with two approaches: (1) Vanilla NCCL (NCCL, 2025), which crashes on
+NIC failure; and (2) AdapCC (Zhao et al., 2024), which excludes failed GPUs.
+For inference experiments, we compile NCCL v2.23.4 and R2CCL and build vLLM v1 on top.
+Because NCCL lacks fault tolerance, we implement two standard mitigation strategies: (1) Restart
+Server, which incurs a measured 35-second restart delay, and (2) Reroute Request, which redirects
+affected queries to an alternative server that must absorb the doubled load. We also evaluate
+DéjàVu (Strati et al., 2024b), a fault-tolerant inference framework with KV-cache replication,
+compiled with both vanilla NCCL and R2CCL to isolate R2CCL’s contribution.
+For microbenchmarks, we use NCCL-tests v2.17.1 on two nodes to compare vanilla NCCL
+and R2CCL for collective and point-to-point operations under normal and single-NIC failure
+conditions.
+8.2
+Training Resilience
+Figure 7: Megatron Training Performance Evaluation
+In this section, we demonstrate R2CCL’s
+effectiveness in maintaining training con-
+tinuity when failures occur.
+We use
+Megatron-LM (Narayanan et al., 2021)
+as our training benchmark to compare
+against baselines.
+Physical Testbed Evaluation. We mea-
+sure token-per-second training through-
+put (Figure 7) and overhead relative to a
+no-failure baseline for GPT-3 2.7B and 13B models under two multi-node configurations: (1)
+DP=16 on the 2.7B model, where inter-node all-reduce dominates; (2) TP=8, PP=2 on the 13B
+model, where pipeline stages span nodes and induce point-to-point activations.
+Under DP=16, vanilla NCCL fails completely. Among fault-tolerant methods, R2CCL-AllReduce
+achieves 312,394 tokens/s, just 0.71% overhead vs. the no-failure throughput of 314,618 tokens/s.
+R2CCL-Balance incurs 1.32%, and R2CCL-HotRepair 4.82%. AdapCC shows the worst slowdown
+(8.65%) due to reduced compute capacity.
+For TP=8, PP=2 on the 13B model, R2CCL-Balance again performs best, with only 0.38%
+overhead (8,309 vs. 8,340 tokens/s). R2CCL-HotRepair incurs 1.31%. AdapCC cannot operate in
+this setting (0 tokens/s) because removing a rank violates tensor/pipeline partitioning constraints.
+16
+
+(a) Small Scale Training.
+(b) Large Scale Training.
+(c) Strategies Overhead.
+(d) Time Composition.
+Figure 8: Simulation 7B model training performance across 4-64 8xA100 Server.
+AdapCC’s tolerance is also limited: it can exclude failed GPUs only if the failure occurs before
+a collective begins. Mid-operation faults still crash the job, and excluded GPUs cause gradient
+loss. R2CCL avoids these issues by operating at the transport layer, transparently rerouting traffic
+through healthy NICs mid-operation and preserving full-rank, lossless execution regardless of
+failure timing.
+To assess resilience under more severe conditions, we inject two simultaneous NIC failures
+on one node. In DP=16, R2CCL-Two-Failures sustains 310,756 tokens/s (1.24% overhead). In
+TP=8, PP=2, it delivers 8,257 tokens/s (1.01% overhead). In both cases, training proceeds with
+near-baseline efficiency, demonstrating R2CCL’s robustness to multiple failures.
+Figure 9:
+Extra time
+R2CCL vs. AdapCC.
+Figure 10: Multi-failure
+training overhead.
+Large scale training simulation under fail-
+ures For a single failure, we use SimAI to sim-
+ulate a 7B-parameter model with global batch
+size 512, from 4 to 64 servers each with 8 GPUs.
+Within each server, GPUs are partitioned into
+two TP groups. Figure 8c shows that R2CCL-
+AllReduce consistently maintains an overhead
+of less than 1.5% despite a 12.5% bandwidth
+loss, significantly outperforming the R2CCL-
+Balance strategy, which sees overhead rise to 5% at larger scales. Overheads increase as the number
+of GPUs increases, because communication ratio increases when per GPU computation batch
+decreases, as shown in figure 8d. The low computation ratio implies low GPU utilization, so GPU
+number larger than 512 usually trains a larger model with more computation ratio to fully utilize
+GPUs. In practice, this will bound the overhead of R2CCL due to limited communication ratio.
+Figure 9 shows pre-training a 175B-parameter model with 1,024 GPUs (TP=8, PP=8, DP=16) and
+RLHF fine-tuning with DeepSpeed-Chat’s RLHF (Yao et al., 2023) on 64 GPUs (TP=8, PP=1, DP=8)
+with Fully Sharded Data Parallelism (FSDP). In this production scenario, R2CCL proved vastly
+superior to the AdapCC framework reducing failure-induced training time by approximately 54x
+and 15x, respectively.
+We also extend our evaluation to scenarios with multiple concurrent failures. Unlike single-
+failure cases where the impact is deterministic, the performance degradation in multi-failure
+17
+
+Figure 11: p50/p95/p99 TTFT vs QPS under NIC failures for vLLM
+scenarios depends heavily on the spatial distribution of faults. We randomly inject k failures
+across 64 servers(512 GPUs), varying k from 1 to 10. We conduct a Monte Carlo simulation with
+50 random failure patterns for each k. Figure 10 shows the average iteration time overhead for
+the 7B model training as the number of failures increases. R2CCL demonstrates exceptional
+resilience: the overhead grows sub-linearly from 1.5% with a single failure to only 4.3% with 10
+concurrent failures. When multiple failures concentrate on a single server, that server becomes
+a bandwidth bottleneck; when failures scatter across the cluster, the impact is amortized and
+no single server dominates the critical path. This confirms that R2CCL’s load-balancing and
+algorithmic optimizations effectively bound performance degradation even under severe failure
+scenarios.
+8.3
+Inference Resilience
+Figure 12: p50/p95/p99 TTFT vs p50/p95 TPOT un-
+der multiple failures for serving with pipeline parallel
+In this section, we demonstrate how
+R2CCL leverages network redundancy to
+significantly benefit end-to-end inference
+performance when NIC failures occur. We
+evaluate R2CCL using vLLM (Kwon et al.,
+2023), a widely adopted production infer-
+ence framework, and compare it against
+two strategies relied upon by systems lack-
+ing transport-layer resilience: restarting
+the failed service and rerouting the re-
+quests to another server. Additionally, we
+integrate R2CCL into DéjàVu (Strati et al.,
+2024b), an existing fault-tolerant inference framework, to compare our fault handling strategies
+with their application-side fault tolerance performance.
+18
+
+vLLM Inference Performance.
+We use the vLLM v1 engine and focus on two multi-node configu-
+rations that exercise inter-node communication: (i) tensor-parallelism with pipeline parallelism
+(TP=8, PP=2), and (ii) TP=8 with prefill–decode (PD) disaggregation setting, which separates the
+compute-intensive prefill phase from the memory-intensive decode phase across different nodes.
+These are vLLM configurations that require inter-node communication rather than being confined
+to a single node.
+Figure 13: p50/p95 TPOT vs QPS under multiple NIC
+failures for serving with pipeline parallel
+For each setup, we generate requests
+using fixed-rate arrival patterns to sim-
+ulate inference workloads. We measure
+different metrics tailored to each configu-
+ration’s characteristics. For PD disaggre-
+gation, NIC failures primarily impact the
+prefill phase, making time-to-first-token
+(TTFT) our key metric since decoding pro-
+ceeds without inter-node communication
+after the prefill node finishes transferring
+the kv cache. The pipeline-parallel configuration requires inter-node communication for every
+token generation, so we track both TTFT and time-per-output-tokens (TPOT) to capture the full
+performance impact.
+Our experiments simulate inference patterns using synthetic prompts with 2,000 tokens length,
+allowing models to generate outputs until reaching EOS or 256. Each 100-second experiment
+injects a single NIC failure at the midpoint (t=50s) to observe both transient and steady-state effects.
+This workload stresses both prefill bandwidth and decode throughput, revealing how failures
+impact different phases of inference.
+End-to-end latency (TTFT).
+Fig. 11 plots TTFT as a function of the offered load for Llama-3.1-
+70B and 3.1-405B under different failure-handling strategies. R2CCL-Balance almost overlaps with
+the no-failure curve across models and percentiles (p50/p95/p99), indicating near-zero steady-state
+overhead in the absence of NIC failures: before saturation, the TTFT overhead is within ≈0–0.6%
+for the 70B model and 0.3–3% for the 405B model. Under a TTFT SLO of 5 s, R2CCL sustains up
+to 1.2–8.7× higher throughput than service restart and 1.6–1.9× higher throughput than request
+rerouting, while retaining ≈99–100% of the no-failure capacity.
+Streaming latency (TPOT).
+Fig. 12 reports time per output token (TPOT) for the Llama-3.1-405B
+TP+PP configuration. R2CCL-Balance again closely tracks the no-failure baseline: both p50 and
+p95 TPOT increase smoothly with QPS and remain low until the system saturates, showing that
+R2CCL preserves the streaming rate of generated tokens. Before saturation, the TPOT overhead is
+within 3%. Under a p95 TPOT SLO of 0.4 s, R2CCL sustains ≈1.9× and ≈2.6× higher throughput
+19
+
+than the restart and rerouting strategies, respectively, while remaining within about 5% of the
+no-failure capacity.
+R2CCL leverages the inherently low cross-node communication volume and bandwidth redun-
+dancy in large-model inference so that it can provide strong fault tolerance in inference workloads
+with almost no performance penalty.
+Performance Comparison vs. DéjàVu.
+We follow DéjàVu’s evaluation methodology and keep
+the application stack unchanged, varying only the communication layer. Using two workers with
+TP8 and PP2 parallelism, we evaluate the same models—OPT-66B and BLOOM-176B—under
+homogeneous requests (500-token prompt, 1500-token generation) and inject failure at decode step
+800. As in their study, we report single-request cumulative latency. For comparison, we compile
+DéjàVu in two forms: (i) its original NCCL-based build and (ii) a version where NCCL is replaced
+by R2CCL. This setup also demonstrates that R2CCL integrates seamlessly without requiring any
+application-level modifications.
+Figure 14: Inference performance under failure com-
+pare to DéjàVu and non fault tolerance baseline.
+For DéjàVu and the non-fault-tolerant
+baseline, recovery is dominated by worker
+restart and reconnection delays. As shown
+in Figure 14, the non-fault-tolerant base-
+line experiences severe latency inflation:
+1.62× for OPT-66B and 1.79× for BLOOM-
+176B—due to full request reprocessing.
+DéjàVu reduces this via neighbor KV-
+cache replication but still incurs a 14–33%
+penalty (1.14×–1.33×) from bandwidth-
+heavy state reconstruction and added memory overhead. In contrast, R2CCL’s transparent connec-
+tion migration avoids both restart and reconstruction, sustaining service with only 0.71–1.58%
+overhead. This yields 8.6× and 47× lower recovery overhead than DéjàVu, and 38.9× and 113×
+lower overhead than the non-fault-tolerant baseline for OPT-66B and BLOOM-176B.
+R2CCL Performance Under Multiple Failures.
+We further evaluate R2CCL’s resilience under
+multiple concurrent failures on our two-node testbed. Unlike training workloads that may scale to
+hundreds of nodes, inference deployments typically use fewer nodes per model instance, reflecting
+production requirements for latency and cost efficiency. Our multi-failure experiments use vLLM
+engine to serve a 405B model with TP=8 and PP=2 configuration. We inject varying numbers of
+failures to reduce available NICs on a single node and feed requests at QPS=0.1, ensuring the
+system operates within its capacity to measure steady-state overhead. As shown in Figure 13,
+both TTFT and TPOT overheads remain within 0-5%, exhibiting minimal variance due to system
+underlying overhead, even as multiple network device failures reduce majority bandwidth. This
+20
+
+demonstrates that R2CCL fully exploits the ample bandwidth headroom in inference workloads:
+even under more severe and numerous failures on network devices, the remaining links still suffice
+to allow the system to continue serving with overhead close to zero.
+8.4
+Microbenchmarks
+We evaluate R2CCL’s primitive communication performance using NCCL-tests on two nodes of our
+physical testbed, measuring communication operations bus bandwidth across message sizes from
+8B to 16GB under a failure scenario.
+AllReduce Performance.
+Figure 15 compares four configurations: vanilla NCCL with no failure,
+R2CCL-HotRepair, R2CCL-Balance, and R2CCL-AllReduce. We also compare R2CCL with multiple
+failures in training and inference.
+Without failure, vanilla NCCL achieves up to 369 GB/s for large messages. When a NIC
+fails (12.5% total bandwidth loss), the R2CCL-HotRepair approach suffers approximately 46%
+throughput loss for large messages, as expected from the single-NIC bottleneck on the affected
+node.
+Figure 15: AllReduce performance.
+R2CCL’s
+two
+strategies
+exhibit
+complementary
+strengths. For small messages (<32MB), R2CCL-Balance
+achieves significantly lower latency, maintaining 92%
+of normal throughput while R2CCL-AllReduce drops to
+66% due to its data dependency coordination overhead.
+For medium messages (32MB–256MB), both strategies
+perform similarly at 87–98% of normal throughput. For
+large messages (≥512MB), R2CCL-AllReduce achieves su-
+perior performance, around 93% of normal throughput
+compared to Balance’s 83%, by reducing the data volume that the bandwidth-constrained node
+must transmit.
+In practice, R2CCL leverages an α-β performance model, using machine-specific link latency
+(α) and bandwidth (β) parameters provided by NCCL along with the operation’s data size, to
+dynamically select the optimal strategy at runtime. This approach ensures that the crossover
+point adapts to different hardware configurations and message sizes, rather than relying on a fixed
+threshold.
+More results on other collectives.
+Beyond AllReduce, we evaluate R2CC-Balance on AllGather,
+ReduceScatter, and point-to-point (SendRecv) operations. Appendix E Figure 16 shows that
+R2CC-Balance consistently maintains 85-89% of normal throughput across all three operations.
+21
+
+9
+Other Related Work
+Resilient distributed training. Checkpointing has been widely adopted for fault tolerance in
+distributed training. Gemini (Wang et al., 2023b) leverages in-memory checkpoints to enable fast
+parallel recovery. ByteCheckpoint (Wan et al., 2025b) provides optimized I/O pipelines for large
+foundation models. Recent works also explore alternative approaches to reduce recovery time.
+TrainMover (Lao et al., 2024) leverages standby machines with two-phase communication group
+setup and sandbox-based warm-up to achieve second-level migration without restarting the entire
+job.
+Communication Synthesis and Scheduling. Complementary to fault tolerance, optimizing
+communication efficiency via offline synthesis has gained significant attention. These approaches
+typically employ solvers (e.g., Gurobi) to compute optimal traffic schedules prior to execution.
+TACCL (Shah et al., 2023) introduces communication sketch abstractions incorporating human
+hints, which allows the system to capture key design information, thereby significantly pruning the
+search space and guiding the synthesizer toward superior algorithms. TE-CCL (Liu et al., 2024b)
+formulates collective communication as a traffic engineering problem to synthesize higher-quality
+schedules. To address the complexity of large-scale clusters, SyCCL (Cao et al., 2025) exploits the
+inherent symmetry within current large GPU clusters to drastically reduce the search space and
+accelerate the schedule synthesis process.
+10
+Conclusions
+In this paper, we introduce R2CCL, a fault-tolerant collective communication library designed
+to sustain large-scale ML workloads through network failures without costly interruptions. By
+leveraging seamless connection migration, intelligent load balancing, and resilient communication
+algorithms, R2CCL reduces failure-induced overheads. Our experiments show that R2CCL reduces
+additional training time by up to 12× and decreases inference latency by 47× compared to existing
+fault-tolerant systems.
+References
+Cao, J., Shi, S., Gao, J., Liu, W., Yang, Y., Xu, Y., Zheng, Z., Guan, Y., Qian, K., Liu, Y. et al. (2025).
+Syccl: Exploiting symmetry for efficient collective communication scheduling. In Proceedings of
+the ACM SIGCOMM 2025 Conference.
+Choudhury, A., Wang, Y., Pelkonen, T., Srinivasan, K., Jain, A., Lin, S., David, D., Soleimanifard,
+S., Chen, M., Yadav, A. et al. (2024). {MAST}: Global scheduling of {ML} training across {Geo-
+Distributed} datacenters at hyperscale. In 18th USENIX Symposium on Operating Systems Design
+and Implementation (OSDI 24).
+22
+
+Eisenman, A., Matam, K. K., Ingram, S., Mudigere, D., Krishnamoorthi, R., Nair, K., Smelyanskiy,
+M. and Annavaram, M. (2022). {Check-N-Run}: A checkpointing system for training deep
+learning recommendation models. In 19th USENIX Symposium on Networked Systems Design and
+Implementation (NSDI 22).
+Gandhi, S., Zhao, M., Skiadopoulos, A. and Kozyrakis, C. (2024). Recycle: Resilient training of
+large dnns using pipeline adaptation. In Proceedings of the ACM SIGOPS 30th Symposium on
+Operating Systems Principles.
+Gangidi, A., Miao, R., Zheng, S., Bondu, S. J., Goes, G., Morsy, H., Puri, R., Riftadi, M., Shetty,
+A. J., Yang, J. et al. (2024). Rdma over ethernet for distributed training at meta scale. In
+Proceedings of the ACM SIGCOMM 2024 Conference.
+Grattafiori, A., Dubey, A., Jauhri, A., Pandey, A., Kadian, A., Al-Dahle, A., Letman, A., Mathur,
+A., Schelten, A., Vaughan, A. et al. (2024). The llama 3 herd of models. arXiv preprint
+arXiv:2407.21783.
+Gupta, T., Krishnan, S., Kumar, R., Vijeev, A., Gulavani, B., Kwatra, N., Ramjee, R. and Sivathanu,
+M. (2024). Just-in-time checkpointing: Low cost error recovery from deep learning training
+failures. In Proceedings of the Nineteenth European Conference on Computer Systems.
+He, T., Li, X., Wang, Z., Qian, K., Xu, J., Yu, W. and Zhou, J. (2023). Unicron: Economizing
+self-healing llm training at scale.
+https://arxiv.org/abs/2401.00134
+Hu, Q., Ye, Z., Wang, Z., Wang, G., Zhang, M., Chen, Q., Sun, P., Lin, D., Wang, X., Luo, Y. et al.
+(2024). Characterization of large language model development in the datacenter. In 21st USENIX
+Symposium on Networked Systems Design and Implementation (NSDI 24).
+Jiang, Z., Lin, H., Zhong, Y., Huang, Q., Chen, Y., Zhang, Z., Peng, Y., Li, X., Xie, C., Nong, S.
+et al. (2024). {MegaScale}: Scaling large language model training to more than 10,000 {GPUs}.
+In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24).
+Jin, C., Jiang, Z., Bai, Z., Zhong, Z., Liu, J., Li, X., Zheng, N., Wang, X., Xie, C., Huang, Q. et al.
+(2025). Megascale-moe: Large-scale communication-efficient training of mixture-of-experts
+models in production. arXiv preprint arXiv:2505.11432.
+Kokolis, A., Kuchnik, M., Hoffman, J., Kumar, A., Malani, P., Ma, F., DeVito, Z., Sengupta, S.,
+Saladi, K. and Wu, C.-J. (2025a). Revisiting reliability in large-scale machine learning research
+clusters. In 2025 IEEE International Symposium on High Performance Computer Architecture
+(HPCA).
+23
+
+Kokolis, A., Kuchnik, M., Hoffman, J., Kumar, A., Malani, P., Ma, F., DeVito, Z., Sengupta, S.,
+Saladi, K. and Wu, C.-J. (2025b). Revisiting reliability in large-scale machine learning research
+clusters. In 2025 IEEE International Symposium on High Performance Computer Architecture
+(HPCA). IEEE.
+Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J., Zhang, H. and Stoica,
+I. (2023). Efficient memory management for large language model serving with pagedattention.
+In Proceedings of the 29th symposium on operating systems principles.
+Lao, C., Yu, M., Akella, A., Cao, J., Guan, Y., Zhang, P., Zheng, Z., Xu, Y., Zhai, E., Cai, D. et al.
+(2024). Trainmover: An interruption-resilient and reliable ml training runtime. arXiv preprint
+arXiv:2412.12636.
+Liu, K., Jiang, Z., Zhang, J., Wei, H., Zhong, X., Tan, L., Pan, T. and Huang, T. (2023). Hostping:
+Diagnosing intra-host network bottlenecks in {RDMA} servers. In 20th USENIX Symposium on
+Networked Systems Design and Implementation (NSDI 23).
+Liu, K., Zhang, J., Jiang, Z., Zhang, X., Guo, S., Bai, Y., Dong, Y., Zhang, Z., Shi, X., Wang, L.
+et al. (2024a). Hostmesh: Monitor and diagnose networks in rail-optimized roce clusters. In
+Proceedings of the 8th Asia-Pacific Workshop on Networking.
+Liu, X., Arzani, B., Kakarla, S. K. R., Zhao, L., Liu, V., Castro, M., Kandula, S. and Marshall,
+L. (2024b). Rethinking machine learning collective communication as a multi-commodity flow
+problem. In Proceedings of the ACM SIGCOMM 2024 Conference.
+Mohan, J., Phanishayee, A. and Chidambaram, V. (2021).
+{CheckFreq}:
+Frequent,{Fine-
+Grained}{DNN} checkpointing. In 19th USENIX Conference on File and Storage Technologies
+(FAST 21).
+Narayanan, D., Shoeybi, M., Casper, J., LeGresley, P., Patwary, M., Korthikanti, V., Vainbrand,
+D., Kashinkunti, P., Bernauer, J., Catanzaro, B. et al. (2021). Efficient large-scale language
+model training on gpu clusters using megatron-lm. In Proceedings of the international conference
+for high performance computing, networking, storage and analysis.
+NCCL (2025). NCCL: NVIDIA Collective Communication Library.
+https://developer.nvidia.com/nccl
+Qian, K., Xi, Y., Cao, J., Gao, J., Xu, Y., Guan, Y., Fu, B., Shi, X., Zhu, F., Miao, R. et al. (2024).
+Alibaba hpn: A data center network for large language model training. In Proceedings of the ACM
+SIGCOMM 2024 Conference.
+RCCL (2025). RCCL: ROCm Communication Collectives Library.
+https://rocm.docs.amd.com/projects/rccl
+24
+
+Shah, A., Chidambaram, V., Cowan, M., Maleki, S., Musuvathi, M., Mytkowicz, T., Nelson,
+J., Saarikivi, O. and Singh, R. (2023). {TACCL}: Guiding collective algorithm synthesis us-
+ing communication sketches. In 20th USENIX Symposium on Networked Systems Design and
+Implementation (NSDI 23).
+Silberstein, M., Kim, S., Huh, S., Zhang, X., Hu, Y., Wated, A. and Witchel, E. (2016). Gpunet:
+Networking abstractions for gpu programs. ACM Transactions on Computer Systems (TOCS), 34
+1–31.
+Song, J., Yim, J., Jung, J., Jang, H., Kim, H.-J., Kim, Y. and Lee, J. (2023). Optimus-cc: Efficient large
+nlp model training with 3d parallelism aware communication compression. In Proceedings of
+the 28th ACM International Conference on Architectural Support for Programming Languages and
+Operating Systems, Volume 2.
+Strati, F., Mcallister, S., Phanishayee, A., Tarnawski, J. and Klimovic, A. (2024a). D\’ej\avu: Kv-
+cache streaming for fast, fault-tolerant generative llm serving. arXiv preprint arXiv:2403.01876.
+Strati, F., Mcallister, S., Phanishayee, A., Tarnawski, J. and Klimovic, A. (2024b). D\’ej\avu: Kv-
+cache streaming for fast, fault-tolerant generative llm serving. arXiv preprint arXiv:2403.01876.
+Strati, F., McAllister, S., Phanishayee, A., Tarnawski, J. and Klimovic, A. (2024c). Déjàvu:
+Kv-cache streaming for fast, fault-tolerant generative llm serving. In Proceedings of the 41st
+International Conference on Machine Learning. ICML’24, JMLR.org.
+Wan, B., Han, M., Sheng, Y., Peng, Y., Lin, H., Zhang, M., Lai, Z., Yu, M., Zhang, J., Song, Z.
+et al. (2025a). {ByteCheckpoint}: A unified checkpointing system for large foundation model
+development. In 22nd USENIX Symposium on Networked Systems Design and Implementation
+(NSDI 25).
+Wan, B., Han, M., Sheng, Y., Peng, Y., Lin, H., Zhang, M., Lai, Z., Yu, M., Zhang, J., Song, Z.
+et al. (2025b). {ByteCheckpoint}: A unified checkpointing system for large foundation model
+development. In 22nd USENIX Symposium on Networked Systems Design and Implementation
+(NSDI 25).
+Wang, G., Qin, H., Jacobs, S. A., Holmes, C., Rajbhandari, S., Ruwase, O., Yan, F., Yang, L. and He,
+Y. (2023a). Zero++: Extremely efficient collective communication for giant model training. arXiv
+preprint arXiv:2306.10209.
+Wang, H., Tian, H., Chen, J., Wan, X., Xia, J., Zeng, G., Bai, W., Jiang, J., Wang, Y. and Chen, K.
+(2024). Towards {Domain-Specific} network transport for distributed {DNN} training. In 21st
+USENIX Symposium on Networked Systems Design and Implementation (NSDI 24).
+25
+
+Wang, X., Li, Q., Xu, Y., Lu, G., Li, D., Chen, L., Zhou, H., Zheng, L., Zhang, S., Zhu, Y. et al.
+(2025). {SimAI}: Unifying architecture design and performance tuning for {Large-Scale} large
+language model training with scalability and precision. In 22nd USENIX Symposium on Networked
+Systems Design and Implementation (NSDI 25).
+Wang, Z., Jia, Z., Zheng, S., Zhang, Z., Fu, X., Ng, T. E. and Wang, Y. (2023b). Gemini: Fast
+failure recovery in distributed training with in-memory checkpoints. In Proceedings of the 29th
+Symposium on Operating Systems Principles.
+Yao, Z., Aminabadi, R. Y., Ruwase, O., Rajbhandari, S., Wu, X., Awan, A. A., Rasley, J., Zhang,
+M., Li, C., Holmes, C., Zhou, Z., Wyatt, M., Smith, M., Kurilenko, L., Qin, H., Tanaka, M.,
+Che, S., Song, S. L. and He, Y. (2023). Deepspeed-chat: Easy, fast and affordable rlhf training of
+chatgpt-like models at all scales.
+https://arxiv.org/abs/2308.01320
+Yu, Z., Su, B., Bai, W., Raindel, S., Braverman, V. and Jin, X. (2023). Understanding the micro-
+behaviors of hardware offloaded network stacks with lumina. In Proceedings of the ACM SIG-
+COMM 2023 Conference.
+Zhao, X., Zhang, Z. and Wu, C. (2024). Adapcc: Making collective communication in distributed
+machine learning adaptive. In 2024 IEEE 44th International Conference on Distributed Computing
+Systems (ICDCS). IEEE.
+Zhou, Y., Wang, Z., Wang, Z., Zhang, R., Tian, C., Wang, X., Dou, W., Chen, G., Wang, B., Tian, Y.
+et al. (2025). Accelerating model training on ascend chips: An industrial system for profiling,
+analysis and optimization. In 2025 USENIX Annual Technical Conference (USENIX ATC 25).
+Zhu, X., Li, Z., Jiang, Y., Xu, J., Wang, J. and Bai, X. (2024).
+Real-time vehicle-to-vehicle
+communication-based network cooperative control system through distributed database and
+multimodal perception: Demonstrated in crossroads. In International Congress on Information
+and Communication Technology. Springer.
+26
+
+A
+Data distribution ratio Y to minimize T (Y )
+For fixed n ≥2, g ≥2, and 0 < X < 1, write
+T (Y ) = max{T1(Y ),T2(Y )} + T3(Y ),
+Y ∈[0,1],
+where (positive B,D only rescale T , so we set B = D = 1)
+T1(Y ) = a 1 −Y
+1 −X ,
+T2(Y ) = b Y
+X ,
+T3(Y ) = Y
+X ,
+with
+a = 2(ng −1)
+ng
+,
+b = 2((n −1)g −1)
+(n −1)g
+.
+Step 1: Monotonicity of T1, T2 and existence of Y ∗∈[0,1]. We have
+T ′
+1(Y ) = −
+a
+1 −X < 0,
+T ′
+2(Y ) = b
+X > 0,
+so T1 is strictly decreasing and T2 strictly increasing in Y . At the endpoints,
+T1(0) =
+a
+1 −X > 0 = T2(0),
+T1(1) = 0 < b
+X = T2(1).
+Thus T1(0) > T2(0) and T1(1) < T2(1); by continuity there exists Y ∗∈(0,1) with T1(Y ∗) = T2(Y ∗), and
+strict monotonicity implies this Y ∗is unique. Solving T1(Y ∗) = T2(Y ∗) yields
+Y ∗= X +
+X(1 −X)
+X + (g(n −1) −1)n.
+Step 2: Piecewise form of T and derivatives. Since T1 starts above T2 and ends below,
+Y ≤Y ∗⇒T1(Y ) ≥T2(Y ),
+Y ≥Y ∗⇒T1(Y ) ≤T2(Y ),
+so
+T (Y ) =
+
+T1(Y ) + T3(Y ),
+0 ≤Y ≤Y ∗,
+T2(Y ) + T3(Y ),
+Y ∗≤Y ≤1.
+For Y ≥Y ∗,
+T (Y ) = T2(Y ) + T3(Y ) =
+ b
+X + 1
+X
+
+Y ,
+so
+T ′(Y ) = b
+X + 1
+X > 0,
+and T is strictly increasing on [Y ∗,1] for all admissible X.
+For Y ≤Y ∗,
+T (Y ) = T1(Y ) + T3(Y ) = a(1 −Y )
+1 −X
++ Y
+X ,
+hence
+T ′(Y ) = −
+a
+1 −X + 1
+X ,
+27
+
+whose sign is independent of Y . Solving T ′(Y ) = 0 for X gives
+X =
+ng
+3ng −2.
+Step 3: Conclusion.
+• If 0 < X ≤
+ng
+3ng −2, then T ′(Y ) ≥0 on [0,Y ∗] and on [Y ∗,1], so T (Y ) is non-decreasing on [0,1]
+and attains its minimum at Y = 0.
+• If X >
+ng
+3ng −2, then T ′(Y ) < 0 on [0,Y ∗] and T ′(Y ) > 0 on [Y ∗,1], so T strictly decreases then
+increases and attains its unique minimum at
+Y ∗= X +
+X(1 −X)
+X + (g(n −1) −1)n.
+The same statements hold for the original T (Y ) with general B,D > 0, since positive scaling does
+not affect monotonicity or the minimizer.
+B
+Detailed Overhead Analysis
+The overhead of using multiple NICs is confined to the I/O and host memory rather than to GPU
+memory or NVLink if using PCIe and QPI. When direct GPU–NIC access is available, R2CCL
+registers the same GPU buffer with all NICs once at communicator creation and reuses this mapping
+for rerouted traffic, so no additional device memory is allocated. When a GPU–NIC pair cannot use
+direct access or cross NUMA, R2CCL instead binds the collective to pinned host buffers and relies
+on CPU-assisted copies, which likewise keep the GPU’s memory footprint unchanged. Prior work
+(Liu et al., 2023) shows that cross-socket paths to a remote-NUMA NIC can sustain more than half
+of the NIC’s line rate with only modest latency increase, which is sufficient to carry the fraction
+of traffic shifted off a failed NIC. When R2CCL chooses PXN to avoid oversubscribed PCIe root
+complexes or CPU interconnects, the proxy GPU needs to alloc a small staging buffer on the order
+of tens of megabytes to relay segments to its local PCIe-attached NIC, incurring one extra hop on
+NVLink but still negligible GPU-memory overhead compared to model state.
+C
+Detailed R2CCL Failure Handling Scope Table
+28
+
+Table 2: R2CCL failure model and scope. Support means the system can keep an ongoing
+collective running without communicator re-initialization or job restart, under the stated boundary
+conditions.
+Failure Type
+Support
+When Supported (Boundary)
+In-flight inter-node communication failures (R2CCL’s primary scope)
+NIC hardware / port failure
+(incl. NIC–ToR)
+Yes
+Node/process stays alive, and the node still has at least
+one remaining healthy inter-node NIC/path.
+Inter-node link / cable / ToR
+port down (single rail/link)
+Yes
+An alternate inter-node path exists (e.g., another
+rail/NIC); not a full network partition.
+RDMA transport / QP-level
+failure (error CQE, QP error,
+WQE flush)
+Yes
+Failure is confined to a subset of connections while
+endpoints remain alive and an alternate NIC/path ex-
+ists.
+Link
+flapping
+(up→down→up)
+Partial
+Only when flapping causes an in-flight transport
+failure (e.g., timeout) visible to the collective; pure
+throughput jitter is not handled.
+CRC error (packet corrup-
+tion)
+Partial
+Only when CRC errors escalate into an in-flight trans-
+port failure; otherwise typically no recovery action is
+triggered.
+NIC driver issue
+Yes
+Supported if it does not crash the OS/process and still
+leaves an alternate NIC/path usable.
+NIC firmware issue
+Yes
+Supported if it degrades a subset of NICs while the
+node/process remains alive and other NICs/paths re-
+main usable.
+PCIe failure (NIC unreach-
+able / disappears)
+Partial
+Supported when PCIe issues take down only a subset
+of NICs while other NICs remain usable; system-wide
+I/O failure is out of scope.
+GPU↔NIC direct path un-
+available (GPUDirect / PCIe
+P2P degraded)
+Partial
+Supported only if communication can continue via
+other usable inter-node NIC/path (potentially with
+degraded performance).
+Out-of-scope fundamentals
+NVLink/NVSwitch failure
+No
+Theoretically it is possible. Leave as future work.
+Switch-wide outage
+No
+Not supported.
+Continued on next page
+29
+
+Failure Type
+Support
+When Supported (Boundary)
+GPU/OS/process crash
+No
+Not supported.
+Cross-rail mistaken wiring
+No
+Out of scope; assumes the job can initialize and run
+normally.
+D
+R2CCL Bridge-Based Re-ranking
+Algorithm 1 R2CCL Bridge-Based Re-ranking
+Input: Logical Ring R, Rail Sets S
+Output: Optimized Ring R′
+1: Initialize R′ ←R, Candidates ←∅
+2: Bglobal ←minn∈R |Sn|
+3: for i ←0 to |R| −1 do
+4:
+u ←R[i], v ←R[(i + 1) (mod |R|)]
+5:
+if |Su ∩Sv| < Bglobal then
+6:
+Candidates.add((u,v))
+7:
+end if
+8: end for
+9: Sort Candidates by severity (gap size) descending
+10: for each pair (u,v) in Candidates do
+11:
+BestBridge ←None
+12:
+for each node w ∈R′ \ {u,v} do
+13:
+x ←PrevNode(w),y ←NextNode(w)
+14:
+NewCap ←min(|Su ∩Sw|,|Sw ∩Sv|)
+15:
+RemovalCap ←|Sx ∩Sy|
+16:
+if NewCap ≥Bglobal and RemovalCap ≥Bglobal then
+17:
+BestBridge ←w
+18:
+break
+19:
+end if
+20:
+end for
+21:
+if BestBridge , None then
+22:
+R′.Relocate(BestBridge, between u,v)
+23:
+end if
+24: end for
+25: return R′
+30
+
+(a) AllGather
+(b) ReduceScatter
+(c) SendRecv
+Figure 16: H100 NCCL-Test Benchmark.
+E
+Additional Evaluation Results
+Other Collective and Point-to-Point Operations.
+Beyond AllReduce, we evaluate R2CCL-Balance
+on AllGather, ReduceScatter, and point-to-point (SendRecv) operations. Figure 16 shows that
+R2CCL-Balance consistently maintains 85–89% of normal throughput across all three operations
+for large messages, while the R2CCL-HotRepair approach suffers approximately 50% throughput
+loss due to its single-NIC bottleneck.
+These results demonstrate that R2CCL’s load-balancing mechanism generalizes effectively
+beyond AllReduce, providing consistent fault tolerance for the full range of communication
+primitives used in modern distributed ML systems.
+31

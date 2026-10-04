@@ -1,0 +1,1366 @@
+DynaFix: Iterative Automated Program Repair Driven by
+Execution-Level Dynamic Information
+ZHILI HUANG∗, Chongqing University, China
+LING XU, School of Big Data & Software Engineering, Chongqing University, China
+CHAO LIU, Chongqing University, China
+WEIFENG SUN, Chongqing University, China
+XU ZHANG, Chongqing University, China
+YAN LEI, Chongqing University, China
+MENG YAN, Chongqing University, China
+HONGYU ZHANG, Chongqing University, China
+Automated Program Repair (APR) aims to generate correct patches for buggy programs automatically. Recent
+approaches leveraging large language models (LLMs) have shown promise but face notable limitations. Most
+existing methods rely solely on static analysis, ignoring the runtime behaviors of programs. Although some
+studies attempt to incorporate dynamic signals, most methods either restrict it to the training or fine-tuning
+phase, or inject it only once into the repair prompt, without leveraging it iteratively throughout the repair
+process. This limited usage fails to fully capture program execution. In addition, current iterative repair
+frameworks typically rely on coarse-grained feedback, such as pass/fail results or exception types, without
+effectively utilizing fine-grained execution-level information. This makes it difficult for models to simulate the
+stepwise debugging process of human developers, resulting in limited effectiveness in multi-step reasoning
+and complex bug repair.
+To address these challenges, we propose DynaFix, an execution-level dynamic information-driven APR
+method that iteratively leverages runtime information to refine the repair process. In each repair round,
+DynaFix captures detailed execution-level dynamic information such as variable states, control-flow paths,
+and call stacks, transforming them into structured prompts to guide LLMs in generating candidate patches. If a
+patch fails validation, DynaFix re-executes the modified program to collect new execution information, which
+informs the next repair attempt. This iterative loop incrementally improves patches based on updated execution-
+level feedback, similar to the stepwise debugging practices of human developers. We evaluate DynaFix on
+the Defects4J v1.2 and v2.0 benchmarks. DynaFix repairs 186 single-function bugs, a 10% improvement over
+state-of-the-art baselines, including 38 bugs previously unrepaired. It achieves correct patches within at most
+35 attempts, reducing the patch search space by 70% compared with existing methods, thereby demonstrating
+both effectiveness and efficiency in repairing complex bugs.
+1
+Introduction
+Software systems underpin virtually every critical domain of modern society, such as manufacturing,
+aerospace, energy, and healthcare. As these systems grow in scale and complexity, they inevitably
+introduce a large number of bugs. Program repair is essential for maintaining stability and security
+throughout the software lifecycle. Prior studies show that developers spend 35%–50% of their
+time fixing bugs manually [41]. To reduce this cost, researchers have extensively investigated
+∗Corresponding author.
+Authors’ Contact Information: Zhili Huang, huangzhili@stu.cqu.edu.cn, Chongqing University, Chongqing, China; Ling
+Xu, xuling@cqu.edu.cn, School of Big Data & Software Engineering, Chongqing University, Chongqing, China; Chao
+Liu, liu.chao@cqu.edu.cn, Chongqing University, Chongqing, China; Weifeng Sun, weifeng.sun@cqu.edu.cn, Chongqing
+University, Chongqing, China; Xu Zhang, zhangx@stu.cqu.edu.cn, Chongqing University, Chongqing, China; Yan Lei,
+yanlei@cqu.edu.cn, Chongqing University, Chongqing, China; Meng Yan, mengy@cqu.edu.cn, Chongqing University,
+Chongqing, China; Hongyu Zhang, hyzhang@cqu.edu.cn, Chongqing University, Chongqing, China.
+2026. ACM XXXX-XXXX/2026/1-ART
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+arXiv:2512.24635v1 [cs.SE] 31 Dec 2025
+
+2
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+APR techniques, which aim to automatically generate patches that automatically correct faulty
+code [12].
+Traditional APR approaches can be broadly categorized into heuristic-based [17, 25, 26, 35, 49, 56,
+58], constraint-based [24, 34, 39, 60], and template-based methods [13, 15, 16, 31, 33, 38]. Heuristic
+methods search a large patch space but often suffer from efficiency degradation as the space expands.
+Constraint-based methods provide formal guarantees but struggle to scale to complex programs.
+Template-based methods, which are widely regarded as the most representative [1, 13, 32], depend
+on high-quality templates that are costly to construct and limit general applicability. To address
+these limitations, deep learning–based APR methods have emerged, typically formulating patch
+generation as a neural machine translation (NMT) task [46], trained on large corpora of bug–fix
+pairs [65]. However, their effectiveness heavily relies on training data quality and drops significantly
+when encountering previously unseen bug types [10, 11, 53].
+The rapid progress of LLMs has opened new opportunities for APR [22, 55, 63]. Recent approaches
+adopt an iterative paradigm, where the LLM is guided by feedback from previous repair attempts.
+Beyond this, several studies have further explored incorporating dynamic execution information,
+leveraging runtime traces or behavioral signals to improve fault localization and patch generation [3,
+6, 8, 61]. Although these methods achieve state-of-the-art (SOTA) performance on benchmarks,
+they still face two key challenges:
+1) Over-reliance on static information and insufficient use of dynamic information.
+Despite the strong capabilities of LLMs in code generation and modification, their effective-
+ness in APR remains limited because they rely predominantly on static code artifacts (e.g.,
+exception messages, test outcomes, or code comments), which provide only partial insight
+into the actual execution that causes failures. Recent studies [3, 6, 8, 14, 61] showed that
+dynamic information (i.e., execution traces) can help LLMs understand runtime behaviors
+and support patch generation for complex software bugs. However, the use of dynamic
+information in existing work remains limited—most methods either restrict it to the training
+or fine-tuning phase [3, 8, 61], or inject it only once into the repair prompt [14], without
+leveraging it iteratively throughout the repair process. Because execution traces are only
+superficially or sporadically exploited, models cannot fully capture program behaviors or
+identify underlying causes in complex or multi-step bugs. This insufficient and non-iterative
+use of dynamic information, in turn, constrains their ability to localize faults and generate
+effective patches accurately.
+2) Coarse-grained feedback in iterative repair without execution-level insights. The
+SOTA LLM-based APR approaches employ iterative repair strategies [2, 55, 63, 64], where
+the model is repeatedly re-prompted by feedback from test results or bug reports after each
+repair attempt. However, such feedback is typically coarse-grained, often limited to the
+result level (e.g., pass/fail outcomes, exception types, or aggregated bug summaries). By
+contrast, effective real-world debugging depends on the fine-grained examination of runtime
+behaviors, including variable states, control-flow paths, and call stacks, to refine hypotheses
+and iteratively isolate the fault. The absence of execution-level insights constrains existing
+iterative methods, limiting their ability to handle complex bugs that require multi-step
+reasoning and progressive repair.
+To address these limitations, we propose DynaFix, an LLM-based APR method that integrates
+execution-level dynamic information feedback into an iterative repair workflow. The key insight is
+that execution traces, which includes variable states, control-flow paths, and call stacks, provide
+essential behavioral evidence for understanding program faults and uncovering their root causes.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+3
+To collect this information, we develop ByteTrace, a non-intrusive tool for collecting program
+execution traces, which collects precise and context-rich dynamic information to support DynaFix.
+In each repair iteration, DynaFix executes the buggy program, records its execution traces via
+ByteTrace, and augments the repair prompt with the captured dynamic information. The LLM then
+generates candidate patches. If a patch fails validation, DynaFix re-executes the program, collects
+updated execution traces, and refines for the next iteration. This closed-loop process continuously
+grounds the LLM’s reasoning in the latest runtime behaviors, resembling how human developers
+iteratively debug with feedback. By sustaining iterative and fine-grained exploitation of dynamic
+information, DynaFix enables more accurate fault localization and more effective patch generation.
+We conducted a comprehensive evaluation of DynaFix on the widely used Defects4J benchmark.
+On the 483 single-function bugs in Defects4J v2.0, DynaFix successfully repaired 186 bugs, compris-
+ing 100 from v1.2 and 86 from v2.0, and resolved 38 bugs that were not fixed by any of the selected
+baselines. Compared with LLM-based methods that rely solely on exception message prompts,
+DynaFix repaired 116 more single-function bugs and 13 more multi-function bugs, corresponding
+to improvements of 24.0% and 3.7% in repair rates, respectively.
+Our contributions are summarized as follows:
+• We propose DynaFix, an LLM-based APR framework that integrates execution-level dy-
+namic information into the repair process. By leveraging fine-grained runtime signals,
+DynaFix guides code modifications in an iterative manner that more closely aligns with how
+developers debug real programs.
+• We developed ByteTrace, a lightweight Java instrumentation tool for capturing detailed
+execution traces, enabling iterative repair based on execution-level feedback.
+• Extensive experiments on the Defects4J benchmark demonstrate that DynaFix outperforms
+11 SOTA methods and successfully repairs 38 bugs that previous methods could not fix.
+To promote reproducibility, we will release a replication package including the DynaFix
+framework, the ByteTrace tool, and all experimental datasets upon acceptance.
+2
+Motivation
+This section presents two real-world examples to illustrate the limitations of current APR approaches
+and highlight the necessity of incorporating execution-level dynamic information into the repair
+process. In the code listings, lines prefixed with “+” denote added code, while those with “–” indicate
+deleted code.
++
+if (this.allowDuplicateXValues) {
++
+add(x, y);
++
+return null;
++
+}
+XYDataItem overwritten = null;
+int index = indexOf(x);
++
+if (index >= 0) {
+-
+if (index >= 0 && !this.allowDuplicateXValues) {
+Listing 1. Patch for Chart-5 from Defects4J, adding support for duplicate X values.
+Listing 1 shows the developer patch for the Chart-5 vulnerability in Defects4J [21]. Here, the
+condition this.allowDuplicateXValues has been removed from the generic condition block and
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+4
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+refined as a new conditional statement. The failure reported by JUnit was java.lang.IndexO
+utOfBoundsException:Index:-1,Size:1, indicating an array boundary violation but lacking
+sufficient contextual information to localize the fault. For LLM-based APR methods, this ambiguity
+expands the search space for possible patches. Without access to runtime values of variables such
+as x, y, or the return result value of the indexOf, it becomes difficult for the model to determine
+whether the fault stems from a missing null check, an incorrect index calculation, or inconsistent
+data.
+for (int i = getNumObjectiveFunctions(); i < getHeight(); i++) {
+-
+if (MathUtils.equals(getEntry(i, col), 1.0, epsilon) && (row == null)) {
++
+if (!MathUtils.equals(getEntry(i, col), 0.0, epsilon)) {
++
+if (row == null) {
+row = i;
+-
+} else if (!MathUtils.equals(getEntry(i, col), 0.0, epsilon)) {
+Listing 2. Patch for Math-87 from Defects4J, correcting the logic for locating the first non-zero entry in a
+column.
+Listing 2 presents the developer patch for the Math-87 bug. The target function identifies whether
+a matrix column is a unit vector and returns the row index containing the value 1.0. Although the
+static code appears correct, JUnit reports the exception junit.framework.AssertionFailedError:
+expected:<10.0> but was:<0.0>. Based solely on this message and static code, LLM-based
+APR systems often misdiagnose the fault. Providing the actual col input at runtime reveals that
+getEntry(i, col) returns a value close to but not exactly 1.0 due to floating-point precision
+errors. This small deviation leads to the function returning an incorrect row index.
+The above examples highlight key challenges faced by current LLM-based APR techniques in
+effectively leveraging information during repair. As illustrated in Fig. 1, most existing approaches [28,
+31, 48, 50] primarily depend on static information such as buggy source code, code comments, and
+test cases. Others incorporate dynamic signals, but these are typically limited to coarse result-level
+feedback such as pass/fail test outcomes or exception information. While such signals can confirm
+the occurrence of a failure, they provide little insight into the underlying execution state, making it
+difficult for models to accurately localize faults. Recent studies have begun to explore finer-grained
+execution-level dynamic information(e.g., variable states, control-flow) [3, 14, 61]. However, most
+of these methods exploit such data during training or inject it once into a repair prompt, leaving its
+potential for iterative repair largely untapped.
+Moreover, existing methods lack a systematic feedback mechanism that continuously incorporates
+execution-level dynamic information throughout the repair loop. Approaches that rely primarily on
+static information, such as those in [28, 31, 48, 50] generate patches in a single step and cannot refine
+a patch once it fails, while iterative approaches using result-level signals [2, 55, 64] are constrained
+to high-level feedback (e.g., pass/fail or exception type) that fails to convey deeper execution
+behaviors. Without stepwise use of fine-grained execution-level feedback, these approaches often
+resemble a trial-and-error process rather than converging through developer-like reasoning guided
+by execution information, ultimately limiting their effectiveness in addressing complex bugs.
+3
+Approach
+Figure 2 illustrates the framework of our proposed approach. We introduce DynaFix, an itera-
+tive APR approach driven by execution-level dynamic information. First, In terms of information
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+5
+Fig. 1. Comparison of information types used in APR: static information, result-level dynamic information,
+and execution-level dynamic information.
+granularity, DynaFix addresses the limitations of JUnit’s coarse exception reporting by integrating
+non-intrusive bytecode instrumentation [23, 40, 45] into the repair process. Instead of modifying
+source code directly, our framework instruments bytecode to capture dynamic behavioral informa-
+tion during program execution without interfering with normal operation. This runtime data is
+then fed back to the LLM, providing richer context on bug behavior and enabling more informed
+repair decisions. Second, regarding the repair process, we design a Layered Progressive Repair
+(LPR) strategy, which prioritizes promising patches and discards unpromising ones at an early
+stage. This targeted strategy improves efficiency by focusing computational resources on promising
+candidates.
+The workflow consists of four main steps:
+• Step 1 (Section 3.1): We employ ByteTrace, a tool developed in this study, to perform non-
+intrusive bytecode instrumentation on the buggy program. During test execution, ByteTrace
+captures dynamic runtime information, including variable states, control-flow paths, and call
+stacks.
+• Step 2 (Section 3.2): The collected debugging information is combined with the original
+buggy source code to construct debugging prompts, thereby supplying the LLM with execu-
+tion context for the bug. These prompts help the LLM better understand bug behavior and
+generate candidate patches. To further guide patch generation, we incorporate instruction
+prompts, including role definitions and one-shot examples, ensuring that the LLM outputs
+code in the expected format.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+6
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+Fig. 2. Overview of DynaFix.
+• Step 3 (Section 3.3): The candidate patch generated by the LLM is applied to the source code
+and validated by running test cases. This automated validation ensures that patch correctness
+is assessed automatically.
+• Step 4 (Section 3.4): We apply the LPR strategy to iteratively refine patches based on
+validation results. When a patch fails validation, two cases are distinguished:
+– (a) Compilation Error: The patch is discarded, and the repair process restarts using the
+debugging information collected from the original buggy code.
+– (b) Test Failure: If the patch compiles but fails in test execution, it is treated as a refinable
+patch with potential for further improvement. Updated debugging information, is collected
+based on the current buggy code, and used to guide the next repair iteration.
+3.1
+Capturing Execution-Level Dynamic Information
+A core feature of DynaFix is its ability to exploit execution-level dynamic information as iterative
+feedback. To capture such information from buggy programs at runtime, we integrate a non-
+intrusive bytecode instrumentation mechanism into the framework. This mechanism records
+dynamic behaviors such as local variables, method call traces, and control flow during program
+execution with test cases. By instrumenting bytecode rather than directly modifying source code, our
+approach captures rich execution-level dynamic information without disrupting normal program
+execution. Moreover, the modular instrumentation design facilitates scalability and allows automatic
+adaptation to benchmarks such as Defects4J.
+Specifically, we extended and integrated the DebugRecorder tool from DEVLoRE [9]. The original
+DebugRecorder only leverages JavaAgent and ASM [4] to instrument Java programs and monitor
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+7
+Fig. 3. Structure of the hierarchical prompt template. A fixed input–output example is included to enforce
+consistent response formatting, while code details are omitted.
+local variable values. Building on this foundation, we developed ByteTrace, a bytecode instrumen-
+tation tool that serves as the core data collection component of our APR framework. Compared with
+DebugRecorder, ByteTrace adds support for tracing method call stacks and conditional control flow,
+thereby providing a more comprehensive execution context for program repair. Furthermore, Byte-
+Trace modularizes the instrumentation logic, enabling automatic adaptation to the Defects4J [21]
+benchmark and enabling efficient collection of execution-level dynamic data in large-scale APR
+experiments.
+For information granularity selection, we adopt function-level instrumentation. Prior studies [59]
+show that function-level granularity provides sufficient context for fault localization and repair
+while avoiding the fragmentation problems in statement-level or variable-level tracing. This design
+also aligns with the input-output paradigm of LLMs, which are typically trained to process and
+generate code at the function level. Therefore, DynaFix employs function-level instrumentation
+to balance repair effectiveness with scalability in LLM-based workflows. please say that which
+experimental result approves the balance.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+8
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+3.2
+Structured Prompt Construction for Patch Generation
+For LLM-based APR, the design of a well-structured and semantically clear prompt is critical
+to repair performance [43]. Even with comprehensive bug-related information, poorly designed
+prompts can limit model understanding and result in suboptimal patches. To achieve efficient
+and accurate information transmission, we designed a hierarchical prompt template, as shown
+in Figure 3, consisting of three parts: system instructions, input-output example, and debugging
+information.
+The instruction explicitly defines the LLM’s role as an AI debugger, requiring it to generate
+corrected versions of buggy functions without producing any explanatory text. This enforces role
+awareness and output format constraints. The template then provides a representative one-shot
+example, inspired by recent findings [5] that including one or two examples significantly improves
+code generation performance compared to zero-shot prompting. In this example, the input consists
+of a buggy function with handcrafted debugging information, and the output presents the fully
+repaired function. The repaired function is marked a consistent identifier, such as // Fixed Method
+X, to enable deterministic patch extraction.
+Finally, we inject debugging information collected by ByteTrace. This includes: (1) the buggy
+function as the repair target; (2) dynamic execution traces such as variable states, control-flow
+paths, and call stacks, accompanied by short in-prompt explanations to aid model understanding;
+and (3) call context, including function names, signatures, and callees code, retrieved from the
+codebase via dynamic call relationships.
+This structured prompt design enables the LLM to clearly identify the repair task, interpret
+execution-level dynamic information, and reason about call dependencies. As a result, the model is
+guided to generate a targeted and verifiable patch in the expected format.
+3.3
+Automated Patch validation
+To evaluate the correctness of the patch, DynaFix replaces the faulty function in the original
+program with the generated fix. It then executes the corresponding test suite to ensure successful
+compilation and test passing. While passing all tests suggests plausible correctness, prior work has
+shown that benchmark test suites often suffer from limited coverage, allowing incorrect patches
+to be misclassified as correct [47]. To address this issue, following standard practices in the APR
+community [20, 53], we further conduct manual inspection of test-passing patches to assess whether
+they are semantically equivalent to the developer’s fix. This two-stage process is used to verify
+that the reported patches are both test-adequate and semantically valid.
+3.4
+Layered Progressive Repair Strategy
+Due to the high computational cost and token-based billing model of mainstream LLM services,
+large-scale and multi-round invocations of models during APR can lead to significant resource
+consumption and economic overhead. To address this, we introduce the LPR strategy, which
+incrementally explores the patch space in both breadth and depth. In the breadth phase, it rapidly
+evaluates candidate patches, discarding invalid ones to save resources. Refinable patches that
+pass partial tests then enter the depth phase, where execution-level dynamic information guides
+step-by-step refinement. This design focuses resources on viable repair directions and is intended
+to balance repair effectiveness with computational resource consumption. We provide empirical
+evidence of its efficiency in Section 5.3.
+As described in Algorithm 1, LPR takes as input a set of buggy programs B with as input a set of
+buggy programs diagnostic information and outputs either a successfully repaired program or a
+failure report. For each bug, the system first initiates breadth-based layered repair, generating an
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+9
+initial candidate patch 𝑝0 using the LLM. If 𝑝0 fails to compile or results in runtime exceptions, it is
+immediately discarded to avoid wasting resources on invalid repair directions. If 𝑝0 passes all test
+cases, the bug is considered successfully repaired, and the process terminates. All generated patches,
+including those that fail validation, are stored along with their function code and validation results.
+In subsequent rounds, the LLM is prompted to generate new patches that differ from those in the
+patch history, thereby encouraging diversity in candidate fixes. This first phase aims to explore a
+broad range of potential repair directions quickly.
+If the patches generated during a breadth-based search fail to fully repair the program but pass
+a subset of test cases, they are deemed potentially promising. The system then proceeds to the
+second phase: depth-first progressive repair. In this phase, the ByteTrace tool performs bytecode
+instrumentation on the function modified by the current patch 𝑝𝑑−1. It collects execution-level
+dynamic information, including variable states, control-flow paths, and call stacks. This information
+is incorporated into a new prompt to guide the generation of the next patch 𝑝𝑑based on 𝑝𝑑−1. After
+each depth attempt, the patch is validated. If it passes all tests, the repair is deemed successful. If it
+fails to compile or encounters fatal errors, the current repair path is abandoned, and the system
+returns to breadth-based exploration.
+LPR tests a maximum of 𝐵rounds of breadth-based fixes on each buggy, with a maximum of 𝐷
+depth-based fixes per round. If all 𝐵× 𝐷repair attempts fail, the system marks the current buggy
+as unrepairable.
+4
+Experimental Setup
+4.1
+Research Questions
+In this paper, we investigate the following research questions (RQs):
+• RQ1: Can DynaFix outperform the SOTA APR approaches? We evaluate DynaFix on
+the Defects4J benchmark dataset and compare its repair effectiveness with a set of SOTA
+APR techniques.
+• RQ2: How effective is DynaFix in enhancing LLM-based APR? We evaluate the effec-
+tiveness of DynaFix in improving the repair capability of LLMs by comparing different types
+of feedback, and further investigate the role of execution-level dynamic information and
+iterative mechanisms in repairing complex bugs.
+• RQ3: How do different LPR settings affect DynaFix’s repair effectiveness and search
+efficiency? We investigate the impact of varying LPR search parameters on repair effective-
+ness and LLM resource consumption. We further evaluate DynaFix’s search efficiency under
+the LPR strategy, comparing maximum patch attempts per bug with those of the baseline
+methods.
+• RQ4: How each component of DynaFix contributes to repair effectiveness? We analyze
+the impact of different types of dynamic information at the execution level collected by
+ByteTrace and the contribution of the LPR strategy to overall repair performance.
+4.2
+Datasets
+Our experiment adopted the widely used Defects4J benchmark [21], which includes 835 real-world
+bugs from 17 open-source repositories in v2.0. The latest update removes five bugs, leaving 830 for
+our study. Following previous work [52, 54, 55], these bugs are classified into 483 single-function
+bugs and 347 multi-function bugs. The single-function subset is further divided into v1.2 (255 bugs)
+and v2.0 (228 bugs). For each bug, Defects4J provides a buggy and a fixed version, along with a
+corresponding test suite that reproduces the bug and validates the fix. This setup allows realistic
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+10
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+Algorithm 1: LPR: Layered Progressive Repair Strategy
+Input: B: set of buggy programs with diagnostic info
+𝐵: maximum breadth attempts per bug
+𝐷: maximum depth attempts per breadth
+LLM: the large language model interface
+ByteTrace: runtime information extractor
+Output: Patched programs or failure reports
+1 foreach bug ∈B do
+2
+Initialize breadth attempt 𝑏←0
+3
+while 𝑏< 𝐵do
+4
+Generate initial patch 𝑝0 using LLM
+5
+if 𝑝0 fails to compile or crashes then
+6
+Discard 𝑝0 and continue to the next breadth attempt
+7
+end
+8
+if 𝑝0 passes all tests then
+9
+Record 𝑝0 as successful patch and return
+10
+end
+11
+Initialize patch history H ←{𝑝0}
+12
+for 𝑑←1 to 𝐷do
+13
+Extract runtime info from 𝑝𝑑−1 via ByteTrace
+14
+Generate 𝑝𝑑via LLM using H and runtime info
+15
+if 𝑝𝑑fails to compile or produces a fatal error then
+16
+break depth loop
+17
+end
+18
+if 𝑝𝑑passes all tests then
+19
+Record 𝑝𝑑as successful patch and return
+20
+end
+21
+Update patch history H ←H ∪{𝑝𝑑}
+22
+end
+23
+𝑏←𝑏+ 1
+24
+end
+25
+Mark current bug as unfixable after 𝐵× 𝐷attempts
+26 end
+evaluations based on DynaFix in debugging scenarios and facilitates fair comparisons with existing
+APR methods on a unified benchmark.
+4.3
+Baselines and Metrics
+In RQ1, we compare DynaFix against 11 SOTA APR systems, covering 4 paradigms: 5 LLM-
+based approaches including FitRepair [50], Repilot [48], GAMMA [66], AlphaRepair [53], and
+GIANTREPAIR [27]; 4 deep learning-based methods including ITER [63], SelfAPR [61], Tare [68],
+and KNOD [19]; 1 template-based technique TBar [32]; and 1 agent-based approach RepairAgent [2].
+In RQ2, we compare pure LLMs, LLMs with JUnit exception messages, and LLMs with fine-grained
+execution-level feedback. This allows us to assess the benefits of execution-level feedback over
+coarse-grained signals and the value of iterative utilization in repairing complex bugs. In RQ3, we
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+11
+evaluate DynaFix’s search efficiency under the LPR strategy using the maximum patch attempts per
+bug, defined as the product of the maximum number of iterations and the number of candidate
+patches per iteration. we include nine of the eleven most effective baselines from RQ1, excluding
+Tare and TBar due to unreported search details. In RQ4, we perform an ablation study on Dy-
+naFix, using prompts with specific information added or removed as baselines to investigate the
+contributions of each information component to APR performance.
+A plausible patch is defined as one that passes all provided unit tests, and a correct patch as a
+plausible patch that is semantically equivalent to the developer’s fix. For evaluation, we follow the
+evaluation criteria of existing studies [17, 20, 32, 48, 50, 53, 57, 66–68], and compare the number of
+bugs correctly fixed by each baseline. Because correctness validation requires substantial manual
+effort, RQ1 analyses are based on correct patches, whereas other experiments are evaluated using
+plausible patches.
+4.4
+Implementation and Configuration
+Configuration. We used GPT-4o as the underlying LLM, accessed via the OpenAI API [42].
+Following Xu et al.’s [59] and Xia et al.’s [55] work, the temperature is set to 1.0 to balance diversity
+and determinism. For each bug, the LLM generates up to 35 candidate patches, determined by the
+breadth and depth of the exploration of DynaFix. For all baseline APR systems, we directly adopt
+the official experimental results reported in their respective publications.
+DynaFix. We implemented the ByteTrace tool in Java to capture the execution-level dynamic
+information at runtime, while the core repair logic of DynaFix is implemented in Python. Based on
+the RQ3 experiments, we set the LPR strategy configuration to a maximum exploration breadth
+of 7 and a depth of 5. Unlike earlier APR studies [13, 17, 32] that allocate up to 5 hours to repair
+a single bug, ByteTrace’s efficient tracing and the rapid generation of LLM patches substantially
+reduce runtime, with most of the time spent in the testing phase. Consequently, each repair attempt
+is limited to 30 minutes, allowing multiple iterations until a successful repair is achieved or the
+exploration limit is reached.
+Fault localization. To isolate repair effectiveness from the influence of localization accuracy, we
+adopt perfect fault localization provided by the official Defects4J dataset. All the baselines [2, 19, 27,
+32, 48, 50, 53, 55, 61, 66, 68] also operate under the identical perfect localization settings, ensuring
+fairness and comparability.
+5
+Results
+5.1
+RQ1: Effectiveness over the SOTA
+5.1.1
+Number of Bugs Fixed. We evaluate DynaFix against SOTA APR methods on Defects4J v1.2
+and v2.0. To ensure fairness, all methods were compared in perfect fault localization settings. For
+reproducibility, we use the repair data released by each respective APR method. Since bug coverage
+varies between methods, we normalize the results by retaining only the 483 single-function bugs
+selected in this study and discarding all data outside this scope for fair comparison.
+It is worth noting that DynaFix uses function-level bug units for repair, whereas some baselines
+adopt function-level fault localization and others rely on line-level localization. These differences
+reflect inherent design choices rather than evaluation bias. Table 1 summarizes the number of
+correct patches produced by each APR method. Due to space constraints, detailed results for v2.0
+are provided in our open-source repository1.
+1Link will be provided upon publication.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+12
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+Table 1. Comparison with SOTA APRs: Number of Correct Patches on Defects4J v1.2 and v2.0 in Single-
+Function Bug Projects
+Project
+Bugs
+DynaFix
+GIANTREPAIR
+RepairAgent
+FitRepair
+KNOD
+Repilot
+AlphaRepair
+GAMMA
+SelfAPR
+Tare
+ITER
+TBar
+Chart
+16
+9
+8
+11
+8
+9
+6
+8
+8
+7
+11
+8
+9
+Closure
+93
+25
+32
+24
+29
+23
+22
+23
+20
+17
+10
+16
+16
+Lang
+40
+29
+13
+15
+17
+11
+15
+11
+12
+10
+12
+7
+10
+Math
+72
+29
+26
+24
+23
+18
+20
+17
+17
+18
+15
+13
+16
+Time
+17
+4
+1
+2
+3
+2
+2
+3
+2
+3
+2
+2
+2
+Mockito
+17
+4
+6
+6
+6
+5
+0
+5
+3
+3
+2
+0
+3
+Defects4J v1.2
+255
+100
+86
+82
+86
+68
+65
+67
+62
+58
+52
+46
+56
+Defects4J v2.0
+228
+86
+83
+65
+44
+47
+47
+36
+39
+42
+31
+15
+-
+Total
+483
+186
+169
+147
+130
+115
+112
+103
+101
+100
+83
+61
+-
+22
+46
+16
+14
+4
+5
+4
+1
+28
+2
+13
+8
+3
+5
+5
+10
+6
+7
+8
+3
+2
+15
+3
+3
+6
+7
+16
+8
+6
+10
+24
+GIANTREPAIR
+DynaFix
+RepairAgent
+FitRepair
+KNOD
+(a) with top APR baselines
+21
+38
+10
+8
+40
+2
+11
+5
+2
+3
+10
+9
+4
+3
+11
+13
+10
+7
+0
+8
+5
+0 0
+1
+9
+8
+18
+15
+6
+16
+3
+2
+3
+GIANTREPAIR
+DynaFix
+RepairAgent
+FitRepair
+Others
+(b) with all APR baselines
+Fig. 4. Uniquely repaired bugs on Defects4J.
+As shown in Table 1, DynaFix has the highest number of correct patches in both datasets,
+repairing a total of 186 single-function bugs and outperforming all baselines. Specifically, on v1.2,
+DynaFix fixed 100 bugs, which is 14 more than the strongest baseline GIANTREPAIR, while on
+v2.0, it fixed 86 bugs compared to GIANTREPAIR’s 83. Notably, GIANTREPAIR aggregates the
+outputs of four LLM models, while DynaFix achieves superior performance with only a single
+model augmented with execution-level dynamic information. Compared to other strong baselines,
+DynaFix repaired 39 more bugs than RepairAgent (an improvement of 26.5%), 56 more than FitRepair
+(+43.1%), 71 more than KNOD (+61.7%), and 74 more than Repilot (+66.1%).
+5.1.2
+Complementarity Analysis. To investigate how DynaFix complements existing APR methods,
+we analyze the overlaps and differences in fixed bugs across all 483 single-function bugs. Figure 4(a)
+compares DynaFix with the top four baselines, and Figure 4(b) extends the comparison to all eleven
+methods. Compared with the top four baselines, DynaFix achieves 46 unique fixes, which is 23 more
+than GIANTREPAIR. Compared with all eleven baselines, DynaFix still achieves 38 unique fixes.
+These results indicate that DynaFix effectively leverages the execution-level dynamic information
+to repair bugs that remain unresolved by other APR approaches.
+As an example, Listing 3 illustrates a bug repaired solely by DynaFix. The failure arises from a
+direct invocation of new TarArchiveEntry(headerBuf), when headerBuf contains unparsable
+data, this call throws an uncaught IllegalArgumentException, leading to program termination.
+By leveraging runtime values of local variables, DynaFix detects the invalid input, precisely localizes
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+13
+// Runtime context at line 192 -> Local Variable
+headerBuf = [116, 101, 115, ..., 0, 0, ...]
+// Developer patch
++
+catch (IllegalArgumentException e) {
++
+IOException ioe = new IOException("Error detected parsing the header");
++
+ioe.initCause(e);
++
+throw ioe;
++
+}
+-
+currEntry = new TarArchiveEntry(headerBuf);
+// DynaFix patch
++
+catch (IllegalArgumentException e) {
++
+throw new IOException("Invalid tar header encountered", e);
++
+}
+-
+currEntry = new TarArchiveEntry(headerBuf);
+Listing 3. Comparison between DynaFix patch and developer patch
+the exception trigger to line 192, and generates a correct patch. In contrast, existing APR techniques
+can only recognize that an exception occurs, without identifying the fault-inducing statement or
+the specific type of invalid input. The limitation leaves a substantially larger search space and
+reduces the likelihood of generating an effective patch.
+Answer to RQ1: DynaFix repairs 186 single-function bugs in Defects4J, exceeding 11 SOTA
+methods on both v1.2 and v2.0; It contributes 38 unique repairs that no baseline achieves. These
+results demonstrate that DynaFix iteratively leverages execution-level dynamic information,
+enabling more effective bug localization and patch generation, and thus achieving superior and
+complementary repair capabilities beyond existing methods.
+5.2
+RQ2: Effectiveness of DynaFix in Enhancing LLM-Based APR
+To evaluate the effectiveness of DynaFix in enhancing LLM repair capabilities, we conducted
+experiments on the full Defects4J v2.0 dataset, which contains 483 single-function and 347 multi-
+function bugs. We compared four settings: (i) Pure LLM without additional information, (ii) LLM
+with traditional JUnit exception messages, (iii) LLM with execution-level dynamic information, and
+(iv) DynaFix, which integrates dynamic information with iterative repair. Table 2 summarizes the
+results. For single-function bugs, Pure LLM fixed only 72 bugs (14.9%). Adding exception messages
+or execution-level information improved repair rates to 18.6% and 24.2%, respectively, indicating
+that dynamic information provides greater benefit than exception messages. However, relying
+solely on execution-level dynamic information brings only limited improvement. When combined
+with an iterative mechanism, DynaFix repaired 206 bugs with a repair rate of 42.6%, representing a
+27.7% improvement over Pure LLM and more than doubling the performance of either baseline.
+This demonstrates that the iterative mechanism is crucial for exploiting the value of dynamic
+information.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+14
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+Table 2. Effectiveness of DynaFix vs. Execution-Level Dynamic Information and Traditional Exception Infor-
+mation in Enhancing LLM-based Program Repair on Defects4J v2.0.
+Bug Type
+Enhancement Method
+#Bugs
+#Plausible
+Fix Rate
+Δ over Pure
+Single-function
+DynaFix
+483
+206
+42.6%
++27.7%
+Execution-Level Info
+483
+117
+24.2%
++9.3%
+Exception Info
+483
+90
+18.6%
++3.7%
+Pure
+483
+72
+14.9%
+-
+Multi-function
+DynaFix
+347
+31
+8.9%
++6.6%
+Execution-Level Info
+347
+15
+4.3%
++2.0%
+Exception Info
+347
+18
+5.2%
++2.9%
+Pure
+347
+8
+2.3%
+-
+2
+2
+8
+9
+22
+29
+1
+5
+74
+29
+21
+6
+1
+12
+15
+DynaFix
+Exception
+Pure
+Execution-Level
+(a) Single-Function Bug Repairs
+2
+1
+2
+1
+1
+1
+0
+2
+14
+4
+4
+2
+0
+5
+4
+DynaFix
+Exception
+Pure
+Execution-Level
+(b) Multi-Function Bug Repairs
+Fig. 5. Unique Bug Repairs by DynaFix, Execution-Level Information, Exception Information, and Pure LLM
+on Defects4J
+For multi-function bugs, exception messages led to slightly better results (18 fixes) than execution-
+level information (15 fixes), likely because the verbose and complex nature of multi-function traces
+reduces the effectiveness of single-shot reasoning. Nevertheless, when augmented with iteration,
+DynaFix fixed 31 bugs (8.9%), more than tripling the performance of Pure LLM and significantly
+outperforming both baselines. These findings suggest that execution-level information alone does
+not generalize well to complex cases, but iteration enables the LLM to progressively extract useful
+signals.
+We further analyzed DynaFix’s unique repair capabilities, as shown in Figure 5. For single-
+function and multi-function bugs, DynaFix achieved 74 and 14 unique fixes, respectively, signifi-
+cantly surpassing the baselines using only execution-level dynamic information or JUnit exception
+messages. Notably, the exception information baseline achieved more unique fixes in both single-
+function (12 cases) and multi-function (5 cases) bugs than execution-level dynamic information.
+This indicates that providing fine-grained dynamic information alone is not necessarily superior to
+exception messages, but when combined with an iterative mechanism, DynaFix can fully exploit
+the potential of execution-level dynamic information and achieve unique fixes that other methods
+cannot cover.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+15
+1
+3
+5
+7
+10
+0
+0.2
+0.4
+0.6
+0.8
+Search Breadth
+Fix Cost
+Depth = 3
+Fix Cost
+60
+80
+100
+120
+140
+Plausible Patch
+Plausible Patch
+(a) Impact of Search Breadth on Fix Performance and Cost
+1
+3
+5
+7
+10
+0
+0.2
+0.4
+0.6
+0.8
+Search Depth
+Fix Cost
+Breadth = 5
+Fix Cost
+60
+80
+100
+120
+140
+Plausible Patch
+Plausible Patch
+(b) Impact of Search Depth on Fix Performance and Cost
+Fig. 6. Impact of Search Depth and Breadth in the LPR Strategy.
+Answer to RQ2: DynaFix significantly enhances LLM-based APR on Defects4J v2.0, repairing 206
+single-function bugs (42.6%) and 31 multi-function bugs (8.9%), and outperforming baselines that
+rely solely on exception messages or execution-level dynamic information. While execution-level
+information alone provides limited gains, its integration with iterative repair enables significant
+improvements. DynaFix achieves 74 unique fixes for single-function bugs and 14 unique fixes for
+multi-function bugs not achieved by the baselines.
+5.3
+RQ3: Impact of LPR Search Parameters on DynaFix’s Repair Effectiveness and
+Search Efficiency
+To evaluate how search breadth and depth influence the performance of the LPR strategy, we
+conducted experiments under different parameter settings. Since varying both parameters requires
+multiple LLM invocations and incurs high computational costs, we selected 255 single-function bugs
+from Defects4J v1.2 for evaluation. This dataset is a representative subset of Defects4J v2.0, with
+similar distributions of bug difficulty and type, allowing the results to be reasonably extrapolated.
+Figure 6 shows the trend of the number of plausible patches generated and the average cost per
+fixed bug repaired under fixed depth and fixed breadth configurations.
+When the search depth is fixed at 3 (Figure 6a), the repair cost increases steadily as the search
+breadth increases. The number of plausible patches rises initially, peaks at a breadth of 7, and then
+stabilizes. When the search breadth is fixed at 5 (Figure 6b), increasing depth similarly increases
+the repair cost, while the patch benefit gradually diminishes once the depth exceeds 5.
+This phenomenon can be explained as follows. Beyond breadth 7 or depth 5, the search has already
+covered most high-quality patches, and further expansion primarily introduces redundant, low-
+quality variants. Moreover, the generative capacity of the LLM is inherently bounded; expanding
+the search space no longer produces substantially more effective patches, but it continues to raise
+computational costs, leading to diminishing returns. Based on this trade-off, we adopt a breadth
+of 7 and a depth of 5 as the default LPR configuration in DynaFix to balance patch output and
+efficiency.
+After determining the default LPR configuration, we further evaluate search efficiency across
+approaches. Unlike traditional APR systems where runtime dominates cost, LLM-based repair is
+constrained by token-based billing. As a result, the number of patch attempts directly translates
+into economic overhead, making this metric particularly relevant. To capture this overhead, we
+introduce the metric maximum patch attempts per bug, defined as the product of the maximum
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+16
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+0
+1,000
+2,000
+3,000
+4,000
+5,000
+DynaFix
+RepairAgent
+GAMMA
+GIANTREPAIR
+SelfAPR
+KNOD
+ITER
+AlphaRepair
+FitRepair
+Repilot
+35
+117
+250
+500
+500
+1,000
+1,000
+5,000
+5,000
+5,000
+Max Patch Attempts per Bug
+Fig. 7. Comparison of Maximum Patch Attempts per Bug Across APR Approaches
+number of iterations and the number of candidate patches per iteration. This metric reflects the
+worst-case repair effort for each system and complements existing measures such as repair rate
+and runtime. For the fairness of comparison, we exclude Tare and TBar due to missing data in their
+original publications. As shown in figure 7, most existing baselines adopt large-scale patch searches,
+often generating over 500 candidates per bug and sometimes exceeding 5,000, which reduces search
+efficiency. In contrast, guided by fine-grained dynamic execution information, DynaFix requires
+only 35 iterations with a single candidate patch per iteration. This reduces the maximum attempts
+by over 70% compared to the most efficient baseline, RepairAgent, while still achieving superior
+repair effectiveness.
+Answer to RQ3: Search breadth and depth significantly influence DynaFix’s repair performance
+and efficiency. Increasing either parameter initially produces more plausible patches but leads
+to diminishing returns and higher cost once the breadth exceeds 7 or the depth exceeds 5. With
+optimized settings, DynaFix requires only 35 patch attempts per bug, over 70% fewer than the
+most efficient baseline, indicating that precise dynamic execution guidance and parameter tuning
+enable efficient repair with minimal search overhead.
+5.4
+RQ4: Contribution of individual Component in DynaFix
+To evaluate the contribution of individual components, we conducted an ablation study on 255
+single-function bugs from Defects4J v1.2. Since RQ3 has already examined the sensitivity to
+search depth and breadth, these parameters were fixed to their optimal values. We varied only the
+dynamic execution information provided to the LLM and the use of the LPR strategy. The evaluated
+configurations are:
+• w/o Local Variables: Removing local variable values from the prompt.
+• w/o Control Flow: Removing control flow traces from the prompt.
+• w/o Method Call: Removing call stack and function call details.
+• w/o LPR: Disabling the hierarchical progressive repair (LPR) strategy.
+• Pure: Only the buggy function code is provided, without any dynamic information.
+• Default: DynaFix default configuration, Combining all execution-level dynamic information
+with the LPR strategy.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+17
+Table 3. Contribution of Each Component in DynaFix on 255 Single-function Bugs from Defects4J v1.2
+Setting
+#Plausible
+Fix Rate
+Δ from Default
+w/o Local Variables
+97
+38.0%
+-5.5%
+w/o Control Flow
+102
+40.0%
+-3.5%
+w/o Method Call
+101
+39.6%
+-3.9%
+w/o LPR
+55
+21.6%
+-21.9%
+Pure
+34
+13.3%
+-30.2%
+Default
+111
+43.5%
+–
+Table 3 summarizes the results. Every component improves repair effectiveness, but the LPR
+strategy has the largest impact. Removing LPR reduces the fix rate by 21.9% and eliminates 56
+plausible patches, highlighting its central role in simulating the iterative debug–fix cycle and
+enabling the LLM to exploit execution feedback effectively.
+Among the execution-level features, local variables contribute the most. Removing them decreases
+the fix rate by 5.5%, corresponding to 14 fewer repairs. Excluding control flow reduces the fix rate
+by 3.5% with nine fewer repairs, while excluding method calls decreases it by 3.9% with ten
+fewer repairs. These smaller drops suggest partial redundancy, as the combination of LPR and the
+remaining features allows the model to infer some missing information. For example, when control
+flow traces are absent, variations in local variables and call stack patterns still provide clues about
+branch execution. Nevertheless, redundancy is only partial. For certain bugs, the absence of any
+single feature can prevent a correct fix, even when the other two features and LPR are present. This
+underscores the complementary role of dynamic execution information: each feature contributes
+to repair effectiveness, yet none can fully substitute for another.
+Overall, the ablation study demonstrates that DynaFix achieves its effectiveness by combining
+detailed execution feedback with the LPR strategy. Dynamic feedback alone provides only marginal
+improvements, and LPR alone cannot fully exploit incomplete data. Their integration, however,
+aligns the repair process with real-world debugging practices. As a result, the Default configuration
+fixes 77 more bugs and attains a 30.2% higher repair rate compared to the Pure LLM baseline.
+Answer to RQ4: The ablation study shows that all components contribute to repair effective-
+ness. The LPR strategy has the most significant impact, while execution-level features provide
+complementary benefits that together maximize repair performance.
+6
+Threats to Validity
+Our study may be affected by potential threats to internal and external validity.
+Threats to Internal Validity. One internal threat is the manual evaluation of patch correctness.
+Following established APR protocols [48, 51, 53, 55], we carefully inspected each patch to confirm
+it fixed the underlying bug rather than bypassing tests. All validated patches and reproduction
+code are publicly available.
+Another internal threat concerns potential data leakage, as the LLM may have been trained on
+open-source repositories [36] partially overlapping with Defects4J [44]. Prior work [18] suggests
+such overlap has limited impact on APR, since training corpora rarely contain complete bug–fix
+pairs, making memorization of effective repairs unlikely. Furthermore, all LLM-based APR baselines
+face the same risk, preserving fairness in comparison. To further mitigate this concern, we evaluated
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+18
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+24 multi-function bugs newly introduced in Defects4J v3.0, which were not included in prior
+benchmarks. These bugs are more complex and harder to memorize. DynaFix repaired 9 of the 24
+bugs, compared to 2 by the underlying LLM, demonstrating generalization to previously unseen
+bugs and reducing concerns about data leakage.
+Finally, we relied on reported results for the baseline instead of re-running all tools to avoid
+inconsistencies from different configurations. While this is common practice, future work could
+re-execute all baselines in a unified environment for stricter reproducibility.
+Threats to External Validity. A primary external threat is that the effectiveness of DynaFix may
+not be generalizable to other datasets. To address this concern, we evaluated it on two different
+benchmarks, Defects4J v1.2 and v2.0, and observed consistently solid performance, achieving SOTA
+results on both.
+Another external threat arises from the reliance on a single LLM in the main experiments, which
+could introduce model-specific bias. To test robustness, we re-ran DynaFix using the open-source
+DeepSeek model [30]. On 483 single-function bugs in Defects4J, this variant generated plausible
+patches for 228 bugs, again outperforming baseline approaches.
+Finally, our evaluation is limited to Java programs. While DynaFix leverages execution-level
+instrumentation that is in principle language-agnostic, its effectiveness has only been demonstrated
+in Java. Extending evaluation to multiple programming languages is a promising direction for
+future work to more rigorously assess generality and robustness.
+7
+Related Work
+APR has been studied from multiple perspectives, including predefined repair templates [13, 15, 16,
+31, 33, 38], heuristic rules [17, 25, 26, 35, 49, 56, 58], program synthesis [24, 34, 39, 60], and more
+recently, deep learning [7, 20, 29, 37, 62, 67, 68].
+Among recent LLM-based APR studies, the following works are most relevant to our research.
+FitRepair [50] incorporates the plastic surgery hypothesis into LLM-based APR via patch-knowledge
+and repair-oriented fine-tuning. GIANTRepair [27] reduces the search space by extracting patch
+skeletons from LLM outputs and instantiating them with contextual information.ChatRepair [55]
+introduces dialogue-driven repair, where prompts are constructed using test failure information
+and past repair attempts. RepairAgent [2] treats the LLM as an autonomous agent, leveraging
+dynamic prompts and a state machine to iteratively plan repair actions. SelfAPR [61] proposes
+to utilize compiler and test diagnostics during the LLM’s self-supervised training to improve
+APR performance. Self-Debug [6] improves program generation in APR tasks by generating code
+explanations from the LLM in a chain-of-thought manner. Despite these advances, most LLM-based
+methods either rely heavily on static information (e.g., source code and error messages) or only
+incorporate coarse-grained runtime feedback, leaving the potential of fine-grained dynamic signals
+underexplored.
+In terms of leveraging execution-level dynamic information, TraceFixer [3] enhances APR by
+incorporating local variable values and expected program states during CodeT5 fine-tuning, while
+Towards Effectively Leveraging Execution Traces [14] systematically analyzes the potential of ex-
+ecution traces in APR and demonstrates their value for explaining failing test behaviors. Unlike
+these works, DynaFix not only captures more fine-grained execution-level dynamic information
+but also deeply integrates it into the LLM-based iterative repair process. This allows DynaFix to
+more closely simulate human-like debugging, enabling a more effective use of execution-level
+information.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+19
+8
+Conclusion
+In this paper, we propose DynaFix, an LLM-based APR framework that integrates execution-level
+dynamic information into an iterative repair workflow. DynaFix uses our ByteTrace tool to collect
+runtime information and combines it with a hierarchical progressive repair strategy, enabling
+more precise fault localization and context-aware patch generation in a debug-and-fix workflow.
+Evaluation on Defects4J v1.2 and v2.0 shows that DynaFix repaired 186 single-function bugs
+and fixed 38 previously unresolved bugs. Compared with LLM baselines using only exception
+information, DynaFix consistently improves repair performance for both single-function and multi-
+function bugs. These results suggest that integrating execution-level feedback into automated repair
+can better align with real-world debugging practices, enhancing the effectiveness of LLM-based
+program repair for complex bugs.
+Data Availability
+To facilitate reproducibility, we have provided a comprehensive replication package that includes
+the DynaFix framework, the ByteTrace tool, and all experimental datasets used in this study.
+The package has been submitted to the conference submission system and will be made publicly
+available upon acceptance of the paper.
+References
+[1] Samuel Benton, Xia Li, Yiling Lou, and Lingming Zhang. 2020. On the effectiveness of unified debugging: An extensive
+study on 16 program repair systems. In Proceedings of the 35th IEEE/ACM International Conference on Automated
+Software Engineering. 907–918.
+[2] Islem Bouzenia, Premkumar Devanbu, and Michael Pradel. 2025. RepairAgent: An Autonomous, LLM-Based Agent for
+Program Repair. In 2025 IEEE/ACM 47th International Conference on Software Engineering (ICSE). IEEE, 2188–2200.
+[3] Islem Bouzenia, Yangruibo Ding, Kexin Pei, Baishakhi Ray, and Michael Pradel. 2023. Tracefixer: Execution trace-driven
+program repair. arXiv preprint arXiv:2304.12743 (2023).
+[4] Eric Bruneton, Romain Lenglet, and Thierry Coupaye. 2002. ASM: a code manipulation tool to implement adaptable
+systems. Adaptable and extensible component systems 30, 19 (2002).
+[5] Junkai Chen, Xing Hu, Zhenhao Li, Cuiyun Gao, Xin Xia, and David Lo. 2024. Code search is all you need? improving
+code suggestions with code search. In Proceedings of the IEEE/ACM 46th international conference on software engineering.
+1–13.
+[6] Xinyun Chen, Maxwell Lin, Nathanael Schärli, and Denny Zhou. 2023. Teaching large language models to self-debug.
+arXiv preprint arXiv:2304.05128 (2023).
+[7] Zimin Chen, Steve Kommrusch, Michele Tufano, Louis-Noël Pouchet, Denys Poshyvanyk, and Martin Monperrus. 2019.
+Sequencer: Sequence-to-sequence learning for end-to-end program repair. IEEE Transactions on Software Engineering
+47, 9 (2019), 1943–1959.
+[8] Yangruibo Ding, Benjamin Steenhoek, Kexin Pei, Gail Kaiser, Wei Le, and Baishakhi Ray. 2024. Traced: Execution-aware
+pre-training for source code. In Proceedings of the 46th IEEE/ACM International Conference on Software Engineering.
+1–12.
+[9] Qiong Feng, Xiaotian Ma, Jiayi Sheng, Ziyuan Feng, Wei Song, and Peng Liang. 2024. Integrating Various Software
+Artifacts for Better LLM-based Bug Localization and Program Repair. arXiv preprint arXiv:2412.03905 (2024).
+[10] Sidong Feng and Chunyang Chen. 2024. Prompting is all you need: Automated android bug replay with large language
+models. In Proceedings of the 46th IEEE/ACM International Conference on Software Engineering. 1–13.
+[11] Michael Fu, Chakkrit Tantithamthavorn, Trung Le, Van Nguyen, and Dinh Phung. 2022. VulRepair: a T5-based
+automated software vulnerability repair. In Proceedings of the 30th ACM joint european software engineering conference
+and symposium on the foundations of software engineering. 935–947.
+[12] Luca Gazzola, Daniela Micucci, and Leonardo Mariani. 2018. Automatic software repair: A survey. In Proceedings of the
+40th International Conference on Software Engineering. 1219–1219.
+[13] Ali Ghanbari, Samuel Benton, and Lingming Zhang. 2019. Practical program repair via bytecode mutation. In Proceedings
+of the 28th ACM SIGSOFT International Symposium on Software Testing and Analysis. 19–30.
+[14] Mirazul Haque, Petr Babkin, Farima Farmahinifarahani, and Manuela Veloso. 2025. Towards Effectively Leveraging
+Execution Traces for Program Repair with Code LLMs. arXiv preprint arXiv:2505.04441 (2025).
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+20
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+[15] Jinru Hua, Mengshi Zhang, Kaiyuan Wang, and Sarfraz Khurshid. 2018. Towards practical program repair with
+on-demand candidate generation. In Proceedings of the 40th international conference on software engineering. 12–23.
+[16] Jiajun Jiang, Luyao Ren, Yingfei Xiong, and Lingming Zhang. 2019. Inferring program transformations from singular
+examples via big code. In 2019 34th IEEE/ACM International Conference on Automated Software Engineering (ASE). IEEE,
+255–266.
+[17] Jiajun Jiang, Yingfei Xiong, Hongyu Zhang, Qing Gao, and Xiangqun Chen. 2018. Shaping program repair space with
+existing patches and similar code. In Proceedings of the 27th ACM SIGSOFT international symposium on software testing
+and analysis. 298–309.
+[18] Nan Jiang, Kevin Liu, Thibaud Lutellier, and Lin Tan. 2023. Impact of code language models on automated program
+repair. In 2023 IEEE/ACM 45th International Conference on Software Engineering (ICSE). IEEE, 1430–1442.
+[19] Nan Jiang, Thibaud Lutellier, Yiling Lou, Lin Tan, Dan Goldwasser, and Xiangyu Zhang. 2023. Knod: Domain knowledge
+distilled tree decoder for automated program repair. In 2023 IEEE/ACM 45th International Conference on Software
+Engineering (ICSE). IEEE, 1251–1263.
+[20] Nan Jiang, Thibaud Lutellier, and Lin Tan. 2021. Cure: Code-aware neural machine translation for automatic program
+repair. In 2021 IEEE/ACM 43rd International Conference on Software Engineering (ICSE). IEEE, 1161–1173.
+[21] René Just, Darioush Jalali, and Michael D Ernst. 2014. Defects4J: A database of existing faults to enable controlled
+testing studies for Java programs. In Proceedings of the 2014 international symposium on software testing and analysis.
+437–440.
+[22] Sungmin Kang, Bei Chen, Shin Yoo, and Jian-Guang Lou. 2025. Explainable automated debugging via large language
+model-driven scientific debugging. Empirical Software Engineering 30, 2 (2025), 45.
+[23] Raffi Khatchadourian, Yiming Tang, and Mehdi Bagherzadeh. 2020. Safe automated refactoring for intelligent paral-
+lelization of Java 8 streams. Science of Computer Programming 195 (2020), 102476.
+[24] Xuan-Bach D Le, Duc-Hiep Chu, David Lo, Claire Le Goues, and Willem Visser. 2017. S3: syntax-and semantic-guided
+repair synthesis via programming by examples. In Proceedings of the 2017 11th Joint Meeting on Foundations of Software
+Engineering. 593–604.
+[25] Xuan Bach D Le, David Lo, and Claire Le Goues. 2016. History driven program repair. In 2016 IEEE 23rd international
+conference on software analysis, evolution, and reengineering (SANER), Vol. 1. IEEE, 213–224.
+[26] Claire Le Goues, ThanhVu Nguyen, Stephanie Forrest, and Westley Weimer. 2011. Genprog: A generic method for
+automatic software repair. Ieee transactions on software engineering 38, 1 (2011), 54–72.
+[27] Fengjie Li, Jiajun Jiang, Jiajun Sun, and Hongyu Zhang. 2025. Hybrid Automated Program Repair by Combining Large
+Language Models and Program Analysis. ACM Transactions on Software Engineering and Methodology (TOSEM) (2025).
+doi:10.1145/3715004
+[28] Haonan Li, Yu Hao, Yizhuo Zhai, and Zhiyun Qian. 2024. Enhancing static analysis for practical bug detection: An
+llm-integrated approach. Proceedings of the ACM on Programming Languages 8, OOPSLA1 (2024), 474–499.
+[29] Yi Li, Shaohua Wang, and Tien N Nguyen. 2020. Dlfix: Context-based code transformation learning for automated
+program repair. In Proceedings of the ACM/IEEE 42nd international conference on software engineering. 602–614.
+[30] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu
+Zhang, Chong Ruan, et al. 2024. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 (2024).
+[31] Kui Liu, Anil Koyuncu, Dongsun Kim, and Tegawendé F Bissyandé. 2019. Avatar: Fixing semantic bugs with fix
+patterns of static analysis violations. In 2019 IEEE 26th International Conference on Software Analysis, Evolution and
+Reengineering (SANER). IEEE, 1–12.
+[32] Kui Liu, Anil Koyuncu, Dongsun Kim, and Tegawendé F Bissyandé. 2019. TBar: Revisiting template-based automated
+program repair. In Proceedings of the 28th ACM SIGSOFT international symposium on software testing and analysis.
+31–42.
+[33] Fan Long, Peter Amidon, and Martin Rinard. 2017. Automatic inference of code transforms for patch generation. In
+Proceedings of the 2017 11th joint meeting on foundations of software engineering. 727–739.
+[34] Fan Long and Martin Rinard. 2015. Staged program repair with condition synthesis. In Proceedings of the 2015 10th
+Joint Meeting on Foundations of Software Engineering. 166–178.
+[35] Fan Long and Martin Rinard. 2016. Automatic patch generation by learning correct code. In Proceedings of the 43rd
+annual ACM SIGPLAN-SIGACT symposium on principles of programming languages. 298–312.
+[36] José Antonio Hernández López, Boqi Chen, Mootez Saad, Tushar Sharma, and Dániel Varró. 2024. On inter-dataset
+code duplication and data leakage in large language models. IEEE Transactions on Software Engineering (2024).
+[37] Thibaud Lutellier, Hung Viet Pham, Lawrence Pang, Yitong Li, Moshi Wei, and Lin Tan. 2020. Coconut: combining
+context-aware neural translation models using ensemble for program repair. In Proceedings of the 29th ACM SIGSOFT
+international symposium on software testing and analysis. 101–114.
+[38] Matias Martinez and Martin Monperrus. 2016. Astor: A program repair library for java. In Proceedings of the 25th
+international symposium on software testing and analysis. 441–444.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+DynaFix: Iterative Automated Program Repair Driven by Execution-Level Dynamic Information
+21
+[39] Sergey Mechtaev, Jooyong Yi, and Abhik Roychoudhury. 2016. Angelix: Scalable multiline program patch synthesis
+via symbolic analysis. In Proceedings of the 38th international conference on software engineering. 691–701.
+[40] Philippe Moret, Walter Binder, and Éric Tanter. 2011. Polymorphic bytecode instrumentation. In Proceedings of the
+tenth international conference on Aspect-oriented software development. 129–140.
+[41] Devon H O’Dell. 2017. The Debugging Mindset: Understanding the psychology of learning strategies leads to effective
+problem-solving skills. Queue 15, 1 (2017), 71–90.
+[42] OpenAI. 2024. Documentation of OpenAI API. https://platform.openai.com/docs/introduction. Accessed: 2025-07-30.
+[43] Rishov Paul, Md Mohib Hossain, Mohammed Latif Siddiq, Masum Hasan, Anindya Iqbal, and Joanna Santos. 2023.
+Enhancing automated program repair through fine-tuning and prompt engineering. arXiv preprint arXiv:2304.07840
+(2023).
+[44] Daniel Ramos, Claudia Mamede, Kush Jain, Paulo Canelas, Catarina Gamboa, and Claire Le Goues. 2025. Are large
+language models memorizing bug benchmarks?. In 2025 IEEE/ACM International Workshop on Large Language Models
+for Code (LLM4Code). IEEE, 1–8.
+[45] Chukri Soueidi, Marius Monnier, and Yliès Falcone. 2023. Efficient and expressive bytecode-level instrumentation for
+Java programs. International Journal on Software Tools for Technology Transfer 25, 4 (2023), 453–479.
+[46] Ilya Sutskever, Oriol Vinyals, and Quoc V Le. 2014. Sequence to sequence learning with neural networks. Advances in
+neural information processing systems 27 (2014).
+[47] Shin Hwei Tan, Hiroaki Yoshida, Mukul R Prasad, and Abhik Roychoudhury. 2016. Anti-patterns in search-based
+program repair. In Proceedings of the 2016 24th ACM SIGSOFT International Symposium on Foundations of Software
+Engineering. 727–738.
+[48] Yuxiang Wei, Chunqiu Steven Xia, and Lingming Zhang. 2023. Copiloting the copilots: Fusing large language models
+with completion engines for automated program repair. In Proceedings of the 31st ACM Joint European Software
+Engineering Conference and Symposium on the Foundations of Software Engineering. 172–184.
+[49] Ming Wen, Junjie Chen, Rongxin Wu, Dan Hao, and Shing-Chi Cheung. 2018. Context-aware patch generation for
+better automated program repair. In Proceedings of the 40th international conference on software engineering. 1–11.
+[50] Chunqiu Steven Xia, Yifeng Ding, and Lingming Zhang. 2023. The plastic surgery hypothesis in the era of large
+language models. In 2023 38th IEEE/ACM International Conference on Automated Software Engineering (ASE). IEEE,
+522–534.
+[51] Chunqiu Steven Xia, Yifeng Ding, and Lingming Zhang. 2023. Revisiting the plastic surgery hypothesis via large
+language models. arXiv preprint arXiv:2303.10494 (2023).
+[52] Chunqiu Steven Xia, Yuxiang Wei, and Lingming Zhang. 2023. Automated program repair in the era of large pre-trained
+language models. In 2023 IEEE/ACM 45th International Conference on Software Engineering (ICSE). IEEE, 1482–1494.
+[53] Chunqiu Steven Xia and Lingming Zhang. 2022. Less training, more repairing please: revisiting automated program
+repair via zero-shot learning. In Proceedings of the 30th ACM Joint European Software Engineering Conference and
+Symposium on the Foundations of Software Engineering. 959–971.
+[54] Chunqiu Steven Xia and Lingming Zhang. 2023.
+Conversational automated program repair.
+arXiv preprint
+arXiv:2301.13246 (2023).
+[55] Chunqiu Steven Xia and Lingming Zhang. 2024. Automated program repair via conversation: Fixing 162 out of 337
+bugs for $0.42 each using chatgpt. In Proceedings of the 33rd ACM SIGSOFT International Symposium on Software Testing
+and Analysis. 819–831.
+[56] Qi Xin and Steven P Reiss. 2017. Leveraging syntax-related code for automated program repair. In 2017 32nd IEEE/ACM
+International Conference on Automated Software Engineering (ASE). IEEE, 660–670.
+[57] Yingfei Xiong and Bo Wang. 2022. L2S: A framework for synthesizing the most probable program under a specification.
+ACM Transactions on Software Engineering and Methodology (TOSEM) 31, 3 (2022), 1–45.
+[58] Yingfei Xiong, Jie Wang, Runfa Yan, Jiachen Zhang, Shi Han, Gang Huang, and Lu Zhang. 2017. Precise condition
+synthesis for program repair. In 2017 IEEE/ACM 39th International Conference on Software Engineering (ICSE). IEEE,
+416–426.
+[59] Junjielong Xu, Ying Fu, Shin Hwei Tan, and Pinjia He. 2025. Aligning the Objective of LLM-Based Program Repair. In
+2025 IEEE/ACM 47th International Conference on Software Engineering (ICSE). IEEE, 2548–2560.
+[60] Jifeng Xuan, Matias Martinez, Favio Demarco, Maxime Clement, Sebastian Lamelas Marcote, Thomas Durieux, Daniel
+Le Berre, and Martin Monperrus. 2016. Nopol: Automatic repair of conditional statement bugs in java programs. IEEE
+Transactions on Software Engineering 43, 1 (2016), 34–55.
+[61] He Ye, Matias Martinez, Xiapu Luo, Tao Zhang, and Martin Monperrus. 2022. Selfapr: Self-supervised program repair
+with test execution diagnostics. In Proceedings of the 37th IEEE/ACM International Conference on Automated Software
+Engineering. 1–13.
+[62] He Ye, Matias Martinez, and Martin Monperrus. 2022. Neural program repair with execution-based backpropagation.
+In Proceedings of the 44th international conference on software engineering. 1506–1518.
+, Vol. 1, No. 1, Article . Publication date: January 2026.
+
+22
+Zhili Huang, Ling Xu, Chao Liu, Weifeng Sun, Xu Zhang, Yan Lei, Meng Yan, and Hongyu Zhang
+[63] He Ye and Martin Monperrus. 2024. Iter: Iterative neural repair for multi-location patches. In Proceedings of the 46th
+IEEE/ACM international conference on software engineering. 1–13.
+[64] Xin Yin, Chao Ni, Shaohua Wang, Zhenhao Li, Limin Zeng, and Xiaohu Yang. 2024. Thinkrepair: Self-directed
+automated program repair. In Proceedings of the 33rd ACM SIGSOFT International Symposium on Software Testing and
+Analysis. 1274–1286.
+[65] Quanjun Zhang, Chunrong Fang, Yuxiang Ma, Weisong Sun, and Zhenyu Chen. 2023. A survey of learning-based
+automated program repair. ACM Transactions on Software Engineering and Methodology 33, 2 (2023), 1–69.
+[66] Quanjun Zhang, Chunrong Fang, Tongke Zhang, Bowen Yu, Weisong Sun, and Zhenyu Chen. 2023. Gamma: Revisiting
+template-based automated program repair via mask prediction. In 2023 38th IEEE/ACM International Conference on
+Automated Software Engineering (ASE). IEEE, 535–547.
+[67] Qihao Zhu, Zeyu Sun, Yuan-an Xiao, Wenjie Zhang, Kang Yuan, Yingfei Xiong, and Lu Zhang. 2021. A syntax-guided
+edit decoder for neural program repair. In Proceedings of the 29th ACM joint meeting on European software engineering
+conference and symposium on the foundations of software engineering. 341–353.
+[68] Qihao Zhu, Zeyu Sun, Wenjie Zhang, Yingfei Xiong, and Lu Zhang. 2023. Tare: Type-aware neural program repair. In
+2023 IEEE/ACM 45th International Conference on Software Engineering (ICSE). IEEE, 1443–1455.
+, Vol. 1, No. 1, Article . Publication date: January 2026.

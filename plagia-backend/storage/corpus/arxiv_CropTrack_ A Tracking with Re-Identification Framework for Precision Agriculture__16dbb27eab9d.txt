@@ -1,0 +1,1017 @@
+CropTrack: A Tracking with Re-Identification
+Framework for Precision Agriculture
+Md Ahmed Al Muzaddid∗, Jordan A. James∗, and William J. Beksi
+Abstract— Multiple-object tracking (MOT) in agricultural
+environments presents major challenges due to repetitive pat-
+terns, similar object appearances, sudden illumination changes,
+and frequent occlusions. Contemporary trackers in this domain
+rely on the motion of objects rather than appearance for
+association. Nevertheless, they struggle to maintain object
+identities when targets undergo frequent and strong occlusions.
+The high similarity of object appearances makes integrating
+appearance-based association nontrivial for agricultural sce-
+narios. To solve this problem we propose CropTrack, a novel
+MOT framework based on the combination of appearance
+and motion information. CropTrack integrates a reranking-
+enhanced appearance association, a one-to-many association
+with appearance-based conflict resolution strategy, and an
+exponential moving average prototype feature bank to improve
+appearance-based association. Evaluated on publicly available
+agricultural MOT datasets, CropTrack demonstrates consistent
+identity preservation, outperforming traditional motion-based
+tracking methods. Compared to the state of the art, CropTrack
+achieves significant gains in identification F1 and association
+accuracy scores with a lower number of identity switches.
+Index Terms— Agricultural Automation; Computer Vision
+for Automation; Visual Tracking
+I. INTRODUCTION
+Driven by labor shortages in the agricultural sector,
+robotics is emerging as a pivotal technology to address the
+need for more efficient and sustainable food production.
+For example, robotic platforms are being developed for
+tasks such as precision spraying, mechanical weeding, crop
+monitoring, and automated harvesting [2]. A fundamental
+prerequisite for these systems is the ability to sense and
+perceive complicated and dynamic environments in real time.
+At the core of this perceptual capability lies multiple-object
+tracking (MOT), a computer vision task focused on detecting
+and maintaining the identities of many objects across a
+sequence of video frames.
+Accurate MOT is necessary to enable advanced perception
+required for agricultural robotics. For instance, tracking
+plants and weeds over time enables the precise applica-
+tion of fertilizers or herbicides, minimizing chemical usage
+and environmental impact. Similarly, accurate detection and
+tracking of individual fruits can allow a robotic harvester
+to plan an optimal picking trajectory and avoid redundant
+∗Indicates equal contribution. This work was supported by a University
+of Texas at Arlington Dissertation Fellowship and by the United States
+Department of Agriculture (USDA) under agreement #58-6066-3-050.
+The authors are with the Department of Computer Science and
+Engineering, The University of Texas at Arlington, Arlington, TX,
+USA. Emails: mdahmedal.muzaddid@mavs.uta.edu, jaj9608@mavs.uta.edu,
+william.beksi@uta.edu.
+30
+35
+40
+45
+50
+20
+30
+40
+50
+ByteTrack
+PineSORT
+FastTracker
+NTrack
+AgriSORT
+CropTrack
+IDF1
+AssA
+Fig. 1: A comparison of state-of-the-art trackers on the AgriSORT-
+Grapes [1] dataset. The horizontal axis is the identification F1
+(IDF1) score, the vertical axis is the association accuracy (AssA),
+and the radius of each circle corresponds to the higher-order
+tracking accuracy (HOTA) score. CropTrack achieves the best AssA
+score and comparable IDF1 and HOTA performance.
+harvesting attempts. MOT is also essential for yield estima-
+tion [3], where tracking individual crops throughout a field
+can provide precise counts. Thus, the ability to maintain a
+persistent track of each object of interest is integral for the
+efficiency and reliability of agricultural automation.
+Applying MOT in agricultural settings presents a unique
+and formidable set of challenges. Frequent occlusions caused
+by foliage, branches, or other objects are common, leading
+to fragmented tracks and identity switches. Furthermore,
+objects of interest, such as fruits or plants, typically exhibit
+high intra-class similarity and are often found in dense
+clusters, making it difficult to distinguish between individual
+instances. The appearance of crops can also change dramati-
+cally due to variations in lighting and shadows. To overcome
+these issues, it is crucial to develop MOT frameworks specifi-
+cally tailored to agricultural. Such methods must be robust to
+severe occlusions, capable of differentiating visually similar
+objects, and efficient enough to operate in real time on
+resource-constrained hardware.
+In this letter we propose CropTrack, a re-identification
+(Re-ID) MOT framework designed for complex agricultural
+environments. Our approach combines Re-ID-based associ-
+ation using reranking of appearance features and motion-
+based association to improve data association and maintain
+arXiv:2512.24838v1 [cs.CV] 31 Dec 2025
+
+object identities through long-term occlusions, Fig. 1. By
+overcoming these limitations, our work aims to enhance the
+perceptual capabilities of robots for precision agriculture. To
+summarize, we make the following contributions.
+• We create a MOT system that incorporates appearance-
+based association specifically designed for video appli-
+cations with long-term occlusions in agricultural envi-
+ronments.
+• We develop a one-to-many motion-based association
+strategy with greedy appearance-based conflict resolu-
+tion.
+• We introduce an efficient reranking technique to refine
+appearance-based association.
+The source code and multimedia associated with this project
+can be found at https://robotic-vision-lab.github.io/croptrack.
+II. RELATED WORK
+A. Tracking by Detection
+Kalman filters are widely used for location prediction due
+to their simplicity (e.g., [4], [5]). However, the assumption of
+linear dynamics and Gaussian noise limits their effectiveness
+for complex motion. Researchers have explored more flexible
+approaches such as particle filters, extended Kalman filters,
+and non-parametric interpolation methods (e.g., Gaussian
+process regression (GPR)). On the other hand, deep learning
+techniques such as POI [6] and Tracktor [7], use a con-
+volutional neural network (CNN) to generate discriminative
+embeddings. These embeddings are essential for preserving
+identities during long-term occlusions [8].
+Simple online and real-time tracking (SORT) [9] combines
+Kalman filtering with the Hungarian algorithm [10] and is
+one of the earliest tracking-by-detection approaches. Sub-
+sequent extensions, including DeepSORT [11] and Strong-
+SORT [12], incrementally improve tracking performance.
+In particular, DeepSORT augments SORT by incorporating
+appearance features, while a Kalman filter with the Maha-
+lanobis distance supports short-term motion-based predic-
+tions. Building on DeepSORT, StrongSORT introduces a
+spatio-temporal connectivity model for tracklet association,
+GPR-based interpolation to address trajectory gaps caused by
+missing detections, and exponential moving average (EMA)
+updates of appearance features. ByteTrack [13] extends the
+association logic by employing low-confidence detection
+boxes to maintain trajectory continuity during partial occlu-
+sions. This approach is further enhanced by FastTracker [14],
+which introduces an occlusion-aware Re-ID module that
+restores lost tracks using motion-based geometric reasoning
+rather than traditional appearance-based features.
+Recent research increasingly focuses on end-to-end or
+joint detection-association architectures. In these networks,
+detection and tracking cues are learned simultaneously rather
+than in separate modules. For example, TransTrack [15],
+TrackFormer [16], and MOTR [17] employ transformer-
+based query and key mechanisms to jointly detect objects
+in the current frame and associate them with existing tracks
+within a unified pipeline. Such methods reduce dependence
+on post-hoc association heuristics, but they rely on large
+amounts of labeled spatial-temporal datasets to learn robust
+association functions.
+B. Appearance-Based Re-Identification
+Appearance-based Re-ID has been investigated in domains
+such as pedestrian and vehicle tracking, where the objec-
+tive is to consistently match object instances across non-
+overlapping camera views or over time despite variations in
+appearance, pose, and illumination. Early pedestrian Re-ID
+approaches rely on handcrafted descriptors, such as color
+histograms and texture features, to encode visual infor-
+mation [18]. CNN-based methods enable the learning of
+highly-discriminative representations [19], [20]. Proceeding
+advancements introduce attention mechanisms [21], [22] and
+part-based modeling [23], [24] to emphasize salient regions
+and improve cross-view generalization.
+Zhang et al. [25] further enhance discriminative ca-
+pability through patch-wise high-frequency augmentation
+(PHA), which preserves critical high-frequency components
+via self-attention. To resolve ambiguities among visually
+similar individuals (e.g., identical clothing color or acces-
+sories), several reranking strategies have been proposed (e.g.,
+[26], [27]) to refine similarity estimation post-matching.
+Inspired by the success of these techniques in disambiguating
+near-identical appearances, we incorporate reranking-based
+similarity-refinement into our MOT framework. To the best
+of our knowledge, we are the first to adapt an appearance-
+based reranking scheme for crop-tracking tasks.
+C. Crop Tracking
+By maintaining consistent identities across video streams,
+crop tracking can support a range of downstream applica-
+tions. For instance, LettuceTrack [28] introduces handcrafted
+geometric features that leverage the relative positions of
+plants along a row, exploiting the regular spatial arrangement
+of crops. While effective in highly-structured environments,
+this approach lacks distinctiveness and robustness, and its
+reliance on grid-like planting patterns limits broader ap-
+plicability. In a related development, AgriSORT [1] argues
+that appearance-based association is often unreliable in agri-
+cultural domains where targets share near-identical visual
+characteristics. The framework depends exclusively on mo-
+tion cues and assumes that robot movement remains largely
+parallel to orchard rows to minimize perspective distortion.
+However, this assumption may not hold under diverse field
+conditions. Furthermore, we show that appearance-based
+reranking strategies, when combined with motion cues, can
+still enhance association performance despite the inherent
+visual similarity of crops.
+Similarly, PineSort [29] uses ORB [30] features to mitigate
+camera motion and adopts a multi-stage, confidence-driven
+matching strategy. However, like AgriSORT, PineSort relies
+mainly on motion information, thus its association accuracy
+decreases in scenarios where motion cues are weak or
+ambiguous leading to reduced robustness. In contrast to
+these approaches, NTrack [31] models linear relationships
+2
+
+among neighboring tracks without assuming row- or grid-
+based planting. By integrating both direct cues such as
+dense optical flow and indirect spatial relationships, NTrack
+improves the consistency and reliability of detection-to-track
+association, especially in fields with irregular planting pat-
+terns. WeedsSORT [32] utilizes a multi-dimensional feature
+extraction decoder and establishes keypoint correspondences
+via the SuperGlue [33] algorithm to derive motion estimation
+results. For data association, WeedsSORT relies on template
+matching, which is susceptible to erroneous matches under
+challenging field conditions such as occlusions, varying
+illumination, or crop movement caused by wind.
+III. METHOD
+A. Review of ByteTrack
+CropTrack employs appearance-based association by in-
+tegrating aspects of ByteTrack [13] as the baseline tracker.
+ByteTrack is a hierarchical framework for detection-to-track
+matching. Detection bounding boxes are matched to existing
+tracks in multiple steps based on detection accuracy. For
+each video frame k, detections Dk are partitioned into high-
+confidence Dhigh and low-confidence Dlow sets using a score
+threshold τ. A Kalman filter is then applied to predict the po-
+sitions of all tracks T , including those that are lost. The first
+association step matches Dhigh with predicted tracks using
+intersection over union (IoU), and assignments are solved via
+the Hungarian algorithm. Unmatched detections and tracks
+are retained as Dremain and Tremain, respectively. In the
+second stage, the remaining tracks are further associated with
+Dlow, allowing the tracker to recover potential true positives
+with initially lower confidence. This hierarchical association
+strategy enhances robustness by leveraging both confident
+and ambiguous detections, thereby ensuring more precise and
+reliable tracking results.
+B. CropTrack Overview
+CropTrack processes detected bounding boxes in a video
+sequence, along with their feature embeddings and detection
+scores as input. As output it produces tracks, where each
+track contains the bounding box and the identity of the object
+across frames. Unlike ByteTrack’s IoU-based association,
+CropTrack adopts a more sophisticated association proce-
+dure, Fig. 2. Concretely, we employ a hierarchical association
+strategy between detection boxes and tracks, as listed in Al-
+gorithm 1. The principal contributions we introduce beyond
+ByteTrack are highlighted in lines 16 and 19.
+As shown in Fig. 3, position prediction via a Kalman
+filter can be unreliable in dynamic environments. It can
+lead to an accumulated drift from the true object position,
+which makes an IoU-based association ineffective. Following
+StrongSORT [12], we replace the vanilla Kalman filter with a
+noise scale adaptive (NSA) Kalman filter. The NSA Kalman
+filter includes the confidence of detections in the state update,
+producing more robust predictions.
+In the MOT literature, appearance-based association has
+been proposed as a remedy. Nonetheless, incorporating ap-
+pearance cues into crop tracking is particularly challenging
+Algorithm 1: CropTrack
+Input: Detected bounding boxes D; Bounding box feature
+embeddings F; detection score threshold τ
+Output: Tracks T of the video
+1 Initialization: T ←∅
+2 for Dk in D do
+3
+Dhigh ←∅
+4
+Dlow ←∅
+5
+for d in Dk do
+6
+if d.score > τ then
+7
+Dhigh ←Dhigh ∪{d}
+8
+end
+9
+else
+10
+Dlow ←Dlow ∪{d}
+11
+end
+12
+end
+/* predict new locations of tracks */
+13
+for t in T do
+14
+t ←KalmanFilter(t)
+15
+end
+/* first association */
+16
+Tmatch, Dmatch ←one to many reranking association( T ,
+Dhigh, F)
+17
+Dremain ←Dhigh \ Dmatch
+18
+Tremain ←T \ Tmatch
+/* second association */
+19
+Trematch, Drematch ←reranking association( Tremain,
+Dremain, F )
+20
+Dremain ←Dremain \ Drematch
+21
+Tre−remain ←Tremain \ Trematch
+/* third association */
+22
+Tre−rematch ←IoU association( Tre−remain, Dlow )
+23
+Tre−remain ←Tre−remain \ Tre−rematch
+/* delete unmatched tracks */
+24
+T ←T \ Tre−remain
+/* initialize new tracks */
+25
+for d in Dremain do
+26
+T ←T ∪{d}
+27
+end
+28 end
+29 Return: T
+due to self-similarity, where multiple targets exhibit near-
+identical visual characteristics. We solve this problem by
+introducing a reranking technique to refine appearance-based
+association. Furthermore, we reformulate the assignment
+problem from the matching cost matrix using a one-to-
+many association strategy with greedy Re-ID for conflict
+resolution. In the ensuing subsections we provide a detailed
+discussion of these key design choices.
+C. Appearance-Based Association
+Enhancing MOT through appearance-based association
+presents a unique challenge due to the high degree of self-
+similarity among targets. To fix this complication, we adapt
+a reranking scheme originally developed for pedestrian Re-
+ID, where it is employed to distinguish individuals with
+similar attributes such as clothing color, accessories, or
+hairstyle [27]. Specifically, a k-reciprocal encoding approach
+is utilized. The technique computes a feature vector by
+aggregating the k-reciprocal nearest neighbors of a given
+sample and subsequently reranks the neighbors based on a
+3
+
+Trackletst−1
+Framet
+Object Detector
+Predicted State Based
+on NSA Kalman Filter
+First Association
+One-to-Many with
+Greedy Fused ReID & IoU
+Third Association
+Based Fused IoU
+Second Association
+Based Fused ReID & IoU
+- Update NSA Kalman Filter
+- Create New Tracklets
+- Kill Inactive Tracklets
+- Update Appearance Features
+Trackletst
+Trackst
+Low-Score Detections
+High-Score Detections
+Unmatched Tracklets
+and Detections
+Matched Tracklets
+Unmatched Tracklets
+Unmatched
+Detections
+Matched
+Tracklets
+Matched Tracklets
+Unmatched Tracklets and Detections
+Fig. 2: An overview of the CropTrack pipeline where our key contributions are shaded in blue. The pipeline begins with an object detector
+that generates both low- and high-score detections. The high-score detections are processed by the first appearance-based association.
+Then, all unmatched detections and tracklets proceed to the second appearance-based association step. Finally, unmatched tracklets are
+processed with the low-score detections in the third IoU-based association.
+Drift
+Drift
+Fig. 3: An example of IoU-based association failure. Left: In frame 16, a new track is initiated with bounding box ID 17. Right: By frame
+43, the track (white bounding box, ID 17) has drifted from the object’s true position, leaving the yellow detection box unmatched and
+failing to associate with the correct track.
+combined distance metric that incorporates both the original
+distance and the Jaccard distance.
+In CropTrack, detected bounding boxes in each frame
+serve as the query set Q, while an EMA-based feature bank
+(Sec. III-E) associated with the active tracks functions as the
+gallery set G. Formally, given a query q ∈Q, its k-nearest
+neighbors in G are defined as N(q, k) = {g1, g2, . . . , gk},
+from which the k-reciprocal nearest neighbors are computed
+as R(q, k) = {gi | (gi ∈N(q, k)) ∧(q ∈N(gi, k))}.
+However, variations in illumination, pose, occlusion, and
+viewpoint may exclude true positives from N(q, k). Zhong
+et al. [27] addressed this limitation by refining N(q, k)
+and computing a k-reciprocal nearest-neighbor distance,
+d∗(q, gi), between all pairs of query-to-gallery samples.
+Nevertheless, detection boxes tend to associate with only
+spatially-local tracks. This is based on the observation that
+although Kalman filter track predictions are not accurate,
+the predicted tracks generally remain close to the true object
+location. This property guides us in refining the pairwise
+distance,
+d†(q, gi) =
+(
+d∗(q, gi),
+if ∥q.center −gi.center∥2 < δ
+∞,
+otherwise
+(1)
+where q.center and gi.center denote the centers of the
+corresponding bounding boxes and δ serves as a parame-
+ter that controls the maximum allowable neighbor distance
+for potential association. This formulation enforces spatial
+consistency while preserving the robustness of appearance-
+based reranking, ultimately improving association accuracy
+in highly self-similar crop tracking scenarios.
+D. One-to-Many Association with Appearance-Based Con-
+flict Resolution
+A common way to associate predicted tracklet states
+and current detections is to formulate a linear assignment
+problem that can be solved using the Hungarian algorithm.
+This assignment is based on minimizing a cost matrix derived
+4
+
+from a spatial metric like IoU, an appearance metric such
+as cosine similarity, or a combination of the two metrics.
+However, this one-to-one assignment approach can fail in
+highly-dynamic scenes or under partial occlusions. Global
+optimization may prioritize a spatially-convenient match that
+does not correspond to the correct object identity, leading
+to identity switches. Even when appearance features are
+fused into the cost matrix, their influence is weighted against
+the spatial metric across all possible assignments. This can
+suppress the ability to resolve local ambiguities effectively.
+To address this limitation, we design a robust two-stage, one-
+to-many motion-based association strategy with appearance-
+based conflict resolution.
+The association process consists of three stages: candidate
+generation, appearance feature reranking, and greedy conflict
+resolution. In the first stage, a pool of potential candidates
+is generated. The IoU distance is computed for all pairs
+of existing tracks and new detections. Any track-detection
+pair with an IoU distance below a predefined threshold is
+considered a plausible match and added to a candidate list.
+In the second stage, the reranking distance (1) is calculated
+for every pair in the candidate list. To maintain efficiency, this
+step is performed only on the spatially-plausible pairs, not on
+all possible pairs. In the final stage, the candidate list is sorted
+in ascending order based on the computed distances and
+then greedily processed to assign matches. The pair with the
+highest appearance similarity is selected as a definitive match
+and removed from consideration for any further matches.
+This process repeats for the next-best pair until all conflicts
+are resolved.
+E. Exponential Moving Average Feature Prototypes
+Although the EMA-based feature bank has gained pop-
+ularity in MOT due to significant computational savings
+and its ability to suppress detection noise, it is not without
+flaws. For example, the strategy for updating the feature
+bank is greatly affected by the chosen value of momentum,
+α, which represents the sensitivity to new features. This
+hyperparameter requires tuning to accurately fit a tracker
+to new environments. High α values can fail to accurately
+represent features, since the detections may include features
+from occluding structures. In contrast, low α values struggle
+in scenarios where the features do not update smoothly over
+time due to low-frame rates or fast camera movements. To
+solve this problem, we implement an EMA-based feature
+bank containing a predetermined number of prototypes that
+updates the appearance state et
+i,p for the i-th tracklet and p-
+th prototype in frame t with varying levels of sensitivity αp.
+Concretely,
+et
+i,p = αpet−1
+i,p + (1 −αp)f t
+i ,
+(2)
+where f t
+i is the appearance feature of the current detection.
+For CropTrack, the number of prototypes is set to 3 with αp
+values of 0.1, 0.5, and 0.9 corresponding to low, medium,
+and high sensitivity to new feature updates, respectively. The
+additional prototypes improve robustness without the need
+for manual tuning.
+F. Motion-Based Association
+Motion information in agricultural scenarios is generally
+robust and leads to strong predictions. Beyond the first
+association, we use the motion predictions from the NSA
+Kalman filter to enhance the cost matrix for association.
+Formally, we combine the appearance cost Ca and motion
+cost Cm for all appearance-based association steps as
+C = λCa + (1 −λ)Cm,
+(3)
+where λ is a tunable weight factor set to 0.75. Lastly, the
+standard second association from ByteTrack is adopted as
+the third association in CropTrack. Specifically, the final
+association step of CropTrack uses only motion information
+to associate the low-confidence detections, all unmatched
+detections, and all unmatched tracklets.
+IV. EVALUATION
+A. Datasets
+We conducted experiments on the following agricultural
+MOT datasets: TexCot22 [34] and the table grapes dataset
+presented in AgriSORT [1], which we refer to as AgriSORT-
+Grapes. TexCot22 contains a total of 30 video sequences
+of which 13 are used for testing. The sequences are 10
+to 20 seconds long and capture cotton crop rows from the
+overhead perspective at 4K resolution and varying frame
+rates. The dataset was recorded at separate times of the day,
+accounting for varying illumination conditions. AgriSORT-
+Grapes contains 4 video sequences, all of which are used for
+testing. The dataset is composed of 10 second sequences at
+a resolution of 720p. The sequences are divided equally by
+frame rate, with half of the videos recorded at 30 FPS and
+the remainder at 10 FPS. All sequences are recorded from
+the side view while moving along the vineyard rows.
+B. Evaluation Metrics
+We used the TrackEval framework [35], which provides a
+comprehensive set of metrics for MOT evaluation. Specifi-
+cally, we reported performance using higher-order tracking
+accuracy (HOTA), MOT accuracy (MOTA), identification
+F1 score (IDF1), identity switches (IDsw), fragmentations
+(Frag), and association accuracy (AssA). HOTA provides a
+balanced assessment by jointly capturing detection, associ-
+ation, and localization quality, thereby offering a holistic
+measure of MOT performance. MOTA primarily reflects
+detection performance as it aggregates false positives, false
+negatives, and identity switches. IDF1 emphasizes iden-
+tity preservation by measuring the consistency of correctly
+identified detections over time. IDsw quantifies errors in
+identity assignment, whereas Frag measures interruptions in
+continuous trajectories. AssA quantifies a tracker’s ability to
+maintain identity consistency across frames, which is vital
+for applications such as crop yield estimation. Collectively,
+these metrics provide a detailed evaluation of CropTrack’s
+ability to track and re-identify crop instances over time.
+5
+
+Method
+TexCot22
+AgriSORT-Grapes
+HOTA↑
+MOTA↑AssA↑
+IDF1↑
+IDP↑
+IDsw↓
+Frag↓
+HOTA↑
+MOTA↑AssA↑
+IDF1↑
+IDP↑
+IDsw↓
+Frag↓
+ByteTrack
+70.11
+83.10
+70.83
+85.56
+86.57
+1380
+974
+44.59
+47.57
+50.78
+57.64
+76.41
+37
+193
+FastTracker
+70.99
+80.88
+72.58
+85.23
+84.09
+1342
+871
+46.58
+48.33
+50.13
+60.10
+68.98
+56
+130
+AgriSORT
+57.19
+46.99
+60.63
+70.35
+59.90
+1411
+870
+43.90
+30.13
+46.09
+55.00
+50.68
+82
+236
+PineSORT
+70.73
+78.25
+70.35
+85.97
+85.78
+4640
+1163
+45.81
+44.90
+46.44
+61.33
+72.44
+703
+312
+NTrack
+72.25
+84.13
+74.81
+89.95
+90.74
+1028
+920
+24.74
+39.37
+17.08
+29.62
+40.39
+310
+343
+CropTrack
+72.17
+84.03
+74.68
+89.86
+90.88
+1020
+897
+46.04
+48.30
+53.35
+59.69
+79.05
+23
+207
+TABLE I: A comparison of state-of-the-art MOT methods on the TexCot22 [34] and AgriSORT-Grapes [1] datasets.
+(a)
+(b)
+(c)
+Frame: 47
+Frame: 47
+Frame: 47
+Frame: 58
+Frame: 58
+Frame: 58
+Frame: 69
+Frame: 69
+Frame: 69
+Fig. 4: A qualitative comparison of (a) CropTrack, (b) NTrack, and (c) PineSORT on a test sequence from TexCot22 [34] across multiple
+time steps. The top row displays the tracking results at frame 47, while the middle and bottom rows show the corresponding results at
+frame 58 and 69, respectively. Each bounding box represents a tracklet and the color signifies its object ID. A single color is used for the
+same object, while different colors are employed for distinct objects. CropTrack yields superior ID preservation under strong occlusions.
+Noise Level
+LN probability
+FN rate
+FP rate
+A
+0.4
+0.2
+0.2
+B
+0.4
+0.0
+0.0
+C
+0.2
+0.0
+0.0
+D
+0.0
+0.0
+0.0
+TABLE II: The noise level settings for the detection perturbation
+experiments.
+C. Implementation Details
+CropTrack’s appearance features, (f ∈R1024), are ex-
+tracted from detections via the PHA [25] model, which is
+pretrained on the Market-1501 [36] dataset for person Re-ID.
+Unless otherwise specified, the detection score threshold τ is
+set to 0.6. In (1), the maximum allowable neighbor distance δ
+for potential association is set at 600, accommodating larger
+track drifts. During the assignment step, associations are
+discarded if the IoU between a detection box and a tracklet
+box falls below 0.2. Lost tracklets are retained for up to
+30 frames to account for potential reappearance. To ensure
+a fair evaluation, we adopted the detection bounding boxes
+provided with the dataset across all baseline methods.
+D. Tracker Comparison
+As demonstrated in Table I, CropTrack establishes su-
+perior identity preservation when evaluated against state-
+of-the-art trackers on the TexCot22 and AgriSORT-Grapes
+datasets. It consistently outperforms all other methods in
+identity-specific metrics, achieving the highest IDP and the
+6
+
+HOTA↑
+MOTA↑
+IDF1↑
+IDR↑
+IDP↑
+AssA↑
+IDsw↓
+Frag↓
+ByteTrack
+70.11
+83.10
+85.56
+84.57
+86.57
+70.83
+1380
+974
++NSA
+73.13
+84.16
+88.16
+87.03
+89.31
+75.10
+1119
+883
++Re-ID
+56.51
+79.90
+60.49
+59.96
+61.03
+46.52
+1316
+1080
++Reranking
+73.64
+84.36
+89.39
+88.40
+90.40
+76.05
+1055
+888
++Greedy
+72.17
+84.03
+89.86
+88.86
+90.88
+74.68
+1020
+897
+TABLE III: An ablation study of the proposed association modules evaluated on the TexCot22 [34] test sequences.
+A
+B
+C
+D
+Metric Value
+HOTA
+A
+B
+C
+D
+MOTA
+A
+B
+C
+D
+AssA
+A
+B
+C
+D
+Metric Value
+IDF1
+A
+B
+C
+D
+Detection Accuracy
+IDsw
+A
+B
+C
+D
+Frag
+CropTrack
+ByteTrack
+Fig. 5: Tracking performance under varying detection accuracies.
+lowest IDsw on both benchmarks. Furthermore, CropTrack
+achieves competitive results in all the main metrics (HOTA,
+MOTA, AssA, IDF1). Although CropTrack excels in identity
+preservation, it does exhibit a higher number of fragmented
+tracks. This is a direct consequence of its robust ability to
+accurately re-associate and reactivate tracks after an occlu-
+sion, as illustrated in Fig. 4. The high tracking accuracy and
+reliable identity preservation across two distinct crop types
+validates the effectiveness of appearance-based association
+in agricultural settings.
+E. Tracking Performance under Varying Detection Accuracy
+It is important to validate that our method performs
+well with current detectors and remains robust as detection
+accuracy improves. Therefore, we tested CropTrack under
+different detection accuracy levels by generating perturbed
+bounding boxes from ground-truth annotations. To simulate
+realistic detector outputs, we introduced three types of per-
+turbations into the ground-truth bounding boxes.
+1) Localization noise (LN): We perturbed each bounding
+box by adding random spatial noise to its center coordi-
+nates and scaling noise to its width and height. The per-
+turbation magnitudes were controlled with a predefined
+noise probability, producing varying distortion levels of
+LN.
+2) False negatives (FNs): We randomly removed a fraction
+of bounding boxes according to a specified FN rate. This
+simulates missed detections.
+3) False positives (FPs): We randomly sampled additional
+bounding boxes within the image frame. These boxes
+were added at a specified FP rate to represent spurious
+detections.
+The perturbation procedure was controlled by three pa-
+rameters: LN probability, FN rate, and FP rate. As shown
+in Fig. 5, three distinct noise levels, labeled A, B, and C,
+were evaluated alongside a ground-truth baseline, labeled
+D. The specific parameter configurations for each noise
+level are detailed in Table II. The results demonstrate that
+CropTrack achieves considerably higher performance than
+baseline approaches as detection quality increases. Notably,
+the gains in HOTA, MOTA, AssA, and IDF1 indicate that
+our approach is more effective at maintaining accurate and
+consistent object identities. Additionally, lower values of
+IDsw and Frag reflect the robustness of our method in
+minimizing identity switches and fragmentation under chal-
+lenging conditions. Collectively, these findings highlight the
+resilience of CropTrack to variations in detection quality and
+its superior capacity to maintain long-term object trajectories.
+F. Ablation Study
+The development of CropTrack is detailed via an ablation
+study, Table III. ByteTrack is employed as the baseline
+and the vanilla Kalman filter is replaced with the NSA
+Kalman filter. We introduce appearance-based Re-ID for the
+unmatched detections after the first motion-based associa-
+tion. Choosing cosine similarity between detection features
+and EMA feature prototypes as the distance metric results
+in a significant reduction in performance across all met-
+rics. However, replacing cosine similarity distance with our
+reranking distance results in a major improvement in track-
+ing performance across all metrics excluding fragmentation.
+Lastly, we form CropTrack by replacing the first motion-
+based association with our proposed one-to-many association
+with greedy appearance-based conflict resolution. Compared
+to the baseline, CropTrack significantly improves HOTA,
+AssA, and IDF1, indicating that appearance-based features
+are beneficial for identity preservation in agricultural tracking
+scenarios.
+7
+
+V. CONCLUSION
+This letter presented CropTrack, a MOT framework for
+infield crop monitoring based on Re-ID. CropTrack inte-
+grates reranking-enhanced appearance association, a one-to-
+many association with appearance-based conflict resolution
+strategy, and an EMA-based prototype feature bank. These
+components collectively enhance robustness under occlusion,
+dense plant structures, and high visual similarity. Evaluations
+on the TexCot22 and AgriSORT-Grapes datasets, which serve
+as benchmarks for agricultural tracking, show that CropTrack
+achieves state-of-the-art performance in tracking accuracy
+and identity consistency. Future research will investigate
+multimodal sensor fusion and online adaptation to further
+generalize tracking across diverse environmental conditions.
+REFERENCES
+[1] L. Saraceni, I. M. Motoi, D. Nardi, and T. A. Ciarfuglia, “Agrisort: A
+simple online retl-time tracking-by-detection framework for robotics
+in precision agriculture,” in Proceedings of the IEEE International
+Conference on Robotics and Automation, 2024, pp. 2675–2682.
+[2] A. Botta, P. Cavallone, L. Baglieri, G. Colucci, L. Tagliavini, and
+G. Quaglia, “A review of robots, perception, and tasks in precision
+agriculture,” Applied Mechanics, vol. 3, no. 3, pp. 830–854, 2022.
+[3] J. Villacr´es, M. Viscaino, J. Delpiano, S. Vougioukas, and F. A. Cheein,
+“Apple orchard production estimation using deep learning strategies:
+A comparison of tracking-by-detection algorithms,” Computers and
+Electronics in Agriculture, vol. 204, p. 107513, 2023.
+[4] X. Li, K. Wang, W. Wang, and Y. Li, “A multiple object tracking
+method using kalman filter,” in Proceedings of the IEEE International
+Conference on Information and Automation, 2010, pp. 1862–1866.
+[5] J. Cao, J. Pang, X. Weng, R. Khirodkar, and K. Kitani, “Observation-
+centric sort: Rethinking sort for robust multi-object tracking,” in
+Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2023, pp. 9686–9696.
+[6] F. Yu, W. Li, Q. Li, Y. Liu, X. Shi, and J. Yan, “Poi: Multiple object
+tracking with high performance detection and appearance feature,”
+in Proceedings of the European Conference on Computer Vision.
+Springer, 2016, pp. 36–42.
+[7] P. Bergmann, T. Meinhardt, and L. Leal-Taixe, “Tracking without
+bells and whistles,” in Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 2019, pp. 941–951.
+[8] G. Wang, M. Song, and J.-N. Hwang, “Recent advances in embed-
+ding methods for multi-object tracking: A survey,” arXiv preprint
+arXiv:2205.10766, 2022.
+[9] A. Bewley, Z. Ge, L. Ott, F. Ramos, and B. Upcroft, “Simple online
+and realtime tracking,” in Proceedings of the IEEE International
+Conference on Image Processing, 2016, pp. 3464–3468.
+[10] H. W. Kuhn, “The hungarian method for the assignment problem,”
+Naval Research Logistics Quarterly, vol. 2, no. 1-2, pp. 83–97, 1955.
+[11] N. Wojke, A. Bewley, and D. Paulus, “Simple online and realtime
+tracking with a deep association metric,” in Proceedings of the IEEE
+International Conference on Image Processing, 2017, pp. 3645–3649.
+[12] Y. Du, Z. Zhao, Y. Song, Y. Zhao, F. Su, T. Gong, and H. Meng,
+“Strongsort: Make deepsort great again,” IEEE Transactions on Mul-
+timedia, vol. 25, pp. 8725–8737, 2023.
+[13] Y. Zhang, P. Sun, Y. Jiang, D. Yu, F. Weng, Z. Yuan, P. Luo,
+W. Liu, and X. Wang, “Bytetrack: Multi-object tracking by associating
+every detection box,” in Proceedings of the European Conference on
+Computer Vision.
+Springer, 2022, pp. 1–21.
+[14] H. Hashempoor and Y. D. Hwang, “Fasttracker: Real-time and accurate
+visual tracking,” arXiv preprint arXiv:2508.14370, 2025.
+[15] P. Sun, J. Cao, Y. Jiang, R. Zhang, E. Xie, Z. Yuan, C. Wang, and
+P. Luo, “Transtrack: Multiple object tracking with transformer,” arXiv
+preprint arXiv:2012.15460, 2020.
+[16] T. Meinhardt, A. Kirillov, L. Leal-Taixe, and C. Feichtenhofer, “Track-
+former: Multi-object tracking with transformers,” in Proceedings of
+the IEEE/CVF International Conference on Computer Vision, 2022,
+pp. 8844–8854.
+[17] F. Zeng, B. Dong, Y. Zhang, T. Wang, X. Zhang, and Y. Wei, “Motr:
+End-to-end multiple-object tracking with transformer,” in Proceedings
+of the European Conference on Computer Vision. Springer, 2022, pp.
+659–675.
+[18] S. Liao, Y. Hu, X. Zhu, and S. Z. Li, “Person re-identification
+by local maximal occurrence representation and metric learning,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2015, pp. 2197–2206.
+[19] L. Zheng, Y. Yang, and A. G. Hauptmann, “Person re-identification:
+Past, present and future,” arXiv preprint arXiv:1610.02984, 2016.
+[20] A. Hermans, L. Beyer, and B. Leibe, “In defense of the triplet loss
+for person re-identification,” arXiv preprint arXiv:1703.07737, 2017.
+[21] H. Zhao, M. Tian, S. Sun, J. Shao, J. Yan, S. Yi, X. Wang, and X. Tang,
+“Spindle net: Person re-identification with human body region guided
+feature decomposition and fusion,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2017, pp.
+1077–1085.
+[22] W. Li, X. Zhu, and S. Gong, “Harmonious attention network for
+person re-identification,” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 2018, pp. 2285–2294.
+[23] Y. Sun, L. Zheng, Y. Yang, Q. Tian, and S. Wang, “Beyond part
+models: Person retrieval with refined part pooling (and a strong
+convolutional baseline),” in Proceedings of the European Conference
+on Computer Vision, 2018, pp. 480–496.
+[24] M. M. Kalayeh, E. Basaran, M. G¨okmen, M. E. Kamasak, and
+M. Shah, “Human semantic parsing for person re-identification,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2018, pp. 1062–1071.
+[25] G. Zhang, Y. Zhang, T. Zhang, B. Li, and S. Pu, “Pha: Patch-
+wise high-frequency augmentation for transformer-based person re-
+identification,” in Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition, 2023, pp. 14 133–14 142.
+[26] M. Ye, J. Chen, Q. Leng, C. Liang, Z. Wang, and K. Sun, “Coupled-
+view based ranking optimization for person re-identification,” in Pro-
+ceedings of the International Conference on Multimedia Modeling.
+Springer, 2015, pp. 105–117.
+[27] Z. Zhong, L. Zheng, D. Cao, and S. Li, “Re-ranking person re-
+identification with k-reciprocal encoding,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2017, pp. 1318–1327.
+[28] N. Hu, D. Su, S. Wang, P. Nyamsuren, Y. Qiao, Y. Jiang, and Y. Cai,
+“Lettucetrack: Detection and tracking of lettuce for robotic precision
+spray in agriculture,” Frontiers in Plant Science, vol. 13, p. 1003243,
+2022.
+[29] D. Xie-Li and F. Fallas-Moya, “Pinesort: A simple online real-time
+tracking framework for drone videos in agriculture,” in Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recog-
+nition Workshops, 2025, pp. 65–74.
+[30] E. Rublee, V. Rabaud, K. Konolige, and G. Bradski, “Orb: An
+efficient alternative to sift or surf,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision, 2011, pp. 2564–2571.
+[31] M. A. Al Muzaddid and W. J. Beksi, “Ntrack: A multiple-object
+tracker and dataset for infield cotton boll counting,” IEEE Transactions
+on Automation Science and Engineering, vol. 21, no. 9, pp. 7452–
+7464, 2024.
+[32] T. Jin, K. Liang, M. Lu, Y. Zhao, and Y. Xu, “Weedssort: A weed
+tracking-by-detection framework for laser weeding applications within
+precision agriculture,” Smart Agricultural Technology, vol. 11, p.
+100883, 2025.
+[33] P.-E. Sarlin, D. DeTone, T. Malisiewicz, and A. Rabinovich, “Su-
+perglue: Learning feature matching with graph neural networks,” in
+Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2020, pp. 4938–4947.
+[34] M. A. Al Muzaddid and W. J. Beksi, “TexCot22,” 2024. [Online].
+Available: https://doi.org/10.18738/T8/5M9NCI
+[35] J. Luiten, A. Osep, P. Dendorfer, P. Torr, A. Geiger, L. Leal-Taix´e,
+and B. Leibe, “Hota: A higher order metric for evaluating multi-object
+tracking,” International Journal of Computer Vision, vol. 129, no. 2,
+pp. 548–578, 2021.
+[36] L. Zheng, L. Shen, L. Tian, S. Wang, J. Wang, and Q. Tian, “Scal-
+able person re-identification: A benchmark,” in Proceedings of the
+IEEE/CVF International Conference on Computer Vision, 2015, pp.
+1116–1124.
+8

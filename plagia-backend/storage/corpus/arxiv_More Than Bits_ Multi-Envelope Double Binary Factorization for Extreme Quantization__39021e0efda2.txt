@@ -1,0 +1,1896 @@
+More Than Bits: Multi-Envelope Double Binary Factorization
+for Extreme Quantization
+Yuma Ichikawa1, 2, Yoshihiko Fujisawa1, 3, Yudai Fujimoto1, 3,
+Akira Sakai1, 4, Katsuki Fujisawa3
+1Fujitsu Limited, 2RIKEN Center for AIP, 3Institute of Science Tokyo, 4Tokai University
+Correspondence: ichikawa.yuma@fujitsu.com
+Abstract
+For extreme low-bit quantization of large lan-
+guage models (LLMs), Double Binary Factor-
+ization (DBF) is attractive as it enables efficient
+inference without sacrificing accuracy. How-
+ever, the scaling parameters of DBF are too
+restrictive; after factoring out signs, all rank
+components share the same magnitude profile,
+resulting in performance saturation. We pro-
+pose Multi-Envelope DBF (MDBF), which
+retains a shared pair of 1-bit sign bases but
+replaces the single envelope with a rank-l en-
+velope. By sharing sign matrices among en-
+velope components, MDBF effectively main-
+tains a binary carrier and utilizes the limited
+memory budget for magnitude expressiveness.
+We also introduce a closed-form initialization
+and an alternating refinement method to opti-
+mize MDBF. Across the LLaMA and Qwen
+families, MDBF enhances perplexity and zero-
+shot accuracy over previous binary formats at
+matched bits per weight while preserving the
+same deployment-friendly inference primitive.
+1
+Introduction
+Large language models (LLMs) support many NLP
+systems; however, their size renders deployment ex-
+pensive, since storing FP16 or FP32 parameters and
+moving them through the memory hierarchy often
+dominates both the memory footprint and inference
+latency. Quantization is therefore a central tool for
+efficient deployment. Post-training quantization
+(PTQ) (Frantar et al., 2022; Lin et al., 2024) is par-
+ticularly appealing because it can be applied to a
+pretrained model with minimal overhead, avoiding
+the need for full retraining. Although recent PTQ
+methods maintain strong accuracy at around 4-bit
+precision, performance typically degrades as pre-
+cision approaches the 2–1-bit regime, where the
+per-layer information budget is extremely limited.
+To push below 2 bits lower, many approaches move
+beyond elementwise quantization and adopt struc-
+tured parameterizations (Chee et al., 2023; Tseng
+et al., 2024b,a; Malinovskii et al., 2024a). Binary
+and near-binary schemes are especially appealing
+because they provide a clear hardware fast path:
+most computation can be performed by specialized
+kernels operating on bit-packed sign matrices, with
+only lightweight higher-precision scaling.
+A prominent family of methods factorizes each
+weight matrix into low-rank components and then
+binarizes the factors. OneBit (Xu et al., 2024)
+shows that appropriate scaling can stabilize 1-bit
+factors, while Double Binary Factorization (DBF)
+(Boža and Macko, 2025) makes the binary path
+explicit by composing two binary matrix multipli-
+cations with interleaved diagonal scalings. LittleBit
+(Lee et al., 2025) further enhances extreme-bit ac-
+curacy through multi-scale scaling and residual
+compensation, utilizing quantization-aware train-
+ing (QAT) across multiple GPUs. Despite these
+advances, existing formats share a key structural
+limitation: after demodulation, factor magnitudes
+are confined to a single rank-one envelope. Increas-
+ing the inner rank primarily enhances sign diversity
+rather than magnitude expressiveness. As a result,
+under a fixed bits-per-weight budget, accuracy can
+saturate because gains come more from signs than
+magnitudes.
+This paper addresses the DBF bottleneck by ex-
+plicitly allocating limited expressivity to the crit-
+ical components at extremely low precision. We
+propose Multi-Envelope Double Binary Factoriza-
+tion (MDBF), which retains the shared 1-bit sign
+bases and a deployment-friendly binary fast path
+while replacing the rank-one magnitude envelope
+with multiple demodulated envelope modes. Fig-
+ure 1 shows that increasing the envelope rank l
+systematically reduces reconstruction error; how-
+ever, while increasing the residual path P, as in
+LittleBit (Lee et al., 2025), is often less effective
+within a fixed bits-per-weight budget. MDBF adds
+a small number of real-valued degrees of freedom
+for magnitude modeling, better aligning with the
+1
+arXiv:2512.24545v1 [cs.LG] 31 Dec 2025
+
+0.08
+0.10
+0.12
+Relative Error
+(l , P )=(16, 1)
+q_proj (Layer 1)
+1
+2
+3
+8
+16
+0.42
+0.44
+0.46
+(l , P )=(16, 1)
+down_proj (Layer 1)
+0.40
+0.42
+0.44
+(l , P )=(16, 1)
+up_proj (Layer 1)
+0.08
+0.10
+0.12
+(l , P )=(16, 1)
+k_proj (Layer 1)
+0.30
+0.32
+0.34
+0.36
+0.38
+(l , P )=(16, 1)
+v_proj (Layer 1)
+0.38
+0.40
+0.42
+0.44
+(l , P )=(16, 1)
+gate_proj (Layer 1)
+0.34
+0.36
+0.38
+0.40
+0.42
+Relative Error
+(l , P )=(16, 1)
+q_proj (Layer 16)
+0.44
+0.46
+0.48
+(l , P )=(16, 1)
+down_proj (Layer 16)
+0.44
+0.46
+0.48
+(l , P )=(16, 1)
+up_proj (Layer 16)
+0.34
+0.36
+0.38
+0.40
+0.42
+(l , P )=(16, 1)
+k_proj (Layer 16)
+0.40
+0.42
+0.44
+0.46
+(l , P )=(16, 1)
+v_proj (Layer 16)
+0.42
+0.44
+0.46
+(l , P )=(16, 1)
+gate_proj (Layer 16)
+1
+2
+3
+P
+0.38
+0.40
+0.42
+0.44
+Relative Error
+(l , P )=(16, 1)
+q_proj (Layer 31)
+1
+2
+3
+P
+0.46
+0.48
+(l , P )=(16, 1)
+down_proj (Layer 31)
+1
+2
+3
+P
+0.44
+0.46
+0.48
+(l , P )=(16, 1)
+up_proj (Layer 31)
+1
+2
+3
+P
+0.38
+0.40
+0.42
+0.44
+(l , P )=(16, 1)
+k_proj (Layer 31)
+1
+2
+3
+P
+0.42
+0.44
+0.46
+0.48
+(l , P )=(16, 1)
+v_proj (Layer 31)
+1
+2
+3
+P
+0.44
+0.46
+(l , P )=(16, 1)
+gate_proj (Layer 31)
+Figure 1: Layer-wise reconstruction error vs. envelope rank and decomposition depth (LLaMA2 7B). We
+conduct experiments under a 1.5 bit quantization setting and report the relative Frobenius error ∥W −c
+W ∥F/∥W ∥F
+of MDBF as a function of the envelope rank l and the decomposition depth P, evaluated on three representative
+Transformer blocks of layers 0, 15, and 30 and central attention/MLP projections. Across layers and modules, larger
+l, which increases magnitude expressivity while sharing sign bases, consistently lowers reconstruction error. In
+contrast, larger P, which adds extra decompositions and sign bases, often worsens reconstruction at matched bits
+per weight. The best configuration in this sweep is (l∗, P ∗) = (16, 1).
+empirically observed low-rank structure of Trans-
+former weights, which are rarely rank-one. To
+make MDBF applicable for layer-wise PTQ, we
+introduce a layer-wise optimization pipeline with
+closed-form initialization followed by ADMM re-
+finement. Across the LLaMA and Qwen families,
+MDBF improves perplexity and zero-shot accuracy
+compared to previous binary formats at matched
+bits per weight, particularly in the challenging 2–1
+bit range, while maintaining the same deployment-
+friendly binary inference primitive.
+Contributions.
+• Identifying DBF Bottleneck: We identify the
+bottleneck as the single envelope constraint.
+Under a fixed bits-per-weight budget, model-
+ing magnitude variation yields greater accu-
+racy gains than increasing sign diversity.
+• Multi-Envelope Generalization of DBF: We
+propose Multi-Envelope DBF (MDBF), which
+retains the shared 1-bit sign bases and main-
+tains the same deployment-friendly binary fast
+path while replacing the rank-one magnitude
+envelope with a rank-l envelope.
+• Initialization and ADMM Refinement for
+MDBF: We generalize the initialization of
+LittleBit and the ADMM-based refinement of
+DBF to a multi-envelope setting. This results
+in a closed-form initializer and an efficient
+alternating ADMM refinement procedure.
+• Empirical Validation: Across the LLaMA
+and Qwen model families, MDBF consistently
+reduces reconstruction error and improves per-
+plexity and zero-shot accuracy compared to
+prior binary formats at matched BPW.
+2
+Notation
+Vectors are denoted by bold lowercase letters,
+e.g., x, and matrices by uppercase letters, e.g.,
+W.
+Throughout, W ∈RN×M denotes a real-
+valued weight matrix.
+We denote by ⊙the
+Hadamard elementwise product, and for a vec-
+tor a, let Da represent the diagonal matrix with
+(Da)ii = ai. We use ∥· ∥F for the Frobenius
+norm and ⟨A, B⟩F := Tr(A⊤B) for the corre-
+sponding Frobenius inner product. For any matrix
+A, its singular values are denoted by σ1(A) ≥
+· · · ≥σmin(N,M)(A) ≥0.
+For a target rank
+R ≤min(N, M), we denote the rank-R trun-
+cated SVD of W as WR = URΣRV ⊤
+R , where
+UR ∈RN×R and VR ∈RM×R have orthonormal
+columns and ΣR = diag(σ1, . . . , σR) ∈RR×R.
+2
+
+Finally, the entrywise sign function sign(·) maps
+to {±1}, with sign(0) = +1.
+3
+Preliminaries
+3.1
+Low-Rank Approximation
+A common approach to model compression ex-
+ploits the empirically observed approximate low-
+rank structure of weight matrices. Given a weight
+matrix W ∈RN×M, we approximate it with a
+rank-R factorization:
+W ≈UV ⊤, U ∈RN×R, V ∈RM×R.
+Equivalently, UV ⊤expresses W as a sum of
+R rank-one components, UV ⊤= PR
+j=1 ujv⊤
+j ,
+where uj and vj are the j-th columns of U and V .
+However, low rank alone does not guarantee
+meaningful memory savings. If U and V are stored
+in standard high-precision formats, such as FP16
+or FP32, the parameter count becomes (N + M)R,
+which may be comparable to the original NM
+parameters unless R ≪min(N, M). Moreover,
+maintaining accuracy often requires a moderate R,
+further limiting the compression benefit. There-
+fore, to achieve significant savings at very low bit
+widths while maintaining a sufficiently large ef-
+fective rank, it is crucial to quantize the factors or
+introduce additional structures that facilitate both
+compact storage and efficient computation.
+3.2
+Double Binary Factorization
+Double Binary Factorization (DBF) (Boža and
+Macko, 2025) represents a weight matrix W ∈
+RN×M by utilizing two binary sign bases and diag-
+onal rescalings:
+c
+WDBF := DaSaDmS⊤
+b Db,
+(1)
+where a ∈RN and b ∈RM are the row and col-
+umn scaling vectors, m ∈RR is an inner scaling
+vector, and Sa ∈{±1}N×R and Sb ∈{±1}M×R
+are binary sign matrices. Equation (1) can be re-
+garded as a structured rank-R factorization:
+c
+WDBF = bU bV ⊤,
+bU := DaSaDm1/2, bV := DbSbDm1/2.
+Single-Envelope Constraint.
+For a sign mask
+S ∈{±1}p×q and a matrix Z ∈Rp×q, we define
+the demodulated envelope of Z concerning S as
+ES(Z) := S ⊙Z. In DBF, the demodulated en-
+velopes of factors bU and bV satisfy the following
+exact identities:
+ESa(bU) = Sa ⊙bU = a(m
+1/2)⊤,
+ESb(bV ) = Sb ⊙bV = b(m
+1/2)⊤.
+Therefore, the following holds:
+rank(ESa(bU)) ≤1, rank(ESb(bV )) ≤1,
+after demodulation by the shared sign bases, both
+factor envelopes constitute rank-one outer products.
+Equivalently, each column of bU shares the same
+row-wise envelope profile a up to a scalar multi-
+plier m1/2
+j
+, and similarly b applies to bV . We refer
+to this rank-one demodulated-envelope constraint
+as the single envelope constraint.
+Inference.
+Let X ∈RT×N denote the input ac-
+tivations and Y = Xc
+WDBF ∈RT×M the output.
+DBF admits an efficient evaluation order in which
+diagonal scalings are interleaved with two binary
+matrix multiplications:
+Y = Xc
+WDBF =
+ XDa
+
+Sa
+
+Dm
+
+S⊤
+b
+
+Db.
+Multiplication by a diagonal matrix is equivalent to
+elementwise rescaling and is typically bandwidth-
+light compared to matrix multiplication. There-
+fore, DBF substitutes one high-precision GEMM
+with two binary GEMMs and inexpensive diagonal
+operations. The effective bits-per-weight is deter-
+mined by the storage of bitpacked {Sa, Sb} and
+real-valued vectors {a, b, m}, relative to the NM
+entries of the original matrix.
+Residual Compensation.
+LittleBit (Lee et al.,
+2025) improves fidelity by augmenting a single
+DBF approximation with an additional DBF term
+trained on the residual. LittleBit specifically em-
+ploys a two-term decomposition as follows:
+c
+WLittleBit = Da(1)S(1)
+a Dm(1)S(1)⊤
+b
+Db(1)
++ Da(2)S(2)
+a Dm(2)S(2)⊤
+b
+Db(2).
+A natural optimization strategy is stagewise resid-
+ual fitting: first, fit the initial term, then compute
+the residual term:
+bR := W −Da(1)S(1)
+a Dm(1)S(1)⊤
+b
+Db(1).
+Fit the second DBF term to approximate bR. This
+residual-compensation scheme captures structures
+that are difficult to represent with a single DBF
+component.
+3
+
+0
+10
+20
+30
+Layer
+3000
+3250
+3500
+3750
+4000
+4250
+Effective Rank
+W
+sign(W)
+|U|
+|V|
+Figure 2: Entropy-based effective rank across Trans-
+former layers for LLaMA2 13B. We report the average
+effective rank of the full weight matrices W, their bi-
+narized signs sign(W), and the demodulated envelopes
+|U| and |V |. The envelopes remain consistently above
+rank one, indicating multiple magnitude modes and mo-
+tivating the relaxation of the single-envelope constraint.
+4
+Method
+4.1
+Bottleneck: Single-Envelope Constraint
+In practice, DBF exhibits a performance ceiling;
+increasing the inner dimension R results in dimin-
+ishing returns, and accuracy saturates below that of
+a real-valued low-rank approximation with a com-
+parable parameter count. This gap is not merely
+empirical but structural. As shown in Section 3,
+demodulation indicates that each DBF factor is con-
+strained by a rank-one amplitude envelope shared
+across all R columns. Enlarging R primarily in-
+creases sign-pattern diversity rather than enhancing
+the capacity to represent magnitudes, fundamen-
+tally limiting achievable accuracy.
+The assumption of a rank-one envelope is incon-
+sistent with the empirical structure of LLM weights.
+To quantify this point, we analyze LLaMA2 13B
+and compute the entropy-based effective ranks
+(Roy and Vetterli, 2007) of the demodulated en-
+velopes |U| and |V |; see Appendix B.1 for a de-
+tailed definition. Figure 2 shows the average effec-
+tive rank across Transformer blocks and their linear
+layers. Although the envelopes are low-rank, they
+are consistently not rank-one; their effective ranks
+remain moderately above 1, suggesting multiple
+magnitude modes that DBF cannot represent under
+the single-envelope constraint.
+These observations clarify why merely increas-
+ing sign variation, such as in residual-style multi-
+term designs like LittleBit, is not the most direct
+solution. The goal is to preserve a deployment-
+friendly inference path, where shared binary carri-
+ers facilitate efficient 1-bit computation while al-
+leviating the bottleneck. This motivation leads to
+Multi-Envelope DBF, which enhances expressivity
+by allowing higher-rank amplitude envelopes to be
+used under the same shared binary sign bases, with-
+out altering the inference-time execution model.
+Takeaway
+More Than Bits: DBF is fundamentally
+limited by its rank-one amplitude envelope,
+rather than by the available bit budget.
+4.2
+Multi-Envelope Double Binary
+Factorization
+We propose Multi-Envelope DBF (MDBF), which
+preserves the shared 1-bit sign bases while allow-
+ing the demodulated envelopes of the factor matri-
+ces to have a rank of at most l as follows:
+c
+Wl := bUl bV ⊤
+l , bUl = Sa ⊙AQ⊤, bVl = Sb ⊙BG⊤,
+(2)
+where Sa ∈{±1}N×R and Sb ∈{±1}M×R are
+binary sign matrices, while A ∈RN×l, Q ∈RR×l,
+B ∈RM×l, and G ∈RR×l are real-valued factors.
+By construction, the demodulated envelopes are
+low-rank:
+ESa(bUl) = Sa ⊙bUl = AQ⊤,
+ESb(bVl) = Sb ⊙bVl = BG⊤,
+leads to rank(ESa(bUl)) ≤l and rank(ESb(bVl)) ≤
+l.
+Let A
+=
+[a(1), . . . , a(l)] and Q
+=
+[q(1), . . . , q(l)], along with B = [b(1), . . . , b(l)]
+and G = [g(1), . . . , g(l)], yield the expansions
+bUl =
+l
+X
+t=1
+Da(t)SaDq(t), bVl =
+l
+X
+s=1
+Db(s)SbDg(s).
+Thus, c
+Wl admits an equivalent sum-of-DBF form:
+c
+Wl =
+l
+X
+t=1
+l
+X
+s=1
+Da(t)SaDq(t)⊙g(s)S⊤
+b Db(s).
+MDBF generalizes DBF: when l = 1, Equa-
+tion (2) reduces to a single DBF term involv-
+ing m = q(1) ⊙g(1); if one enforces m ≥0,
+q(1) = g(1) = m
+1/2 may be set to column-sign
+absorption in Sa, Sb.
+4
+
+4.3
+Multi-Envelope Structure
+We next formalize the role of envelope rank l and
+derive the corresponding closed-form optimizer
+using a fixed sign mask. The key idea is to decom-
+pose each factor into (i) a binary sign mask and
+(ii) a demodulated envelope, while imposing a rank
+constraint on the envelope.
+Demodulation under Fixed Sign Mask.
+Fix a
+sign mask S ∈{±1}N×R and consider an arbi-
+trary factor matrix U ∈RN×R. We define the
+demodulated envelope as follows:
+ES(U) := S ⊙U.
+Since S2
+ij = 1 holds for all (i, j), we obtain S ⊙
+(S ⊙Z) = Z for any matrix Z. Thus, once S is
+fixed, U is determined by its envelope ES(U).
+Consider an approximation bU that shares the
+same mask S. It can be expressed as bU = S ⊙bE
+for some envelope matrix bE ∈RN×R. Moreover,
+by Lemma A.3, the mapping Z 7→S ⊙Z preserves
+Frobenius norms:
+∥U −bU∥F = ∥ES(U) −bE∥F .
+(3)
+Therefore, under a fixed mask S, approximating U
+in Frobenius norm is equivalent to approximating
+its demodulated envelope.
+Rank-l Envelope Class.
+MDBF constrains the
+envelope to a low rank. For l ≥1, we define the
+feasible family as follows:
+Definition 4.1. Let S ∈{±1}N×R and l ≥1.
+Define
+Fl(S) :=
+
+S ⊙E | E ∈RN×R, rank(E) ≤l
+ 
+.
+Equivalently, bU ∈Fl(S) if and only if its en-
+velope ES(bU) = S ⊙bU has a rank of at most l.
+This implies the MDBF factor structure; for exam-
+ple, bUl = Sa ⊙(AQ⊤) satisfies rank(ESa(bUl)) =
+rank(AQ⊤) ≤l.
+Closed-form Minimizer.
+By Equation (3), the
+best approximation of U within Fl(S) becomes the
+classical best rank-l approximation problem for the
+envelope matrix ES(U). The following theorem
+demonstrates this equivalence and provides both
+the optimal error and a minimizer.
+Theorem 4.2. Let U ∈RN×R fix a sign mask
+S
+∈{±1}N×R.
+Let σ1(ES(U)) ≥· · · ≥
+σmin(N,R)(ES(U)) ≥0 be the singular values
+of ES(U) = S ⊙U. Fix an integer l such that
+1 ≤l ≤min(N, R). Then
+min
+bU∈Fl(S)
+∥U−bU∥F =
+
+
+min(N,R)
+X
+i=l+1
+σi
+ ES(U)
+2
+
+
+1/2
+.
+(4)
+Moreover, one minimizer is
+bU∗= S ⊙TSVDl(ES(U)),
+(5)
+where TSVDl(·) denotes the rank-l truncated SVD,
+which provides the best approximation in the Frobe-
+nius norm.
+The minimizer Equation (5) directly follows
+from Equation (3). Writing bU = S ⊙bE with
+rank( bE) ≤l yields ∥U −bU∥F = ∥ES(U)−bE∥F ,
+thereby identifying the optimal choice as the best
+rank-l approximation bE = TSVDl(ES(U)) ac-
+cording to the Eckart–Young–Mirsky theorem; re-
+modulating with S results in Equation (5).
+Theorem 4.2 clarifies the role of l: for a fixed
+binary basis S, MDBF approximates the demod-
+ulated envelope ES(U) using a rank-l matrix and
+then reattaches the same mask. Thus, MDBF does
+not allocate additional degrees of freedom to sign
+patterns; rather, it enhances capacity by permitting
+multiple envelope modes in the demodulated do-
+main. DBF represents the special case l = 1, which
+constrains the envelope to rank-one and requires all
+R columns to share a single envelope direction up
+to scalar weights. For l > 1, the feasible set strictly
+expands, F1(S) ⊆Fl(S), and the optimal error in
+Equation (4) can only decrease.
+4.4
+Layer-Wise Optimization
+We adopt a layer-wise PTQ setting, in which we
+quantize each weight matrix W ∈RN×M inde-
+pendently under strict memory and computational
+constraints. Even with the binary sign bases fixed,
+optimizing MDBF remains non-convex; the ob-
+jective is bilinear in the factor matrices, and we
+impose low-rank constraints on their demodulated
+envelopes. We propose a two-stage pipeline: (i) a
+closed-form initialization based on Multi-Envelope
+SVID (MSVID) and (ii) local refinement using al-
+ternating updates of ADMM. The resulting factors
+also provide a robust warmup start for QAT.
+4.4.1
+Initialization via Multi-Envelope SVID
+We begin by defining the operator used in both
+initialization and refinement. For any matrix Z ∈
+5
+
+RN×M and any l with 1 ≤l ≤min(N, M), define
+MSVIDl[Z] := sign(Z) ⊙TSVDl(|Z|).
+(6)
+Equivalently, let SZ := sign(Z), and noting that
+the demodulated envelope satisfies ESZ(Z) =
+SZ ⊙Z = |Z|, the operator MSVIDl[Z] preserves
+the sign mask SZ while replacing the envelope with
+its optimal rank-l approximation. The special case
+l = 1 corresponds to a rank-one envelope.
+Given W ∈RN×M and an inner dimension R
+with 1 ≤R ≤min(N, M), we first compute the
+rank-R truncated SVD, WR = URΣRV ⊤
+R , to form
+balanced factors
+U0 := URΣ
+1/2
+R ∈RN×R, V0 := VRΣ
+1/2
+R ∈RM×R,
+so that WR = U0V ⊤
+0 . We then initialize MDBF by
+applying Equation (6) to each continuous factor:
+bU(0)
+l
+:= MSVIDl[U0], bV (0)
+l
+:= MSVIDl[V0].
+By construction, bU(0)
+l
+and bV (0)
+l
+possess rank-l
+demodulated envelopes under their induced sign
+masks, conforming to the MDBF factor structure.
+4.4.2
+ADMM Refinement
+Starting from c
+W (0) = bU(0)
+l
+bV (0)⊤
+l
+, we refine the
+factors through alternating updates that minimize
+the reconstruction objective ∥W −UV ⊤∥2
+F while
+repeatedly imposing the multi-envelope structure
+via MSVIDl[·]. Specifically, with V fixed, we con-
+duct a limited number of ADMM inner iterations
+using an auxiliary variable eU and a scaled dual
+variable Λ:
+eU(k+1) =
+
+WV (k) + ρ(U(k) −Λ(k))
+
+×
+
+V (k)⊤V (k) + ρI
+−1
+,
+U(k+1) = MSVIDl
+h
+eU(k+1) + Λ(k)i
+,
+Λ(k+1) = Λ(k) + eU(k+1) −U(k+1),
+where ρ > 0 and I are the R × R identity matrix.
+We update V analogously by applying the same
+steps to the transposed problem while keeping U
+fixed.
+Since MSVIDl[·] updates the sign mask via
+sign(·), it is not an exact Frobenius projection
+onto any fixed-mask constraint set, and standard
+ADMM convergence guarantees do not apply di-
+rectly. Therefore, we consider the method as an
+ADMM-inspired scheme that alternates between
+closed-form least-squares updates and a mask-
+adaptive rank-l envelope step. Crucially, Theorem
+4.2 provides the theoretical backbone: with strong
+initialization, subsequent updates function as a re-
+finement mechanism that improves the solution in
+practice.
+5
+Experiments
+5.1
+Setting
+Baselines and Quantization Methods.
+We use
+representative low-rank binary-factor formats as
+baselines: DBF, corresponding to (l, P) = (1, 1),
+and LittleBit, corresponding to (l, P) = (1, 2).
+For each method, we optimize the binary-factor
+parameters using ADMM for 1,000 outer itera-
+tions, with 3 inner ADMM updates per outer step.
+For formats utilizing P decomposed terms, we ap-
+ply this ADMM procedure independently for each
+term, resulting in a total of 1,000 × P outer itera-
+tions. Following ADMM, we perform an additional
+gradient-based refinement using Adam for 1,500
+steps, with a learning rate of 0.01. During this
+refinement stage, we update only the real-valued
+parameters by minimizing the squared reconstruc-
+tion loss ∥W −c
+W∥2
+F . For each target bit budget of
+{1.00, 1.25, 1.50} bits per weight, we choose the
+largest inner rank that meets the budget, following
+Boža and Macko (2025).
+To enhance accuracy in the low-bit regime, we in-
+corporate an error-compensation technique. Specif-
+ically, we adopt quantization error propagation
+(QEP) (Arai and Ichikawa, 2025) with α = 0.5
+and use 512 samples from WikiText2 to estimate
+the required statistics. Finally, in line with stan-
+dard practice, we retain the first four and last four
+layers in full precision to ensure a fair and stable
+comparison across methods.
+Models and Datasets.
+We evaluate the proposed
+low-rank binary-factor format and baseline vari-
+ants on widely used open-weight LLM families, in-
+cluding LLaMA2 (Touvron et al., 2023), LLaMA3
+(Grattafiori et al., 2024), and Qwen.
+Specifi-
+cally, we analyze the standard benchmarks of Tiny
+LLaMA 1.1B, LLaMA2 7B, LLaMA3 8B, and
+LLaMA3.2 1B in prior quantization work (Boža
+and Macko, 2025). To assess robustness across
+architectural variations, we also evaluate Qwen3
+0.6B and Qwen3 8B, which differ from LLaMA
+models by incorporating RMSNorm variants in
+their attention components.
+6
+
+Table 1: Perplexities (↓) on WikiText2 for each model. Rows indicate the target bitwidth, and columns correspond
+to bit-parameters (l, P). DBF uses the same parameter format as (l, P) = (1, 1), and LittleBit uses the same format
+as (l, P) = (1, 2).
+Model
+Bits
+(l=1, P=1) (l=1, P=2) (l=2, P=1) (l=8, P=1) (l=16, P=1)
+Tiny LLaMA (1.1B)
+1.00
+78.14
+114.84
+70.17
+70.04
+60.40
+1.25
+21.96
+37.71
+22.50
+21.67
+19.98
+1.50
+15.85
+19.85
+16.41
+14.94
+14.27
+Qwen3 (0.6B)
+1.00
+343.80
+773.01
+415.91
+262.56
+277.12
+1.25
+120.89
+221.01
+121.23
+128.35
+111.70
+1.50
+100.84
+121.72
+78.77
+85.15
+70.97
+LLaMA3.2 (1B)
+1.00
+118.69
+131.20
+118.17
+119.82
+104.28
+1.25
+47.99
+84.12
+42.35
+39.88
+41.46
+1.50
+47.78
+44.90
+39.50
+41.06
+38.54
+LLaMA2 (7B)
+1.00
+27.96
+37.92
+28.01
+29.72
+28.31
+1.25
+13.40
+21.67
+12.82
+15.83
+18.26
+1.50
+9.81
+12.14
+9.83
+9.94
+10.50
+LLaMA3 (8B)
+1.00
+1222.32
+9118.75
+1024.80
+2094.86
+1639.64
+1.25
+58.61
+165.43
+50.13
+92.02
+164.24
+1.50
+35.62
+41.40
+36.11
+30.14
+31.70
+Qwen3 (8B)
+1.00
+189.02
+309.30
+108.90
+134.00
+115.41
+1.25
+41.10
+101.54
+53.24
+63.73
+69.18
+1.50
+31.72
+39.02
+40.22
+30.09
+32.28
+Evaluation.
+We follow established evaluation
+practices for LLM quantization (Boža and Macko,
+2025; Lee et al., 2025). We report perplexity (PPL)
+on WikiText2 and evaluate downstream zero-shot
+performance on ARC-Easy, and PIQA. In the main
+text, we present the average accuracy across tasks
+and include per-task results in Appendix C. All
+experiments were conducted on a single NVIDIA
+B200 GPU.
+5.2
+Result
+Reconstruction Error.
+A central motivation for
+MDBF is that, under an extremely tight bit bud-
+get, additional sign diversity may inefficiently uti-
+lize capacity compared to enhancing magnitude
+expressivity. We investigate this by analyzing how
+layer-wise reconstruction error depends on (i) the
+envelope rank l, which increases magnitude capac-
+ity while keeping the shared binary sign bases, and
+(ii) the residual path P, which introduces extra
+factor terms and additional sign bases, as seen in
+residual binary decompositions (Boža and Macko,
+2025; Lee et al., 2025). We evaluate LLaMA2-7B
+on three representative Transformer blocks (layers
+0, 15, and 30) and compute the reconstruction error
+for the attention and MLP projection matrices. For
+each weight matrix W and its quantized approxi-
+mation c
+W, we report the relative Frobenius error
+∥W−c
+W∥F/∥W∥F while sweeping l ∈{1, 2, 3, 8, 16}
+and P ∈{1, 2, 3} at matched bits per weight. Al-
+though larger envelope ranks, e.g., l ≥16, may fur-
+ther improve performance, we defer these settings
+to future work due to their higher computational
+cost; notably, l = 16 is sufficient to demonstrate
+their effectiveness.
+Figure 1 shows a consistent trend across layers
+and modules. For any fixed P, increasing l reduces
+reconstruction error, whereas increasing P is gen-
+erally ineffective within the same bit budget. This
+behavior supports the design choice of MDBF: to
+reuse a shared binary carrier and allocate the lim-
+ited capacity to a richer magnitude structure, rather
+than duplicating sign bases. In contrast, a larger P
+necessitates the storage of additional sign matrices,
+diverting bits from magnitude modeling and poten-
+tially increasing approximation error. The effect is
+strongest in the earliest block, where the gap across
+(l, P) is most significant among several projections.
+Since quantization noise introduced early can prop-
+agate through the network, minimizing errors in
+7
+
+Table 2: Average zero-shot accuracy (↑) on ARC-Easy and PIQA. Rows indicate the target bitwidth, and columns
+correspond to bit-parameters (l, P). Notably, DBF uses the same parameter format as (l, P) = (1, 1), and LittleBit
+uses the same format as (l, P) = (1, 2).
+Model
+Bits
+(l=1, P=1) (l=1, P=2) (l=2, P=1) (l=8, P=1) (l=16, P=1)
+Tiny LLaMA (1.1B)
+1.00
+0.4398
+0.4355
+0.4423
+0.4557
+0.4449
+1.25
+0.4945
+0.4608
+0.5049
+0.5045
+0.5179
+1.50
+0.5252
+0.5053
+0.5273
+0.5311
+0.5259
+Qwen3 (0.6B)
+1.00
+0.4237
+0.4110
+0.4244
+0.4120
+0.4228
+1.25
+0.4390
+0.4213
+0.4449
+0.4449
+0.4457
+1.50
+0.4519
+0.4317
+0.4604
+0.4544
+0.4609
+LLaMA3.2 (1B)
+1.00
+0.4639
+0.4716
+0.4691
+0.4680
+0.4691
+1.25
+0.4977
+0.4842
+0.5039
+0.5196
+0.5099
+1.50
+0.5082
+0.5202
+0.5222
+0.5386
+0.5240
+LLaMA2 (7B)
+1.00
+0.5263
+0.4919
+0.5217
+0.5229
+0.5229
+1.25
+0.5981
+0.5522
+0.6096
+0.5767
+0.5785
+1.50
+0.6398
+0.6110
+0.6480
+0.6243
+0.6341
+LLaMA3 (8B)
+1.00
+0.4078
+0.3997
+0.4104
+0.4185
+0.4095
+1.25
+0.4796
+0.4370
+0.5004
+0.4716
+0.4443
+1.50
+0.5208
+0.5056
+0.5059
+0.5069
+0.5000
+Qwen3 (8B)
+1.00
+0.4635
+0.4508
+0.4588
+0.4486
+0.4589
+1.25
+0.4971
+0.4646
+0.4993
+0.4819
+0.4854
+1.50
+0.5186
+0.4880
+0.5159
+0.5263
+0.5119
+the early layers is particularly important.
+Perplexity and Zero-shot Accuracy.
+Table 1
+demonstrates that MDBF is the strongest across
+models when comparing matched bits-per-weight,
+resulting in consistent reductions in perplexity. No-
+tably, the improvements are most significant in the
+extremely low bit regime. Table 2 also presents
+downstream zero-shot performance and displays
+trends closely aligned with those in Table 1.
+Across a fixed bit budget, we find that increas-
+ing the envelope rank l contributes more to per-
+formance than increasing P. Specifically, larger l
+yields improvements in both perplexity and zero-
+shot accuracy, while larger P provides more mod-
+est enhancements. In this regime, our method sig-
+nificantly outperforms the baselines, often by a
+substantial margin. By contrast, for larger models
+around the 7B scale, the gains begin to saturate.
+We observe that the quantization error continues to
+decline, suggesting that the method may be over-
+fitting the calibration data instead of translating
+these improvements into downstream gains. Ex-
+ploring whether these trends persist with signifi-
+cantly larger calibration sets is an important direc-
+tion for future work.
+6
+Related Work
+Post-Training Quantization at ∼4 Bits.
+Most
+practical low-bit deployments of LLMs rely on
+PTQ in the roughly 4-bit range. Layer-wise cali-
+bration methods, such as GPTQ (Li et al., 2025;
+Frantar et al., 2022) and AWQ (Lin et al., 2024),
+achieve strong accuracy without full retraining by
+minimizing layer-wise reconstruction errors or by
+identifying and preserving salient weight channels
+during calibration. However, when the bit budget
+increases to ≤2 bits per weight, these techniques
+often result in significant accuracy degradation, un-
+derscoring the need for more structured parameter-
+izations.
+Structured Representations for 2–3 Bits.
+To
+achieve the 2–3 bit regime, recent studies often go
+beyond purely elementwise quantization to adopt
+structured weight representations. A representa-
+tive line combines incoherence processing with
+lattice- and trellis-coded quantizers, as seen in
+QuIP# (Tseng et al., 2024a), QTIP (Tseng et al.,
+2024b), and AQLM (Egiazarian et al., 2024). By
+8
+
+encoding weights using structured codebooks in-
+stead of independent rounding, these methods en-
+hance effective expressivity within tight bit budgets.
+In this regime, heuristic STE-based adjustments
+tend to be unstable (Long et al., 2021; Ichikawa
+et al., 2025b; Yin et al., 2019); therefore, refine-
+ment is typically framed as a discrete optimization
+problem (Malinovskii et al., 2024b).
+Methods Targeting 1 Bit and Below.
+At or be-
+low 1 bit precision, maintaining model quality gen-
+erally requires more flexibility than naive round-
+ing permits. Representative approaches include
+SVID-based parameterizations (Xu et al., 2024),
+token-adaptive mixtures of scaling factors (Jo et al.,
+2024), and structured sparsity (Dong et al., 2025).
+In parallel, binary-factor formats maintain efficient
+inference primitives (Boža and Macko, 2025; Lee
+et al., 2025) by decomposing each weight matrix
+into two bit-packed sign matrices with low-cost
+diagonal scaling, resulting in inference primarily
+governed by 1-bit kernels. A common theme is
+the explicit addition of degrees of freedom, such
+as adaptive scales, learnable sparsity patterns, or
+residual corrections, to mitigate the information
+bottleneck caused by extreme quantization.
+7
+Conclusion
+We study extreme low-bit quantization using
+binary-factor representations and identify a key lim-
+itation of DBF: after sign demodulation, all weight
+magnitudes are constrained to a single shared en-
+velope. This collapse significantly constrains ex-
+pressivity and leads to diminishing returns as the
+inner rank increases, explaining the observed per-
+formance saturation. To address this bottleneck,
+we introduce MDBF, which enables deployment-
+friendly binary computation by preserving shared
+1-bit sign bases while replacing the single-envelope
+with a rank-l demodulated envelope that can rep-
+resent multiple magnitude modes. We present a
+practical layer-wise PTQ pipeline featuring closed-
+form initialization followed by an alternating refine-
+ment procedure. Experiments across the LLaMA
+and Qwen model families demonstrate that MDBF
+improves perplexity and zero-shot accuracy com-
+pared to prior binary formats with the same bits per
+weight, highlighting that limited capacity is more
+effectively allocated to modeling magnitudes rather
+than replicating sign patterns.
+8
+Limitations
+We focus on layer-wise PTQ. Accordingly, we
+do not consider submodule-level (Ichikawa et al.,
+2025a) or block-wise (Tseng et al., 2024a; Lee
+et al., 2025) quantization, end-to-end QAT, or
+distillation-based methods such as LittleBit (Lee
+et al., 2025). While these alternatives may yield
+additional accuracy gains, they typically require
+significantly greater computational resources and
+introduce nontrivial engineering overhead. Our ap-
+proach minimizes a non-convex objective through
+heuristic alternating updates. As a result, we do
+not provide guarantees of global optimality; the
+best-performing hyperparameter settings, e.g., en-
+velope rank l and decomposition depth P, may
+depend on the optimizer and initialization. De-
+veloping more principled optimization strategies
+or employing robust discrete general optimization
+methods (Ichikawa and Iwashita, 2025; Ichikawa
+and Arai, 2025; Sun et al., 2023; Ichikawa, 2024)
+and model-selection criteria for extremely low-bit
+binary-factor formats remains an important open
+problem.
+Acknowledgments
+This work was supported by JST BOOST, Japan
+(Grant No. JPMJBY24D0), and RIKEN Center for
+AIP. Additionally, this work received support from
+the Strategic Innovation Promotion Program (SIP)
+of the Cabinet Office, Government of Japan.
+References
+Yamato Arai and Yuma Ichikawa. 2025. Quantization
+error propagation: Revisiting layer-wise post-training
+quantization. In The Thirty-ninth Annual Conference
+on Neural Information Processing Systems.
+Vladimír Boža and Vladimír Macko. 2025.
+Addi-
+tion is almost all you need: Compressing neural
+networks with double binary factorization. CoRR,
+abs/2505.11076.
+Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and
+Christopher M De Sa. 2023. Quip: 2-bit quantization
+of large language models with guarantees. Advances
+in Neural Information Processing Systems, 36:4396–
+4429.
+Peijie Dong, Lujun Li, Yuedong Zhong, Dayou Du,
+Ruibo Fan, Yuhan Chen, Zhenheng Tang, Qiang
+Wang, Wei Xue, Yike Guo, and Xiaowen Chu. 2025.
+Stbllm: Breaking the 1-bit barrier with structured bi-
+nary llms. In International Conference on Learning
+Representations (ICLR).
+9
+
+Vage Egiazarian, Andrei Panferov, Denis Kuznedelev,
+Elias Frantar, Artem Babenko, and Dan Alistarh.
+2024. Extreme compression of large language mod-
+els via additive quantization. In Proceedings of the
+41st International Conference on Machine Learning
+(ICML).
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and
+Dan Alistarh. 2022. Gptq: Accurate post-training
+quantization for generative pre-trained transformers.
+arXiv preprint arXiv:2210.17323.
+Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri,
+Abhinav Pandey, Abhishek Kadian, Ahmad Al-
+Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten,
+Alex Vaughan, and 1 others. 2024. The llama 3 herd
+of models. arXiv preprint arXiv:2407.21783.
+Yuma Ichikawa. 2024. Controlling continuous relax-
+ation for combinatorial optimization. Advances in
+Neural Information Processing Systems, 37:47189–
+47216.
+Yuma Ichikawa and Yamato Arai. 2025. Optimization
+by parallel quasi-quantum annealing with gradient-
+based sampling. In The Thirteenth International Con-
+ference on Learning Representations.
+Yuma Ichikawa, Yudai Fujimoto, and Akira Sakai.
+2025a.
+Lpcd:
+Unified framework from layer-
+wise to submodule quantization.
+arXiv preprint
+arXiv:2512.01546.
+Yuma Ichikawa and Hiroaki Iwashita. 2025. Continuous
+parallel relaxation for finding diverse solutions in
+combinatorial optimization problems. Transactions
+on Machine Learning Research.
+Yuma Ichikawa, Shuhei Kashiwamura, and Ayaka
+Sakata. 2025b. High-dimensional learning dynamics
+of quantized models with straight-through estimator.
+arXiv preprint arXiv:2510.10693.
+Dongwon Jo, Taesu Kim, Yulhwa Kim, and Jae-Joon
+Kim. 2024. Mixture of scales: Memory-efficient
+token-adaptive binarization for large language mod-
+els. In Advances in Neural Information Processing
+Systems (NeurIPS).
+Banseok Lee, Dongkyu Kim, Youngcheon You, and
+Youngmin Kim. 2025. Littlebit: Ultra low-bit quanti-
+zation via latent factorization. In Advances in Neural
+Information Processing Systems (NeurIPS).
+Yuhang Li, Ruokai Yin, Donghyun Lee, Shiting Xiao,
+and Priyadarshini Panda. 2025. GPTAQ: Efficient
+finetuning-free quantization for asymmetric calibra-
+tion. In Forty-second International Conference on
+Machine Learning.
+Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-
+Ming Chen, Wei-Chen Wang, Guangxuan Xiao,
+Xingyu Dang, Chuang Gan, and Song Han. 2024.
+Awq: Activation-aware weight quantization for on-
+device llm compression and acceleration. Proceed-
+ings of Machine Learning and Systems, 6:87–100.
+Ziang Long, Penghang Yin, and Jack Xin. 2021. Learn-
+ing quantized neural nets by coarse gradient method
+for nonlinear classification. Research in the Mathe-
+matical Sciences, 8(3):48.
+Vladimir Malinovskii, Denis Mazur, Ivan Ilin, Denis
+Kuznedelev, Konstantin Burlachenko, Kai Yi, Dan
+Alistarh, and Peter Richtarik. 2024a. Pv-tuning: Be-
+yond straight-through estimation for extreme llm
+compression. In Advances in Neural Information
+Processing Systems (NeurIPS).
+Vladimir Malinovskii, Denis Mazur, Ivan Ilin, Denis
+Kuznedelev, Konstantin Burlachenko, Kai Yi, Dan
+Alistarh, and Peter Richtarik. 2024b.
+Pv-tuning:
+Beyond straight-through estimation for extreme llm
+compression. Advances in Neural Information Pro-
+cessing Systems, 37:5074–5121.
+Olivier Roy and Martin Vetterli. 2007. The effective
+rank: A measure of effective dimensionality. In 15th
+European Signal Processing Conference (EUSIPCO
+2007), pages 606–610, Poznan, Poland. Event date:
+September 3–7, 2007.
+Haoran Sun, Katayoon Goshvadi, Azade Nova, Dale
+Schuurmans, and Hanjun Dai. 2023.
+Revisiting
+sampling for combinatorial optimization. In Inter-
+national Conference on Machine Learning, pages
+32859–32874. PMLR.
+Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier
+Martinet, Marie-Anne Lachaux, Timothée Lacroix,
+Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal
+Azhar, and 1 others. 2023. Llama: Open and effi-
+cient foundation language models. arXiv preprint
+arXiv:2302.13971.
+Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr
+Kuleshov, and Christopher De Sa. 2024a. Quip#:
+Even better llm quantization with hadamard in-
+coherence and lattice codebooks.
+arXiv preprint
+arXiv:2402.04396.
+Albert Tseng, Qingyao Sun, David Hou, and Christo-
+pher De Sa. 2024b. Qtip: Quantization with trellises
+and incoherence processing. In Advances in Neural
+Information Processing Systems (NeurIPS).
+Yuzhuang Xu, Xu Han, Zonghan Yang, Shuo Wang,
+Qingfu Zhu, Zhiyuan Liu, Weidong Liu, and Wanx-
+iang Che. 2024.
+Onebit:
+Towards extremely
+low-bit large language models.
+arXiv preprint
+arXiv:2402.11295.
+Penghang Yin, Jiancheng Lyu, Shuai Zhang, Stanley
+Osher, Yingyong Qi, and Jack Xin. 2019.
+Un-
+derstanding straight-through estimator in training
+activation quantized neural nets.
+arXiv preprint
+arXiv:1903.05662.
+10
+
+A
+Derivation
+A.1
+Proofs of Main Results
+This section presents detailed proofs of the results stated in the main text, along with the necessary
+auxiliary lemmas for completeness.
+A.1.1
+Demodulated envelopes and Envelope Class
+Demodulated Envelope.
+Let S ∈{±1}p×q represent a sign mask and Z ∈Rp×q an arbitrary matrix.
+We define the demodulated envelope of Z concerning S as follows:
+ES(Z) := S ⊙Z,
+Since S2
+ij = 1 holds for all (i, j), we have S ⊙S = 1 entrywise; therefore, Z = S ⊙ES(Z).
+Envelope Class.
+We recall the rank-l envelope class associated with a fixed sign mask.
+Definition A.1. Let S ∈{±1}p×q and l ≥1. Define
+Fl(S) :=
+
+S ⊙E | E ∈Rp×q, rank(E) ≤l
+ 
+⊂Rp×q.
+Equivalently, bZ ∈Fl(S) if and only if its demodulated envelope ES( bZ) has a rank of at most l.
+The next lemma demonstrates that Fl(S) can be equivalently characterized as a sum of diagonal
+scalings of the fixed mask S, thereby relating envelopes to DBF-like parameterizations.
+Lemma A.2. Let S ∈{±1}p×q and l ≥1. Then
+Fl(S) =
+(
+l
+X
+t=1
+Dx(t)SDy(t) | x(t) ∈Rp, y(t) ∈Rq
+)
+.
+(7)
+Proof. We prove both inclusions. Let bZ ∈Fl(S). By Definition A.1, there exists E ∈Rp×q such
+that rank(E) ≤l with bZ = S ⊙E. Since rank(E) ≤l, there exist vectors {x(t)}l
+t=1 ⊂Rp and
+{y(t)}l
+t=1 ⊂Rq such that E = Pl
+t=1 x(t)(y(t))⊤. For any (i, j), we compute
+bZij = (S ⊙E)ij = SijEij = Sij
+l
+X
+t=1
+x(t)
+i y(t)
+j
+=
+l
+X
+t=1
+x(t)
+i Sijy(t)
+j
+=
+l
+X
+t=1
+ Dx(t)SDy(t)
+
+ij.
+Therefore, bZ = Pl
+t=1 Dx(t)SDy(t), which shows that bZ belongs to the right-hand side of Equation (7).
+Suppose that bZ = Pl
+t=1 Dx(t)SDy(t). Define E := Pl
+t=1 x(t) y(t)⊤. Then rank(E) ≤l. Moreover,
+for any (i, j),
+(S ⊙E)ij = SijEij = Sij
+l
+X
+t=1
+x(t)
+i y(t)
+j
+=
+l
+X
+t=1
+x(t)
+i Sijy(t)
+j
+=
+l
+X
+t=1
+ Dx(t)SDy(t)
+
+ij = bZij.
+Hence, bZ = S ⊙E ∈Fl(S) completes the proof.
+A.1.2
+Isometry Induced by Sign Mask
+Lemma A.3. Let S ∈{±1}p×q and A, B ∈Rp×q.
+∥S ⊙A∥F = ∥A∥F , ∥S ⊙(A −B)∥F = ∥A −B∥F .
+The linear map TS : Rp×q →Rp×q defined by TS(Z) := S ⊙Z is an isometry with respect to ∥· ∥F .
+Proof. Using the definition of the Frobenius norm and the fact that S2
+ij = 1 for all (i, j), we have
+∥S ⊙A∥2
+F =
+p
+X
+i=1
+q
+X
+j=1
+(SijAij)2 =
+p
+X
+i=1
+q
+X
+j=1
+S2
+ij A2
+ij =
+p
+X
+i=1
+q
+X
+j=1
+A2
+ij = ∥A∥2
+F .
+Taking the square roots yields ∥S ⊙A∥F = ∥A∥F . Applying the same argument to A-B yields
+∥S ⊙(A −B)∥F = ∥A −B∥F ,
+which establishes the distance-preservation property and, consequently, the isometry claim.
+11
+
+A.1.3
+Optimal Demodulated-Envelope Approximation
+We restate and prove Theorem 4.2 from the perspective of the demodulated-envelope.
+Theorem A.4. Let U
+∈RN×R fix a sign mask S ∈{±1}N×R.
+Let σ1(ES(U)) ≥· · · ≥
+σmin(N,R)(ES(U)) ≥0 denote the singular values of the demodulated envelope ES(U) := S ⊙U.
+Fix an integer l with 1 ≤l ≤min(N, R). Then
+min
+bU∈Fl(S)
+∥U −bU∥2
+F =
+min(N,R)
+X
+i=l+1
+σi
+ ES(U)
+2.
+(8)
+Moreover, a minimizer is provided by
+bU⋆= S ⊙TSVDl
+ ES(U)
+
+,
+(9)
+where TSVDl(·) denotes the best rank-l approximation in the Frobenius norm.
+Proof. By Definition 4.1, bU ∈Fl(S) if and only if there exists a matrix E ∈RN×R such that rank(E) ≤l
+as follows:
+bU = S ⊙E.
+(10)
+Hence, the constrained minimization over bU ∈Fl(S) is equivalent to minimizing over E with rank(E) ≤
+l under the parameterization in Equation (10). Define EU := ES(U) = S ⊙U. Since S2
+ij = 1 for all
+(i, j), we have the involution property S ⊙(S ⊙Z) = Z for any Z, particularly U = S ⊙EU. For any
+feasible bU = S ⊙E, we obtain U −bU = S ⊙(EU −E). Applying Lemma A.3 yields
+∥U −bU∥F = ∥EU −E∥F , ∥U −bU∥2
+F = ∥EU −E∥2
+F .
+(11)
+Substituting Equations (10) and (11) gives
+min
+bU∈Fl(S)
+∥U −bU∥2
+F =
+min
+E∈RN×R
+rank(E)≤l
+∥EU −E∥2
+F ,
+which is exactly the classical best rank-l approximation problem for EU in Frobenius norm. By the
+Eckart–Young–Mirsky theorem applied to EU, we have
+min
+rank(E)≤l ∥EU −E∥2
+F =
+min(N,R)
+X
+i=l+1
+σi(EU)2 =
+min(N,R)
+X
+i=l+1
+σi
+ ES(U)
+2,
+which proves Equation (8). Moreover, the same theorem implies that an optimizer is E⋆= TSVDl(EU);
+substituting into Equation (10) yields bU⋆= S⊙TSVDl(EU) = S⊙TSVDl(ES(U)), which corresponds
+to Equation (9).
+Remark A.5. If we choose the mask S = sign(U), the demodulated envelope satisfies ES(U) = S ⊙U =
+|U| entrywise. In this case, Equation (8) specializes to the standard singular-value tail characterization
+of the best rank-l approximation error for |U| in the Frobenius norm.
+Corollary A.6. Under the assumptions of Theorem A.4, setting l = 1 yields
+min
+bU∈F1(S)
+∥U −bU∥2
+F =
+min(N,M)
+X
+i=2
+σi
+ ES(U)
+2, .
+In particular, the single envelope constraint is lossless (in Frobenius norm) if and only if rank
+ ES(U)
+
+≤
+1.
+Proof. This is the specialization of Theorem A.4 to l = 1.
+12
+
+A.1.4
+Exact Projection
+Proposition A.7. Fix S ∈{±1}N×R and l ≥1. For any Z ∈RN×R, the Frobenius projection onto
+Fl(S),
+ΠFl(S)(Z) ∈arg
+min
+Y ∈Fl(S) ∥Z −Y ∥F ,
+selected as
+ΠFl(S)(Z) = S ⊙TSVDl
+ ES(Z)
+
+= S ⊙TSVDl
+ S ⊙Z
+
+.
+(12)
+Proof. By Definition A.1, any Y ∈Fl(S) can be expressed as Y = S ⊙E for some E ∈RN×R with
+rank(E) ≤l. Hence,
+min
+Y ∈Fl(S) ∥Z −Y ∥2
+F =
+min
+E∈RN×R
+rank(E)≤l
+∥Z −S ⊙E∥2
+F .
+Using the sign-mask isometry (Lemma A.3) and the identity S ⊙(S ⊙E) = E, we obtain
+∥Z −S ⊙E∥F = ∥S ⊙Z −S ⊙(S ⊙E)∥F = ∥S ⊙Z −E∥F = ∥ES(Z) −E∥F .
+Therefore,
+min
+Y ∈Fl(S) ∥Z −Y ∥2
+F =
+min
+rank(E)≤l ∥ES(Z) −E∥2
+F .
+The right-hand side represents the classical best rank-l approximation problem for ES(Z) in the Frobenius
+norm, with minimizers provided by the truncated SVD: E⋆= TSVDl(ES(Z)) (Eckart–Young–Mirsky
+theorem). Substituting back yields Y ⋆= S ⊙E⋆= S ⊙TSVDl(ES(Z)), which is Equation (12).
+B
+Additional Implementation Details
+B.1
+Entropy-based effective rank
+We quantify the number of envelope modes present using the entropy-based effective rank (entropy
+rank) (Roy and Vetterli, 2007). For a matrix E ∈RN×M (in our case, a demodulated envelope such as
+Esign(U)(U) = |U| or Esign(V )(V ) = |V |), let singular values and σ1(E) ≥· · · ≥σmin(N,M)(E) ≥0
+represent its normalized spectrum. Define the normalized spectrum
+πi(E) :=
+σi(E)
+Pmin(N,M)
+j=1
+σj(E)
+,
+i = 1, . . . , min(N, M),
+with the convention πi(E) = 1/min(N, M), if E = 0 and the spectral entropy are considered:
+H(E) := −
+min(N,M)
+X
+i=1
+πi(E) log πi(E).
+The effective rank of entropy is erank(E) := exp
+ H(E)
+
+. This quantity is scale-invariant and satisfies
+1 ≤erank(E) ≤min(N, M). Moreover, erank(E) = 1 when E is a nonzero rank-one matrix with all
+spectral mass on a single singular value, and erank(E) ≈k when roughly k singular values contribute
+comparably.
+C
+Additional Experiments
+In the main text, we present results aggregated across models (and, where applicable, across tasks) to
+emphasize overall trends. For completeness and transparency, this appendix includes the individual results
+for each model and target bitwidth. All experiments follow the same evaluation protocol as the main
+paper; the reported metric remains the same normalized accuracy (higher is better).
+Tables 3 and 4 summarize normalized accuracy on ARC-Easy and PIQA, respectively. Rows indicate
+the target bit width, while columns correspond to the bit-parameter choices (l, P). Overall, the per-model
+numbers align with the aggregate results in the main text: changing (l, P) typically results in modest
+variations, with (l=2, P=1) providing a strong and stable default across models, while increasing l often
+leads to diminishing returns.
+13
+
+Table 3: Zero-shot accuracy (↑) on ARC-Easy. Rows indicate the target bitwidth, and columns correspond to
+bit-parameters (l, P).
+Model
+Bits
+(l=1, P=1) (l=1, P=2) (l=2, P=1) (l=8, P=1) (l=16, P=1)
+Tiny LLaMA (1.1B)
+1.00
+0.3279
+0.3258
+0.3215
+0.3304
+0.3283
+1.25
+0.3737
+0.3384
+0.3960
+0.3822
+0.3927
+1.50
+0.4057
+0.3838
+0.4045
+0.4066
+0.4082
+Qwen3 (0.6B)
+1.00
+0.3051
+0.2883
+0.3157
+0.2837
+0.3064
+1.25
+0.3258
+0.3089
+0.3283
+0.3338
+0.3245
+1.50
+0.3418
+0.3140
+0.3565
+0.3401
+0.3485
+LLaMA3.2 (1B)
+1.00
+0.3413
+0.3653
+0.3359
+0.3523
+0.3472
+1.25
+0.3843
+0.3540
+0.3897
+0.3956
+0.3990
+1.50
+0.3906
+0.4217
+0.4112
+0.4369
+0.4082
+LLaMA2 (7B)
+1.00
+0.4221
+0.3842
+0.4209
+0.4228
+0.4265
+1.25
+0.5118
+0.4482
+0.5189
+0.4853
+0.4899
+1.50
+0.5614
+0.5240
+0.5800
+0.5370
+0.5631
+LLaMA3 (8B)
+1.00
+0.2879
+0.2761
+0.3001
+0.3077
+0.2946
+1.25
+0.3628
+0.3266
+0.3817
+0.3544
+0.3232
+1.50
+0.4099
+0.4024
+0.3965
+0.3864
+0.3851
+Qwen3 (8B)
+1.00
+0.3514
+0.3439
+0.3443
+0.3481
+0.3514
+1.25
+0.4045
+0.3645
+0.4007
+0.3788
+0.3805
+1.50
+0.4196
+0.3885
+0.4415
+0.4373
+0.4188
+Table 4: Zero-shot accuracy (↑) on PIQA. Rows indicate the target bitwidth, and columns correspond to bit-
+parameters (l, P).
+Model
+Bits
+(l=1, P=1) (l=1, P=2) (l=2, P=1) (l=8, P=1) (l=16, P=1)
+Tiny LLaMA (1.1B)
+1.00
+0.5517
+0.5452
+0.5631
+0.5811
+0.5615
+1.25
+0.6153
+0.5832
+0.6137
+0.6268
+0.6431
+1.50
+0.6447
+0.6268
+0.6502
+0.6556
+0.6436
+Qwen3 (0.6B)
+1.00
+0.5424
+0.5337
+0.5332
+0.5403
+0.5392
+1.25
+0.5522
+0.5337
+0.5615
+0.5560
+0.5669
+1.50
+0.5620
+0.5495
+0.5642
+0.5686
+0.5734
+LLaMA3.2 (1B)
+1.00
+0.5865
+0.5778
+0.6023
+0.5838
+0.5909
+1.25
+0.6110
+0.6143
+0.6181
+0.6436
+0.6208
+1.50
+0.6257
+0.6186
+0.6333
+0.6404
+0.6398
+LLaMA2 (7B)
+1.00
+0.6306
+0.5997
+0.6225
+0.6230
+0.6192
+1.25
+0.6844
+0.6561
+0.7002
+0.6681
+0.6670
+1.50
+0.7182
+0.6980
+0.7160
+0.7116
+0.7051
+LLaMA3 (8B)
+1.00
+0.5277
+0.5234
+0.5207
+0.5294
+0.5245
+1.25
+0.5963
+0.5473
+0.6192
+0.5887
+0.5653
+1.50
+0.6317
+0.6088
+0.6153
+0.6273
+0.6148
+Qwen3 (8B)
+1.00
+0.5756
+0.5577
+0.5734
+0.5490
+0.5664
+1.25
+0.5898
+0.5647
+0.5979
+0.5849
+0.5903
+1.50
+0.6175
+0.5876
+0.5903
+0.6153
+0.6050
+14

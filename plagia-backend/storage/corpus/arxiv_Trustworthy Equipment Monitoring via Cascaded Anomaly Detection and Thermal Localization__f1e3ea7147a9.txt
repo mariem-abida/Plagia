@@ -1,0 +1,1235 @@
+Trustworthy Equipment Monitoring via Cascaded Anomaly
+Detection and Thermal Localization
+Sungwoo Kang
+Department of Electrical and Computer Engineering, Korea University
+Seoul 02841, Republic of Korea
+krml919@korea.ac.kr
+Abstract
+Predictive maintenance in industrial settings demands not only accurate anomaly de-
+tection but also interpretable explanations that maintenance engineers can trust and act
+upon. While multimodal fusion approaches combining sensor time-series with thermal im-
+agery have shown promise, we demonstrate through extensive ablation studies that naive
+fusion strategies can actually degrade detection performance.
+This paper introduces a
+Cascaded Anomaly Detection framework that decouples the detection and localiza-
+tion stages: Stage 1 employs an LSTM-based sensor encoder with temporal attention for
+high-accuracy anomaly detection (93.08% F1-score), while Stage 2 activates a CNN-based
+thermal encoder with spatial attention to localize fault regions post-detection. Our key find-
+ings reveal that sensor-only detection outperforms full multimodal fusion by 8.3 percentage
+points (93.08% vs. 84.79% F1), challenging the assumption that more modalities invari-
+ably improve performance. We further contribute a comprehensive explainability pipeline
+integrating SHAP analysis for sensor importance ranking, temporal attention for identify-
+ing predictive time windows, spatial attention heatmaps for thermal fault localization, and
+gate weight analysis that reveals a “modality bias” phenomenon where fusion models para-
+doxically assign 65–87% weight to the weaker thermal modality. This diagnostic insight
+validates the critical role of explainable AI in auditing multimodal systems before deploy-
+ment. Experiments on a real-world bearing monitoring dataset comprising 78,397 samples
+with 8 sensors and thermal images demonstrate the effectiveness of our cascaded approach,
+achieving state-of-the-art detection accuracy while providing actionable explanations for
+maintenance decision-making.
+Keywords: Predictive maintenance, Anomaly detection, Multimodal fusion, Explainable
+AI, Thermal imaging, LSTM, Attention mechanisms, Industrial monitoring
+1
+Introduction
+Industrial equipment monitoring has emerged as a critical application of machine learning, with
+potential cost savings of billions of dollars annually through early fault detection and predictive
+maintenance scheduling [Mobley, 2002, Jardine et al., 2006]. Modern manufacturing facilities
+increasingly deploy heterogeneous sensor networks combining traditional vibration and tem-
+perature sensors with thermal imaging cameras, creating opportunities for multimodal learning
+approaches [Wang et al., 2018, Zhao et al., 2019]. However, the adoption of deep learning models
+in safety-critical maintenance decisions faces a fundamental challenge: maintenance engineers
+are reluctant to trust black-box predictions without understanding why a model predicts an
+anomaly, which sensor readings indicate the problem, and where on the equipment the fault is
+located [Carvalho et al., 2019, Rudin, 2019].
+The prevailing assumption in multimodal learning is that combining multiple data sources
+improves model performance [Baltrušaitis et al., 2019, Ngiam et al., 2011]. This intuition has
+1
+arXiv:2512.24755v1 [eess.SY] 31 Dec 2025
+
+driven extensive research in multimodal fusion for industrial applications, with approaches rang-
+ing from early feature concatenation to sophisticated attention-based cross-modal learning [Gao
+et al., 2020]. However, we challenge this assumption in the context of industrial anomaly de-
+tection. Through rigorous ablation studies, we discover that sensor-only detection achieves
+93.08% F1-score, significantly outperforming naive multimodal fusion at 84.79%
+F1-score—an 8.3 percentage point degradation when thermal imaging is added without careful
+architectural consideration.
+This counter-intuitive finding motivates our proposed Cascaded Anomaly Detection
+framework, which decouples the detection and localization tasks into two specialized stages:
+1. Stage 1 – Detection: An LSTM-based encoder with temporal attention processes sensor
+time-series to classify equipment states (Normal, Pre-Warning, Warning, Failure). This stage
+achieves 93.08% F1-score and 97.00% AUROC, serving as the primary alarm trigger.
+2. Stage 2 – Localization: Upon anomaly detection, a CNN-based encoder with spatial atten-
+tion analyzes thermal images to identify where the fault manifests—generating interpretable
+heatmaps that highlight bearing zones, contact points, or thermal gradient anomalies.
+This cascaded design offers several advantages over end-to-end multimodal fusion. First,
+it avoids the performance degradation observed when fusing modalities with vastly different
+predictive power. Second, it provides clear separation of concerns: sensors detect if there is a
+problem, while thermal imaging explains where. Third, it enables on-demand thermal analysis,
+reducing computational overhead when equipment operates normally.
+Beyond architectural contributions, we introduce a comprehensive explainability pipeline
+that addresses the trustworthiness requirements of industrial deployment:
+• SHAP Analysis: Quantifies individual sensor contributions, revealing that NTC tempera-
+ture sensors contribute most to predictions (importance: 0.28), followed by PM10 particulate
+sensors (0.21).
+• Temporal Attention: Visualizes which time windows in the sensor sequence are most pre-
+dictive, showing increasing attention weights toward recent observations (0.049 →0.051).
+• Spatial Attention: Generates heatmaps overlaid on thermal images, localizing fault regions
+for maintenance crews.
+• Gate Weight Analysis: Exposes a critical “modality bias” phenomenon where fusion models
+assign 65–87% weight to thermal features despite their poor predictive power (28.79% F1 when
+used alone). This diagnostic insight validates why XAI is essential for auditing multimodal
+architectures.
+Our contributions can be summarized as follows:
+1. We demonstrate that sensor-only detection outperforms naive multimodal fusion (93% vs.
+85% F1), providing empirical evidence that more modalities do not guarantee better perfor-
+mance in industrial anomaly detection.
+2. We propose a cascaded framework that preserves high detection accuracy while leveraging
+thermal imaging for post-detection fault localization, answering “where is the fault?” without
+compromising “is there a fault?”.
+3. We develop a comprehensive explainability pipeline integrating SHAP, temporal attention,
+spatial attention, and gate weight analysis, enabling full auditability of model decisions.
+2
+
+4. We identify the “modality bias” phenomenon through gate weight analysis, demonstrating
+that XAI tools can diagnose architectural failures before deployment.
+The remainder of this paper is organized as follows.
+Section 2 reviews related work in
+multimodal fusion, predictive maintenance, and explainable AI. Section 3 details our cascaded
+framework and explainability pipeline. Section 4 describes the experimental setup. Section 5
+presents quantitative results and ablation studies. Section 6 analyzes the implications of our
+findings. Section 7 concludes with future directions.
+2
+Related Work
+This section reviews the literature across four interconnected domains: multimodal fusion for
+industrial monitoring, predictive maintenance and fault detection, explainable AI in industrial
+applications, and deep learning architectures for time-series and image analysis.
+2.1
+Multimodal Fusion for Industrial Monitoring
+Multimodal learning has gained significant traction in industrial applications, driven by the
+availability of diverse sensor modalities [Baltrušaitis et al., 2019, Ramachandram and Taylor,
+2017]. Early fusion approaches concatenate features from different modalities before classifica-
+tion [Ngiam et al., 2011, Srivastava and Salakhutdinov, 2012], while late fusion combines predic-
+tions from unimodal classifiers [Zhang et al., 2020, Karpathy et al., 2014]. More sophisticated
+methods employ attention mechanisms to dynamically weight modality contributions [Vaswani
+et al., 2017, Lu et al., 2019].
+In manufacturing contexts, Gao et al. [2020] provide a comprehensive survey of deep learning
+for multimodal data fusion, categorizing approaches into data-level, feature-level, and decision-
+level fusion. Klyuev et al. [2022] demonstrate improved defect detection by combining visual
+inspection with acoustic emission data. However, few studies critically examine when multimodal
+fusion may degrade performance—a gap our work addresses directly.
+Cross-modal attention mechanisms have shown promise in aligning heterogeneous data streams [Lu
+et al., 2019, Tan and Bansal, 2019]. Tsai et al. [2019] introduce the Multimodal Transformer
+for unaligned multimodal sequences, while Hazarika et al. [2020] propose modality-invariant
+and modality-specific representations. We adapt these attention concepts for industrial sensor-
+thermal fusion but discover that simpler cascaded architectures outperform attention-based fu-
+sion in our domain.
+Gated fusion mechanisms, as explored by Arevalo et al. [2017], learn to weight modality
+contributions dynamically. Our gate weight analysis reveals that these mechanisms can exhibit
+“modality bias,” assigning disproportionate weight to weaker modalities—a phenomenon not
+previously documented in industrial settings.
+2.2
+Predictive Maintenance and Fault Detection
+Predictive maintenance has evolved from rule-based systems to sophisticated machine learning
+approaches [Mobley, 2002, Jardine et al., 2006, Lee et al., 2014]. Carvalho et al. [2019] provide a
+systematic review of machine learning for predictive maintenance, highlighting the shift toward
+deep learning methods. Zhang et al. [2019] demonstrate the effectiveness of deep neural networks
+for remaining useful life prediction.
+Bearing fault detection, closely related to our application, has been extensively studied.
+Zhang et al. [2017] propose a deep convolutional neural network with wide first-layer kernels for
+vibration-based fault diagnosis. Jia et al. [2016] use deep neural networks for rotating machinery
+fault diagnosis. Chen et al. [2020] combine 1D-CNN with LSTM for bearing fault detection from
+vibration signals.
+3
+
+Sensor-based monitoring remains the dominant paradigm in industry [Lei et al., 2020]. Zhao
+et al. [2019] survey deep learning for intelligent fault diagnosis, noting that vibration, tempera-
+ture, and acoustic signals are most commonly used. Han et al. [2019] address domain adaptation
+challenges when sensor distributions shift over time.
+Thermal imaging for equipment monitoring has gained attention for its non-contact mea-
+surement capabilities [Bagavathiappan et al., 2013, Vollmer and M"ollmann, 2017]. Glowacz
+and Glowacz [2017] use thermal images for motor fault detection, while Janssens et al. [2016]
+apply infrared thermography and vibration data to bearing fault diagnosis. However, combining
+thermal imaging with sensor data remains underexplored, with limited understanding of when
+such fusion helps or hurts.
+Industrial datasets for anomaly detection vary in size and complexity. Lessmeier et al. [2016]
+introduce the Paderborn bearing dataset with vibration data. Nectoux et al. [2012] present the
+PRONOSTIA platform for bearing degradation. Our work uses a proprietary dataset combining
+multiple sensor types with thermal imagery, representing realistic industrial heterogeneity.
+2.3
+Explainable AI in Industrial Applications
+The black-box nature of deep learning models poses significant barriers to industrial adop-
+tion [Rudin, 2019, Adadi and Berrada, 2018]. Arrieta et al. [2020] provide a comprehensive
+taxonomy of explainable AI methods, distinguishing between intrinsic interpretability and post-
+hoc explanations. Ribeiro et al. [2016] introduce LIME for local interpretable model-agnostic
+explanations, while Lundberg and Lee [2017] propose SHAP values based on Shapley game
+theory.
+Attention mechanisms provide a form of built-in explainability [Vaswani et al., 2017, Bah-
+danau et al., 2015]. Jain and Wallace [2019] critically examine whether attention weights faith-
+fully explain model decisions, finding mixed results. Wiegreffe and Pinter [2019] counter that at-
+tention can provide useful explanations under appropriate conditions. We use attention weights
+as one component of a multi-faceted explainability pipeline.
+Gradient-based saliency methods identify important input features [Simonyan et al., 2013,
+Selvaraju et al., 2017]. GradCAM [Selvaraju et al., 2017] generates visual explanations for CNN
+predictions, widely applied in medical imaging [Yang et al., 2022]. Integrated Gradients [Sun-
+dararajan et al., 2017] satisfy desirable axioms for attribution.
+We apply these methods to
+thermal images to localize fault regions.
+In industrial contexts, Grezmak et al. [2019] apply Layer-Wise Relevance Propagation (LRP)
+to bearing fault diagnosis. Liu et al. [2021] develop sensor importance ranking for predictive
+maintenance. Hrnjica and Softic [2020] present a case study on explainability in manufactur-
+ing. Our work extends these efforts with a comprehensive pipeline combining SHAP, attention
+visualization, and gate weight analysis.
+Trustworthy AI for industrial applications aligns with emerging standards such as IEEE 7000
+series [Association, 2021] and the EU AI Act’s requirements for high-risk systems [European
+Commission, 2021]. Li et al. [2023] outline trustworthiness dimensions including explainability,
+robustness, and fairness. Our cascaded framework and explainability pipeline directly address
+these requirements.
+2.4
+Deep Learning for Time-Series and Image Analysis
+Recurrent neural networks, particularly LSTMs [Hochreiter and Schmidhuber, 1997], have be-
+come standard for time-series modeling [Lipton et al., 2015, Che et al., 2018]. Malhotra et al.
+[2015] apply LSTM for anomaly detection in time-series. Hundman et al. [2018] use LSTM
+autoencoders for spacecraft telemetry anomaly detection.
+We employ LSTM with temporal
+attention for sensor sequence encoding.
+4
+
+Temporal attention mechanisms highlight important time steps in sequential data [Song
+et al., 2018, Qin et al., 2017]. Shih et al. [2019] propose a temporal pattern attention mechanism
+for multivariate time-series forecasting. Fan et al. [2019] use multi-horizon temporal attention
+for remaining useful life prediction. Our temporal attention visualizations reveal that later time
+steps receive higher attention weights, suggesting models focus on recent degradation patterns.
+Convolutional neural networks dominate image analysis [LeCun et al., 2015, He et al., 2016].
+ResNet [He et al., 2016] and its variants provide powerful feature extraction for various visual
+tasks.
+Simonyan and Zisserman [2014] introduce VGGNet with deep, narrow convolutions.
+For thermal imaging specifically, Gade and Moeslund [2014] survey analysis techniques, while
+Kulkarni et al. [2023] discuss deep learning applications in industrial thermal imaging.
+Spatial attention mechanisms identify important image regions [Xu et al., 2015, Ba et al.,
+2015]. Wang et al. [2017] propose residual attention networks that combine attention with skip
+connections. Woo et al. [2018] introduce the Convolutional Block Attention Module for channel
+and spatial attention. We adapt spatial attention for thermal fault localization.
+Combining CNNs and RNNs for multimodal data has been explored in video understand-
+ing [Donahue et al., 2015, Yue-Hei Ng et al., 2015] and medical imaging [Rajkomar et al., 2018].
+Yuan et al. [2019] propose multimodal deep learning for bearing fault diagnosis combining vi-
+bration spectrograms with numerical features. Our cascaded approach differs by deliberately
+separating modality processing rather than fusing them end-to-end.
+2.5
+Summary and Research Gap
+Despite extensive research in multimodal fusion and predictive maintenance, several gaps remain.
+First, few studies critically examine when multimodal fusion degrades performance compared
+to unimodal baselines.
+Second, the combination of sensor time-series with thermal imaging
+for industrial monitoring remains underexplored. Third, comprehensive explainability pipelines
+integrating multiple XAI methods are rare in industrial applications. Fourth, diagnostic tools
+for auditing multimodal architectures (such as gate weight analysis) are largely absent from the
+literature.
+Our work addresses these gaps by: (1) demonstrating that sensor-only detection outperforms
+naive multimodal fusion; (2) proposing a cascaded framework that leverages both modalities
+appropriately; (3) developing an integrated explainability pipeline; and (4) introducing gate
+weight analysis as a diagnostic tool for multimodal architectures.
+3
+Methodology
+This section presents our Cascaded Anomaly Detection framework, which comprises two special-
+ized stages for detection and localization, followed by a comprehensive explainability pipeline.
+Figure 1 illustrates the overall architecture.
+3.1
+Problem Formulation
+Given a multimodal input consisting of sensor time-series Xs ∈RT×D (where T is the sequence
+length and D is the number of sensors) and a thermal image Xt ∈RH×W (where H and W are
+image dimensions), the task is to:
+1. Detect: Classify the equipment state into one of C classes y ∈{0, 1, . . . , C −1} repre-
+senting Normal, Pre-Warning, Warning, and Failure states.
+2. Localize: Generate a spatial attention map Aspatial ∈RH′×W ′ highlighting fault-related
+regions in the thermal image.
+5
+
+Figure 1: Cascaded Anomaly Detection Framework. Stage 1 uses sensor time-series with LSTM
+and temporal attention for high-accuracy detection (93% F1). Stage 2 activates post-detection
+to localize faults on thermal images using CNN with spatial attention.
+3. Explain: Provide interpretable attributions for sensor importance, temporal attention,
+and spatial localization.
+3.2
+Stage 1: Sensor-Based Detection
+Stage 1 focuses exclusively on sensor time-series for anomaly detection, motivated by our em-
+pirical finding that sensor-only models outperform multimodal fusion.
+3.2.1
+LSTM Encoder
+The sensor sequence Xs is processed by a bidirectional LSTM encoder:
+H = BiLSTM(Xs) ∈RT×2h
+(1)
+where h is the hidden dimension. The bidirectional architecture captures both forward and
+backward temporal dependencies. We use two LSTM layers with dropout regularization:
+ht = Dropout(LSTM(xt, ht−1))
+(2)
+3.2.2
+Temporal Attention
+To identify which time steps are most predictive of equipment state, we apply a temporal at-
+tention mechanism:
+αt =
+exp(w⊤
+a tanh(Whht + bh))
+PT
+t′=1 exp(w⊤
+a tanh(Whht′ + bh))
+(3)
+where Wh ∈Rda×2h, bh ∈Rda, and wa ∈Rda are learnable parameters. The context vector is
+computed as:
+cs =
+T
+X
+t=1
+αtht
+(4)
+The attention weights {αt}T
+t=1 serve as temporal explanations, indicating which time windows
+contribute most to the prediction.
+6
+
+3.2.3
+Classification Head
+The context vector is passed through a fully-connected classification head:
+ˆy = softmax(Wccs + bc)
+(5)
+where Wc ∈RC×2h and bc ∈RC. The model is trained with cross-entropy loss:
+Lcls = −
+N
+X
+i=1
+C−1
+X
+c=0
+y(c)
+i
+log ˆy(c)
+i
+(6)
+3.3
+Stage 2: Thermal Localization
+Stage 2 is triggered when Stage 1 detects an anomaly (prediction ̸= Normal). Its purpose is not
+to improve detection but to answer “where is the fault?”
+3.3.1
+CNN Encoder
+The thermal image Xt is processed by a ResNet-based CNN encoder:
+F = ResNet(Xt) ∈RCf×H′×W ′
+(7)
+where Cf is the feature dimension and H′, W ′ are the spatial dimensions after downsampling.
+We use ResNet-18 pretrained on ImageNet with the final classification layer removed.
+3.3.2
+Spatial Attention
+To localize fault regions, we apply a spatial attention mechanism over the feature map:
+Aspatial = σ(Conv1×1(F)) ∈RH′×W ′
+(8)
+where σ is the sigmoid activation and Conv1×1 is a 1 × 1 convolution that projects the Cf
+channels to a single attention map. The attended features are:
+F′ = Aspatial ⊙F
+(9)
+The spatial attention map Aspatial is upsampled to the original image resolution for visual-
+ization, providing interpretable heatmaps of fault locations.
+3.3.3
+Thermal Feature Pooling
+The attended features are pooled to create a thermal representation:
+ct = GlobalAvgPool(F′) ∈RCf
+(10)
+Note that in our cascaded framework, this representation is used primarily for localization
+visualization rather than classification.
+3.4
+Multimodal Fusion Baseline (For Comparison)
+To demonstrate the limitations of naive fusion, we also implement an attention-based multimodal
+fusion model that combines Stage 1 and Stage 2 features:
+7
+
+3.4.1
+Cross-Modal Attention
+Sensor features attend to thermal features and vice versa:
+c′
+s = CrossAttention(cs, ct, ct)
+(11)
+c′
+t = CrossAttention(ct, cs, cs)
+(12)
+3.4.2
+Gated Fusion
+Modality contributions are weighted by learned gates:
+g = σ(Wg[c′
+s; c′
+t] + bg)
+(13)
+cfused = g · c′
+t + (1 −g) · c′
+s
+(14)
+where [·; ·] denotes concatenation. The gate values g provide diagnostic insight into modality
+weighting.
+3.5
+Explainability Pipeline
+Our explainability pipeline integrates four complementary methods to provide comprehensive
+model interpretability.
+3.5.1
+SHAP for Sensor Importance
+We use SHAP (SHapley Additive exPlanations) [Lundberg and Lee, 2017] to quantify individual
+sensor contributions. For the sensor-only model, SHAP values are computed as:
+ϕd =
+X
+S⊆D\{d}
+|S|!(|D| −|S| −1)!
+|D|!
+[f(S ∪{d}) −f(S)]
+(15)
+where ϕd is the importance of sensor d, D is the set of all sensors, and f(·) is the model prediction.
+We use the DeepExplainer variant for computational efficiency.
+3.5.2
+Temporal Attention Visualization
+The attention weights {αt}T
+t=1 from Stage 1 are directly visualized to show which time steps
+influence the prediction. Higher weights indicate more predictive time windows.
+3.5.3
+Spatial Attention and GradCAM
+For thermal localization, we combine the learned spatial attention Aspatial with GradCAM [Sel-
+varaju et al., 2017] for gradient-weighted activation mapping:
+LGradCAM = ReLU
+ X
+k
+αc
+kFk
+!
+(16)
+where αc
+k =
+1
+H′W ′
+P
+i,j
+∂yc
+∂Fk,i,j are the importance weights for class c. The combination of learned
+attention and gradient-based saliency provides robust localization.
+8
+
+3.5.4
+Gate Weight Analysis
+For multimodal models, we analyze the gate weights g to understand modality contributions
+and define a formal “Modality Bias” diagnostic metric. The gate mechanism produces a scalar
+weight gi ∈[0, 1] for each sample i:
+gi = σ(Wg[c′
+s,i; c′
+t,i] + bg)
+(17)
+where σ is the sigmoid function, Wg ∈R1×2d and bg ∈R are learnable parameters, and [·; ·]
+denotes concatenation. The fused representation is computed as cfused,i = gi · c′
+t,i + (1 −gi) · c′
+s,i.
+Modality Bias Metric.
+We define the Modality Bias B as the deviation of the expected
+gate weight from the ideal weight based on unimodal performance:
+B = E[g] −g∗
+(18)
+where the ideal gate weight g∗is computed from unimodal F1-scores:
+g∗=
+F1thermal
+F1thermal + F1sensor
+=
+0.2879
+0.2879 + 0.9308 = 0.236
+(19)
+A positive B indicates over-reliance on the thermal modality. In our experiments:
+B = E[g] −g∗= 0.76 −0.236 = 0.524
+(20)
+where E[g] ≈0.65–0.87 across samples (mean ≈0.76). This substantial positive bias (B = 0.524)
+indicates the model assigns approximately 3.2× more weight to thermal features than their
+predictive power warrants.
+Statistical Significance.
+The bias is consistent across samples: std(g) = 0.11, and a one-
+sample t-test rejects H0 : E[g] = g∗with p < 0.001.
+This quantitative diagnostic enables reproducible auditing of multimodal fusion architectures
+and validates the importance of XAI for identifying architectural failures before deployment.
+3.6
+Training Procedure
+3.6.1
+Loss Functions
+For the sensor-only model (Stage 1):
+LStage1 = Lcls
+(21)
+For the multimodal baseline:
+Lmultimodal = Lcls + λreg∥θ∥2
+2
+(22)
+where λreg is the weight decay coefficient.
+3.6.2
+Optimization
+We use the AdamW optimizer [Loshchilov and Hutter, 2017] with:
+• Learning rate: 10−3 with cosine annealing
+• Weight decay: 10−4
+• Batch size: 32
+• Epochs: 50 with early stopping (patience = 10)
+9
+
+3.6.3
+Data Augmentation
+For sensor sequences, we apply:
+• Gaussian noise: N(0, 0.01)
+• Time warping with probability 0.1
+For thermal images:
+• Random horizontal flip
+• Random rotation (±10◦)
+• Color jitter (brightness, contrast)
+3.7
+Implementation Details
+The framework is implemented in PyTorch 2.0. Key architectural parameters:
+• LSTM hidden dimension: 128
+• Attention dimension: 64
+• ResNet backbone: ResNet-18 (pretrained)
+• Fusion hidden dimension: 256
+• Dropout rate: 0.3
+Training is performed on an NVIDIA A100 GPU. The sensor-only model trains in approx-
+imately 15 minutes, while the multimodal model requires 45 minutes due to thermal image
+processing.
+4
+Experiments
+This section describes the experimental setup, including the dataset, evaluation metrics, baseline
+comparisons, and ablation study design.
+4.1
+Dataset
+We evaluate our cascaded framework on a real-world industrial bearing monitoring dataset
+collected from a manufacturing facility.
+4.1.1
+Data Collection
+The dataset comprises multimodal observations from bearing test rigs instrumented with:
+• Sensor array: 8 heterogeneous sensors measuring temperature (NTC), particulate matter
+(PM10, PM2.5, PM1.0), humidity, and other environmental factors, sampled at 1 Hz.
+• Thermal camera: FLIR infrared camera capturing thermal images at 192 × 200 pixel
+resolution, capturing temperature distributions across the bearing housing.
+• Ground truth labels: Expert annotations classifying each observation into one of four
+states: Normal (0), Pre-Warning (1), Warning (2), and Failure (3).
+10
+
+Table 1: Dataset Statistics
+Property
+Value
+Total samples
+78,397
+Training samples
+66,242
+Validation samples
+12,155
+Number of sensors
+8
+Sequence length
+20 timesteps
+Thermal image size
+192 × 200
+Number of classes
+4
+Class distribution (training)
+Normal
+32,904 (49.7%)
+Pre-Warning
+7,823 (11.8%)
+Warning
+11,424 (17.2%)
+Failure
+14,091 (21.3%)
+Class imbalance ratio
+2.34:1
+4.1.2
+Dataset Statistics
+Table 1 summarizes the dataset properties.
+4.1.3
+Data Preprocessing
+Sensor sequences are normalized using z-score standardization:
+ˆxt,d = xt,d −µd
+σd
+(23)
+where µd and σd are the mean and standard deviation of sensor d computed on the training set.
+Thermal images are normalized to [0, 1] and resized to 192 × 200 pixels. We apply min-max
+normalization based on the thermal camera’s operating range (20°C–120°C).
+4.1.4
+Train/Validation Split
+We use an 85/15 train/validation split stratified by class label to preserve class proportions. No
+temporal leakage is introduced as samples are shuffled post-collection.
+4.2
+Evaluation Metrics
+We evaluate model performance using standard classification metrics:
+• Accuracy: Overall proportion of correct predictions.
+• Precision:
+TP
+TP+FP, averaged across classes (macro).
+• Recall:
+TP
+TP+FN, averaged across classes (macro).
+• F1-score: Harmonic mean of precision and recall, 2 · Precision·Recall
+Precision+Recall.
+• AUROC: Area Under the Receiver Operating Characteristic curve, computed using one-
+vs-rest strategy and macro-averaged.
+For multiclass classification, we report macro-averaged metrics to treat all classes equally
+regardless of prevalence.
+11
+
+4.3
+Baseline and Ablation Variants
+We compare the following model variants:
+1. Stage 1: Sensor Only — LSTM encoder with temporal attention using only sensor
+sequences. This is our proposed detection model.
+2. Stage 2: Thermal Only — CNN encoder with spatial attention using only thermal
+images. This validates that thermal images alone are insufficient for detection.
+3. Full Multimodal — End-to-end fusion of sensor and thermal features using cross-modal
+attention and gated fusion. This represents the naive multimodal approach.
+4. Late Fusion — Separate sensor and thermal classifiers with prediction averaging. This
+tests whether late fusion avoids the performance degradation of early fusion.
+5. No Attention — Multimodal model without attention mechanisms (simple concatenation
+fusion). This ablates the contribution of attention.
+4.4
+Explainability Evaluation
+For the explainability pipeline, we evaluate:
+• SHAP consistency: Sensor rankings should align with domain knowledge (temperature
+sensors most important for bearing monitoring).
+• Temporal attention patterns: Attention should focus on recent time steps where degra-
+dation signals are strongest.
+• Spatial attention localization: Heatmaps should highlight bearing regions rather than
+background areas.
+• Gate weight analysis: Diagnostic insight into modality weighting behavior.
+4.5
+Experimental Protocol
+All experiments follow the same protocol:
+1. Initialize model with specified architecture and random seed.
+2. Train for up to 50 epochs with early stopping (patience = 10, monitoring validation loss).
+3. Evaluate on the held-out validation set.
+4. Report metrics averaged over 5 random seeds (42, 123, 456, 789, 1024) with standard
+deviations.
+For the sensor-only model, we also run single-seed experiments to report point estimates, as
+variance is minimal.
+12
+
+4.6
+Hardware and Software
+Experiments are conducted on:
+• GPU: NVIDIA A100 (40GB)
+• CPU: AMD EPYC 7443 (24-core)
+• RAM: 264 GB
+• Framework: PyTorch 2.0, CUDA 11.8
+• XAI libraries: SHAP 0.42, Captum 0.6
+Training times:
+• Sensor-only: ∼15 minutes
+• Thermal-only: ∼30 minutes
+• Full multimodal: ∼45 minutes
+5
+Results
+This section presents our experimental findings, including main performance comparisons, ab-
+lation study results, and explainability analysis.
+5.1
+Main Results
+Table 2 compares the sensor-only detection model (Stage 1) with the multimodal fusion baseline.
+Table 2: Main Results: Cascaded Framework vs. Multimodal Fusion
+Model
+Accuracy
+Precision
+Recall
+F1
+AUROC
+Stage 1: Sensor Detection
+0.9343
+0.9290
+0.9338
+0.9308
+0.9700
+Multimodal Fusion (Baseline)
+0.8479 ±0.0255
+0.8509 ±0.0250
+0.8425 ±0.0248
+0.8479 ±0.0255
+0.8649 ±0.0260
+Key Finding: The sensor-only model achieves 93.08% F1-score, outperforming multi-
+modal fusion by 8.29 percentage points. This result challenges the common assumption that
+multimodal data always improves performance.
+The sensor-only model also achieves:
+• 93.43% accuracy (vs. 84.79% for multimodal)
+• 97.00% AUROC (vs. 86.49% for multimodal)
+• Lower variance (single model performance is stable)
+5.2
+Ablation Study
+Table 3 presents the complete ablation study comparing all model variants.
+13
+
+Table 3: Ablation Study: Validating the Cascaded Architecture Design
+Variant
+Accuracy
+Precision
+Recall
+F1
+AUROC
+Stage 1: Sensor Only
+0.9343
+0.9290
+0.9338
+0.9308
+0.9700
+Late Fusion
+0.9243
+0.9166
+0.9221
+0.9188
+0.9600
+No Attention
+0.9173
+0.9123
+0.9086
+0.9101
+0.9500
+Full Multimodal
+0.8479 ±0.0255
+0.8509 ±0.0250
+0.8425 ±0.0248
+0.8479 ±0.0255
+0.8649 ±0.0260
+Stage 2: Thermal Only
+0.2879
+0.2879
+0.2879
+0.2879
+0.5200
+5.2.1
+Analysis of Ablation Results
+Sensor vs. Thermal: The thermal-only model achieves only 28.79% F1, barely above random
+chance for a 4-class problem (25%). This validates that thermal images alone cannot reliably
+detect equipment state changes, justifying their use for localization rather than detection in our
+cascaded framework.
+Late vs.
+Early Fusion: Late fusion (91.88% F1) outperforms full multimodal fusion
+(84.79% F1), suggesting that independent processing of modalities is preferable to complex
+feature-level fusion.
+Attention Contribution: The “No Attention” variant achieves 91.01% F1, indicating that
+attention mechanisms contribute approximately 0.87 percentage points to late fusion perfor-
+mance.
+Ranking: Sensor Only > Late Fusion > No Attention > Full Multimodal ≫Thermal Only
+Figure 2 visualizes the ablation comparison.
+Figure 2: Ablation comparison across model variants. Sensor-only achieves the highest perfor-
+mance, while adding thermal features via naive fusion degrades results.
+5.3
+Explainability Analysis
+5.3.1
+SHAP Sensor Importance
+Figure 3 shows the SHAP-based sensor importance ranking for the sensor-only model.
+The ranking reveals:
+14
+
+Figure 3: SHAP sensor importance ranking.
+NTC temperature sensor contributes most to
+predictions, aligning with domain knowledge that bearing temperature is a primary indicator of
+degradation.
+1. NTC (Temperature): Highest importance (0.28), confirming that bearing temperature
+is the most diagnostic signal.
+2. PM10 (Particulates): Second highest (0.21), indicating that particulate emissions cor-
+relate with wear.
+3. PM1.0: Third (0.15), finer particulates also contribute.
+4. CT2: Fourth (0.15), environmental factors provide context.
+5. Other sensors: Lower but non-zero contributions.
+This ranking aligns with domain expertise: bearing degradation manifests primarily through
+temperature rise, followed by increased particulate emissions from mechanical wear.
+5.3.2
+Temporal Attention Patterns
+Figure 4 shows the temporal attention weights across the 20-timestep sequences.
+Figure 4: Temporal attention weights across time steps. Later time steps receive higher attention
+(0.049 →0.051), indicating that recent observations are most predictive of equipment state.
+Key observations:
+15
+
+• Attention weights increase monotonically from 0.0496 (t=1) to 0.0508 (t=20).
+• The model focuses on recent observations, consistent with the intuition that current sensor
+readings are most informative about current equipment state.
+• The gradual increase (rather than sharp focus on the final timestep) suggests that degra-
+dation patterns span multiple time steps.
+5.3.3
+Spatial Attention for Thermal Localization
+Figure 5 shows spatial attention heatmaps overlaid on thermal images for different equipment
+states.
+Figure 5: Spatial attention heatmaps on thermal images. The model focuses on bearing regions
+(high attention) while ignoring background areas, providing localization for maintenance crews.
+The spatial attention successfully:
+• Highlights bearing housing regions in warning/failure cases.
+• Identifies thermal hotspots corresponding to friction points.
+• Provides actionable localization: maintenance crews can focus inspection on highlighted
+areas.
+5.3.4
+Gate Weight Analysis: Modality Bias
+Figure 6 analyzes the gated fusion mechanism in the multimodal baseline.
+Critical Finding: The multimodal model exhibits “modality bias,” assigning 65–87% weight
+to thermal features even though:
+• Thermal-only achieves only 28.79% F1
+• Sensor-only achieves 93.08% F1
+This counter-intuitive weighting explains why fusion hurts performance: the model over-relies
+on the weaker modality. This diagnostic insight:
+1. Validates the importance of XAI for auditing multimodal architectures.
+2. Explains the 8.3 percentage point performance drop.
+3. Justifies our cascaded design that avoids problematic fusion.
+16
+
+Figure 6: Gate weight analysis revealing modality bias. The fusion model assigns 65–87% weight
+to thermal features despite their poor predictive power (28.79% F1), explaining the performance
+degradation.
+NormalPre-Warning
+Warning Failure
+Predicted Label
+Normal
+Pre-Warning
+Warning
+Failure
+True Label
+0.94
+0.05
+0.00
+0.00
+0.29
+0.67
+0.04
+0.00
+0.00
+0.10
+0.85
+0.05
+0.00
+0.00
+0.08
+0.92
+0.0
+0.2
+0.4
+0.6
+0.8
+Figure 7: Confusion matrix for the sensor-only model (Stage 1).
+The model achieves high
+accuracy across all four classes with minimal confusion between Normal and Failure states.
+5.4
+Confusion Matrix Analysis
+Figure 7 shows the confusion matrix for the sensor-only model.
+The confusion matrix reveals:
+• Strong diagonal indicating high per-class accuracy.
+• Most confusion occurs between adjacent states (Normal/Pre-Warning, Warning/Failure).
+• Critical separation between Normal and Failure is maintained.
+5.5
+Summary of Key Findings
+1. Sensor-only detection achieves 93.08% F1, the highest among all variants.
+2. Multimodal fusion degrades performance by 8.29 percentage points.
+17
+
+3. Thermal images are unsuitable for detection (28.79% F1) but valuable for localiza-
+tion.
+4. Gate weight analysis reveals modality bias explaining fusion failure.
+5. SHAP rankings align with domain knowledge: temperature and particulates are
+most diagnostic.
+6. Temporal attention focuses on recent observations, validating model behavior.
+7. Spatial attention localizes thermal faults, enabling actionable maintenance guidance.
+6
+Discussion
+This section analyzes the implications of our findings, discusses the advantages of cascaded
+architectures, and addresses limitations and future directions.
+6.1
+Why Sensor-Only Outperforms Multimodal Fusion
+Our most significant finding—that sensor-only detection (93.08% F1) outperforms multimodal
+fusion (84.79% F1)—challenges the prevailing assumption that more modalities improve perfor-
+mance. We attribute this to several factors:
+6.1.1
+Modality Informativeness Mismatch
+Sensor time-series contain direct measurements of bearing operating conditions (temperature,
+vibration proxy via particulates), while thermal images capture surface temperature distributions
+that are:
+• Delayed: Thermal changes lag behind internal degradation.
+• Indirect: Surface temperatures may not reflect internal bearing conditions.
+• Ambiguous: Similar thermal patterns can arise from different fault types or normal
+operation at high loads.
+This fundamental informativeness mismatch means thermal features add noise rather than
+signal.
+6.1.2
+Modality Bias in Fusion
+Our gate weight analysis reveals that fusion mechanisms assign 65–87% weight to thermal fea-
+tures despite their poor standalone performance.
+This “modality bias” phenomenon occurs
+because:
+• Thermal features have higher variance, which gradient-based optimization may interpret
+as more informative.
+• Cross-modal attention may focus on visually distinctive thermal patterns even when they
+lack predictive value.
+• The fusion mechanism lacks explicit guidance on modality quality.
+This finding emphasizes the importance of explainability tools for diagnosing architectural
+failures before deployment.
+18
+
+6.1.3
+Dimensionality and Optimization
+Thermal images (192×200 pixels) introduce significantly more parameters than sensor sequences
+(20 timesteps × 8 sensors), making optimization more challenging and prone to overfitting.
+6.2
+When to Use Cascaded vs. End-to-End Architectures
+Our results suggest guidelines for choosing between cascaded and end-to-end multimodal archi-
+tectures:
+Prefer cascaded when:
+• Modalities have vastly different predictive power for the primary task.
+• One modality excels at detection while another excels at localization/explanation.
+• Interpretability is critical (cascaded stages have clear roles).
+• Computational efficiency matters (secondary stage can be triggered on-demand).
+Prefer end-to-end fusion when:
+• Modalities have complementary information of similar quality.
+• Tasks benefit from fine-grained cross-modal interactions.
+• Sufficient data exists to train complex fusion mechanisms.
+6.3
+Explainability for Industrial Deployment
+Our explainability pipeline addresses key requirements for industrial AI adoption:
+6.3.1
+Actionable Insights
+Each XAI component provides actionable information:
+• SHAP: Which sensors to prioritize in maintenance checks.
+• Temporal attention: When degradation signals are strongest.
+• Spatial attention: Where to focus physical inspection.
+• Gate weights: Architecture diagnostic for model developers.
+6.3.2
+Trust Calibration
+Engineers can calibrate trust by verifying that:
+• SHAP rankings align with physical understanding (temperature is important).
+• Attention patterns are plausible (recent observations matter more).
+• Spatial heatmaps highlight meaningful equipment regions.
+When explanations contradict domain knowledge, they serve as warnings that the model
+may be unreliable.
+19
+
+6.3.3
+Regulatory Compliance
+Our framework aligns with emerging AI regulations:
+• IEEE 7000 series: Trustworthiness through transparency.
+• EU AI Act: High-risk systems require human oversight and explainability.
+• ISO/IEC 23894: Risk management for AI applications.
+6.4
+Modality Bias as a Diagnostic Tool
+Our discovery of modality bias through gate weight analysis has broader implications:
+1. Pre-deployment auditing: Gate weights can reveal problematic weighting before models
+are deployed.
+2. Architecture design: Observing bias suggests exploring alternatives (cascaded, con-
+strained fusion).
+3. Data quality assessment: Persistent bias may indicate that a modality adds little value.
+This diagnostic capability demonstrates why XAI tools are essential not only for end-users
+but also for model developers during the training phase.
+6.5
+Limitations
+Our study has several limitations:
+6.5.1
+Dataset Specificity
+Results are based on a single industrial dataset. While representative of bearing monitoring,
+generalization to other equipment types requires validation.
+6.5.2
+Thermal Image Resolution and Detection Limitations
+The failure of thermal-only detection (28.79% F1) is likely tied to the specific resolution (192×200
+pixels) and sensor placement used in our study.
+At this resolution, fine thermal gradients
+indicative of incipient bearing faults may be below the spatial discrimination threshold of the
+imaging system. Higher-resolution thermography (640 × 480 or above) with optimized sensor
+positioning might yield different detection results.
+However, we emphasize that our experimental setup reflects realistic IoT deployment con-
+straints. Low-resolution thermal sensors are significantly more cost-effective and are typical for
+widespread industrial monitoring installations where hundreds of bearings require simultaneous
+observation. The 192×200 resolution represents a practical trade-off between coverage and cost
+that many manufacturers face. Our finding that such sensors are unsuitable for detection but
+valuable for localization provides actionable guidance for system architects designing multimodal
+monitoring pipelines.
+6.5.3
+Static Fusion Comparison
+We compare against standard fusion approaches. More sophisticated methods designed to handle
+modality imbalance might mitigate the observed bias:
+20
+
+• Modality Dropout [Neverova et al., 2016]: Randomly dropping entire modalities during
+training forces the network to develop robust representations that do not over-rely on any
+single input stream. This technique has shown promise in video understanding but requires
+careful tuning of dropout rates per modality.
+• Gradient Modulation [Wang et al., 2020]: Dynamically scaling gradients based on per-
+modality learning progress can prevent stronger modalities from dominating.
+Variants
+include OGM-GE (gradient equilibrium) which explicitly balances modality contributions
+during backpropagation.
+While these techniques represent promising directions, they introduce significant computa-
+tional overhead and hyperparameter complexity. Given the strength of our sensor-only results
+(93.08% F1), we argue that the cascaded architecture provides a simpler, more interpretable
+solution for scenarios where modality quality is highly imbalanced. Nevertheless, future work
+should evaluate whether gradient modulation can rescue multimodal fusion performance in this
+domain.
+6.5.4
+Offline Evaluation
+Experiments are conducted on static datasets. Real-time deployment may introduce additional
+challenges (distribution shift, streaming data).
+6.6
+Future Directions
+6.6.1
+Adaptive Fusion
+Future work could develop fusion mechanisms that explicitly account for modality quality, po-
+tentially using the gate weight diagnostic as a training signal.
+6.6.2
+Real-Time Deployment
+Deploying the cascaded framework in production would provide insights into practical challenges
+(latency, drift, operator acceptance).
+6.6.3
+Additional Modalities
+Exploring other modalities (vibration waveforms, acoustic emission) within the cascaded frame-
+work could identify complementary detection-localization pairs.
+6.6.4
+Transfer Learning
+Investigating whether the cascaded architecture transfers to other industrial domains (motors,
+compressors, turbines) would demonstrate broader applicability.
+6.6.5
+Improved Localization
+Combining spatial attention with object detection could provide structured outputs (“bearing 3,
+outer race”) rather than heatmaps.
+7
+Conclusion
+This paper introduces a Cascaded Anomaly Detection framework for trustworthy industrial
+equipment monitoring.
+Through extensive experiments on a real-world bearing monitoring
+dataset, we demonstrate that:
+21
+
+1. Sensor-only detection outperforms multimodal fusion (93.08% vs. 84.79% F1),
+challenging the assumption that more modalities improve performance.
+2. Cascaded architectures effectively separate detection and localization, leverag-
+ing each modality for its strength: sensors for high-accuracy anomaly detection, thermal
+imaging for spatial fault localization.
+3. Gate weight analysis reveals modality bias, where fusion mechanisms paradoxically
+over-weight weaker modalities. This diagnostic insight validates the critical role of explain-
+able AI in auditing multimodal systems.
+4. A comprehensive explainability pipeline integrating SHAP, temporal attention, spa-
+tial attention, and gate weight analysis provides full auditability for industrial deployment.
+Our key contribution is demonstrating that thoughtful architectural design—informed by
+modality-specific capabilities—can outperform naive end-to-end fusion. The cascaded frame-
+work achieves state-of-the-art detection accuracy while providing actionable explanations that
+maintenance engineers can trust and act upon.
+The discovery of modality bias through gate weight analysis has implications beyond our
+specific application. It demonstrates that XAI tools are essential not only for end-users seeking
+to understand predictions but also for model developers diagnosing architectural failures during
+training.
+Future work will explore adaptive fusion mechanisms that explicitly account for modality
+quality, real-time deployment challenges, and transfer to other industrial domains. We believe
+the cascaded design philosophy—detect first, then explain and localize—offers a principled ap-
+proach for multimodal industrial AI that prioritizes both performance and interpretability.
+Reproducibility
+Code and trained models will be made available upon publication. The dataset remains pro-
+prietary due to industrial confidentiality but we provide detailed dataset statistics to enable
+comparison with similar benchmarks.
+Acknowledgments
+[To be added upon submission]
+References
+Amina Adadi and Mohammed Berrada. Peeking inside the black-box: A survey on explainable
+artificial intelligence (XAI). IEEE Access, 6:52138–52160, 2018.
+John Arevalo, Thamar Solorio, Manuel Montes-y Gómez, and Fabio A González. Gated multi-
+modal units for information fusion. In International Conference on Learning Representations
+Workshop, 2017.
+Alejandro Barredo Arrieta, Natalia Díaz-Rodríguez, Javier Del Ser, Adrien Bennetot, Siham
+Tabik, Alberto Barbado, Salvador Garcia, Sergio Gil-Lopez, Daniel Molina, Richard Ben-
+jamins, et al. Explainable artificial intelligence (XAI): Concepts, taxonomies, opportunities
+and challenges toward responsible AI. Information Fusion, 58:82–115, 2020.
+IEEE Standards Association.
+IEEE standard model process for addressing ethical concerns
+during system design, 2021. IEEE 7000-2021.
+22
+
+Jimmy Ba, Volodymyr Mnih, and Koray Kavukcuoglu. Multiple object recognition with visual
+attention. In International Conference on Learning Representations, 2015.
+S Bagavathiappan, BB Lahiri, T Saravanan, John Philip, and T Jayakumar. Infrared thermog-
+raphy for condition monitoring—a review. Infrared Physics & Technology, 60:35–55, 2013.
+Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio. Neural machine translation by jointly
+learning to align and translate. In International Conference on Learning Representations, 2015.
+Tadas Baltrušaitis, Chaitanya Ahuja, and Louis-Philippe Morency. Multimodal machine learn-
+ing: A survey and taxonomy. IEEE Transactions on Pattern Analysis and Machine Intelli-
+gence, 41(2):423–443, 2019.
+Thyago P Carvalho, Fabrízzio AAMN Soares, Roberto Vita, Roberto da P Francisco, João P
+Basto, and Symone GS Alcalá. A systematic literature review of machine learning methods
+applied to predictive maintenance. Computers & Industrial Engineering, 137:106024, 2019.
+Zhengping Che, Sanjay Purushotham, Kyunghyun Cho, David Sontag, and Yan Liu. Recurrent
+neural networks for multivariate time series with missing values. Scientific Reports, 8(1):6085,
+2018.
+Zhiqiang Chen, Chuan Li, and Rene-Vinicio Sanchez. Deep learning based bearing fault diagnosis
+using 1d-cnn and lstm. IEEE Access, 8:17438–17449, 2020.
+Jeffrey Donahue, Lisa Anne Hendricks, Sergio Guadarrama, Marcus Rohrbach, Subhashini Venu-
+gopalan, Kate Saenko, and Trevor Darrell. Long-term recurrent convolutional networks for
+visual recognition and description. In IEEE Conference on Computer Vision and Pattern
+Recognition, pages 2625–2634, 2015.
+European Commission. Proposal for a regulation laying down harmonised rules on artificial
+intelligence (artificial intelligence act), 2021. COM(2021) 206 final.
+Wei Fan, Shun Zheng, Xiaowei Pi, Shanshan Wang, Dong Xu, and Bin Wu. Multi-horizon time
+series forecasting with temporal attention learning. Knowledge-Based Systems, 182:104791,
+2019.
+Rikke Gade and Thomas B Moeslund. Thermal cameras and applications: A survey. Machine
+Vision and Applications, 25(1):245–262, 2014.
+Jing Gao, Peng Li, Zhikui Chen, and Jianing Zhang. A survey on deep learning for multimodal
+data fusion. Neural Computation, 32(5):829–864, 2020.
+Adam Glowacz and Zygfryd Glowacz. Diagnosis of the three-phase induction motor using ther-
+mal imaging. Infrared Physics & Technology, 81:7–16, 2017.
+John Grezmak, Jianjing Zhang, Peng Wang, Kenneth A Loparo, and Robert X Gao. Inter-
+pretable convolutional neural network through layer-wise relevance propagation for machine
+fault diagnosis. IEEE Sensors Journal, 20(6):3172–3181, 2019.
+Songqiao Han, Xiyang Hu, Hailiang Huang, Minqing Jiang, and Yue Zhao. Out-of-distribution
+detection for reliable deep learning. arXiv preprint arXiv:1909.09020, 2019.
+Devamanyu Hazarika, Roger Zimmermann, and Soujanya Poria. MISA: Modality-invariant and-
+specific representations for multimodal sentiment analysis. In ACM International Conference
+on Multimedia, pages 1122–1131, 2020.
+23
+
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image
+recognition. In IEEE Conference on Computer Vision and Pattern Recognition, pages 770–778,
+2016.
+Sepp Hochreiter and J"urgen Schmidhuber. Long short-term memory. Neural Computation, 9
+(8):1735–1780, 1997.
+Bahrudin Hrnjica and Selver Softic. Explainable ai in manufacturing: A predictive maintenance
+case study. IFAC-PapersOnLine, 53(2):10618–10623, 2020.
+Kyle Hundman, Valentino Constantinou, Christopher Laporte, Ian Colwell, and Tom Soder-
+strom. Detecting spacecraft anomalies using lstms and nonparametric dynamic thresholding.
+In ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pages
+387–395, 2018.
+Sarthak Jain and Byron C Wallace. Attention is not explanation. In Conference of the North
+American Chapter of the Association for Computational Linguistics, pages 3543–3556, 2019.
+Olivier Janssens, Viktor Slavkovikj, Bram Vervisch, Kurt Stockman, Mia Loccufier, Steven Ver-
+stockt, Rik Van de Walle, and Sofie Van Hoecke. Thermal imaging and vibration-based mul-
+tisensor fault detection for rotating machinery. IEEE Transactions on Industrial Informatics,
+12(4):1348–1355, 2016.
+Andrew KS Jardine, Daming Lin, and Dragan Banjevic. A review on machinery diagnostics
+and prognostics implementing condition-based maintenance. Mechanical Systems and Signal
+Processing, 20(7):1483–1510, 2006.
+Feng Jia, Yaguo Lei, Jing Lin, Xin Zhou, and Na Lu. Deep neural networks: A promising tool
+for fault characteristic mining and intelligent diagnosis of rotating machinery with massive
+data. Mechanical Systems and Signal Processing, 72:303–315, 2016.
+Andrej Karpathy, George Toderici, Sanketh Shetty, Thomas Leung, Rahul Sukthankar, and
+Li Fei-Fei.
+Large-scale video classification with convolutional neural networks.
+In IEEE
+Conference on Computer Vision and Pattern Recognition, pages 1725–1732, 2014.
+Roman Klyuev et al. Integrated video and acoustic emission data fusion for intelligent decision
+making in material surface inspection system. Mathematics, 10(16):2977, 2022.
+Vaishnavi V Kulkarni, Vishwanath R Hulipalled, Mayuri Kundu, Jay B Simha, and Shinu Abhi.
+Thermal image-based fault detection using machine learning and deep learning in industrial
+machines: Issues-challenges and emerging trends.
+In Fourth International Conference on
+Image Processing and Capsule Networks. Springer, 2023.
+Yann LeCun, Yoshua Bengio, and Geoffrey Hinton. Deep learning. Nature, 521(7553):436–444,
+2015.
+Jay Lee, Fangji Wu, Wenyu Zhao, Masoud Ghaffari, Linxia Liao, and David Siegel. Prognostics
+and health management design for rotary machinery systems—reviews, methodology and
+applications. Mechanical Systems and Signal Processing, 42(1-2):314–334, 2014.
+Yaguo Lei, Bin Yang, Xinwei Jiang, Feng Jia, Naipeng Li, and Asoke K Nandi. Applications
+of machine learning to machine fault diagnosis: A review and roadmap. Mechanical Systems
+and Signal Processing, 138:106587, 2020.
+Christian Lessmeier, James Kuria Kimotho, Detmar Zimmer, and Walter Sextro. Condition
+monitoring of bearing damage in electromechanical drive systems by using motor current
+signals of electric motors: A benchmark data set for data-driven classification. In European
+Conference of the PHM Society, volume 3, 2016.
+24
+
+Bo Li, Peng Qi, Bo Liu, Shuai Di, Jingen Liu, Jian Pei, Jinfeng Yi, and Bowen Zhou. Trustworthy
+ai: From principles to practices. ACM Computing Surveys, 55(9):1–46, 2023.
+Zachary C Lipton, John Berkowitz, and Charles Elkan. A critical review of recurrent neural
+networks for sequence learning. arXiv preprint arXiv:1506.00019, 2015.
+Xue Liu, Shuxia Wang, and Weiming Li. Sensor-based fault diagnosis with interpretable machine
+learning. IEEE Transactions on Instrumentation and Measurement, 70:1–12, 2021.
+Ilya Loshchilov and Frank Hutter.
+Decoupled weight decay regularization.
+arXiv preprint
+arXiv:1711.05101, 2017.
+Jiasen Lu, Dhruv Batra, Devi Parikh, and Stefan Lee. ViLBERT: Pretraining task-agnostic vi-
+siolinguistic representations for vision-and-language tasks. In Advances in Neural Information
+Processing Systems, volume 32, 2019.
+Scott M Lundberg and Su-In Lee. A unified approach to interpreting model predictions. In
+Advances in Neural Information Processing Systems, volume 30, 2017.
+Pankaj Malhotra, Lovekesh Vig, Gautam Shroff, and Puneet Agarwal. Long short term memory
+networks for anomaly detection in time series. In European Symposium on Artificial Neural
+Networks, pages 89–94, 2015.
+R. Keith Mobley. An Introduction to Predictive Maintenance. Butterworth-Heinemann, 2002.
+Patrick Nectoux, Rafael Gouriveau, Kamal Medjaher, Emmanuel Ramasso, Brigitte Chebel-
+Morello, Noureddine Zerhouni, and Christophe Varnier.
+PRONOSTIA: An experimental
+platform for bearings accelerated degradation tests. In IEEE International Conference on
+Prognostics and Health Management, pages 1–8, 2012.
+Natalia Neverova, Christian Wolf, Graham Taylor, and Florian Nebout. ModDrop: Adaptive
+multi-modal gesture recognition. IEEE Transactions on Pattern Analysis and Machine Intel-
+ligence, 38(8):1692–1706, 2016.
+Jiquan Ngiam, Aditya Khosla, Mingyu Kim, Juhan Nam, Honglak Lee, and Andrew Y Ng.
+Multimodal deep learning. In International Conference on Machine Learning, pages 689–696,
+2011.
+Yao Qin, Dongjin Song, Haifeng Chen, Wei Cheng, Guofei Jiang, and Garrison Cottrell. A dual-
+stage attention-based recurrent neural network for time series prediction. In International
+Joint Conference on Artificial Intelligence, pages 2627–2633, 2017.
+Alvin Rajkomar, Eyal Oren, Kai Chen, Andrew M Dai, Nissan Hajaj, Michaela Hardt, Peter J
+Liu, Xiaobing Liu, Jake Marcus, Mimi Sun, et al. Scalable and accurate deep learning with
+electronic health records. npj Digital Medicine, 1(1):18, 2018.
+Dhanesh Ramachandram and Graham W Taylor. Deep multimodal learning: A survey on recent
+advances and trends. IEEE Signal Processing Magazine, 34(6):96–108, 2017.
+Marco Tulio Ribeiro, Sameer Singh, and Carlos Guestrin. “Why Should I Trust You?”: Explain-
+ing the predictions of any classifier. In ACM SIGKDD International Conference on Knowledge
+Discovery and Data Mining, pages 1135–1144, 2016.
+Cynthia Rudin. Stop explaining black box machine learning models for high stakes decisions
+and use interpretable models instead. Nature Machine Intelligence, 1(5):206–215, 2019.
+25
+
+Ramprasaath R Selvaraju, Michael Cogswell, Abhishek Das, Ramakrishna Vedantam, Devi
+Parikh, and Dhruv Batra. Grad-CAM: Visual explanations from deep networks via gradient-
+based localization. In IEEE International Conference on Computer Vision, pages 618–626,
+2017.
+Shun-Yao Shih, Fan-Keng Sun, and Hung-yi Lee. Temporal pattern attention for multivariate
+time series forecasting. In Machine Learning, volume 108, pages 1421–1441. Springer, 2019.
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image
+recognition. arXiv preprint arXiv:1409.1556, 2014.
+Karen Simonyan, Andrea Vedaldi, and Andrew Zisserman. Deep inside convolutional networks:
+Visualising image classification models and saliency maps. arXiv preprint arXiv:1312.6034,
+2013.
+Huan Song, Deepta Rajan, Jayaraman J Thiagarajan, and Andreas Spanias. Attend and diag-
+nose: Clinical time series analysis using attention models. In AAAI Conference on Artificial
+Intelligence, volume 32, 2018.
+Nitish Srivastava and Ruslan Salakhutdinov. Multimodal learning with deep boltzmann ma-
+chines. In Advances in Neural Information Processing Systems, volume 25, 2012.
+Mukund Sundararajan, Ankur Taly, and Qiqi Yan. Axiomatic attribution for deep networks. In
+International Conference on Machine Learning, pages 3319–3328, 2017.
+Hao Tan and Mohit Bansal. LXMERT: Learning cross-modality encoder representations from
+transformers. In Conference on Empirical Methods in Natural Language Processing, pages
+5100–5111, 2019.
+Yao-Hung Hubert Tsai, Shaojie Bai, Prasanna Thattai, Florian Kolber, Louis-Philippe Morency,
+and Ruslan Salakhutdinov. Multimodal transformer for unaligned multimodal language se-
+quences. In Annual Meeting of the Association for Computational Linguistics, pages 6558–
+6569, 2019.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Infor-
+mation Processing Systems, volume 30, 2017.
+Michael Vollmer and Klaus-Peter M"ollmann. Infrared Thermal Imaging: Fundamentals, Re-
+search and Applications. John Wiley & Sons, 2017.
+Fei Wang, Mengqing Jiang, Chen Qian, Shuo Yang, Cheng Li, Honggang Zhang, Xiaogang Wang,
+and Xiaoou Tang. Residual attention network for image classification. In IEEE Conference
+on Computer Vision and Pattern Recognition, pages 3156–3164, 2017.
+Jinjiang Wang, Yulin Ma, Laibin Zhang, Robert X Gao, and Dazhong Wu.
+Deep learning
+for smart manufacturing: Methods and applications. Journal of Manufacturing Systems, 48:
+144–156, 2018.
+Weiyao Wang, Du Tran, and Matt Feiszli.
+What makes training multi-modal classification
+networks hard?
+In IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+pages 12695–12705, 2020.
+Sarah Wiegreffe and Yuval Pinter. Attention is not not explanation. In Conference on Empirical
+Methods in Natural Language Processing, pages 11–20, 2019.
+26
+
+Sanghyun Woo, Jongchan Park, Joon-Young Lee, and In So Kweon. CBAM: Convolutional
+block attention module. In European Conference on Computer Vision, pages 3–19, 2018.
+Kelvin Xu, Jimmy Ba, Ryan Kiros, Kyunghyun Cho, Aaron Courville, Ruslan Salakhudinov,
+Rich Zemel, and Yoshua Bengio. Show, attend and tell: Neural image caption generation with
+visual attention. In International Conference on Machine Learning, pages 2048–2057, 2015.
+Guang Yang, Qinghao Ye, and Jun Xia. Unbox the black-box for the medical explainable ai
+via multi-modal and multi-centre data fusion: A mini-review, two showcases and beyond.
+Information Fusion, 77:29–52, 2022.
+Yucheng Yuan, Guijun Ma, Cheng Cheng, Jingyi Zhou, and Dinghua Zhang. A multimodal
+approach for bearing fault diagnosis using spectrograms and numerical features. IEEE Access,
+7:117902–117913, 2019.
+Joe Yue-Hei Ng, Matthew Hausknecht, Sudheendra Vijayanarasimhan, Oriol Vinyals, Rajat
+Monga, and George Toderici. Beyond short snippets: Deep networks for video classification.
+In IEEE Conference on Computer Vision and Pattern Recognition, pages 4694–4702, 2015.
+Chao Zhang, Zichao Yang, Xiaodong He, and Li Deng. Multimodal intelligence: Representation
+learning, information fusion, and applications. IEEE Journal of Selected Topics in Signal
+Processing, 14(3):478–493, 2020.
+Shen Zhang, Shibo Zhang, Bingnan Wang, and Thomas G Habetler. Deep learning algorithms
+for bearing fault diagnostics—a comprehensive review. IEEE Access, 8:29857–29881, 2019.
+Wei Zhang, Gaoliang Peng, Chuanhao Li, Yuanhang Chen, and Zhujun Zhang. A new deep
+learning model for fault diagnosis with good anti-noise and domain adaptation ability on raw
+vibration signals. Sensors, 17(2):425, 2017.
+Rui Zhao, Ruqiang Yan, Zhenghua Chen, Kezhi Mao, Peng Wang, and Robert X Gao. Deep
+learning and its applications to machine health monitoring. Mechanical Systems and Signal
+Processing, 115:213–237, 2019.
+27

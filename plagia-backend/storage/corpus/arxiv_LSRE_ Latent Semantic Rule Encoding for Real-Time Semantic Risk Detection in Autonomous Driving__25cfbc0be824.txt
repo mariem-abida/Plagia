@@ -1,0 +1,972 @@
+LSRE: Latent Semantic Rule Encoding for Real-Time Semantic Risk
+Detection in Autonomous Driving
+Qian Cheng, Weitao Zhou, Cheng Jing, Nanshan Deng, Junze Wen, Zhaoyang Liu, Kun Jiang, Diange Yang
+Abstract— Real-world autonomous driving must adhere to
+complex human social rules that extend beyond legally codified
+traffic regulations. Many of these semantic constraints—such
+as yielding to emergency vehicles, complying with traffic of-
+ficers’ gestures, or stopping for school buses—are intuitive
+for humans yet difficult to encode explicitly. Although large
+vision–language models (VLMs) can interpret such semantics,
+their inference cost makes them impractical for real-time
+deployment. This work proposes LSRE, a Latent Semantic
+Rule Encoding framework that converts sparsely sampled VLM
+judgments into decision boundaries within the latent space of a
+recurrent world model. By encoding language-defined safety
+semantics into a lightweight latent classifier, LSRE enables
+real-time semantic risk assessment at 10 Hz without per-frame
+VLM queries. Experiments on six semantic-failure scenarios in
+CARLA demonstrate that LSRE attains semantic risk detection
+accuracy comparable to a large VLM baseline, while providing
+substantially earlier hazard anticipation and maintaining low
+computational latency. LSRE further generalizes to rarely seen
+semantic-similar test cases, indicating that language-guided la-
+tent classification offers an effective and deployable mechanism
+for semantic safety monitoring in autonomous driving.
+I. INTRODUCTION
+Autonomous driving in open-world environments requires
+more than accurate perception and robust control—it de-
+mands adherence to nuanced human social rules [1]. Many
+such semantics, including yielding to emergency vehicles,
+obeying traffic officers over traffic lights, or interpreting
+temporary construction-zone layouts, are intuitive for hu-
+mans yet difficult to encode as explicit rules [2]. These
+context-dependent constraints form a class of semantic safety
+requirements that conventional rule-based or geometric meth-
+ods cannot capture, but whose violations frequently lead to
+critical long-tail failures [3]. For example, human drivers
+coordinate through social cues and implicit norms beyond
+formal traffic regulations—autonomous vehicles strictly fol-
+lowing only traffic rules may struggle with human-like
+negotiation in complex traffic [4]. Similarly, while traffic-
+law encodings such as reachability or temporal logic cover
+structured interactions, they fall short in representing latent
+social semantics that emerge only through interactive context
+[5].
+Existing safety mechanisms primarily rely on traffic-rule
+logic, heuristic filtering, or reachability-based reasoning [6].
+While these methods are effective for geometric safety—
+such as maintaining lane boundaries, enforcing collision-
+Qian Cheng, Weitao Zhou, Cheng Jing, Nanshan Deng, Junze Wen,
+Zhaoyang Liu, Kun Jiang, and Diange Yang are with the School of Vehicle
+and Mobility, Tsinghua University.
+Corresponding to Weitao Zhou, Diange Yang (zhouwt@tsinghua.edu.cn,
+ydg@tsinghua.edu.cn)
+free trajectories, and ensuring kinematic feasibility—they
+fundamentally lack the ability to capture human-defined se-
+mantics that emerge from social context or temporary traffic
+configurations. Prior work on formal safety verification and
+reachability analysis [7] demonstrates strong guarantees for
+physical constraints, yet these approaches cannot express
+high-level obligations such as yielding to emergency vehicles
+or obeying traffic officers.
+Recent vision–language models (VLMs) offer a promising
+direction by providing rich high-level understanding of road
+semantics [8]. VLMs can identify nuanced traffic cues that
+are otherwise absent from explicit rule sets or HD maps
+[9]. However, direct per-frame VLM reasoning remains
+computationally prohibitive for real-time driving—typical
+inference times exceed 200–800 ms per frame [10]. Also,
+VLM outputs lack temporal consistency due to the absence
+of predictive structure. Consequently, current systems either
+ignore these semantic constraints or apply VLMs only in
+offline analysis pipelines, leaving a persistent gap between
+semantic understanding and deployable safety mechanisms
+in autonomous driving.
+To bridge this gap, we propose LSRE (Latent Semantic
+Rule Encoding), a framework that distills language-defined
+semantic safety rules into a lightweight classifier operating
+inside the latent space of a recurrent world model. LSRE
+queries a VLM sparsely during training to obtain semantic
+risk labels, then encodes these labels as decision boundaries
+in the latent dynamics space. During deployment, the latent
+classifier provides frame-level semantic risk predictions at
+10 Hz without per-frame VLM inference, enabling real-time
+enforcement of human-understandable social semantics.
+• Latent Semantic Rule Encoding: We propose LSRE,
+which distills language-defined semantic rules into deci-
+sion boundaries in the latent space of a recurrent world
+model, enabling real-time semantic safety assessment
+without per-frame VLM inference.
+• VLM-Supervised Latent Classifier with Temporal An-
+ticipation: We design a lightweight latent classifier
+trained under sparse VLM supervision and enhanced
+with short-horizon latent rollouts and hysteresis-based
+filtering. This combination provides both stable predic-
+tions and early hazard anticipation at millisecond-level
+latency.
+• Semantic-Failure Benchmark and Evaluation: We con-
+struct a CARLA benchmark with six semantic-failure
+scenario variants. LSRE matches VLM-level accuracy,
+detects hazards substantially earlier, and generalizes to
+semantic-similar but unseen scenes.
+arXiv:2512.24712v1 [cs.RO] 31 Dec 2025
+
+II. RELATED WORK
+A. Safety Constraints and Shields in Autonomous Driving
+Early autonomous driving systems relied mainly on hand-
+crafted rules and deterministic state machines to encode traf-
+fic laws and basic driving behaviors [11]. These approaches
+work in structured environments but fail in ambiguous or
+context-dependent scenarios. To obtain formal correctness,
+temporal-logic frameworks such as Linear Temporal Logic
+(LTL) and Signal Temporal Logic (STL) were introduced to
+specify and monitor safety constraints [12], [13], and later
+extended to driving-related planning tasks [5].
+Reachability analysis provided mathematically rigorous
+guarantees for collision avoidance. Hamilton–Jacobi (HJ)
+reachability computes forward reachable sets of unsafe
+states [14], and later extensions introduced efficient approxi-
+mations that support real-time reachability analysis in multi-
+agent interactive driving [15]. Control Barrier Functions
+(CBFs) were formalized into real-time enforceable safety
+constraints through quadratic program controllers for con-
+tinuous systems [16].
+Safe reinforcement learning introduced learning-based
+mechanisms to constrain policies during execution. Sur-
+veys highlight techniques such as constrained MDPs and
+safety critics that predict unsafe outcomes [17]. Shielding
+approaches [18] monitor the agent’s actions and override
+unsafe actions before execution.
+Although effective for preventing collisions or boundary
+violations, these methods rely on explicit constraints and
+remain unsuitable for ambiguous or socially defined semantic
+contexts [19]. Recent studies emphasize that many critical
+driving behaviors, such as yielding to emergency vehicles,
+prioritizing officers over traffic lights, or identifying hazards
+under occlusion, cannot be fully formalized using geometric
+rules or logical templates [1]. These limitations motivate our
+approach, which leverages high-level semantic supervision
+from VLMs to train a lightweight latent-space safety classi-
+fier.
+B. VLM-Based Risk Assessment and Driving Semantics
+Vision–language models (VLMs) such as CLIP [20],
+BLIP-2 [21], and GPT-4V [22] have recently shown strong
+capabilities in visual reasoning and semantic understanding.
+By aligning image and text representations, these models
+can interpret high-level scene semantics and contextual re-
+lationships beyond purely geometric features. Recent stud-
+ies have applied VLMs to autonomous driving for scene
+understanding, captioning, and decision explanation [23],
+[24], and further extended them to risk reasoning and intent
+recognition in interactive driving [25].
+However, direct use of VLMs in autonomous driving re-
+mains challenging due to high computational cost. Although
+model distillation and lightweight multimodal variants can
+partially mitigate these issues [26], [27], the resulting sys-
+tems still require large-scale inference and lack strict run-
+time guarantees [10]. Moreover, VLM reasoning is often
+conducted on isolated images, making it difficult to maintain
+temporal coherence or safety-critical consistency [28]. These
+limitations motivate us to explore how to retain the semantic
+understanding capabilities of VLMs while significantly im-
+proving runtime efficiency for real-time safety monitoring.
+C. World Models for Driving and Latent Monitoring
+World models aim to learn compact latent dynamics
+that capture environment transitions for imagination-based
+planning and decision making. Ha and Schmidhuber popu-
+larized a modern deep-learning formulation of world models
+by learning recurrent latent dynamics that support model-
+based reinforcement learning directly from pixels [29]. Later,
+the Dreamer series [30] improved stability, scalability, and
+performance by introducing stochastic latent representations
+and actor-critic learning in latent space. These approaches
+demonstrated strong data efficiency and generalization in
+continuous-control tasks.
+Recently,
+several
+driving
+frameworks
+have
+incorpo-
+rated world-model concepts. DriveDreamer [31] and Drive-
+World [32] use latent imagination to predict multi-modal
+driving behaviors and future risks. Such models enable
+representation learning that captures temporal context beyond
+single frames, forming a foundation for safety reasoning in
+latent space [33].
+However, existing methods mainly address geometric or
+stochastic risk, rather than high-level semantic safety. To
+address this, we propose a VLM-guided latent semantic
+risk estimator that transfers VLM-level understanding into
+a world-model latent space, enabling real-time semantic risk
+inference.
+III. PROBLEM FORMULATION
+We consider an autonomous driving system with policy
+π that generates control actions at = π(ot) from sensor
+observations ot. Beyond geometric safety, the vehicle must
+comply with semantic safety constraints—context-dependent
+human rules that dictate whether a state is socially acceptable
+or unsafe. Examples include yielding to emergency vehicles,
+following directions in temporary construction-zone, or stop-
+ping for a stopped school bus. These semantics are intuitive
+for humans but difficult to encode as explicit rules or logic.
+Let yt ∈{0, 1} denote whether the driving state at time t
+violates a semantic constraint, and let rt ∈[0, 1] denote the
+probability of such a violation. The objective is to learn a
+real-time semantic risk function
+rt = gϕ(ot),
+(1)
+which predicts whether the current observation is semanti-
+cally unsafe.
+IV. METHOD
+A. System Overview
+LSRE aims to detect semantic safety violations in real
+time by encoding language-defined rules into a latent space
+learned by a recurrent world model. The core idea is to
+use a VLM only as an offline semantic supervisor—to
+
+Fig. 1: Overall pipeline of LSRE. A pretrained vision–language model (VLM) provides sparse semantic-risk supervision
+for key frames. A recurrent state-space world model encodes multi-view observations into latent states with temporal
+dynamics, and generates short-horizon rollouts. A lightweight latent classifier, trained under VLM supervision, evaluates
+both instantaneous and predicted future latent states to produce a real-time semantic risk signal for the driving stack.
+extract sparse semantic labels—while performing all online
+inference through a lightweight latent classifier.
+The framework consists of two main modules: (1) a VLM-
+guided semantic supervision mechanism that provides weak
+semantic labels for a small number of key frames; and (2)
+a semantic scoring module built on top of a recurrent state-
+space world model, containing both an instantaneous margin
+classifier and a short-horizon latent rollout value estimator.
+Together, these form a deployable semantic safety layer with
+temporal consistency and millisecond-level inference latency.
+B. VLM-Guided Semantic Supervision
+To obtain semantic supervision without relying on manual
+annotation, we employ a pretrained vision–language model
+(VLM) to generate pseudo-labels for a sparse set of key
+frames. The driving sequence can be {xt}T
+t=0, where each
+xt consists of four synchronized surround-view images and
+the ego-vehicle state.
+Every ten-frame segment is selected as a key frame and
+processed by the VLM to determine whether the scene con-
+tains a semantic safety risk. Using a fixed prompt template,
+the VLM produces a soft semantic-risk label:
+ˆyt = VLM
+ x(1)
+t , x(2)
+t , x(3)
+t , x(4)
+t , st; p
+
+,
+t ∈K
+(2)
+where x(i)
+t
+denotes the four-view images, st the ego state,
+and p the prompt.
+Because semantic context typically varies slowly over
+short horizons, we assume that the semantic risk remains
+approximately stable within each ten-frame window:
+yt+k ≈yt,
+k = 1, . . . , 9.
+(3)
+To maintain temporal alignment across sparsely sampled
+key frames, we record the accumulated ego-motion over the
+skipped frames,
+∆st−→t = st −st−,
+(4)
+where t−denotes the previous key frame. These motion
+features serve as auxiliary information for the frames that
+are not directly processed by the VLM. Along with the
+semantic decision obtained at the previous key frame ˆyt−,
+the accumulated ego-motion is supplied as additional input
+to the VLM when analyzing the subsequent key frame. This
+design compensates for missing intermediate observations
+and helps preserve temporal coherence across the reduced
+VLM inference frequency.
+With these additional elements, the VLM query for each
+key frame is defined as
+ˆyt = VLM
+
+x(1)
+t , x(2)
+t , x(3)
+t , x(4)
+t , st, ∆st−→t, ˆyt−, p
+
+,
+t ∈K
+(5)
+where x(i)
+t
+denotes the four synchronized surround-view
+images, st is the current ego-vehicle state, ∆st−→t is the
+accumulated motion across skipped frames, ˆyt−is the seman-
+tic judgment from the previous key frame, and p is the fixed
+prompt template. This extended formulation ensures that the
+supervisory signal reflects short-term scene evolution despite
+the sparse sampling of VLM queries.
+
+C. Semantic Risk Scoring Module
+LSRE performs semantic safety assessment inside the
+latent space of a recurrent state-space model (RSSM). The
+RSSM provides a compact latent representation zt with
+short-horizon temporal consistency, while all semantic rea-
+soning is handled by a lightweight classifier trained under
+VLM supervision.
+1) Latent dynamics: Given observation ot, the encoder
+(inference model) infers a posterior latent
+zt ∼qψ(zt | ˆzt, ot),
+(6)
+where ˆzt denotes the prior (predicted) latent before incor-
+porating ot. The transition model propagates the latent state
+forward as
+ˆzt+1 ∼pϕ(ˆzt+1 | zt, at),
+(7)
+providing predictive structure without requiring additional
+semantic supervision.
+2) Margin-Based Semantic Risk Classifier: To evaluate
+whether a latent state violates a semantic safety constraint,
+we train a classifier gµ(zt) on top of the RSSM latent
+representation. The classifier outputs a real-valued margin
+score, where large positive values indicate safe states and
+large negative values indicate semantic violations.
+Given training sets D, with a signed label yi ∈{0, 1}
+indicating safe or unsafe samples, the classifier is trained
+to satisfy a signed margin constraint, where violations of
+yigµ(zi) ≥δ are penalized as follows:
+Lµ = 1
+N
+X
+zi∈D
+ReLU
+
+δ −yi gµ(zi)
+
+,
+(8)
+This loss encourages separation between safe and unsafe
+latent states in a geometrically interpretable way, providing
+an instantaneous semantic risk indicator.
+3) Future Semantic Value Estimation: While gµ(zt) pro-
+vides an instantaneous estimate of the semantic risk at the
+current frame, it does not reflect violations that may emerge
+in the near future. To capture such prospective risks, we
+estimate a latent value function Vlatent(zt) by rolling out
+the world model for a fixed horizon of K = 50 steps
+and accumulating the predicted margin values along the
+simulated trajectory.
+Starting from the current latent state zt, the RSSM transi-
+tion model generates future latent states,
+zt+k ∼pϕ( · | zt+k−1, at+k−1) ,
+k = 1, . . . , K,
+(9)
+where at+k−1 denotes the ego action applied during rollout.
+The latent value is computed as the discounted sum of
+future margin scores:
+Vlatent(zt) =
+K
+X
+k=0
+γk gµ(zt+k),
+0 < γ ≤1,
+(10)
+where γ is the discount factor controlling the contribution of
+future risk.
+This finite-horizon approximation yields a conservative
+estimate of semantic risk reachable within the next 50
+frames, enabling the system to detect safety violations that
+may not yet be visible at the current time.
+4) Hysteresis-Based Temporal Smoothing: The margin
+score gµ(zt) may fluctuate due to uncertainties in the latent
+representation, especially near the decision boundary. To
+avoid spurious state transitions caused by these small oscilla-
+tions, we adopt a hysteresis thresholding strategy [34]. This
+mechanism introduces two thresholds—an upper threshold
+θhigh and a lower threshold θlow with θlow < θhigh , such that
+the semantic state is updated only when the margin crosses
+either threshold.
+Let yt ∈{0, 1} denote the binary semantic risk indicator.
+The hysteresis rule is defined as:
+yt =
+
+
+
+
+
+
+
+0,
+gµ(zt) ≥θhigh,
+1,
+gµ(zt) ≤θlow,
+yt−1,
+otherwise,
+(11)
+where the third case preserves the previous state when the
+margin lies within the hysteresis band [θlow, θhigh].
+This design prevents rapid switching between safe and
+unsafe predictions and yields a more stable semantic risk
+signal for downstream decision making.
+V. EXPERIMENT
+A. Experiment Setup
+1) Test Scenarios:
+We evaluate the proposed seman-
+tic safety framework across six representative scenarios in
+CARLA, as shown in Fig.2 [35]. Our benchmark contains
+three core semantic–failure categories, each instantiated with
+two scenario variants (in–distribution and few–shot): (1) rear-
+approaching emergency-vehicle yielding, (2) construction-
+zone lane inference, and (3) school-bus stopping. Each
+category contains two sub-settings designed to assess both in-
+distribution performance and semantic generalization. These
+variants share the same semantic rule but differ significantly
+in appearance and layout, forming a total of six semantic-risk
+scenarios.
+a) In-distribution scenario: For each scenario category,
+we construct 100 diverse simulation clips (10 s at 10 Hz)
+covering variations in road geometry, traffic density, and ob-
+ject appearance. These clips are used for training, validation,
+and testing within the same category to measure frame-wise
+semantic risk detection under sufficient data coverage.
+b) Semantically similar few-shot scenario: To evaluate
+semantic rather than spatial memorization, we additionally
+construct a semantically similar but visually and geograph-
+ically distinct variant of each scenario, using only 10 clips
+for training.
+The corresponding test set contains 100 unseen clips that
+differ in layout, lighting, and agent configurations while pre-
+serving the same semantic rule (e.g., yielding to an approach-
+ing emergency vehicle, considering construction bottlenecks,
+or stopping for a school bus). Performance on this setting
+
+reflects the model’s ability to transfer semantic safety rules
+under limited supervision and unseen environments.
+2) Baselines:
+a) VLM-Only: As a reference for semantic risk detec-
+tion, we include a direct VLM baseline using the pretrained
+GPT-5-mini model. For each input frame, the VLM pro-
+duces a binary semantic-risk judgment indicating whether the
+current scene violates any semantic safety constraints. This
+baseline reflects the performance of a high-capacity model
+performing per-frame semantic interpretation, and serves as
+a comparison point for our lightweight classifier built on
+top of the learned world model. In our setup, the VLM is
+accessed via a cloud API, and the reported runtime includes
+both model inference and network communication latency.
+b) Always-Safe:
+We additionally include a trivial
+“Always-Safe” baseline, which always predicts every frame
+as semantically safe. Although simplistic, this baseline pro-
+vides a useful lower bound by illustrating the performance
+of a model that never flags any violation. It allows us to
+quantify how much improvement is gained by incorporating
+semantic supervision and latent-state reasoning, particularly
+on metrics that depend on detecting positive risk cases such
+as recall and accuracy score.
+3) Evaluation Metrics: We evaluate the semantic-safety
+detection performance using three primary metrics: Accu-
+racy, Recall, and False-Alarm Rate (FAR). Accuracy mea-
+sures the overall correctness of frame-level predictions:
+Acc =
+TP + TN
+TP + TN + FP + FN .
+(12)
+Recall reflects the proportion of true unsafe frames that are
+correctly identified:
+Rec =
+TP
+TP + FN .
+(13)
+Latency is reported as the median and 95th percentile of
+the end-to-end decision delay, indicating real-time feasibility
+under vehicle-level execution constraints. We present both
+frame-level (micro) results over 60 000 frames and scenario-
+level (macro) averages across the six semantic-failure cat-
+egories. For each semantic-failure event, we measure how
+early the method raises an unsafe signal relative to the
+annotated event onset. This metric reflects the model’s ability
+to anticipate upcoming hazards rather than reacting only after
+the risky situation fully materializes.
+We also quantify the proportion of erroneous unsafe
+predictions during normal routine driving with no semantic
+failures. This monitors stability and practicality during daily
+deployment, ensuring the semantic-safety module does not
+produce disruptive or distracting alerts. The False-Alarm
+Rate (FAR) quantifies the ratio of normal frames that are
+mistakenly flagged as unsafe:
+FAR =
+FP
+FP + TN .
+(14)
+Together, these metrics characterize not only instantaneous
+correctness but also temporal anticipation and deploy-
+ment robustness, providing a comprehensive evaluation of
+semantic-safety performance.
+Fig. 2: Three semantic–failure categories used in eval-
+uation,
+each
+instantiated
+with
+two
+scenario
+variants
+(in–distribution and few–shot). These scenarios capture
+human-understandable but rule-hard safety semantics that are
+essential for evaluating real-time semantic risk detection.
+TABLE I: Frame-wise semantic risk detection across three
+semantic-failure categories under in-distribution and few-
+shot settings.
+Category / Method
+In-dist Scenario
+Few-shot Scenario
+Acc (%)
+Rec (%)
+Acc (%)
+Rec (%)
+Category 1: Emergency Vehicle
+Always-Safe
+54.36
+0.00
+66.64
+0.00
+VLM-Only
+91.80
+84.07
+93.38
+98.53
+LSRE (Ours)
+85.66
+98.64
+91.29
+92.06
+Category 2: Construction Zone
+Always-Safe
+33.49
+0.00
+42.03
+0.00
+VLM-Only
+93.49
+90.36
+79.40
+74.36
+LSRE (Ours)
+89.54
+91.61
+72.57
+76.90
+Category 3: School Bus
+Always-Safe
+27.60
+0.00
+59.79
+0.00
+VLM-Only
+97.14
+96.71
+81.69
+96.24
+LSRE (Ours)
+93.32
+93.08
+79.88
+93.14
+Overall Avg.
+Always-Safe
+38.48
+0.00
+56.15
+0.00
+VLM-Only
+94.14
+90.38
+84.82
+89.71
+LSRE (Ours)
+89.51
+94.44
+81.25
+87.37
+B. Frame-wise Risk Detection in Long-tail Scenarios
+We first evaluate frame-level semantic risk detection on
+our dataset, which contains six categories of long-tail se-
+mantic failures including emergency-vehicle interactions,
+temporary construction layouts, and school-bus stops. Each
+category includes 100 clips (10 s at 10 Hz), yielding 60 000
+frame-wise safe/unsafe labels. This experiment isolates the
+per-frame classification problem to examine how well each
+method identifies semantic violations without relying on
+temporal smoothing or event structure.
+The primary goal of this evaluation is to measure how
+faithfully a model can reproduce the semantic judgments of
+a VLM. Since LSRE distills VLM outputs into a lightweight
+classifier, strong frame-wise performance indicates success-
+ful semantic rule encoding. For each method, we compute
+
+TABLE II: Event-level early warning analysis across three semantic-failure categories. Event Recall measures whether an
+event is detected at least once; Average Lead Time indicates anticipation relative to the annotated onset.
+Method
+Emergency Vehicle
+Construction Zone
+School Bus Stop
+Overall
+Recall (%)
+Lead (ms)
+Recall (%)
+Lead (ms)
+Recall (%)
+Lead (ms)
+Recall (%)
+Lead (ms)
+Heuristic
+100.0%
+0
+100.0%
+0
+100.0%
+0
+100.0%
+0
+VLM-Only
+97.0%
+51.5
+100.0%
+248.0
+100.0%
+454.5
+99.0%
+51.7
+LSRE (Ours)
+99.5%
+1480.0
+100.0%
+3273.5
+100.0%
+2792.5
+99.8%
+2515.3
+micro-level Accuracy and Recall across all frames: Accuracy
+reflects overall correctness, while Recall quantifies the ability
+to avoid missing risky frames—critical for semantic safety
+monitoring. Together, these metrics assess the quality of real-
+time semantic safety signals that would be injected into the
+driving stack.
+Table I reports results for two evaluation settings: in-
+distribution and few-shot.
+In-distribution scenario: Across the three categories,
+our method achieves an overall accuracy of 89.51%, close
+to the VLM-only baseline (94.14%). Recall reaches 94.44%,
+exceeding the VLM-only model and indicating strong preser-
+vation of VLM semantic sensitivity under matched distribu-
+tion conditions.
+Few-shot scenario:
+When supervision is extremely
+limited, performance differences become more pronounced.
+Even so, our method maintains 81.25% accuracy compared
+with the VLM-only baseline (84.82%), demonstrating that
+the semantic rules distilled into LSRE remain robust under
+sparse supervision.
+Summary: Across both settings, LSRE achieves frame-
+level accuracy and recall comparable to the large-model
+baseline, confirming that the latent classifier effectively cap-
+tures VLM-level semantic capability while operating with
+significantly lower inference overhead.
+C. Event-level Early Warning Analysis
+While frame-wise classification evaluates semantic under-
+standing on isolated observations, real autonomous driving
+requires anticipating hazardous situations before they fully
+unfold. Event-based evaluation therefore provides a more
+realistic assessment of a system’s deployability: a semantic
+safety module should not only identify unsafe frames, but
+also predict the onset of safety-critical events in advance.
+For each semantic-failure category, we manually annotate
+the onset time of the hazardous event, such as the moment
+an emergency vehicle first becomes visible within a 30 m
+range, the emergence of a construction bottleneck, or the
+instant a school bus activates its stop sign. An early warning
+is counted as correct if the model raises an unsafe flag at any
+time between the annotated onset and the end of the event.
+For all correctly detected events, we measure the lead time,
+defined as the time difference between the first predicted
+unsafe frame and the annotated onset.
+We report the following event-level metrics:
+a) Event Recall: percentage of risky events that are
+detected at least once;
+b) Average Lead Time: average anticipation time across
+detected events.
+Table II summarizes the results. Both methods achieve
+nearly identical event recall, consistently detecting every
+hazardous event. However, our approach provides substan-
+tially earlier warnings than the VLM-only baseline across
+all categories. This improvement stems from the temporal
+predictive structure of the world model, which enables the
+latent classifier to recognize future semantic violations before
+they are visually obvious. For example, the average lead
+time in the Construction Zone scenario is 3273.5 ms for our
+method compared with 248.0 ms for the VLM-only baseline,
+and 2792.5 ms versus 454.5 ms in the School Bus scenario.
+These results demonstrate that LSRE offers significantly
+earlier anticipation while maintaining high recall, making it
+more suitable for real-time semantic safety monitoring in
+autonomous driving.
+D. False Alarms in Normal Driving Scenario
+To evaluate the stability of the proposed semantic-safety
+module during everyday operation, we test all methods on
+30 minutes of normal driving in CARLA, covering routine
+behaviors such as car-following, lane-keeping, signal com-
+pliance, and non-critical interactions with pedestrians and
+vehicles. No semantic-failure events occur in these logs, so
+any unsafe prediction is counted as a false alarm.
+We report the frame-wise False-Alarm Rate (FAR), aver-
+aged across all normal-driving segments. Maintaining a low
+FAR is crucial for real-world deployment because excessive
+alarms may destabilize downstream planning modules, cause
+unnecessary slowdowns, and lead to driver disengagements.
+Table III shows that the latent classifier alone produces oc-
+casional spurious unsafe predictions during routine driving,
+yielding an 8.29% FAR due to fluctuations and uncertainties
+in latent features. After applying the proposed hysteresis-
+based temporal filtering mechanism, the FAR is reduced to
+0.98%, eliminating nearly all false triggers. This reduction
+highlights the importance of temporal filtering: with the
+filter applied, the semantic-safety signal becomes sufficiently
+stable for practical integration into an autonomous driving
+stack.
+E. Real-time Performance
+Beyond detection accuracy, a semantic-safety module must
+satisfy the timing constraints of an autonomous driving stack,
+where perception and planning typically operate at 10–20 Hz.
+
+TABLE III: False-alarm rate in normal driving scenarios (no
+semantic failures). Lower is better.
+Method
+FAR (%)
+LSRE w/o filter
+8.29
+LSRE
+0.98
+TABLE IV: End-to-end inference latency under a unified
+hardware setup. Median and 95th-percentile (p95) values are
+reported.
+Method
+Median (ms)
+p95 (ms)
+VLM-Only
+2917
+3706
+LSRE (Ours)
+9.44
+11.91
+We therefore evaluate the end-to-end inference latency of all
+methods.
+Latency is measured as the elapsed time between receiving
+a new frame and outputting a semantic-risk decision. We
+repeat each method for 100 queries and report both the
+median and the 95th-percentile (p95) to characterize typical
+and tail latency.
+Experiments are conducted on a workstation running
+Ubuntu 22.04 with an Intel Xeon Gold 5218R CPU, 256 GB
+RAM, and an NVIDIA Tesla GV100 GPU, using batch size
+1 to reflect streaming, per-frame inference. For VLM-Only,
+we query a server-scale VLM via a cloud API—a practical
+choice given that such models are often infeasible to deploy
+on-board—and thus the reported latency includes both model
+inference and network communication overhead. In contrast,
+LSRE runs fully on-device.
+As shown in Table IV, VLM-Only is far from real-time,
+requiring multi-second end-to-end latency (2917 ms median,
+3706 ms p95). In contrast, LSRE achieves 9.44 ms median
+and 11.91 ms p95, corresponding to over a 300× speedup
+and comfortably meeting the real-time budget for 10–20 Hz
+operation. These results suggest that LSRE retains VLM-
+level semantic guidance through offline supervision while
+enabling lightweight, real-time on-vehicle deployment.
+F. Case Study
+Fig. 3 visualizes the real-time signals produced by LSRE
+across three representative driving scenarios. The system
+outputs the future semantic value estimation Vlatent over
+time. Dashed horizontal lines indicate the zero threshold
+(Vlatent = 0, safe vs. unsafe), while the shaded backgrounds
+mark the inferred safe and danger regions. We highlight two
+key timestamps: the LSRE detection time, defined as the
+first time Vlatent crosses the threshold, and the ground-truth
+(GT) boundary time, i.e., the annotated transition between
+semantic safe and unsafe states.
+In an example case from School-Bus Stopping scenario,
+the ego vehicle initiates a right turn at an intersection
+and later encounters a stopped yellow school bus in its
+lane, resulting in a gradually developing hazard. Notably,
+Vlatent starts to decrease at the beginning of the turning
+(a) Case 1: School-Bus Stopping
+(b) Case 2: Emergency-Vehicle Yielding
+(c) Case 3: Construction-Zone
+Fig. 3: The semantic risk value output by the proposed LSRE
+model across three example cases. Each subplot highlights
+the LSRE detection time and the ground-truth (GT) risk
+happened time.
+maneuver and crosses the Vlatent = 0 threshold well before
+the GT boundary time, which occurs at turn completion.
+This yields a lead time of 3.727 s. Similarly, in example
+cases from Emergency-Vehicle Yielding and Construction-
+Zone scenarios, LSRE identifies the annotated safety-state
+transition ahead of the GT boundary, with lead times of
+2.898 s and 3.086 s, respectively.
+Overall, these examples show that Vlatent provides a real-
+time estimate of the current semantic safety state, and can
+further anticipate upcoming safety transitions by several
+seconds relative to the GT boundary annotations, enabling
+timely semantic safety monitoring under online deployment
+constraints.
+VI. CONCLUSION
+In this paper, we introduced LSRE, a VLM-guided latent
+semantic rule encoding framework for real-time semantic risk
+detection in autonomous driving. By using a vision–language
+model solely as an offline semantic supervisor and deploying
+a lightweight classifier in the latent space of a recurrent world
+model, the proposed approach achieves an effective balance
+between semantic awareness and runtime efficiency. Experi-
+ments across six semantic-failure scenarios demonstrate that
+LSRE achieves detection accuracy comparable to a large
+VLM baseline, while offering substantially earlier event-level
+warnings and maintaining a low false-alarm rate in normal
+driving, all within sub-100 ms end-to-end latency suitable for
+on-vehicle execution.
+In future work, we plan to advance from semantic detec-
+tion toward failure-aware response by coupling the learned
+risk signals with concrete fallback behaviors, such as conser-
+vative re-planning, safe deceleration, or handover strategies
+
+under classifier uncertainty. Another direction is to integrate
+the semantic-safety layer more tightly with downstream plan-
+ning and control to provide closed-loop guarantees. Finally,
+we aim to evaluate LSRE on large-scale real-world driving
+data. These steps seek to further bridge language-informed
+semantic reasoning with the practical safety requirements of
+autonomous driving systems.
+REFERENCES
+[1] S. Shalev-Shwartz, S. Shammah, and A. Shashua, “On a for-
+mal model of safe and scalable self-driving cars,” arXiv preprint
+arXiv:1708.06374, 2017.
+[2] A. Kuefler, J. Morton, T. Wheeler, and M. Kochenderfer, “Imitating
+driver behavior with generative adversarial networks,” in 2017 IEEE
+intelligent vehicles symposium (IV), pp. 204–211, IEEE, 2017.
+[3] W. Zhou, Z. Cao, N. Deng, X. Liu, K. Jiang, and D. Yang, “Dy-
+namically conservative self-driving planner for long-tail cases,” IEEE
+Transactions on Intelligent Transportation Systems, vol. 24, no. 3,
+pp. 3476–3488, 2022.
+[4] D. Amodei, C. Olah, J. Steinhardt, P. Christiano, J. Schulman,
+and D. Man´e, “Concrete problems in ai safety,” arXiv preprint
+arXiv:1606.06565, 2016.
+[5] D. Sadigh, S. Sastry, S. A. Seshia, and A. D. Dragan, “Planning
+for autonomous cars that leverage effects on human actions,” in
+Proceedings of Robotics: Science and Systems, (AnnArbor, Michigan),
+June 2016.
+[6] M. Althoff, M. Koschi, and S. Manzinger, “Commonroad: Scenario
+description and motion planning benchmark for autonomous vehicles,”
+in 2018 IEEE Intelligent Vehicles Symposium (IV), pp. 478–485, IEEE,
+2018.
+[7] A. Ivanovic and M. Pavone, “Safety verification of autonomous vehi-
+cles,” Annual Review of Control, Robotics, and Autonomous Systems,
+2023.
+[8] J. Kim, X. Xu, et al., “Lavit: Vision-language models for driving,” in
+Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2023.
+[9] A. Kar, Y. Li, et al., “Llm4drive: A survey on large models in
+autonomous driving,” arXiv preprint arXiv:2311.01043, 2023.
+[10] X. Zhou, M. Liu, E. Yurtsever, B. L. Zagar, W. Zimmer, H. Cao,
+and A. C. Knoll, “Vision language models in autonomous driving: A
+survey and outlook,” IEEE Transactions on Intelligent Vehicles, 2024.
+[11] C. Urmson, J. Anhalt, D. Bagnell, C. Baker, R. Bittner, M. Clark,
+J. Dolan, D. Duggins, T. Galatali, C. Geyer, et al., “Autonomous
+driving in urban environments: Boss and the urban challenge,” Journal
+of field Robotics, vol. 25, no. 8, pp. 425–466, 2008.
+[12] H. Kress-Gazit, G. E. Fainekos, and G. J. Pappas, “Temporal-logic-
+based reactive mission and motion planning,” IEEE transactions on
+robotics, vol. 25, no. 6, pp. 1370–1381, 2009.
+[13] A. Donz´e and O. Maler, “Robust satisfaction of temporal logic over
+real-valued signals,” in International conference on formal modeling
+and analysis of timed systems, pp. 92–106, Springer, 2010.
+[14] I. Mitchell, A. Bayen, and C. Tomlin, “A time-dependent hamilton-
+jacobi formulation of reachable sets for continuous dynamic games,”
+IEEE Transactions on Automatic Control, vol. 50, no. 7, pp. 947–957,
+2005.
+[15] D. Fridovich-Keil, E. Ratner, L. Peters, A. D. Dragan, and C. J. Tom-
+lin, “Efficient iterative linear-quadratic approximations for nonlinear
+multi-player general-sum differential games,” in 2020 IEEE Interna-
+tional Conference on Robotics and Automation (ICRA), pp. 1475–
+1481, 2020.
+[16] A. D. Ames, X. Xu, J. W. Grizzle, and P. Tabuada, “Control barrier
+function based quadratic programs for safety critical systems,” IEEE
+Transactions on Automatic Control, vol. 62, no. 8, pp. 3861–3876,
+2017.
+[17] J. Garcıa and F. Fern´andez, “A comprehensive survey on safe rein-
+forcement learning,” Journal of Machine Learning Research, vol. 16,
+no. 1, pp. 1437–1480, 2015.
+[18] N. Jansen, B. K¨onighofer, S. Junges, A. Serban, and R. Bloem,
+“Safe reinforcement learning using probabilistic shields,” in 31st
+International Conference on Concurrency Theory (CONCUR 2020),
+pp. 3–1, Schloss Dagstuhl–Leibniz-Zentrum f¨ur Informatik, 2020.
+[19] W. Zhou, Z. Cao, N. Deng, K. Jiang, and D. Yang, “Identify, estimate
+and bound the uncertainty of reinforcement learning for autonomous
+driving,” IEEE Transactions on Intelligent Transportation Systems,
+2023.
+[20] A. Radford, J. W. Kim, C. Hallacy, A. Ramesh, G. Goh, S. Agarwal,
+G. Sastry, A. Askell, P. Mishkin, J. Clark, et al., “Learning transferable
+visual models from natural language supervision,” in International
+conference on machine learning, pp. 8748–8763, PmLR, 2021.
+[21] J. Li, D. Li, S. Savarese, and S. Hoi, “Blip-2: Bootstrapping language-
+image pre-training with frozen image encoders and large language
+models,” in International conference on machine learning, pp. 19730–
+19742, PMLR, 2023.
+[22] Z. Yang, L. Li, K. Lin, J. Wang, C.-C. Lin, Z. Liu, and L. Wang,
+“The dawn of lmms: Preliminary explorations with gpt-4v (ision),”
+arXiv preprint arXiv:2309.17421, 2023.
+[23] X. Tian, J. Gu, B. Li, Y. Liu, Y. Wang, Z. Zhao, K. Zhan,
+P. Jia, X. Lang, and H. Zhao, “Drivevlm: The convergence of au-
+tonomous driving and large vision-language models,” arXiv preprint
+arXiv:2402.12289, 2024.
+[24] C. Sima, K. Renz, K. Chitta, L. Chen, H. Zhang, C. Xie, P. Luo,
+A. Geiger, and H. Li, “Drivelm: Driving with graph visual question
+answering,” arXiv preprint arXiv:2312.14150, 2023.
+[25] F. Kong, Y. Li, W. Chen, C. Min, Y. Li, Z. Gao, H. Li, Z. Guo,
+and H. Sun, “Vlr-driver: Large vision-language-reasoning models for
+embodied autonomous driving,” in Proceedings of the IEEE/CVF In-
+ternational Conference on Computer Vision, pp. 26966–26976, 2025.
+[26] F. Yang, B. Yu, Y. Zhou, X. Luo, Z. Tu, and C. Liu, “Edge-based
+multimodal sensor data fusion with vision language models (vlms)
+for real-time autonomous vehicle accident avoidance,” arXiv preprint
+arXiv:2508.01057, 2025.
+[27] D. Hegde, R. Yasarla, H. Cai, S. Han, A. Bhattacharyya, S. Mahajan,
+L. Liu, R. Garrepalli, V. M. Patel, and F. Porikli, “Distilling multi-
+modal large language models for autonomous driving,” in Proceed-
+ings of the Computer Vision and Pattern Recognition Conference,
+pp. 27575–27585, 2025.
+[28] C. Cui, Y. Ma, X. Cao, W. Ye, Y. Zhou, K. Liang, J. Chen, J. Lu,
+Z. Yang, K.-D. Liao, et al., “A survey on multimodal large language
+models for autonomous driving,” in Proceedings of the IEEE/CVF
+winter conference on applications of computer vision, pp. 958–979,
+2024.
+[29] D.
+Ha
+and
+J.
+Schmidhuber,
+“World
+models,”
+arXiv
+preprint
+arXiv:1803.10122, vol. 2, no. 3, 2018.
+[30] D. Hafner, J. Pasukonis, J. Ba, and T. Lillicrap, “Mastering diverse
+domains through world models,” arXiv preprint arXiv:2301.04104,
+2023.
+[31] X. Wang, Z. Zhu, G. Huang, X. Chen, J. Zhu, and J. Lu, “Drive-
+dreamer: Towards real-world-drive world models for autonomous
+driving,” in European conference on computer vision, pp. 55–72,
+Springer, 2024.
+[32] C. Min, D. Zhao, L. Xiao, J. Zhao, X. Xu, Z. Zhu, L. Jin, J. Li, Y. Guo,
+J. Xing, L. Jing, Y. Nie, and B. Dai, “Driveworld: 4d pre-trained
+scene understanding via world models for autonomous driving,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp. 15522–15533, June 2024.
+[33] N. Deng, K. Jiang, Z. Cao, W. Zhou, and D. Yang, “Decision-
+oriented driving scenario recognition based on unsupervised learning,”
+in CICTP 2021, pp. 564–573, 2021.
+[34] P. Renevey and A. Drygajlo, “Entropy based voice activity detection
+in very noisy conditions.,” in Interspeech, pp. 1887–1890, 2001.
+[35] Z. Qian, K. Jiang, Z. Cao, K. Qian, Y. Xu, W. Zhou, and D. Yang,
+“Spider: Self-driving planners and intelligent decision-making engines
+with reusability,” in 2024 IEEE 27th International Conference on
+Intelligent Transportation Systems (ITSC), pp. 937–944, IEEE, 2024.

@@ -1,0 +1,3940 @@
+Foundation models on the bridge: Semantic hazard detection and safety maneuvers for
+maritime autonomy with vision-language models
+Kim Alexander Christensena,∗, Andreas Gudahl Tufteb, Alexey Gusevc, Rohan Sinhad, Milan Ganaie, Ole Andreas Alsosc, Marco
+Pavoned,f, Martin Steinerta
+aDept. of Mechanical and Industrial Engineering, NTNU, Norway
+bDept. of Engineering Cybernetics, NTNU, Norway
+cDept. of Design, NTNU, Norway
+dDept. of Aeronautics and Astronautics, Stanford University, USA
+eDept. of Computer Science, Stanford University, USA
+fNVIDIA Research, USA
+Abstract
+The draft IMO MASS Code requires autonomous and remotely supervised maritime vessels to detect departures from their oper-
+ational design domain, enter a predefined fallback that notifies the operator, permit immediate human override, and avoid chang-
+ing the voyage plan without approval. Meeting these obligations in the alert-to-takeover gap calls for a short-horizon, human-
+overridable fallback maneuver. Classical maritime autonomy stacks struggle when the correct action depends on meaning (e.g.,
+diver-down flag means people in the water, fire close by means hazard). We argue (i) that vision–language models (VLMs) pro-
+vide semantic awareness for such out-of-distribution situations, and (ii) that a fast–slow anomaly pipeline with a short-horizon,
+human-overridable fallback maneuver makes this practical in the handover window. We introduce Semantic Lookout, a camera-
+only, candidate-constrained vision–language model (VLM) fallback maneuver selector that selects one cautious action (or station-
+keeping) from water-valid, world-anchored trajectories under continuous human authority. On 40 harbor scenes we measure per-call
+scene understanding and latency, alignment with human consensus (model majority-of-three voting), short-horizon risk-relief on
+fire hazard scenes, and an on-water alert→fallback maneuver→operator handover. Sub-10 s models retain most of the awareness
+of slower state-of-the-art models. The fallback maneuver selector outperforms geometry-only baselines and increases standoff dis-
+tance on fire scenes. A field run verifies end-to-end operation. These results support VLMs as semantic fallback maneuver selectors
+compatible with the draft IMO MASS Code, within practical latency budgets, and motivate future work on domain-adapted, hybrid
+autonomy that pairs foundation-model semantics with multi-sensor bird’s-eye-view perception and short-horizon replanning.
+Keywords: Foundation models, vision-language model (VLM), autonomous surface vessel (ASV), maritime autonomous surface
+ships (MASS), IMO MASS Code, human-in-the-loop, anomaly detection
+1. Introduction
+The maritime industry is moving towards autonomous and
+remote operations using smaller autonomous surface vehi-
+cles (ASVs) and larger maritime autonomous surface ships
+(MASS), with potential benefits including cost savings, more
+efficient operations, and increased crew safety (Brekke et al.,
+2022; Wang et al., 2019; Blanke et al., 2024; Akbar et al.,
+2021). Operational systems already exist in both harbor envi-
+ronments and at sea. However, despite the high performance of
+autonomy modules under nominal conditions, they might still
+fail in a large number of possible cases. Some of these are
+purely technical and foreseeable, like loss of a sensor or GNSS
+jamming/spoofing (Volden et al., 2022; Bhatti and Humphreys,
+2017; Liu et al., 2018), while others arise from situations that
+traditionally rely on human judgment because they are ambigu-
+ous, diverse, or rare in data (Sinha et al., 2022). These prob-
+∗Corresponding author
+Email address: kimac@stud.ntnu.no (Kim Alexander Christensen)
+lems lead to reliance on land-based remote operation centers
+(ROCs), where a human operator continuously monitors the
+vessel and intervenes when needed (Alsos et al., 2022). Cur-
+rent ROCs are largely set up so that one operator is responsible
+for one vessel, but over time, one operator (or a small team) is
+expected to supervise many vessels simultaneously (Veitch and
+Alsos, 2022). Given a large enough fleet, this will require robust
+monitors that can alert the ROC if a vessel function is exiting
+the Operational Design Domain (ODD) (IMO, Maritime Safety
+Committee, 2024) so that an operator can intervene, creating
+a handover window between the alert and human intervention
+during which the vessel must remain safe and legible. In this
+paper we argue (i) that vision–language models (VLMs) pro-
+vide semantic awareness that is specifically valuable in such
+out-of-distribution (OOD) situations, and (ii) that a fast–slow
+anomaly pipeline with a short-horizon, human-overridable fall-
+back maneuver makes this practically feasible in the handover
+window.
+The regulatory IMO MASS Code currently being drafted
+arXiv:2512.24470v1 [cs.RO] 30 Dec 2025
+
+speaks directly to this.
+Systems should “be able to detect
+whether [their] current state of operation meets the ODD”,
+and if the ship deviates from its operational envelope it should
+“enter a predefined fallback state” and “notify [its] crew and
+the operator”.
+Navigation automation must be “capable of
+being overridden at all times” and “allow for control to be
+taken immediately”. The “use of the voyage plan, and any
+modification of the voyage plan” by the navigation system is
+“not .. .
+possible without ...
+approval ...
+by the [oper-
+ator]” (IMO, Maritime Safety Committee, 2024).
+We take
+this as a design requirement for an alert →fallback maneuver
+→human override loop in which the fallback maneuver con-
+sists only of short-horizon actions chosen from pre-approved
+primitives (or Station-keeping), is immediately overridable, and
+never edits the overall voyage plan. In this paper, the IMO
+fallback state is the vessel’s predefined degraded mode after
+an alert, and the fallback maneuver is the single short-horizon,
+pre-approved motion action executed within that fallback state
+during the alert-to-override interval until the operator overrides
+(takes manual control) or the alert clears.
+Classic maritime stacks typically cover obstacle detection
+(e.g., radar/LiDAR), tracking (e.g., AIS, multi-target trackers),
+and short-horizon collision avoidance (Johansen et al., 2016;
+Hem et al., 2024).
+They don’t, however, interpret semantic
+cues such as “diver-down” flags, “keep-out” lines, or a vessel
+on fire; cases where the correct action depends on meaning, not
+geometry alone. To complicate things further, many hazards ap-
+pear as out-of-distribution (OOD) scenes for vessel/object de-
+tectors: rare, open-ended “unknown unknowns” beyond prior
+experience (Sinha et al., 2022). Foundation models like large
+language models (LLMs) and vision-language models (VLMs)
+trained on internet-scale data provide strong semantic priors
+that support zero-/few-shot generalization and improved OOD
+behavior (Brown et al., 2020; Radford et al., 2021; Wortsman
+et al., 2022). Following Sinha et al. (2024), we define anomalies
+as semantic deviations from prior operational experience and
+leverage a two-stage pattern in which a fast embedding-space
+monitor can trigger slower generative reasoning. Their work
+shows this can enable real-time OOD anomaly detection and
+reactive planning; what remains is to adapt it to the specific
+needs of maritime autonomy and the IMO MASS code require-
+ment for immediate, human-overridable control. We argue that
+being able to detect and react to such anomalies is an essential
+step in moving beyond constant, laborious human supervision
+and enabling one-to-many supervised maritime autonomy.
+We operationalize the IMO MASS constraints as an alert
+→fallback maneuver →human override loop. Stage (1) is a
+small, camera-first fast anomaly alert adapted from Sinha et al.
+(2024). In Appendix A, we provide details and small n evi-
+dence that this monitor also functions in the maritime domain.
+Stage (2) is a short-horizon fallback maneuver that keeps the
+vessel safe and interpretable until the operator takes charge.
+Stage (3) is a hard-priority joystick override at the ROC. This
+paper focuses mainly on Stage (2) while validating the full
+chain.
+Specifically,
+we
+introduce
+Semantic
+Lookout,
+a
+proof-of-concept, camera-only fallback maneuver selector
+that constrains a vision–language model (VLM) to make
+one cautious, short-term choice among pre-vetted, water-safe
+trajectory candidates overlaid on the camera view (or to stop
+when uncertain). The system is designed to handle previously
+unseen semantic hazards and is aligned with the draft IMO
+MASS Code.
+The objective of this study is to evaluate whether a candidate-
+constrained VLM can serve as an IMO MASS Code–aligned
+fallback maneuver selector in the alert-to-override interval.
+More broadly, we aim to evaluate foundation models as a
+promising technology to build reliability in OOD edge-cases
+that would otherwise require human judgment. We evaluate
+four questions on the same overlay stack used in live field
+tests: (i) scene understanding and latency in semantic maritime
+anomalies; (ii) alignment of selected fallback maneuvers with
+aggregated human Accept/Best judgments relative to geometry-
+only baselines; (iii) short-horizon “risk-relief” on unambigu-
+ously dangerous fire hazards (standoff distance); and (iv) end-
+to-end operation of the alert→fallback maneuver→human over-
+ride chain in a live harbor run with immediate joystick override
+and ROC-legible presentation, complemented by a formative
+handover human-machine interface (HMI) study. Detailed hy-
+potheses, experiment setups and results are shown in Sec. 5. In
+summary, our contributions are as follows:
+1. IMO MASS-aligned fallback maneuver architecture.
+We formalize the alert→fallback maneuver→override
+loop as the main design constraint:
+short-horizon,
+pre-approved actions (or Station-keeping), immediate
+override, and no overall voyage-plan edits. This leads to
+the following main modules (Fig. 1).
+2. Camera-only candidate set and gating.
+From a
+single image frame, we compute a water mask and
+pixel-clearance, sample/project short motion primitives,
+gate them in pixel-space, then reduce to a world-anchored,
+numbered candidate set used consistently online and of-
+fline.
+3. VLM fallback maneuver selector with low-level execu-
+tion and human override. A strict-schema VLM deci-
+sion over the above candidates and an execution/author-
+ity path that publishes world-fixed waypoints to a line-
+of-sight waypoint follower with a direct joystick override
+blend ensuring immediate human authority.
+4. Evidence of feasibility.
+Small-n fast anomaly moni-
+tor experiment (Appendix A); offline evaluation on over-
+lays with human labeled ground truth; short-horizon fire
+“risk-relief” vs.
+geometry-only baselines; and a live
+alert→fallback maneuver→operator handover experiment
+with immediate joystick override.
+2. Related work
+2.1. Remote operation centers, human-machine interface and
+shared control for MASS/ASV
+Regulatory frame. The IMO MASS Code—which is currently
+being drafted and might still change—positions autonomy as
+2
+
+Figure 1: System overview showing the three main modules: perception and proposal, decision and execution and authority.
+bounded and supervised. We adopt the Code’s terminology:
+ODD (Operational Design Domain; conditions under which a
+specific autonomous/remote function is designed to operate)
+and OE (Operational Envelope; ship-level capabilities and lim-
+itations across modules). A deviation outside a function’s ODD
+is treated as a degraded state; exceeding the ship’s OE should
+trigger a predefined fallback state. In all cases, the navigation
+system must be capable of override at all times so human con-
+trol can be taken immediately. Any use of, or changes to, the
+voyage plan require Master (person in charge) approval (IMO,
+Maritime Safety Committee, 2024) These provisions support
+our focus on the alert→override interval.
+ROC supervision and HMI. The NTNU Shore Control Lab
+provides a flexible, instrumented ROC for studying remote su-
+pervision and handover under realistic constraints (Alsos et al.,
+2022). Building on this infrastructure, a human-centered “sit-
+uation awareness by design” ROC prototype emphasizes a
+camera-first view, explicit mode/authority cues, and predictable
+human control (Gusev et al., 2025). Evidence for one-to-many
+supervision remains limited: a controlled study reports de-
+graded performance when operators supervise three vessels vs.
+one, and shows that shorter available response times (e.g., 20 s
+vs. 60 s) materially affect takeover outcomes, with lacking de-
+cision support systems compounding the effect (Veitch et al.,
+2024).
+Control takeover is not instantaneous: first experimental re-
+sults on highly automated inland vessels suggest that takeover
+times of more than 20 s can be expected even in simplified
+scenarios (Shyshova et al., 2024).
+Survey-based results for
+conventional merchant ships further suggest that response and
+situation-awareness recovery can be on the order of minutes
+(including physical movement to the control position), with
+reported time-budgets for hazardous situations also on the or-
+der of several minutes and with high variability (Wróbel et al.,
+2025). Together, these results motivate systems that both buy
+time via safety-preserving degraded-mode actions and support
+rapid situation awareness during the alert-to-override window.
+To our knowledge, there is no published demonstration of
+robust one-operator to multi-vessel supervision with acceptable
+performance in realistic conditions. In this work, we adapt the
+ROC prototype from Gusev et al. (2025) for our experiments
+and use Endsley’s SA lens (perception, comprehension, pro-
+jection) as a framing when designing the graphical user inter-
+face used in the formative HMI experiment in Sec. 6 (Endsley,
+2023). We do not explicitly test one-to-many supervision, but
+see this system as one of the steps toward it.
+FM/LLM UIs in maritime. Prior work explored LLM-based
+conversational mission planning with the operator explicitly in
+the Master role (Christensen et al., 2025). Separately, a simu-
+lator study of a VHF conversational interface found lower trust
+3
+
+than a human officer and argued for tighter coupling to auton-
+omy and retained ROC oversight (Hodne et al., 2024). Our fo-
+cus differs from these: we target the ODD/OE alert window
+with VLM-driven, world-anchored actions.
+Our approach. We contribute an IMO MASS Code-aligned
+anomaly-handling method for the interval between alert and
+override that proposes a single cautious fallback maneuver (or
+abstains) with brief rationale, preserves immediate override,
+and is intended to help buy time and reduce operator time pres-
+sure in the alert→override window. This is aimed at making
+supervision of multiple vessels by one operator feasible, even
+though we evaluate a single vessel here. All closed-loop exper-
+iments run on the Shore Control Lab workstation from Gusev
+et al. (2025). This is to our knowledge the first use of foundation
+models in the real maritime domain used for anomaly handling
+specifically and for vision-to-action in general (one single ex-
+ception comes close to the latter, which runs a rudimentary and
+simulated VLM vision to action ASV stack (and no anomaly
+detection or handling) (Kim and Choi, 2025)).
+2.2. Classical maritime autonomy stack
+Perception. Some common camera-based maritime perception
+methods include (i) semantic water/obstacle segmentation to
+obtain a navigable-water mask, and (ii) object detection to lo-
+calize and classify vessels and other targets. Representative
+segmentation approaches include Water Segmentation and Re-
+finement (WaSR) and its embedded variant (eWaSR), along
+with inland/canal variants that can handle reflections, wakes,
+and narrow channels. Joint detect-and-segment models have
+also been demonstrated on edge hardware (Bovcon and Kris-
+tan, 2022; Teršek et al., 2023; Zhou et al., 2022; Yang et al.,
+2024). On the detection side, YOLO-family models trained
+on domain-specific datasets (e.g., SMD/SMD-Plus, SeaShips)
+offer real-time performance but remain constrained by nar-
+row taxonomies and out-of-distribution brittleness (Kim et al.,
+2022), with many rare or ad hoc hazards (e.g., diver-down flags,
+fire) lying outside the training distribution.
+Collision
+avoidance. Representative
+COLREGs-compliant
+collision avoidance methods formulate the problem as a
+scenario-based MPC (SB-MPC): at each step, a finite set
+of course/speed behaviors is simulated and scored by a cost
+that blends collision risk, COLREGs penalties, and maneuver
+effort (Johansen et al., 2016; Hagen et al., 2022). In deployed
+stacks, SB-MPC is typically fed by multi-target tracks from
+AIS/radar fusion before optimization (Hem et al., 2024).
+Surveys place SB-MPC alongside velocity-obstacle methods,
+potential-field/gradient methods, and graph/sampling-based
+planners; these approaches are fundamentally geometry- and
+rule-centric, encoding COLREGs (IMO, 2018) over kinematics
+rather than interpreting semantic cues and scene meaning
+(Zhang et al., 2021; Öztürk et al., 2022).
+Our approach. Our system is a camera-only proof-of-concept:
+eWaSR water masks gate a world-anchored candidate set, and
+our VLM fallback maneuver selector selects among admissible
+candidates based on scene meaning instead of only geometry
+or predefined categories. For baseline comparison, we evalu-
+ate simple geometry-only, semantics-agnostic heuristics on the
+same gated candidate set (Keep-station / Keep-course / Keep-
+starboard / Forward / Clearance). This is a camera-only sim-
+plified proxy to SB-MPC and similar systems for our proof-
+of-concept scope. Selected behaviors are executed by a stan-
+dard dynamic positioning (DP) system with line-of-sight (LOS)
+guidance and azimuth-thruster control allocation on our vessel
+(see Appendix B and Tufte et al. (2026); Brekke et al. (2022)
+for details).
+2.3. Foundation models in robotics
+Foundation models (FMs) (Bommasani et al., 2021), such as
+LLMs and VLMs, have enabled semantic reasoning across var-
+ious autonomous systems, including manipulation (Kim et al.,
+2024; Bjorck et al., 2025; Octo Model Team et al., 2024), nav-
+igation (Shah et al., 2023a,b), aerial systems (Saviolo et al.,
+2024), and long-horizon planning (Driess et al., 2023). These
+models have been used to bridge natural language instructions
+and visual input with physical plans and actions (Stone et al.,
+2023), generate code that can act as control policies (Liang
+et al., 2023), and construct reward functions (Yu et al., 2023).
+Various prompting strategies have been developed to elicit ac-
+tionable knowledge from off-the-shelf VLMs, including itera-
+tive visual goal prompting (Nasiriany et al., 2024), keypoint
+prompting (Huang et al., 2025; Deitke et al., 2025), selecting
+from predefined skill libraries (Ichter et al., 2023), and antic-
+ipating failure modes (Ganai et al., 2025). Vision-language-
+action (VLA) models trained end-to-end for robotics have been
+developed (Zitkovich et al., 2023; Black et al., 2025), but they
+often suffer from limited training data and lower generalization
+compared to large-scale VLM counterparts trained on internet-
+scale data (Radford et al., 2021).
+These generalist policies
+face deployment challenges including latency, safety verifica-
+tion, lack of interpretability, and domain adaptation (Ren et al.,
+2023a; Sinha et al., 2024).
+Our approach. In safety-critical domains such as maritime au-
+tonomy, regulatory frameworks like the IMO MASS Code man-
+date strict requirements on human oversight and explainability.
+We propose that pairing zero-shot semantic reasoning from off-
+the-shelf VLMs with the reliability of classical autonomy stacks
+offers a pragmatic path forward, leveraging the complementary
+strengths of foundation model reasoning and domain-specific
+perception-planning architectures.
+2.4. Robotic out-of-distribution detection and safety response
+OOD Detection. While deep learning systems have powered
+great advances in robot autonomy, such autonomous systems
+still struggle on rare and unexpected corner cases (Sinha et al.,
+2022; Geirhos et al., 2020). Simply enumerating and control-
+ling the ODD of ML-based robots is challenging, as a model’s
+region of competence is implicit in its training data. There-
+fore, to alleviate the need for constant human supervision, many
+4
+
+robotics works have proposed so-called out-of-distribution de-
+tectors in recent years (e.g., see Sharma et al. (2021); Laksh-
+minarayanan et al. (2017); Ruff et al. (2021)).
+These algo-
+rithms aim to detect anomalous conditions wherein model per-
+formance degrades so that a safety response can be triggered.
+While many works aim to detect component-level degradation,
+like when a perception model degrades in bad weather (Sinha
+et al., 2023; Gupta et al., 2024; Filos et al., 2020; Richter and
+Roy, 2017), some recent works introduce runtime monitors that
+detect contextual, semantic anomalies and reason about the ap-
+propriate safety intervention using LLMs and VLMs (e.g., see
+Elhafsi et al. (2023)). These works demonstrate promising re-
+sults leveraging the general common-sense reasoning capabili-
+ties of foundation models (FMs) to handle scenarios that would
+otherwise require human judgment.
+Our goal is to validate
+these capabilities in the maritime domain and thereby establish
+anomaly handling as a valuable use case of FMs in maritime
+autonomy.
+Maritime anomaly detection. Maritime anomaly detection has
+mainly been studied for traffic surveillance and Vessel Traf-
+fic Service (VTS) decision support, where anomalies are de-
+viations or inconsistencies in AIS-based trajectories and be-
+havior (Riveiro et al., 2018; Wolsing et al., 2022; Stach
+et al., 2023).
+Related work for MASS considers detect-
+ing abnormal surrounding vessels from AIS/GIS features
+(Tyasayumranani et al., 2022), while onboard monitoring tar-
+gets propulsion/engine-room faults from vibration and other
+machinery signals (Jeong et al., 2023; Öster, 2024). To our
+knowledge, no current work addresses onboard camera-based
+perception anomalies or FM-based contextual anomaly han-
+dling for maritime autonomy, which is our focus.
+FM safety interventions. Two challenges must be addressed to
+practically integrate FMs into real-time decision making. First,
+querying state-of-the-art FMs like GPT-5 incurs significant la-
+tency and constantly querying such models is expensive. There-
+fore, we follow (Sinha et al., 2024), which proposes a “thinking
+fast and slow” approach wherein a fast, cheap anomaly detec-
+tor runs in real-time and triggers the slower reasoning of a FM
+only in the event of an unusual situation. Second is to bridge
+the gap between the high-level, text-based reasoning of a VLM
+and the physical actions that the autonomy stack should execute
+to maintain safety. In (Ren et al., 2023b), the authors assume
+the system can freeze in place to await a human takeover when
+the robot is uncertain. In contrast, other works execute fully au-
+tonomous recovery behaviors by making the FM choose from a
+predefined set of safety interventions (Sinha et al., 2024) or by
+using additional VLMs to identify safe alternate goals (Ganai
+et al., 2025).
+Our approach. The existing methods cannot however be di-
+rectly used due to the unique considerations in the maritime do-
+main. In particular, a) the MASS Code (IMO, Maritime Safety
+Committee, 2024) necessitate a handover to a human, excluding
+fully autonomous recovery behaviors, and b) stopping a vessel
+to await a human takeover is not always possible or can even
+Table 1: Symbols and their meaning in the text. Different usages are explicitly
+stated when they appear.
+Symbol
+Description
+Unit
+I
+Calibrated camera image
+Ω
+Image plane (pixel domain)
+px
+u = (u, v)
+Pixel coordinates in image plane Ω
+px
+q
+Auxiliary pixel coordinate used in clearance
+definition
+px
+W(u)
+Binary water mask from segmentation (1 for
+water, 0 for non-water), W = Seg(I)
+D(u)
+Pixel-space clearance distance to nearest
+non-water pixel; cf. Eq. (1)
+px
+dmin
+Minimum clearance margin for feasible mo-
+tion candidates
+px
+talert
+Time when anomaly alert is raised
+s
+pb =
+h
+x
+y
+0
+i⊤
+Point in body-fixed horizontal frame B (x
+forward, y lateral)
+m
+pc
+Point in camera frame (depth coordinate is
+pc
+3)
+m
+K
+Camera intrinsic matrix
+Rn
+b, rb
+nb
+Rotation and translation from body frame {b}
+to world (NED) frame {n}
+Rc
+b, rb
+cb
+Rotation and translation from body frame {b}
+to camera frame {c}
+Π(K, Rc
+b, rb
+cb, pb)
+Projection from {b} to image plane Ω(via
+camera extrinsics)
+TN←B(t)
+Navigation pose (body→world) used for
+world anchoring at time talert
+C = {1, . . . , K}
+Index set of feasible motion candidates
+a ∈{0, 1, . . . , K}
+Selected
+fallback
+action
+(0
+=
+Station-
+keeping)
+Uanom
+Vessel speed during anomaly mode
+kn
+R, ∆
+Acceptance radius and look-ahead distance
+for LOS path guidance
+m
+τm, τh, τd
+Machine (autonomous), human, and desired
+(combined, shared) force input
+α
+Override blending factor (0 = autonomy
+with immediate manual intervention, 1 = full
+manual)
+increase safety risks. Instead, we propose a novel framework
+wherein a VLM bridges the gap between the detection of an
+anomaly and operator takeover by reasoning over and execut-
+ing short-term keep-safe behaviors.
+3. Problem formulation
+We consider an autonomous surface vessel (ASV) with a
+forward-facing monocular camera and a nominal waypoint-
+following system under human authority. An exogenous alert
+at time talert triggers a one-shot fallback maneuver decision (this
+alert is based on the existing fast anomaly detection method
+adapted from Sinha et al. (2024) and validated for the mar-
+itime domain in Appendix A). Throughout the paper, a fallback
+maneuver denotes the short-horizon, operator-overridable ac-
+tion executed in the alert-to-override interval, and the fallback
+maneuver selector denotes the module that chooses it from a
+pre-vetted candidate set. During this alert, we assume that the
+system has the following information (see also Table 1 for de-
+scription of symbols):
+1. A calibrated camera image I,
+5
+
+2. an identified water mask W = Seg(I), where Seg() defines
+the segmentation function returning 1 for water and 0 for
+anything else,
+3. a pixel-space clearance map on Ω, i.e., the minimal dis-
+tance (in the image plane) to shore or other identified ob-
+jects in the water, given by
+D(u) =
+min
+q∈Ω: W(q)=0 ∥u −q∥,
+(1)
+From this, we generate a finite set of K short, straight, and fea-
+sible motion primitives proposed ahead of the vessel. The fea-
+sible motion candidates are paths in the water and contain a
+minimum safe margin. Their projected samples (via the known
+camera model) satisfy for all visible samples u,
+W(u) = 1
+and
+D(u) ≥dmin,
+(2)
+for a margin dmin (pixels). The retained set of motion primitives
+is indexed {1, . . . , K}, with 0 reserved to Station-keeping.
+Problem formulation. The fallback maneuver selector selects a
+single action a ∈{0, . . . , K} once at talert from the overlaid view;
+no replanning occurs within the episode. The selected action
+is executed at a cautious anomaly-mode speed until termination
+by human override or alert clearance; operator authority strictly
+dominates autonomy.
+We assume camera-only perception and start-from-rest. We
+evaluate (i) human alignment of the chosen action (and scene
+understanding) and (ii) short-horizon directional risk relief on
+the same overlays.
+4. Methods: Fallback maneuver selection
+Here we show how our implementation instantiates the one-
+shot fallback maneuver selection problem posed in Section 3
+as a concrete, camera-only method executed at the alert ris-
+ing edge talert. From a single calibrated camera frame, we (i)
+compute a conservative water mask and a pixel-space clearance
+map, (ii) generate and gate short straight motion trajectories
+in the boat frame, (iii) render a numbered overlay ({1, . . . , K}
+with 0 denoting Station-keeping), (iv) query a vision–language
+model (VLM) once to select a fallback action, (v) and publish
+either a Station-keeping point or a world-fixed path to a line-
+of-sight waypoint follower. Operator input always has priority
+(MANUAL > AUTONOMY). The same overlay/gating stack
+is used both for offline evaluation and closed-loop field testing,
+with only vehicle-specific execution and override being differ-
+ent (see details in section 5). The remainder of this section is
+divided into the following three components: Trajectory can-
+didate generation and gating (Section 4.1), VLM fallback ma-
+neuver selection (Section 4.2), and Execution and arbitration
+(Section 4.3), as illustrated in Fig. 1.
+4.1. Trajectory candidate generation and gating
+At the alert rising edge talert, we operate on a single calibrated
+forward image I. We use four coordinate frames, see Fig. 2:
+the image plane Ω⊂Z2 with pixel coordinates u = (u, v),
+Ω: Body-fixed camera projection frame
+Obstacle in water
+Camera
+{b}: Body-fixed frame
+{n}: Local NED frame
+xb (forward)
+xn (North)
+yn (East)
+zn (down)
+yb (starboard)
+zb (down)
+Figure 2: Coordinate frames and their relation. The water segmentation filters
+out any non-water obstacle in the field-of-view, in the projection Ω.
+a body-fixed horizontal frame {b} with pb =
+h
+x
+y
+0
+i⊤(x
+forward, y lateral starboard), a camera frame {c}, and a local
+North–East–Down (NED) world frame {n}. The calibrated pro-
+jection from frame {b} to Ωuses an intrinsic matrix K, and the
+transformation from body frame {b} to world frame {n} uses
+an extrinsic transformation by translation rb
+nb (position of the
+vessel relative to the NED-frame given in the body frame) and
+rotation matrix Rn
+b ∈SO(3):
+pc = Rc
+b
+ pb −rb
+cb
+,
+u = Π(K, pc) := (K pc)1:2
+(K pc)3
+,
+pn = Rn
+b
+ pb −rb
+nb
+.
+(3)
+The above is valid when pc
+3 > 0 and u ∈Ω(in front of the cam-
+era, in-frame). All selection and gating in this subsection hap-
+pens in Ω, putting candidates into {n} happens later in Sec. 4.2.
+Water and clearance. From the image I we compute a conser-
+vative binary water mask
+W(u) ∈{0, 1},
+W = Seg(I),
+(4)
+using the embedded Water Segmentation and Refinement
+(eWaSR) maritime segmentation model (Teršek et al., 2023),
+and a per-pixel clearance map (Euclidean distance to the near-
+est non-water pixel) using Eq. (1). A narrow bottom band is
+treated as trivially water to ensure connectivity at the hull.
+Sampling and projection. We sample Nraw straight motion
+primitives in {b} from a fixed local anchor at the bow
+(4.0, 0.0) m to endpoints drawn in an annulus r ∈[Rmin, Rmax]
+within a forward half-angle |ϕ| ≤ϕmax. Each primitive is dis-
+cretized into Nℓpoints in B and projected via (3). A sample is
+visible if pc
+3 > 0 and u ∈Ω. Let k0 be the first visible index; the
+endpoint pixel must also be visible.
+Pixel-space gating. A candidate is retained if every visible pro-
+jected sample from k0 to the endpoint satisfies
+W(uk) = 1
+and
+D(uk) ≥dmin,
+∀k ∈{k0, . . . , Nℓ}.
+(5)
+This enforces that the commanded segment lies entirely on wa-
+ter with a pixel margin, without requiring world geometry or
+multi-sensor fusion.
+6
+
+Algorithm 1 Candidate generation, projection, gating, and
+thinning
+Require: Image I at talert;
+camera (K, Rc
+b, rb
+cb);
+Rmin, Rmax, ϕmax;
+Nraw, Nℓ; dmin; target K
+1: W ←Seg(I)
+2: D ←Euclidean distance transform on (1 −W), sampled on W=1
+3: S ←∅
+4: for each sampled endpoint e in annulus (Rmin, Rmax, ϕmax) do
+5:
+lineb ←Nℓsamples from anchor (4.0, 0.0) to e in B
+6:
+pix_seq ←project all samples via (3)
+7:
+k0 ←first index with a valid pixel; require endpoint pixel valid
+8:
+if k0 exists and ∀k ∈{k0, . . . , Nℓ} : W(uk)=1 ∧D(uk) ≥dmin
+then
+9:
+S ←S ∪{(e, uend)}
+(store endpoint and its pixel)
+10:
+end if
+11: end for
+12: C ←FarthestPointThinning(S, K, δpx)
+(Appendix Alg. 3)
+13: Index C as {1, . . . , |C|} and define ID 0 ≡Station-keeping
+14: return C (for overlay rendering)
+Thinning and indexing. From the surviving set, we select up
+to K primitives by farthest-point thinning on endpoint pixels to
+promote spatial spread (Appendix, Alg. 3). Candidates are in-
+dexed as {1, . . . , K} (ID 0 is reserved for Station-keeping). We
+use K = 15 and dmin = 40 px in both offline evaluation and
+live field tests. Here dmin = 40 px is an image-space clearance
+margin used as a conservative camera-only proxy to reject can-
+didates whose projected samples pass too close to non-water
+regions. A fixed pixel margin corresponds to a larger physical
+separation for more distant boundaries, so it is most critical in
+the near field. In a production system this gating module would
+naturally be replaced or augmented by range-aware perception
+(e.g., stereo, LiDAR, radar) without changing the remainder of
+the Semantic Lookout fallback maneuver selector.
+The whole generation and gating algorithm is summarized in
+Alg. 1.
+4.2. VLM fallback maneuver selector
+Input and output schema. The model receives only the over-
+layed image O with labeled candidates {1, . . . , K} (ID 0 denotes
+Station-keeping) and an instruction prompt (see Appendix E).
+It returns a single strict JSON object
+{"see":"<= 15 words",
+"implications":"<= 15 words",
+"action":"<= 15 words (no ids)",
+"choice_id": 0..K,
+"confidence": 0..1}
+We parse and connect choice_id to {0, . . . , K} (invalid JSON
+maps to Station-keeping (choice_id = 0). The free-text fields
+(see, implications, action) are logged for analysis and are
+also used with the operator UI to support situational awareness
+in the formative handover study (Sec. 6).
+Failure handling and safe defaults. The fallback maneuver se-
+lector is invoked only after an external anomaly alert at talert.
+It is therefore a post-alert safety module: it does not guaran-
+tee anomaly detection, and missed or late alerts are handled by
+the nominal autonomy stack and the upstream alerting mon-
+itor (Appendix A). Within the fallback maneuver selector it-
+self, we implement conservative safe defaults for three failure
+modes. (i) If the VLM call times out, returns an API error,
+or produces an invalid or non-conforming JSON object, we set
+choice_id = 0 (Station-keeping) and notify the ROC. (ii) If
+the candidate generation/gating yields no feasible motion can-
+didates (i.e., K = 0 after gating), we likewise default to Station-
+keeping and notify the ROC. (iii) If voting in FB-n produces no
+strict majority (ties, see below), we default to Station-keeping
+by design. In all cases, joystick override remains available at
+all times and dominates autonomy.
+Runtime single-shot selection (FB-1). We issue one call per
+alert. Let fθ denote the VLM and let y = fθ(O); the executed
+action is
+a(1) = clip{0,...,K}
+  fθ(O).choice_id.
+(6)
+and is applied once within the episode (no replanning).
+Evaluation ensemble (FB-n). To probe robustness, we evaluate
+n independent calls on the same overlay O with distinct seeds
+{ηs}n
+s=1:
+as = clip{0,...,K}
+  fθ(O; ηs).choice_id,
+s = 1, . . . , n.
+(7)
+We aggregate by strict majority of n (ties ⇒Station-keeping):
+a(n) =
+
+arg maxk ck,
+maxk ck > ⌊n/2⌋,
+0,
+otherwise.
+(8)
+Where as ∈{0, . . . , K} is the ID from the s-th stochastic call,
+ck = |{ s : as = k }| counts votes for candidate k, arg maxk ck re-
+turns any maximizer, and ID 0 denotes Station-keeping. We
+refer to the runtime selector as FB-1 and the evaluation en-
+semble as FB-n. In all experiments, we use n=3 (FB-3, see
+Sec. 5).
+Sampling multiple test-time rollouts and aggregat-
+ing by majority follows standard self-consistency / test-time
+compute-scaling practice in LLM reasoning (Wang et al.,
+2022).
+Temporal anchoring. Candidates are frozen in the world frame
+at talert using the navigation pose TN←B(talert). At command is-
+sue, we re-project those world-fixed polylines for visualization
+and publish the world-fixed geometry to the controller. This de-
+couples perception/decision latency from actuation while pre-
+serving the action space from Sec. 4.1.
+The whole fallback maneuver selector algorithm is summa-
+rized in Alg. 2.
+4.3. Execution, arbitration, and control
+This section summarizes the closed-loop elements used only
+in the field experiments and formative handover study. Given
+the fallback maneuver a ∈{0, . . . , K} (Sec. 4.2), the system ei-
+ther tracks a world-fixed path (a ≥1) or holds position (a = 0,
+Station-keeping). Figures 3 and 4 illustrate the overall architec-
+ture and the override blend. Allocator and platform details are
+provided in Appendix B.
+7
+
+Automatic guidance
+module
+Shared
+control
+(see Fig. 4)
+Control
+allocation
+milliAmpere1
+experimental ASV
+Waypoints
+in mission
+Human-in-the-loop
+Override motion
+Desired
+motion
+Shared
+motion
+Low-level
+commands
+States
+Figure 3: Block diagram for automatic waypoint follow with motion guidance on the ASV. A combined motion is the result of an override logic in which a human-
+in-the-loop may override the automatic motion guidance.
+Algorithm 2 fallback maneuver selection and command issue
+(FB-1 runtime; FB-n evaluation)
+Require: Overlay O with candidate count K; frozen world polylines
+{Πk}K
+k=1; current navigation pose; ensemble size n ∈N, n ≥1
+1: FB-1 (runtime): y ←fθ(O);
+a ←clip{0,...,K}(y.choice_id)
+2: FB-n (evaluation): for s ∈{1, . . . , n} do
+3:
+as ←clip{0,...,K}
+ fθ(O; ηs).choice_id
+4: end for
+5: (vote counts) ck ←
+{ s : as = k }
+ for all k ∈{0, . . . , K}
+6: (strict majority) if maxk ck > ⌊n/2⌋then a ←arg maxk ck else
+a ←0 end if
+(ties ⇒Station-keeping)
+7: if a = 0 then
+8:
+Station-keeping: publish a single world point at the current
+nav pose
+9: else
+10:
+Track: publish world-fixed polyline Πa (to LOS follower)
+11: end if
+Waypoint following. For a ≥1 the pre-frozen world polyline
+Πa is tracked by a line-of-sight (LOS) follower with accep-
+tance radius R = 7.5 m and lookahead distance ∆= 10 m at
+the anomaly-mode speed Uanom = 1.0 kn. Full controller and
+allocation details follow Tufte et al. (2026) and Appendix B.1.
+For a = 0 a single world point at the current navigation pose is
+published.
+Operator override. Let τd denote the desired actuation after
+arbitration, τm the autonomy (motion) command, τh the human
+(joystick) input, and α ∈[0, 1] a blending factor (see Fig. 4).
+We use a direct blend that guarantees at least 50% human au-
+thority and ramps to full override:
+τd = (1 −α)τm + (0.5 + 0.5α)τh
+(9)
+Here, the blending factor α determines
+α =
+
+0,
+Automatic steering
+0 < α < 1,
+Shared steering
+1,
+Manual override
+We do this to enable continuous control and a seamless tran-
+sition between vessel and operator in Sec. 6, and to revert
+back to fully autonomous control in case of loss of signal mid-
+transition. Details of the α schedule transitions are specified
+in Appendix B.1.
+Time
+0%
+50%
+100%
+Phase in
+Full override
+Idle
+Phase out
+τh , 0 (hand on joystick)
+τh = 0 (hands off)
+Human override weight
+Autonomy authority
+Figure 4: Override switch logic implemented from autonomous operation to
+manual intervention and back. The percentage is the weight given to each actor,
+showing that during autonomy operations, the operator may intervene in the
+motion with both immediate action and with a gradual complete override by a
+defined phase-in time period.
+5. Experiments and results
+In this section we evaluate the method on camera overlays at
+alert time, using the candidate generation and gating stack (and
+control/arbitration where applicable) described in Section 4.
+We structure the evaluation around a series of experiments that
+test the following four hypotheses:
+• H1 (Scene understanding).
+Modern VLMs can cor-
+rectly recognize semantic, marine-specific, hazards and
+their implications, and propose appropriate high–level
+action descriptions, at latencies that are usable in the
+alert→override handover window.
+• H2 (Action alignment with human choices). The cor-
+responding fallback maneuvers selected from these ac-
+tion descriptions align with aggregated human “Accept-
+able/Best” judgments on the same overlays, outperforming
+simple geometry-only baselines.
+• H3
+(Risk–relief).
+On
+unambiguously
+dangerous
+fire scenes,
+the fallback maneuver selector selects
+short–horizon actions that increase separation from the
+hazard relative to keep-course/starboard geometry-only
+baselines.
+• H4 (Integrated field test and handover).
+The full
+alert→fallback maneuver→override chain can be executed
+on a real vessel with immediate joystick override and
+8
+
+a ROC-legible user interface (UI), consistent with IMO
+MASS Code constraints.
+Experiment rationale. We run four main experiments, cor-
+responding to each respective hypothesis.
+Experiment 1
+(Sec. 5.2) evaluates scene understanding: given a single over-
+laid camera frame and a strict output schema, can models
+describe the hazard, its implication, and a safe high-level
+action, and how does this trade off with latency?
+Experi-
+ment 2 (Sec. 5.3) evaluates to what extent the selector’s cho-
+sen trajectory IDs under FB-3 agree with human judgments on
+the same overlays, using aggregated Accept/Best sets to ap-
+proximate “reasonable” actions in semantic anomalies.
+Ex-
+periment 3 (Sec. 5.4) focuses on the unambiguously danger-
+ous fire subset, measuring short-horizon directional risk re-
+lief versus geometry-only baselines. Experiment 4 (Sec. 5.5)
+closes the loop on water, testing the full alert→fallback
+maneuver→override chain on a real ASV with ROC supervi-
+sion.
+Each (model, scene) is run n times with distinct seeds. Un-
+less stated otherwise, we use n=3 (FB-3) and aggregate by strict
+majority (ties ⇒Station-keeping). Single–shot results (FB-1)
+are reported where relevant. Models receive only the numbered
+overlay image and an instruction prompt, no additional geome-
+try or labels are provided at inference time.
+In Appendix A, we also evaluate the fast alert of our
+alert→fallback maneuver→operator system (an established fast
+anomaly detection alert method adapted from Sinha et al.
+(2024)), to validate that it also works, given the distribution
+shift for the maritime domain.
+5.1. Shared dataset, platform, and setup
+Platform and environment. All scenes are captured from the
+milliAmpère research ASV operating in a sheltered harbor,
+shown in Fig. 5. The closed-loop live experiment is performed
+with this vessel and the ROC shown in Fig. 6. Platform, control,
+and ROC details are summarized in Appendix B. The offline
+overlays used in this section are produced by the same camer-
+a/overlay/gating stack that is used in field tests, only the exe-
+cution/override differs. Specifically, Experiments 1 and 2 are
+performed on the offline dataset detailed below. Experiment 3
+is performed on the fire subset of that data, where movement
+is simulated along the trajectory in the vessel frame. Exper-
+iment 4 is performed closed-loop on water with real human
+manual override.
+Offline evaluation dataset. In Experiments 1–2 (and partially
+3), we target four visual/semantic anomaly types that require
+understanding of scene meaning and are therefore challenging
+for classical ASV stacks:
+1. Alpha diver-down flag (real): The official international
+diver-down flag requiring reasoning about the implications
+of unseen divers in the area around it.
+2. Man overboard (MOB) (real): a person in the water re-
+quiring context-dependent actions.
+3. Fire (AI–enhanced): flames/smoke inserted into frames
+captured from the vessel to emulate fire hazard nearby.
+Figure 5: The Milliampere research ASV was used for data collection and in
+closed-loop experiments. Details in Appendix B.1.
+Figure 6: The remote operation center used in closed-loop experiments. Details
+in Appendix B.1.
+9
+
+4. Custom signs (AI–enhanced):
+e.g., keep–out or re-
+stricted–area signage inserted into vessel–captured frames.
+We collect 10 scenes per category. For AI-enhancement, we use
+Gemini 2.5 Flash Image (Fortin et al., 2025) on frames from the
+real vessel, which are treated identically to real scenes. This en-
+ables testing anomalous situations that would have been danger-
+ous or impractical otherwise. Representative real and enhanced
+example scenes are shown in Figure 7.
+Model grid and run protocol. In Experiments 1 and 2 we eval-
+uate a diverse set of vision–language models and inference set-
+tings shown in Table 2. Specific models are chosen for Experi-
+ments 3 and 4 based on performance in the first two.
+Table 2: Evaluated VLM models and options.
+Provider
+Model
+Variants / options
+Anthropic
+claude-opus-4-1
+–
+Anthropic
+claude-sonnet-4
+–
+Google
+gemini-2.5-flash
+–
+Google
+gemini-2.5-pro
+reasoning=auto
+Google
+gemini-robotics-er-1.5
+think={off, medium, full}
+OpenAI
+gpt-4.1
+–
+OpenAI
+gpt-4o
+–
+OpenAI
+gpt-5
+{high, medium, low, minimal}
+OpenAI
+gpt-5-mini
+{high, medium, low, minimal}
+OpenAI
+gpt-5-nano
+{high, medium, low, minimal}
+For each (model, scene) we issue three calls with distinct
+seeds to assess stability (strict–majority voting as above). We
+use a conservative prompt that advises Station-keeping when
+uncertain (alternative prompts, neutral/proactive, are ablated
+in Appendix E.2). For every call we record end–to–end latency.
+Reporting conventions. We report 95% confidence intervals
+where relevant. For proportions (e.g., Accept@1, Best-set@1)
+we use the Wilson interval and write p [L, U]. For continuous
+outcomes (e.g., awareness score, latency) we report the mean ±
+95% CI. Pareto scatter plots omit intervals to reduce clutter; the
+corresponding leaderboards/tables include them.
+5.2. Experiment 1: Scene understanding (H1)
+Overview and method. Experiment 1 evaluates whether, given
+the overlaid image and strict output schema, models accurately
+describe the hazard, its safety implications, and a high-level
+safe action, and how this trades off with latency. This addresses
+H1 at the level of textual scene understanding, independent of
+the specific candidate ID (which is evaluated separately in 5.3).
+Each scene is associated with a short human-labeled ground
+truth that describes the hazard, implications and high-level safe
+behavior. We compare model output to ground truth with an
+LLM-as-judge configured as GPT-5-low (see Gu et al. (2024)
+for an overview of LLM-as-judge as a method). The judge is
+provider–blind and sees only the textual ground truth and model
+output (not image, candidates etc.) It also tolerates synonyms
+and penalizes off-topic or unsafe recommendations (see Ap-
+pendix E.3 for the specific LLM-as-judge prompt).
+The judge emits three component scores with fractional
+credit in [0, 1]:
+1. Hazard recognition (1.0 = explicitly correct cue, 0.75 =
+clearly implied, 0.5 = generic hazard, 0 = wrong/missing).
+2. Implication (does the text state why it matters for safety,
+e.g., people in water, restricted area, fire risk).
+3. Action (is the proposed high-level maneuver broadly con-
+sistent with ground truth, independent of choice ID).
+We aggregate to a single awareness score in [0, 1] with fixed
+weights:
+Awareness = 0.50 · hazard + 0.25 · implication + 0.25 · action. (10)
+Reasoning is evaluated per call (FB-1, all three seeds). For
+each (model, anomaly) and overall, we report (i) the mean
+awareness score and (ii) the mean end-to-end model latency.
+Results and analysis. We evaluate per-call scene understanding
+(hazard, implication, action) using the LLM-as-judge protocol
+above and report mean awareness and end-to-end latency across
+the 40 scenes (10 per anomaly). Figures 8 and 9 summarize
+the awareness-latency Pareto frontier by provider. Error bars in
+Figure 9 show 95% confidence interval (CI).
+OpenAI models show overall best performance: gpt-5-high
+shows the highest mean awareness (0.866 ± 0.063) at 59.2 ±
+4.0 s, while strong sub-10 s alternatives, gpt-4.1 (0.830 ± 0.063
+at 5.69 ± 0.22 s) and gpt-5-minimal (0.833 ± 0.071 at 7.07 ±
+0.47 s), provide most of the performance at much lower latency
+(Table 3). Incremental gains beyond ∼30 s are within CI (like
+gpt-5-medium at 0.866 ± 0.062 at 30.0 ± 1.9 s vs. gpt-5-high).
+The best non-OpenAI frontier points are gemini-2.5-flash
+(0.768 ± 0.087 at 15.6 ± 1.1 s) and gemini-robotics-er-1.5
+think=12288 (0.704 ± 0.112 at 14.3 ± 0.6 s), while Anthropic’s
+fastest frontier point is claude-sonnet-4 (0.507±0.139 at 4.53±
+0.11 s). The best models mostly span from ∼5–7 s at ∼0.83
+awareness to ∼60 s at ∼0.87 awareness score.
+Across the Top-5 frontier entries, hazard, implication and ac-
+tion scores are generally high and balanced (Hazard: ∼0.83–
+0.87, Implication: ∼0.81–0.85, Action: ∼0.84–0.88) (Table 3).
+Appendix E.5 shows the results for all models tested.
+Table 3: Top 5 Pareto-frontier models for awareness-latency trade-off (means
+±95% CI over n=40 scenes). H (hazard)/ I (implication) / A (action) lists com-
+ponent means.
+Model
+Latency [s]
+Awareness
+H/I/A
+gpt-4.1
+5.69 ± 0.22
+0.830 ± 0.063
+0.83/0.83/0.84
+gpt-5-minimal
+7.07 ± 0.47
+0.833 ± 0.071
+0.82/0.82/0.86
+gpt-5-low
+17.21 ± 1.11
+0.845 ± 0.068
+0.85/0.81/0.86
+gpt-5-medium
+30.04 ± 1.94
+0.866 ± 0.062
+0.87/0.85/0.88
+gpt-5-high
+59.22 ± 4.01
+0.866 ± 0.063
+0.87/0.85/0.87
+Failure-case analysis and anomaly-specific observations. Per-
+anomaly results (Appendix E.5.1–Appendix E.5.4) show the
+largest inter-model spread on Diver flag and MOB, with most
+models near a high plateau on Fire and Custom sign. When
+defining “low awareness” as the bottom quartile of per-call
+awareness scores, failures concentrate overwhelmingly in the
+small/low-salience categories: 63.7% of Diver flag calls and
+30.4% of MOB calls fall into this low-awareness subset, vs.
+10
+
+(a) Diver flag.
+(b) Man overboard (MOB).
+(c) Fire scene.
+(d) Custom sign.
+Figure 7: Representative scene examples of (a) Diver flag, (b) MOB, (c) fire, (d) custom sign.
+Figure 8: Model awareness vs latency, showing only the pareto frontier.
+Figure 9: Awareness leaderboard, only showing the per-provider pareto frontier
+11
+
+11.7% for Signs and 1.4% for Fire. In the low-awareness subset,
+mean rubric subscores are low for scene understanding and im-
+plications (see/hazard: 0.16, implication: 0.18), while action is
+higher (0.33), indicating that the dominant root cause is missed
+or misinterpreted hazards rather than fine-grained action dis-
+agreement. Notably, even among low-awareness outputs, mod-
+els sometimes propose plausible generic maritime actions (e.g.,
+“slow down” / “keep clear”) without correctly identifying the
+cue, which can make the text appear reasonable while being se-
+mantically ungrounded. Typical recurring modes are: missed
+anomaly (no grounding), misidentification as a benign buoy/-
+marker/clutter, a generic COLREG-like caution template, and
+implication gaps (e.g., noticing a flag/shape but not inferring
+divers or rescue constraints).
+Takeaways. These results support hypothesis H1:
+modern
+VLMs can achieve high maritime scene awareness at practical
+latencies, with sub-10 s models retaining most of the awareness
+of much slower systems. When the selector correctly recog-
+nizes the hazard, the resulting rationale is specific enough to
+support explainable handovers in the ROC GUI, while remain-
+ing failure modes are dominated by subtle, low-salience cues
+such as the alpha diver flag and small, distant MOB targets.
+5.3. Experiment 2: Action alignment with human choices (H2)
+Overview and method. Experiment 2 evaluates whether the
+picked trajectory ID under FB-3 matches what humans con-
+sider reasonable actions on the same overlays. Because these
+semantic anomalies involve value-laden tradeoffs and partial
+observability from only a single camera view, there is no unique
+ground-truth “correct” action label. Instead we treat aggregated
+human judgments as a proxy for reasonable behavior in cases
+where geometry alone is insufficient.
+Human raters mark any number of Acceptable candidates and
+select a single Best candidate. The Station-keeping option (ID
+0) is available and treated like any other candidate. Each scene
+is rated by N ≥11 raters. For rater r, let A(r) ⊆{0, . . . , K} be
+the Acceptable set and b(r) ∈{0, . . . , K} the Best pick. “None
+acceptable” is treated as abstention and set to Station-keep.
+To form the Acceptable consensus we define the acceptance
+frequency
+ˆpk =
+1
+N
+N
+X
+r=1
+1
+h
+k ∈A(r)i
+,
+k ∈{0, . . . , K},
+(11)
+and set
+ACCEPT = k : ˆpk ≥τacc
+ ,
+τacc = 0.6.
+(12)
+To allow for scenes with more than one defensible “best”
+action (e.g., stop near a MOB vs. steer away), we permit up to
+three Best items when support is split across strong contenders.
+We first count “best” votes per candidate:
+vk =
+N
+X
+r=1
+1b(r) = k,
+k ∈{0, . . . , K}.
+(13)
+Let the top vote count be
+vmax = max
+k
+vk.
+(14)
+We require each Best item to clear a threshold that encodes two
+simple safeguards: (i) it must be reasonably competitive with
+the top option (at least half as many votes), and (ii) it must have
+a non-trivial minimum of raters (at least one quarter of N):
+θ = max  0.5 vmax
+, 0.25 N .
+(15)
+Candidates meeting this support are retained,
+BEST⋆= { k : vk ≥θ },
+BEST = BEST⋆∩ACCEPT.
+(16)
+If |BEST| > 3, we keep the three items with largest vk (ties
+broken by larger ˆpk, then smaller ID). This results in one to
+three “best” choices when raters split between a small number
+of strong alternatives, while still filtering outlier picks. Quali-
+tative inspection of per-scene ACCEPT and BEST sets shows
+reasonable results (see Appendix E.4 for examples).
+Metrics and baselines. Each (model, scene) is run three times
+with distinct seeds; unless otherwise stated we report majority-
+of-three (FB-3). We measure:
+• Accept@1: fraction of scenes where the chosen ID lies in
+the human consensus ACCEPT set.
+• Best@1: fraction of scenes where the chosen ID lies in the
+human consensus BEST set.
+These metrics explicitly tie the model’s action to what hu-
+mans regard as acceptable or preferred among the pre-vetted
+candidates. Purely geometric metrics like distance to shore or
+relative bearing would not capture semantics such as divers, sig-
+nage, or people in the water. By aggregating raters, we approx-
+imate the notion of “reasonable behavior” in these ambiguous,
+meaning-dependent scenes.
+We compare the selector method to geometry-only baselines,
+which operate on the identical, gated set: Station-keep (always
+pick ID 0); Keep-course (pick the candidate with the smallest
+bearing relative to vessel heading, |ϕk|); Keep-starboard (pick
+the most starboard gated trajectory); Forward (maximize for-
+ward displacement (x) of the endpoint); Clearance (maximize
+the minimum pixel-space clearance along the candidate’s pro-
+jected samples).
+Results and analysis. We evaluate whether the picked candi-
+date aligns with the human consensus Accept and Best sets on
+the same overlay, using FB-3. Geometry-only baselines op-
+erate on the same, gated set of candidates (Keep-station, Keep-
+starboard, Keep-course, Forward, Clearance) as defined above.
+Figures 10 and 11 show per-provider Pareto frontiers for ac-
+tion alignment versus mean latency, all baselines are included
+and are plotted at zero latency. Models that were on the frontier
+in Fig. 8 (scene understanding) but are not on the current fron-
+tier appear as transparent carryovers for reference. The leader
+12
+
+Figure 10: Accept rate vs latency, showing only the per provider Pareto frontier
+and shaded carryovers from Experiment 1.
+Figure 11: Best rate vs latency, showing only the per provider Pareto frontier
+and shaded carryovers from Experiment 1.
+Figure 12: Accept@1 rate leader board with Wilson CI. Only the Pareto frontier
+models and all baseline models shown.
+Figure 13: Best@1 rate leader board with Wilson CI. Only the Pareto frontier
+models and all baseline models shown.
+boards in Figures 12 and 13 similarly show frontier models (but
+not carryover) and baselines, with 95% Wilson CIs.
+Across the full set of scenes, the best overall model on both
+metrics is gpt-5-low, which we therefore use for FB-3 in the
+risk–relief analysis in Experiment 3. Its FB-3 results are Ac-
+cept@1 = 0.68 [0.52, 0.80] and Best@1 = 0.48 [0.33, 0.63]
+at a latency of 16.1 s (Table 4). In the sub-10 s region, gpt-5-
+minimal achieves Accept@1 = 0.60 [0.45, 0.74] and Best@1
+= 0.40 [0.26, 0.55] at 6.7 s, while gpt-4o yields Accept@1
+= 0.55 [0.40, 0.69] and Best@1 = 0.43 [0.29, 0.58] at 5.8 s.
+These provide strong and fast alternatives with a modest drop
+from the overall best. Like in Experiment 1, OpenAI models
+dominate the frontier.
+Because Station (ID 0) appears frequently in the human
+consensus, baseline Keep-station is relatively competitive: it
+obtains Accept@1 = 0.45 [0.31, 0.60] and Best@1 = 0.38
+[0.24, 0.53] (Table 4). This also highlights the general dataset
+composition: Station is in the rater Accept set for 45% of
+scenes and in the Best set for 37.5% of scenes. In contrast,
+Keep-starboard is often acceptable but rarely best (Accept@1
+= 0.50 [0.35, 0.65], Best@1 = 0.13 [0.05, 0.26]), consistent
+with open-water frames and pre-vetted trajectories that already
+avoid obvious non-water regions. All model and baseline re-
+sults are in Appendix E.6.
+Failure-case analysis and anomaly-specific observations. Per-
+anomaly tables (Fire, Diver flag, MOB, Custom sign) are pro-
+vided in Appendix E.6.1 – Appendix E.6.4. As in Experiment 1,
+action alignment spreads are largest on the low-salience cat-
+egories (Diver flag, MOB) and smaller on Fire/Sign. Typical
+misalignment modes mirror the scene-understanding failures:
+missing or misinterpreting the cue (e.g., diver-down marker or
+distant MOB confused with buoy/clutter) can lead to selecting
+a candidate that passes too close to the hazard region. A sec-
+ond reason is on the conversion from understanding to concrete
+action: even when the hazard is correctly described at a high
+level, mapping that intent to a single numbered best candidate
+among many options is stricter and requires better grounding
+than producing a plausible textual recommendation. This is re-
+13
+
+flected in a consistent gap between high-level scene understand-
+ing and concrete action selection: the best mean awareness in
+Experiment 1 reaches 0.866, whereas the best overall action
+alignment here peaks at Accept@1 = 0.68 and Best@1 = 0.48
+(Table 4), indicating that selecting an acceptable/best specific
+short-horizon path is considerably harder for the models than
+describing the situation and a generic safe response.
+Takeaways. The experiment supports hypothesis H2: within
+our pre-vetted candidate set, the FB-3 selector aligns with hu-
+man Accept/Best judgments more often than geometry-only
+baselines, even though Station-keeping and keep-starboard re-
+main competitive in many scenes. This suggests that seman-
+tics—not only simple geometric rules—matter in the relatively
+small set of cases where those defaults would be unsafe, and
+that action alignment with human consensus is a useful proxy
+for “reasonable” behavior in such semantic anomalies. The ob-
+served gap between awareness and action alignment suggests
+that translating high scene understanding into concrete safe ac-
+tions is a key remaining bottleneck.
+Table 4: Overall action alignment (FB-3 majority-of-three) with 95% Wilson
+CIs over N=40 scenes; median latency across calls.
+Method
+Accept@1
+Best@1
+Latency (s)
+FB-3 (gpt-5-low)
+0.68 [0.52, 0.80]
+0.48 [0.33, 0.63]
+16.11
+Keep-station
+0.45 [0.31, 0.60]
+0.38 [0.24, 0.53]
+∼0.00
+Keep-starboard
+0.50 [0.35, 0.65]
+0.13 [0.05, 0.26]
+∼0.00
+5.4. Experiment 3: Fire-only risk–relief (H3)
+Overview and method. In the event of an anomaly detection,
+the time between alert and human override could be consider-
+able. Experiment 3 asks whether the selector can reason about
+an unambiguously dangerous hazard and move the vessel to-
+ward safety, addressing H3 on directional risk relief. We focus
+on the fire subset, where the hazard location is well defined.
+We evaluate the winning selector, FB-3 (gpt-5-low), on
+short-horizon directional risk relief and compare it to baselines
+(Keep-station, Keep-course and Keep-starboard) on the un-
+ambiguously dangerous fire subset of the dataset.
+For each
+scene we annotate a single hazard point h on the water plane,
+back-projected with the known camera intrinsics and extrin-
+sics from (3), Section 4.1. h is only used for evaluation. We
+start from the bow anchor x0 = (4.0, 0.0) m in the boat frame
+and execute the chosen trajectory at a constant anomaly speed
+Uanom = 0.514 m/s (1 kn) without replanning. If the endpoint
+is reached early, the vessel stops. This is simulated only and
+assumes the hazard is stationary.
+For a horizon H(s),
+let xH(p) be the position after
+straight–line motion toward the chosen endpoint (or xH = x0
+for Keep-station). We measure change in separation
+∆dH(p) =
+
+xH(p) −h
+
+2 −
+
+x0 −h
+
+2,
+(17)
+so that positive values indicate increased distance from the haz-
+ard (risk relief), negative values decreases distance from the
+hazard, and Keep-station is always 0. Because fire is unam-
+biguously dangerous and localized on the water plane, this geo-
+metric standoff metric directly captures whether a choice moves
+away from or toward the hazard and is easier to interpret than
+in the more ambiguous anomaly types where multiple actions
+could be reasonable for humans.
+Results and analysis. We report mean ∆dH across scenes as a
+function of time and at fixed horizons H ∈{10, 30, 60} s, and
+also show min-max values to visualize best and worst runs (Ta-
+ble 5 and Fig. 14). FB-3 yields large positive relief on some
+scenes while remaining neutral on others, depending on the sit-
+uation. It outcompetes all baselines, which show mean zero
+(station) or negative (the rest).
+Takeaways. These findings support H3: on unambiguously
+dangerous fire scenes, the FB-3 method tends to increase
+standoff distance compared to keep-course, keep-starboard, or
+Station-keeping, providing directional evidence that the human-
+alignment result from Experiment 2 translates into short-
+horizon risk relief when the hazard is spatially localized and
+semantically unambiguous.
+Table 5: Fire scenes (n = 10). Mean change in separation ∆dH [m] at H ∈
+{10, 30, 60} s. Brackets show per-scene range [min, max]. Positive indicates
+increased distance from the hazard.
+Fallback
+∆d10s
+∆d30s
+∆d60s
+FB-3
+−0.3 [−2.5, 1.1]
+1.1 [−0.9, 8.0]
+3.5 [−0.9, 19.5]
+K-course
+−4.0 [−5.0, −2.3]
+−4.3 [−6.6, −2.3]
+−4.3 [−6.6, −2.3]
+K-starboard
+−2.6 [−4.5, −0.3]
+−2.9 [−6.7, 3.5]
+−2.9 [−6.7, 3.5]
+K-station
+0.0 [0.0, 0.0]
+0.0 [0.0, 0.0]
+0.0 [0.0, 0.0]
+Figure 14: Risk-relief on the fire scenes: mean ∆dH (m) over time with min–
+max shading across n=10 scenes. Positive values indicate increased separation
+from the annotated hazard.
+5.5. Experiment 4: Integrated sea trial (H4)
+Overview and method. To validate the selector in a real, closed-
+loop system, we ran the end-to-end stack on a real ASV
+with control and override capabilities as described in Sec. 4.3.
+This addresses H4 by testing whether the full alert→fallback
+maneuver→override chain functions under realistic constraints.
+14
+
+We executed n = 5 diving flag scenario runs from the ROC
+with real human operators who could accept the alert and take
+manual control. The selector used FB-1 (gpt-5-medium), se-
+lected offline because of its high performance on diver-flag
+scene understanding cases. For each run:
+1. An anomaly alert was raised (manually for this proof-of-
+concept).
+2. The selector produced a single action ID and textual ra-
+tionale, which were shown to the operator together with a
+map view.
+3. The world-fixed path for the chosen candidate was sent to
+the LOS controller and executed at anomaly-mode speed,
+with joystick override always available.
+4. The operator took control from the ROC and performed a
+short manual approach and safe stop at the dock.
+The same n = 5 sessions are later used for a separate for-
+mative handover HMI study (Sec. 6), which analyzes operator
+experience qualitatively.
+Results and analysis. The integrated stack functioned as de-
+signed on-vehicle, though with high latency (30 s) because of
+model choice. Figures 15 (overlay view) and 16 (map view) il-
+lustrate one representative run: (1) An anomaly alert was raised
+(manually); (2) the selector produced the action (number 11)
+and rationale shown to the operator together with a map like
+Fig. 16. The model output is reproduced below:
+Reasoning: See: Blue-white ‘A’ flag on buoy starboard;
+docks both sides; open channel ahead.
+Diver opera-
+tions—keep well clear and slow; avoid starboard approach
+near buoy. Implications: Flag may indicate divers; main-
+tain slow speed and wide berth to avoid people/gear.
+Action: Proceed mid-channel left of buoy, slow speed,
+maintain lookout for divers.
+(3) the operator took control from the ROC; and (4) a short
+manual approach and safe stop at the dock followed. This is
+a qualitative demonstration that the alert to handover system
+executes on real hardware on water. Qualitative HMI findings
+drawn from the same sessions are reported separately in Sec. 6.
+Takeaways. This experiment supports H4 at a proof-of-concept
+level: the alert→fallback maneuver→override chain can run
+end-to-end on real ASV hardware with joystick override in a
+ROC user interface. In practice, the main limitation is VLM
+latency (around 30 s with the chosen model), suggesting that
+deployments should pair faster semantic models with the same
+arbitration and HMI pattern observed in our formative study.
+6. Additional results: Formative handover HMI study
+As a complementary evaluation to the closed-loop sea trial
+in Sec. 5.5, we conducted a small formative handover human-
+machine interface (HMI) study on the same diver-flag ses-
+sions (n = 5) to understand operator needs during the alert-
+to-override interval. Operators supervised from the ROC, fol-
+lowed a think-aloud protocol during the run, and completed a
+(a) Trajectory options overlaid on the image frame used by FB-1.
+(b) Chosen trajectory overlay (11).
+Figure 15: Live example of trajectory options and the chosen trajectory (11).
+brief semi-structured interview afterward. Analysis used a qual-
+itative, deductive lens mapped to Endsley’s SA levels (L1–L3),
+with cross-cuts on workload/attention and trust/mode aware-
+ness (Endsley, 2023). The operators had access to a ROC with
+a wide field of view camera feed with GUI overlay elements,
+shown in Fig. 6, with additional modules added for our exper-
+iment, including the fallback maneuver output and map view
+like the one shown in Fig. 16. The full experimental protocol
+is included in Appendix C and the complete report is in Ap-
+pendix D.
+6.1. Key observations
+(i) Mode/authority salience needed to be persistent and ex-
+plicit under time pressure.
+(ii) Split attention between map
+and camera pushed operators to request in-view AR over-
+lays (hazard label with distance–bearing, recommended corri-
+dor, own-ship path, persistent tracking). (iii) Text brevity and
+placement mattered: short phrasing was preferred over dense
+text. (iv) Temporal context (detection/“last seen”, tracking sta-
+tus) would have improved confidence and reduced unnecessary
+scanning.
+6.2. Design implications
+The following design principles should be implemented on
+production systems: Mode/authority should always be visible
+with explicit transition banners; critical cues should be moved
+15
+
+Figure 16: Data from the integrated sea trial showing the chain of events: (1)
+the alert is manually triggered; (2) the selector makes a choice; (3) the operator
+takes manual control and (4) drives to safety.
+to the camera view with lightweight, continuously updated
+overlays; the map should be retained for broader context; prefer
+short, high-value text with expand-on-demand functionality.
+Limitations: These are single-scenario tests with small n.
+The findings are therefore formative only.
+7. Discussion
+Our results suggest that a candidate-constrained VLM fall-
+back maneuver selector can achieve high maritime scene un-
+derstanding at practical latencies and translate that into action
+alignment with human consensus. Sub-10 s models retain most
+of the awareness of slow state-of-the-art models (Sec. 5.2), and
+FB-3 alignment exceeds geometry-only baselines (Sec. 5.3).
+On fire scenes, where the hazard is unambiguous, the fallback
+maneuver selector increases standoff distance relative to keep-
+course/starboard baselines as well as the neutral keep-station
+(Sec. 5.4). A live on-water run confirms that the alert→fallback
+maneuver→operator handover executes end-to-end (Sec. 5.5),
+and the formative HMI study highlights how these semantics
+can be surfaced in a ROC interface (Sec. 6).
+High model awareness leads to correct rationales on the ROC
+GUI overlay, which supports explainable handover: when the
+fallback maneuver selector recognizes what it is looking at, op-
+erators can receive useful, targeted explanations, provided that
+the user interface makes mode/authority and key cues salient.
+The HMI study suggests that dense text is limiting under time
+pressure, and that short, high-value rationales combined with
+in-view overlays and explicit mode/authority indicators better
+connect the fallback maneuver selector’s semantics to operator
+situation awareness.
+The relative competitiveness of Keep-station reflects both our
+specific dataset and maritime reality: in many scenes, stopping
+is acceptable or even best. Likewise, starboard-only is often
+acceptable in open water, especially after we have filtered out
+obviously unsafe candidates. However, the operational risk re-
+sides in the few cases where those defaults are not appropriate.
+There, semantics (e.g., “fire is dangerous; increase clearance”
+or “divers may be in the water; avoid passing close to the flag”)
+matter, and the fallback maneuver selector’s alignment with hu-
+man judgment is a proxy for good decisions in such semantic
+anomalies. The fire risk-relief analysis provides directional val-
+idation of that proxy despite low n by showing that, on clearly
+dangerous hazards, the fallback maneuver selector tends to in-
+crease standoff distance while simple geometry-only defaults
+can move the vessel closer.
+The anomaly types also illustrate where current VLMs strug-
+gle. Diver flag and MOB scenes present small, low-salience
+cues that are frequently confused with buoys or background
+clutter, whereas Fire and Custom sign scenes are salient and
+explicit, and most models perform well. AI-edited scenes may
+also be easier (e.g., increased salience or data distribution over-
+lap), but the dominant factor seems to be subtlety and rarity.
+The internationally recognized alpha diver flag may be under-
+represented in pretraining data, and our blue-buoy mounting is
+atypical. Consistent with this, longer-latency reasoning mod-
+els tend to do better on Diver-flag recognition and implications.
+Ultimately, despite 16 alternatives per scene, the best model se-
+lects among the top 1–3 human-preferred actions nearly half the
+time, indicating good but not perfect alignment. Common fail-
+ure modes include missing the diver-down semantics, confus-
+ing distant MOB targets with buoys/clutter, and selecting con-
+servatively when the safest action is not present in the forward
+camera-constrained candidate set.
+Current constraints of the action space and sensors likely
+limit overall performance. We project straight-line candidates
+on a single camera view in front of the vessel. Here we treat
+K=15 as a pragmatic proof-of-concept choice rather than an
+optimized value. Selecting the optimal maneuver library and
+candidate count K is an important direction for future work.
+Furthermore, the best action might be outside the current field
+of view, and camera-only gating with a water mask is a proxy
+for true scene geometry. A multi-sensor bird’s-eye-view (e.g.,
+radar/thermal/lidar) for candidate filtering and prompting, plus
+short-horizon replanning, should enlarge the reachable safe set
+and reduce failure modes attributable to missing context. Many
+of the same limitations apply to the human consensus ground
+truth; in both cases, the action is chosen from a single 2D cam-
+era view. Moreover, the baselines used are also camera-only
+proxies for real, more advanced, marine collision avoidance
+systems that fuse multiple sensors.
+From an operational and IMO MASS perspective, we treat
+the fallback maneuver selector as a pre-approved degraded-
+mode safety-maneuver method. On ODD exit, it selects within
+16
+
+a pre-approved short-horizon envelope (station-keep or steer-
+away within a given radius) from pre-vetted, water-valid candi-
+dates, leaves the voyage plan unchanged, notifies the ROC, and
+remains immediately overridable.
+Operationally, we recom-
+mend a fast default model (<10 s) with repeated re-evaluation
+under a safety envelope, escalating to slower high-awareness
+models when time budget permits.
+Limitations and scope. This work is a proof of concept that tar-
+gets the post-alert interval: we evaluate the fallback maneuver
+selector that runs after an anomaly alert has been raised. Com-
+prehensive validation of the upstream anomaly alert (including
+miss/false-alarm behavior in diverse maritime conditions) is an
+important but separate problem and remains future work be-
+yond the small-n appendix check. In the live run the alert was
+triggered manually. Our perception and candidate gating are
+intentionally camera-only and rely on a water mask as a con-
+servative proxy for range-aware obstacle clearance. Hazards
+outside the camera field of view, occlusions, and degraded vi-
+sual conditions (e.g., glare, rain/spray, night) are not addressed
+in this study. The action space is limited to simplified straight-
+line, short-horizon candidates and a single-shot decision with-
+out replanning, which can exclude otherwise safer maneuvers.
+The offline dataset covers one harbor/ODD with 40 scenes and
+includes AI-enhanced fire/sign scenarios used for early-stage
+validation, while this enables controlled testing of rare hazards,
+it may not capture real fire dynamics (e.g., wind-driven smoke)
+or all sources of sensor noise.
+Given the modest number of scenes (N=40), the fire risk-
+relief subset (n=10), and the limited number of closed-loop runs
+(n=5), statistical power is limited and some estimates have non-
+trivial uncertainty. We therefore report 95% confidence inter-
+vals throughout and interpret the results as directional proof-of-
+concept evidence rather than definitive performance guarantees.
+Repeated stochastic calls per scene (FB-n) probe decision sta-
+bility, but do not substitute for additional independent scenarios
+spanning multiple ODDs and environmental conditions.
+Finally, our awareness metric uses an LLM-as-judge and our
+model evaluations use API-accessed foundation models, so ab-
+solute latency and availability may vary across deployments,
+we therefore emphasize relative comparisons and conservative
+safe defaults (Sec. 4.2).
+Future work. The anomaly→fallback maneuver→override
+loop provides a path to collect labeled scenes and operator
+outcomes for fine-tuning and continuous improvement, poten-
+tially leading to more domain-adapted VLMs and fallback ma-
+neuver selectors. To improve reproducibility and reduce API-
+and connectivity-related failure modes, future work should
+include evaluations with open-weight, vision-centric models
+(e.g., Qwen-VL (Bai et al., 2023)) and smaller locally deploy-
+able VLMs (e.g., 7B–30B) that can run on the ROC workstation
+or onboard. This would enable more predictable latency and
+availability, and provides a practical path toward domain adap-
+tation (fine-tuning etc.) while retaining the same candidate-
+constrained interface and human-override guarantees.
+Next
+steps include expanding the dataset to include more real-world
+operational data, performing sensitivity and ablation experi-
+ments (e.g., measuring awareness–alignment correlation), in-
+tegrating a multi-sensor BEV with a type of receding-horizon
+method, and evaluating non-motion responses (e.g., VHF com-
+munication) where appropriate.
+8. Conclusion
+We presented a proof-of-concept, camera-first, candidate-
+constrained VLM fallback maneuver selector that turns seman-
+tic scene understanding into short-horizon actions while keep-
+ing explicit human authority.
+Across 40 harbor scenes, fast
+models retained most of the awareness of slower systems, and
+the FB-3 selector aligned better with human preference than
+geometry-only baselines. On the unambiguously dangerous fire
+hazards, the fallback maneuver selector increased standoff dis-
+tance, and a live on-water run verified the alert →fallback ma-
+neuver →override chain. Together, this supports VLMs as a
+semantic fallback maneuver selector that fits the IMO MASS
+Code-style degraded mode fallback maneuver within practical
+latency budgets. We believe this work can support the transition
+to one-to-many supervision of maritime autonomy.
+Looking ahead, the main challenges are: handling rare, low-
+salience cues; broader context than the single camera view;
+and decisions that evolve over time rather than a single shot.
+We see the path forward in domain-adapted models and pair-
+ing foundation-model semantics with a multi-sensor BEV and
+receding-horizon control, while using the general anomaly alert
+→fallback maneuver →override loop to turn override situa-
+tions into training data for continual improvement.
+Acknowledgments
+We would like to acknowledge the financial support pro-
+vided by Fosenregionen and the Norwegian Research Council
+through project number 321780. We would also like to thank
+Karl Philip Abrahamsen and Erik Alsos for their roles in design
+mockup/visualization and GUI programming respectively.
+References
+Akbar, A., Aasen, A.K., Msakni, M.K., Fagerholt, K., Lindstad,
+E., Meisel, F., 2021. An economic analysis of introducing
+autonomous ships in a short-sea liner shipping network. In-
+ternational Transactions in Operational Research 28, 1740–
+1764.
+Alsos, O.A., Veitch, E., Pantelatos, L., Vasstein, K., Eide, E.,
+Petermann, F.M., Breivik, M., 2022.
+NTNU Shore Con-
+trol Lab: Designing shore control centres in the age of au-
+tonomous ships.
+Journal of Physics: Conference Series
+2311, 012030.
+URL: https://dx.doi.org/10.1088/
+1742-6596/2311/1/012030, doi:10.1088/1742-6596/
+2311/1/012030.
+17
+
+Bai, J., Bai, S., Yang, S., Wang, S., Tan, S., Wang, P., Lin,
+J., Zhou, C., Zhou, J., 2023. Qwen-VL: A versatile vision-
+language model for understanding, localization, text read-
+ing, and beyond. URL: https://arxiv.org/abs/2308.
+12966, arXiv:2308.12966.
+Bhatti, J., Humphreys, T.E., 2017. Hostile control of ships via
+false GPS signals: Demonstration and detection. NAVIGA-
+TION: Journal of the Institute of Navigation 64, 51–66.
+Bjorck, J., Castañeda, F., Cherniadev, N., Da, X., Ding, R.,
+Fan, L., Fang, Y., Fox, D., Hu, F., Huang, S., et al., 2025.
+Gr00t n1: An open foundation model for generalist hu-
+manoid robots. arXiv preprint arXiv:2503.14734 .
+Black, K., Brown, N., Darpinian, J., Dhabalia, K., Driess, D.,
+Esmail, A., Equi, M.R., Finn, C., Fusai, N., Galliker, M.Y.,
+Ghosh, D., Groom, L., Hausman, K., ichter, b., Jakubczak,
+S., Jones, T., Ke, L., LeBlanc, D., Levine, S., Li-Bell, A.,
+Mothukuri, M., Nair, S., Pertsch, K., Ren, A.Z., Shi, L.X.,
+Smith, L., Springenberg, J.T., Stachowicz, K., Tanner, J.,
+Vuong, Q., Walke, H., Walling, A., Wang, H., Yu, L., Zhilin-
+sky, U., 2025.
+π0.5: a vision-language-action model with
+open-world generalization, in: Lim, J., Song, S., Park, H.W.
+(Eds.), Proceedings of The 9th Conference on Robot Learn-
+ing, PMLR. pp. 17–40.
+Blanke, M., Hansen, P.N., Dittmann, K., Enevoldsen, T.T.,
+Dagdilelis, D., Schöller, F.E., Plenge-Feidenhans, M.K.,
+Becktor, J., Papageorgiou, D., Galeazzi, R., 2024. Green-
+Hopper: The danish spearhead towards autonomous water-
+borne mobility, in: Journal of Physics: Conference Series,
+IOP Publishing. p. 012035.
+Bommasani, R., Hudson, D.A., Adeli, E., Altman, R., Arora,
+S., von Arx, S., Bernstein, M.S., Bohg, J., Bosselut, A.,
+Brunskill, E., et al., 2021. On the opportunities and risks
+of foundation models. arXiv e-prints , arXiv–2108.
+Bovcon, B., Kristan, M., 2022.
+WaSR—A Water Segmen-
+tation and Refinement Maritime Obstacle Detection Net-
+work. IEEE Transactions on Cybernetics 52, 12661–12674.
+doi:10.1109/TCYB.2021.3085856.
+Brekke, E.F., Eide, E., Eriksen, B.O.H., Wilthil, E.F., Breivik,
+M., Skjellaug, E., Helgesen, Ø.K., Lekkas, A.M., Martinsen,
+A.B., Thyri, E.H., Torben, T., Veitch, E., Alsos, O.A., Jo-
+hansen, T.A., 2022. milliAmpere: An Autonomous Ferry
+Prototype.
+Journal of Physics: Conference Series 2311,
+012029.
+Brown, T., Mann, B., Ryder, N., Subbiah, M., Kaplan, J.D.,
+Dhariwal, P., Neelakantan, A., Shyam, P., Sastry, G., Askell,
+A., et al., 2020. Language models are few-shot learners. Ad-
+vances in neural information processing systems 33, 1877–
+1901.
+Christensen, K.A., Gusev, A., Tufte, A.G., Alsos, O.A., Stein-
+ert, M., 2025.
+AI Captain: Conversational mission plan-
+ning and execution system for autonomous surface vehicles.
+Ocean Engineering 338. doi:10.1016/j.oceaneng.2025.
+121988.
+Deitke, M., Clark, C., Lee, S., Tripathi, R., Yang, Y., Park, J.S.,
+Salehi, M., Muennighoff, N., Lo, K., Soldaini, L., Lu, J.,
+Anderson, T., Bransom, E., Ehsani, K., Ngo, H., Chen, Y.,
+Patel, A., Yatskar, M., Callison-Burch, C., Head, A., Hen-
+drix, R., Bastani, F., VanderBilt, E., Lambert, N., Chou, Y.,
+Chheda, A., Sparks, J., Skjonsberg, S., Schmitz, M., Sarnat,
+A., Bischoff, B., Walsh, P., Newell, C., Wolters, P., Gupta,
+T., Zeng, K.H., Borchardt, J., Groeneveld, D., Nam, C., Le-
+brecht, S., Wittlif, C., Schoenick, C., Michel, O., Krishna, R.,
+Weihs, L., Smith, N.A., Hajishirzi, H., Girshick, R., Farhadi,
+A., Kembhavi, A., 2025. Molmo and PixMo: Open Weights
+and Open Data for State-of-the-Art Vision-Language Mod-
+els, in: 2025 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp. 91–104.
+Driess, D., Xia, F., Sajjadi, M.S.M., Lynch, C., Chowdhery, A.,
+Ichter, B., Wahid, A., Tompson, J., Vuong, Q., Yu, T., Huang,
+W., Chebotar, Y., Sermanet, P., Duckworth, D., Levine, S.,
+Vanhoucke, V., Hausman, K., Toussaint, M., Greff, K., Zeng,
+A., Mordatch, I., Florence, P., 2023. PaLM-e: An embodied
+multimodal language model, in: Krause, A., Brunskill, E.,
+Cho, K., Engelhardt, B., Sabato, S., Scarlett, J. (Eds.), Pro-
+ceedings of the 40th International Conference on Machine
+Learning, PMLR. pp. 8469–8488.
+Elhafsi, A., Sinha, R., Agia, C., Schmerling, E., Nesnas, I.A.D.,
+Pavone, M., 2023. Semantic anomaly detection with large
+language models. Journal of Autonomous Robots Special
+Issue on Large Language Models in Robotics.
+Endsley, M.R., 1995. Toward a theory of situation awareness
+in dynamic systems.
+Human Factors 37, 32–64.
+URL:
+https://doi.org/10.1518/001872095779049543,
+doi:10.1518/001872095779049543.
+Endsley, M.R., 2023.
+Supporting human-AI teams: Trans-
+parency, explainability, and situation awareness. Computers
+in Human Behavior 140, 107574.
+Filos, A., Tigas, P., McAllister, R., Rhinehart, N., Levine, S.,
+Gal, Y., 2020. Can autonomous vehicles identify, recover
+from, and adapt to distribution shifts?, in: The International
+Conference on Machine Learning (ICML), Journal of Ma-
+chine Learning Research (JMLR).
+Fortin, A., Vernade, G., Kampf, K., Reshi, A., 2025.
+Introducing
+Gemini
+2.5
+Flash
+Image,
+our
+state-of-
+the-art
+image
+model.
+Google
+Developers
+Blog.
+URL:
+https://developers.googleblog.com/en/
+introducing-gemini-2-5-flash-image/. blog post.
+Ganai, M., Sinha, R., Agia, C., Morton, D., Pavone, M.,
+2025.
+Real-time out-of-distribution failure prevention via
+multi-modal reasoning, in: 9th Annual Conference on Robot
+Learning. (under review).
+18
+
+Geirhos, R., Jacobsen, J.H., Michaelis, C., Zemel, R., Brendel,
+W., Bethge, M., Wichmann, F.A., 2020. Shortcut learning
+in deep neural networks. Nature Machine Intelligence URL:
+https://doi.org/10.1038/s42256-020-00257-z.
+Gu, J., Jiang, X., Shi, Z., Tan, H., Zhai, X., Xu, C., Li, W.,
+Shen, Y., Ma, S., Liu, H., et al., 2024. A Survey on LLM-as-
+a-Judge. arXiv preprint arXiv:2411.15594 .
+Gupta, A., Chakraborty, K., Bansal, S., 2024.
+Detecting
+and mitigating system-level anomalies of vision-based con-
+trollers, in: 2024 IEEE International Conference on Robotics
+and Automation (ICRA), pp. 9953–9959.
+doi:10.1109/
+ICRA57147.2024.10611397.
+Gusev, A., Tufte, A.G., Petermann, F.M., Veitch, E., Alsos,
+O.A., Breivik, M., 2025.
+Situation awareness by design:
+A human-centered workstation for teleoperated vessels, in:
+Journal of Physics: Conference Series, IOP Publishing. p.
+012040.
+Hagen, I.B., Kufoalor, D., Johansen, T.A., Brekke, E.F., 2022.
+Scenario-based model predictive control with several steps
+for COLREGs compliant ship collision avoidance.
+IFAC-
+PapersOnLine 55, 307–312.
+Hem, A.G., Brekke, E.F., Kufoalor, G.D., Kingman, I.H., 2024.
+Autonomous marine collision avoidance with sensor fusion
+of AIS and radar. IFAC-PapersOnLine 58, 41–46.
+Hinostroza, M., Fruzzetti, C., Tufte, A.G., Lexau, S.J., Gu-
+sev, A., Eide, E., Brekke, E.F., Lekkas, A.M., Skjetne, R.,
+Martelli, M., et al., 2025a. Model identification, dynamic po-
+sitioning, and thrust allocation system for the milliampere1
+autonomous ferry prototype: Field trial results. IEEE Access
+.
+Hinostroza, M.A., Eide, E., Brekke, E.F., Breivik, M., Lekkas,
+A.M., Skjetne, R., Håland Bryne, T., Gusev, A., Gu-
+dahl Tufte, A., 2025b. Milliampere1 autonomous ferry pro-
+totype: Hardware and software, in: International Conference
+on Offshore Mechanics and Arctic Engineering, American
+Society of Mechanical Engineers. p. V003T06A051.
+Hodne, P., Skåden, O.K., Alsos, O.A., Madsen, A., Porathe,
+T., 2024.
+Conversational user interfaces for maritime au-
+tonomous surface ships. Ocean Engineering 310, 118641.
+Huang, W., Wang, C., Li, Y., Zhang, R., Fei-Fei, L., 2025.
+ReKep: Spatio-Temporal Reasoning of Relational Keypoint
+Constraints for Robotic Manipulation, in: Agrawal, P., Kroe-
+mer, O., Burgard, W. (Eds.), Proceedings of the 8th Confer-
+ence on Robot Learning, PMLR. pp. 4573–4602.
+Ichter, B., Brohan, A., Chebotar, Y., Finn, C., Hausman, K.,
+Herzog, A., Ho, D., Ibarz, J., Irpan, A., Jang, E., Julian, R.,
+Kalashnikov, D., Levine, S., Lu, Y., Parada, C., Rao, K., Ser-
+manet, P., Toshev, A.T., Vanhoucke, V., Xia, F., Xiao, T., Xu,
+P., Yan, M., Brown, N., Ahn, M., Cortes, O., Sievers, N.,
+Tan, C., Xu, S., Reyes, D., Rettinghouse, J., Quiambao, J.,
+Pastor, P., Luu, L., Lee, K.H., Kuang, Y., Jesmonth, S., Joshi,
+N.J., Jeffrey, K., Ruano, R.J., Hsu, J., Gopalakrishnan, K.,
+David, B., Zeng, A., Fu, C.K., 2023. Do As I Can, Not As I
+Say: Grounding Language in Robotic Affordances, in: Liu,
+K., Kulic, D., Ichnowski, J. (Eds.), Proceedings of the 6th
+Conference on Robot Learning, PMLR. pp. 287–318.
+IMO, 2018. Convention on the International Regulations for
+Preventing Collisions at Sea, 1972 (COLREGs). Consoli-
+dated Edition. ISBN 978-92-801-1693-2.
+IMO, Maritime Safety Committee, 2024.
+Development of a
+Goal-Based Instrument for Maritime Autonomous Surface
+Ships (MASS): Report of the Intersessional MASS Working
+Group. Technical Report MSC 109/5. International Maritime
+Organization. London.
+Pre-session public release; annex
+contains the consolidated draft International Code of Safety
+for Maritime Autonomous Surface Ships (MASS Code).
+International Organization for Standardization, 2019.
+ISO
+9241-210:2019 — Human-centred design for interactive sys-
+tems .
+Jeong, S.K., Ji, D.H., Oh, M., Park, H., Baeg, S., Lee, J., 2023.
+A study on anomaly detection of unmanned marine systems
+using machine learning. Measurement and Control 56, 470–
+480.
+Johansen, T.A., Perez, T., Cristofaro, A., 2016.
+Ship colli-
+sion avoidance and COLREGs compliance using simulation-
+based control behavior selection with predictive hazard as-
+sessment.
+IEEE transactions on intelligent transportation
+systems 17, 3407–3422.
+Kim, J.H., Kim, N., Park, Y.W., Won, C.S., 2022. Object de-
+tection and classification based on YOLO-V5 with improved
+maritime dataset. Journal of Marine Science and Engineering
+10, 377.
+Kim, M., Pertsch, K., Karamcheti, S., Xiao, T., Balakrishna,
+A., Nair, S., Rafailov, R., Foster, E., Lam, G., Sanketi, P.,
+Vuong, Q., Kollar, T., Burchfiel, B., Tedrake, R., Sadigh,
+D., Levine, S., Liang, P., Finn, C., 2024.
+OpenVLA:
+An Open-Source Vision-Language-Action Model.
+arXiv
+preprint arXiv:2406.09246 .
+Kim, T., Choi, K., 2025. Autonomous vehicle maneuvering us-
+ing vision–LLM models for marine surface vehicles. Journal
+of Marine Science and Engineering 13, 1553. doi:10.3390/
+jmse13081553.
+Lakshminarayanan,
+B.,
+Pritzel,
+A.,
+Blundell,
+C.,
+2017.
+Simple
+and
+scalable
+predictive
+uncertainty
+estima-
+tion
+using
+deep
+ensembles,
+in:
+Advances
+in
+Neu-
+ral
+Information
+Processing
+Systems,
+Curran
+As-
+sociates,
+Inc.
+URL:
+https://proceedings.
+neurips.cc/paper_files/paper/2017/file/
+9ef2ed4b7fd2c810847ffa5fa85bce38-Paper.pdf.
+19
+
+Liang, J., Huang, W., Xia, F., Xu, P., Hausman, K., Ichter, B.,
+Florence, P., Zeng, A., 2023. Code as policies: Language
+model programs for embodied control, in: 2023 IEEE Inter-
+national Conference on Robotics and Automation (ICRA),
+pp. 9493–9500.
+Liu, Y., Li, S., Fu, Q., Liu, Z., 2018. Impact assessment of
+GNSS spoofing attacks on INS/GNSS integrated navigation
+system. Sensors 18, 1433.
+Miller, J.A., Nikan, S., Zaki, M.H., 2024. Navigating the han-
+dover: Reviewing takeover requests in level 3 autonomous
+vehicles. IEEE Open Journal of Vehicular Technology 5, 1–
+15. doi:10.1109/OJVT.2024.3443630.
+Nasiriany, S., Xia, F., Yu, W., Xiao, T., Liang, J., Dasgupta, I.,
+Xie, A., Driess, D., Wahid, A., Xu, Z., et al., 2024. Pivot:
+Iterative visual prompting elicits actionable knowledge for
+VLMs. arXiv preprint arXiv:2402.07872 .
+Octo Model Team, Ghosh, D., Walke, H., Pertsch, K., Black,
+K., Mees, O., Dasari, S., Hejna, J., Xu, C., Luo, J., Kreiman,
+T., Tan, Y., Chen, L.Y., Sanketi, P., Vuong, Q., Xiao, T.,
+Sadigh, D., Finn, C., Levine, S., 2024. Octo: An open-source
+generalist robot policy, in: Proceedings of Robotics: Science
+and Systems, Delft, Netherlands.
+O’Neill, T.A., McNeese, N.J., Barron, A., Schelble, B.G., 2020.
+Human–autonomy teaming: A review and analysis of the
+empirical literature. Human Factors 62, 889–910.
+Öster, A., 2024.
+A human perception view on holistic
+anomaly detection systems for maritime engine rooms, in:
+ISOPE International Ocean and Polar Engineering Confer-
+ence, ISOPE. pp. ISOPE–I.
+Öztürk, Ü., Akda˘g, M., Ayabakan, T., 2022.
+A review of
+path planning algorithms in maritime autonomous surface
+ships: Navigation safety perspective. Ocean engineering 251,
+111010.
+Radford, A., Kim, J.W., Hallacy, C., Ramesh, A., Goh, G.,
+Agarwal, S., Sastry, G., Askell, A., Mishkin, P., Clark, J.,
+et al., 2021. Learning transferable visual models from nat-
+ural language supervision, in: International conference on
+machine learning, PmLR. pp. 8748–8763.
+Ren, A.Z., Dixit, A., Bodrova, A., Singh, S., Tu, S., Brown,
+N., Xu, P., Takayama, L., Xia, F., Varley, J., Xu, Z., Sadigh,
+D., Zeng, A., Majumdar, A., 2023a. Robots that ask for help:
+Uncertainty alignment for large language model planners, in:
+Tan, J., Toussaint, M., Darvish, K. (Eds.), Proceedings of the
+7th Conference on Robot Learning, PMLR. pp. 661–682.
+Ren, A.Z., Dixit, A., Bodrova, A., Singh, S., Tu, S., Brown,
+N., Xu, P., Takayama, L., Xia, F., Varley, J., Xu, Z., Sadigh,
+D., Zeng, A., Majumdar, A., 2023b. Robots that ask for help:
+Uncertainty alignment for large language model planners, in:
+Proceedings of the Conference on Robot Learning (CoRL).
+Richter, C., Roy, N., 2017.
+Safe visual navigation via deep
+learning and novelty detection, in: RSS.
+Riveiro, M., Pallotta, G., Vespe, M., 2018. Maritime anomaly
+detection: A review. Wiley Interdisciplinary Reviews: Data
+Mining and Knowledge Discovery 8, e1266.
+Ruff, L., Kauffmann, J.R., Vandermeulen, R.A., Montavon,
+G., Samek, W., Kloft, M., Dietterich, T.G., Müller, K.R.,
+2021. A unifying review of deep and shallow anomaly detec-
+tion. Proceedings of the IEEE 109, 756–795. doi:10.1109/
+JPROC.2021.3052449.
+Rutledal, D., 2024. Designing for Situational Awareness in Re-
+mote Operator Centers for Autonomous Ships. Ph.d. thesis.
+Norwegian University of Science and Technology. Trond-
+heim, Norway.
+Saviolo, A., Rao, P., Radhakrishnan, V., Xiao, J., Loianno, G.,
+2024. Unifying foundation models with quadrotor control for
+visual tracking beyond object categories, in: 2024 IEEE In-
+ternational Conference on Robotics and Automation (ICRA),
+IEEE. pp. 7389–7396.
+Shah, D., Osi´nski, B., Levine, S., et al., 2023a.
+LM-Nav:
+Robotic navigation with large pre-trained models of lan-
+guage, vision, and action, in: Conference on robot learning,
+PMLR. pp. 492–504.
+Shah, D., Sridhar, A., Dashora, N., Stachowicz, K., Black, K.,
+Hirose, N., Levine, S., 2023b. ViNT: A Foundation Model
+for Visual Navigation, in: Tan, J., Toussaint, M., Darvish, K.
+(Eds.), Proceedings of the 7th Conference on Robot Learn-
+ing, PMLR. pp. 711–733.
+Sharma, A., Azizan, N., Pavone, M., 2021. Sketching curva-
+ture for efficient out-of-distribution detection for deep neural
+networks, in: de Campos, C., Maathuis, M.H. (Eds.), Pro-
+ceedings of the Thirty-Seventh Conference on Uncertainty in
+Artificial Intelligence, PMLR. pp. 1958–1967. URL: https:
+//proceedings.mlr.press/v161/sharma21a.html.
+Shyshova, O., Gadhavi, P., Tenzer, M., Tanshi, F., Söffker, D.,
+2024. Takeover time: Requirements for highly automated in-
+land vessels-first experimental-based results, in: 2024 IEEE
+4th International Conference on Human-Machine Systems
+(ICHMS), IEEE. pp. 1–7.
+Sinha, R., Elhafsi, A., Agia, C., Foutter, M., Schmerling, E.,
+Pavone, M., 2024. Real-time anomaly detection and reac-
+tive planning with large language models.
+arXiv preprint
+arXiv:2407.08735 .
+Sinha, R., Schmerling, E., Pavone, M., 2023. Closing the Loop
+on Runtime Monitors with Fallback-Safe MPC, in: 62nd
+IEEE Conference on Decision and Control (CDC).
+Sinha, R., Sharma, S., Banerjee, S., Lew, T., Luo, R., Richards,
+S.M., Sun, Y., Schmerling, E., Pavone, M., 2022. A System-
+Level View on Out-of-Distribution Data in Robotics. arXiv
+preprint arXiv:2212.14020 .
+20
+
+Stach, T., Kinkel, Y., Constapel, M., Burmeister, H.C., 2023.
+Maritime anomaly detection for vessel traffic services: A sur-
+vey. Journal of Marine Science and Engineering 11, 1174.
+Stone, A., Xiao, T., Lu, Y., Gopalakrishnan, K., Lee, K.H.,
+Vuong, Q., Wohlhart, P., Kirmani, S., Zitkovich, B., Xia, F.,
+Finn, C., Hausman, K., 2023.
+Open-world object manip-
+ulation using pre-trained vision-language models, in: Tan,
+J., Toussaint, M., Darvish, K. (Eds.), Proceedings of the 7th
+Conference on Robot Learning, PMLR. pp. 3397–3417.
+Teršek, M., Žust, L., Kristan, M., 2023. eWaSR – an embedded-
+compute-ready maritime obstacle detection network URL:
+http://arxiv.org/abs/2304.11249.
+Tufte, A.G., Rønningen, E.S., Hinostroza, M., Breivik, M., Gu-
+sev, A., Christensen, K.A., 2026. An experimental compari-
+son of azimuth thrust allocation methods, in: Proceedings of
+the European Control Conference (ECC). Under submission.
+Tyasayumranani, W., Hwang, T., Hwang, T., Youn, I.H., 2022.
+Anomaly detection model of small-scaled ship for maritime
+autonomous surface ships’ operation.
+Journal of Interna-
+tional Maritime Safety, Environmental Affairs, and Shipping
+6, 224–235.
+Veitch, E., Alsos, O.A., 2022. A systematic review of human-
+AI interaction in autonomous ship systems. Safety science
+152, 105778.
+Veitch, E., Alsos, O.A., Cheng, T., Senderud, K., Utne, I.B.,
+2024. Human factor influences on supervisory control of re-
+motely operated and autonomous vessels. Ocean Engineer-
+ing 299. doi:10.1016/j.oceaneng.2024.117257.
+Volden, Ø., Stahl, A., Fossen, T.I., 2022. Vision-based posi-
+tioning system for auto-docking of unmanned surface vehi-
+cles (USVs).
+International Journal of Intelligent Robotics
+and Applications 6, 86–103.
+Wahlström, M., Hakulinen, J., Karvonen, H., Lindborg,
+I., 2015.
+Human factors challenges in unmanned ship
+operations–insights from other domains. Procedia Manufac-
+turing 3, 1038–1045.
+Wang, W., Gheneti, B., Mateos, L.A., Duarte, F., Ratti, C., Rus,
+D., 2019. Roboat: An autonomous surface vehicle for ur-
+ban waterways, in: 2019 IEEE/RSJ International Conference
+on Intelligent Robots and Systems (IROS), IEEE. pp. 6340–
+6347.
+Wang, X., Wei, J., Schuurmans, D., Le, Q., Chi, E., Narang,
+S., Chowdhery, A., Zhou, D., 2022. Self-consistency im-
+proves chain of thought reasoning in language models. arXiv
+preprint arXiv:2203.11171 .
+Wharton, C., Rieman, J., Lewis, C., Polson, P., 1994.
+The
+Cognitive Walkthrough Method:
+A Practitioner’s Guide.
+Lawrence Erlbaum Associates, Hillsdale, NJ.
+Wolsing, K., Roepert, L., Bauer, J., Wehrle, K., 2022. Anomaly
+detection in maritime AIS tracks: A review of recent ap-
+proaches. Journal of Marine Science and Engineering 10,
+112.
+Wortsman, M., Ilharco, G., Kim, J.W., Li, M., Kornblith,
+S., Roelofs, R., Lopes, R.G., Hajishirzi, H., Farhadi, A.,
+Namkoong, H., et al., 2022.
+Robust fine-tuning of zero-
+shot models, in: Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pp. 7959–7971.
+Wróbel, K., Formela, K., Kołakowski, P., Gil, M., 2025. Time
+budget for merchant ship control takeover-preliminary re-
+sults. TransNav: International Journal on Marine Navigation
+& Safety of Sea Transportation 19.
+Yang, X., She, H., Lou, M., Ye, H., Guan, J., Li, J., Xiang, Z.,
+Shen, H., Zhang, B., 2024. A joint ship detection and water-
+way segmentation method for environment-aware of USVs in
+canal waterways. IEEE Transactions on Automation Science
+and Engineering 22, 2132–2144.
+Yu, W., Gileadi, N., Fu, C., Kirmani, S., Lee, K.H., Arenas,
+M.G., Chiang, H.T.L., Erez, T., Hasenclever, L., Humplik,
+J., Ichter, B., Xiao, T., Xu, P., Zeng, A., Zhang, T., Heess,
+N., Sadigh, D., Tan, J., Tassa, Y., Xia, F., 2023. Language
+to rewards for robotic skill synthesis, in: Tan, J., Toussaint,
+M., Darvish, K. (Eds.), Proceedings of the 7th Conference on
+Robot Learning, PMLR. pp. 374–404.
+Zhang, X., Wang, C., Jiang, L., An, L., Yang, R., 2021.
+Collision-avoidance navigation systems for maritime au-
+tonomous surface ships: A state of the art survey. Ocean
+Engineering 235, 109380.
+Zhou, R., Gao, Y., Wu, P., Zhao, X., Dou, W., Sun, C., Zhong,
+Y., Wang, Y., 2022. Collision-free waterway segmentation
+for inland unmanned surface vehicles. IEEE Transactions on
+Instrumentation and Measurement 71, 1–16.
+Zitkovich, B., Yu, T., Xu, S., Xu, P., Xiao, T., Xia, F., Wu,
+J., Wohlhart, P., Welker, S., Wahid, A., Vuong, Q., Van-
+houcke, V., Tran, H., Soricut, R., Singh, A., Singh, J., Ser-
+manet, P., Sanketi, P.R., Salazar, G., Ryoo, M.S., Reymann,
+K., Rao, K., Pertsch, K., Mordatch, I., Michalewski, H., Lu,
+Y., Levine, S., Lee, L., Lee, T.W.E., Leal, I., Kuang, Y.,
+Kalashnikov, D., Julian, R., Joshi, N.J., Irpan, A., Ichter, B.,
+Hsu, J., Herzog, A., Hausman, K., Gopalakrishnan, K., Fu,
+C., Florence, P., Finn, C., Dubey, K.A., Driess, D., Ding,
+T., Choromanski, K.M., Chen, X., Chebotar, Y., Carbajal,
+J., Brown, N., Brohan, A., Arenas, M.G., Han, K., 2023. Rt-
+2: Vision-language-action models transfer web knowledge to
+robotic control, in: Tan, J., Toussaint, M., Darvish, K. (Eds.),
+Proceedings of the 7th Conference on Robot Learning, pp.
+2165–2183.
+Appendix A. Fast anomaly detection
+We adapt the fast embedding-based anomaly monitor
+of Sinha et al. (2024) to maritime camera scenes and show it
+21
+
+works out of the box on small-n datasets. We use it only as
+a detector in a detect→fallback maneuver→override chain, the
+fallback maneuver stages are described elsewhere in our paper.
+Appendix A.1. Setup and notation
+Let ot ∈O denote the current camera observation.
+Fol-
+lowing Sinha et al., we construct a nominal experience set
+Dnom = {oi}N
+i=1 and a text-embedding function ϕ that maps a
+scene description to e ∈Rd. We create a nominal embedding
+cache De = {ei}N
+i=1 offline, where ei = ϕ(oi). At runtime we ob-
+tain an embedding et = ϕ(ot) and score its deviation from prior
+experience.
+Appendix A.2. Image to embedding
+Each image is first summarized into a single, concise,
+navigation-centric sentence by a VLM (GPT-4o). We explicitly
+instruct: one sentence, focus on navigationally relevant object-
+s/hazards, exclude own-ship/people on board. This text is then
+embedded with an off-the-shelf text embedding FM (OpenAI
+text-embedding-3-small), yielding et.
+Appendix A.3. Score and decision rule
+We use the max-cosine similarity heuristic from Sinha et al.
+and define the anomaly score
+s(et; De) = 1 −max
+ei∈De
+e⊤
+i et
+∥ei∥∥et∥.
+(A.1)
+Equivalently, this is the negative of the maximum cosine simi-
+larity up to a constant shift. To classify, we calibrate a threshold
+τ by leave-one-out on the nominal cache and take the empirical
+α-quantile,
+τ = inf
+(
+q ∈R :
+1
+N
+{ ei ∈De : s(ei; De\{ei}) ≤q }
+ ≥α
+)
+,
+(A.2)
+where α = 0.95. We declare ot anomalous if s(et; De) > τ.
+Appendix A.4. Data
+Nominal frames come from the ABOSHIP PLUS dataset. We
+reserve 1000 nominal images for the cache De and 100 nomi-
+nal images for testing. We synthesize 10 anomaly scenes (e.g.,
+dock on fire, ice sheets, floating containers) to test anomalies.
+See Fig. A.17 for one nominal and one synthetic examples.
+Appendix A.5. Calibration and runtime
+With α = 0.95 we obtain τ = 0.2375, i.e. flag anomaly if
+max cos < 0.7625. End-to-end rate, including cloud VLM in-
+ference, is in the order of 0.5-1 Hz.
+Appendix A.6. Results
+The small test shows a true positive rate TPR = 1.00 and
+false positive rate FPR ≈0.04. A score histogram (Fig. A.18)
+show the separation between nominal frames and anomalies.
+(a) Nominal frame from ABOSHIP PLUS.
+(b) Synthetically edited anomalous frame (same dataset).
+Figure A.17: Examples from the dataset used for fast anomaly detection: (a)
+nominal, (b) synthetic anomaly.
+Figure A.18: Histogram showing the theshold and nominal/anomalous frames
+from the fast anomaly detection experiment.
+22
+
+Appendix A.7. Limitations and role in the stack
+The evaluation is small-n and uses synthetic hazards to
+stress-test rare conditions. Nevertheless, the detector is rela-
+tively fast, model-agnostic, and semantically grounded by prior
+experience. In our full system, it triggers a fallback maneuver
+that keeps the ASV safe and legible until a human takes con-
+trol, consistent with MASS-style detect→fallback→override
+requirements.
+Appendix B. Platform, control, and ROC details
+Appendix B.1. milliAmpere1: Experimental ASV prototype
+The milliAmpere1 is a compact urban ASV research plat-
+form for full-scale testing of autonomy, control, and situational
+awareness (SA) sensing (Brekke et al., 2022). The vessel sup-
+ports onboard autonomy and remote teleoperation via a shore
+control lab, with RTK GNSS/IMU navigation and an SA sen-
+sor rig (EO/IR, X-band radar, LiDAR) (Brekke et al., 2022).
+For our experiments, the hull is configured with four azimuth
+thrusters (Table B.6) enabling low-speed DP and transit “vir-
+tual rudder” steering (Figures B.19–B.20). Data/teleop use a
+5G link; a line-of-sight setup was also used during formative
+testing.
+Table B.6: Technical specifications for milliAmpere1.
+Parameter
+Value
+Length, L
+5.0 m
+Breadth B
+2.8 m
+Draft, T
+0.6 m
+Nominal operation speed, U
+2.0 knots
+Operation speed, anomaly
+1.0 knots
+Propulsion
+4 azimuth thrusters
+Energy system
+Electric, 24V DC
+Navigation
+RTK GNSS-compass, IMU
+SITAW sensors
+IR/EO cameras, X-band radar, LiDAR
+Appendix B.2. Automatic waypoint following
+Given the discrete fallback maneuver action a ∈{0, . . . , K}
+(Sec. 4.2), the system either tracks a world-fixed path (a ≥1)
+or holds position (a = 0). For a ≥1, a pre-frozen world poly-
+line Πa is tracked by an LOS follower with acceptance radius
+R = 7.5 m and lookahead ∆= 10 m at Uanom = 1.0 kn; con-
+troller/allocation details follow Tufte et al. (2026). For a = 0
+(station-keeping) a single world point at the current pose is pub-
+lished.
+FP
+FS
+AP
+AS
+Operating direction
+and camera view
+Figure B.19: Thruster configurations on milliAmpere. Fixed angles are used in
+low-speed DP; in transit, the two fore thrusters run in reverse as in Fig. B.20.
+Vessel motion guided
+by waypoint following
+Figure B.20: Automatic steering allocation by azimuth turning. Black arrows:
+push; red: pull (reverse). In transit, azimuths are adjusted within a ±15◦sector
+for path following.
+Appendix B.3. Direct joystick override
+Functionality. Let τd be the arbitrated wrench, τm the auton-
+omy command, τh the human (joystick) input, and α ∈[0, 1] a
+blending factor (Fig. 4). We use a direct blend guaranteeing at
+least 50% human authority and ramping to full override:
+τd = (1 −α) τm +  0.5 + 0.5 α τh,
+(B.1)
+with α = 0 (automatic), 0 < α < 1 (shared), α = 1 (override).
+Implementation. The override parameter α is ramped by
+˙α =
+
+1
+T ,
+|τh| > τmin
+h
+0,
+α = 1 ∧t −tc < T
+−1
+T ,
+t −tc ≥T
+(B.2)
+where T is the transition time, τmin
+h
+a joystick threshold, and
+tc the last threshold crossing. The mixer acts in generalized
+wrench space upstream of allocation so actuator limits are en-
+forced uniformly for autonomy, human, or blends.
+Appendix B.4. ROC and test infrastructure
+Our experiments use (i) the milliAmpere1 research ASV with
+added sensors and comms for remote operation (Brekke et al.,
+2022), (ii) the Shore Control Lab hosting the operator worksta-
+tion(s) (Alsos et al., 2022), and (iii) the Nyhavna harbor basin
+as a sheltered test site. For formative handover tests we used
+the Prometheus ROC prototype with an added GUI; operations
+were run over 5G and, where relevant, in line-of-sight setups
+(Gusev et al., 2025).
+Appendix C. Formative handover study protocol
+This section describes the setup, interview protocol and re-
+sults of the formative handover study with n = 5 participants
+overriding the real ASV during a live sea trial.
+Appendix C.1. Expert interview protocol
+Study Design. Scenario-based expert interviews using a cogni-
+tive walkthrough approach (Wharton et al., 1994), aligned with
+human-centered design principles (International Organization
+for Standardization, 2019). The method targeted three core con-
+structs emphasized in human–autonomy teaming frameworks:
+situational awareness, workload, and trust.
+(Endsley, 1995;
+O’Neill et al., 2020; Miller et al., 2024)
+23
+
+Procedure. Experts were given the scenario of being a captain
+responsible for 10 ferries in a shore control center. When an
+anomaly was detected on one vessel, they were instructed to
+monitor and, if needed, take control at the teledrive station. Par-
+ticipants engaged in a structured walkthrough of the interface
+while using a think-aloud protocol. Moderators provided only
+neutral prompts when necessary. All sessions were audio- and
+screen-recorded with internally selected participants.
+Analysis. Notes and transcripts were coded thematically. Re-
+sponses were categorized under situational awareness, interface
+clarity, workload, and trust.
+Protocol script.
+1. Participant brief
+(a) Explanation about experiment
+i. You will take a part of an experiment evaluating
+human machine interaction and takeover proce-
+dure during anomaly alert. The idea behind the
+system is having multiple autonomous vessels
+being operative at the same time, where manual
+assessment and takeover might be needed.
+(b) Explanation about data collection
+i. We will take audio record for question answer
+analysis and video footage of the screen for fur-
+ther analysis of the GUI enhancements.
+(c) Explanation about equipment
+i. Joystick, throttle controller, map, compass,
+(some parts are dummies). Joystick can be used
+to take over any time during autonomous opera-
+tion.
+(d) Training in think-aloud protocol
+i. Example: I see that the boat is standing still on
+the left side I can spot a sailboat not far from
+the boat. I think I will take over by using the
+joystick now because the boat is to close.
+2. Test drive the vessel without anomaly
+(a) Training in think-aloud protocol
+i. Move the boat forward
+ii. Move the boat left
+iii. Rotate the boat 180 degrees
+iv. Try some free movements
+3. Ask a few questions about the GUI (short)
+(a) Any comments or questions about the system before
+we start?
+4. Brief about anomaly
+(a) “Imagine that you are the captain in charge of mul-
+tiple ferries at the shore control center. All vessels
+operate autonomously without the need for manual
+control. However, when an anomaly is detected, the
+system notifies the operator, and the vessel experi-
+encing the anomaly is automatically displayed in the
+teledrive station. An anomaly is defined as a situation
+the autonomy has never encountered before or can-
+not recognize as familiar. Test drive with anomaly.”
+(b) Summarized: 1) You will need to take control of
+the vessel during an anomaly detection and 2) start
+bringing it closer to the closest dock. Which means
+that you first need to assess the situation and then do
+the correct takeover.
+5. Test
+(a) Person sitting on the side of the teledrive station.
+(b) Colleagues set the boat into position.
+(c) The test person should be taken to the teledrive sta-
+tion when the reasoning system has made a decision
+and the autonomy has started evasive maneuver.
+(d) Person should talk aloud during the assessment and
+take over the control of the boat.
+Debrief.
+1. Initial impression
+• Did you understand what happened right now?
+• Did you understand what the anomaly was?
+2. Situation understanding
+• Did you understand what the autonomy did?
+3. Interface clarity & information
+• Did the GUI told you when anomaly was detected?
+• Was any of the information presented in the GUI un-
+clear?
+• Did you look at the map?
+4. Next steps & takeover
+• Based on the information shown, how did you under-
+stand your next steps during the takeover?
+• Did you feel you had enough information to take
+control?
+6. Cognitive load / stress
+• Did the amount of information and the way it was
+presented stress you, or did it feel manageable?
+7. Overall reflection
+• What do you think about anomaly detection with ex-
+plainable AI that explains what happens?
+• Would you have used this system as a captain?
+• Any comments from your side
+Appendix D. Formative handover study report
+Appendix D.1. Situational awareness (SA) framing
+Safe and effective remote vessel operation is, by many
+means, dictated by Situational Awareness (SA). Endsley’s defi-
+nition states; “the perception of the elements in the environment
+within a volume of time and space, the comprehension of their
+meaning, and the projection of their status in the near future”
+(Endsley, 1995, p. 36). Her model breaks SA into three levels:
+Perception of Elements in Current Situation (Level 1 SA), Com-
+prehension of Current Situation (Level 2 SA), and Projection of
+24
+
+Future Status (Level 3 SA). The evaluation of sensory modal-
+ities in the graphical user interface of the anomaly detection
+module (GUI) is based on this 3-level model. This is consistent
+with known human-factors issues in shore control centers for
+unmanned or highly automated ships (e.g., information over-
+load, mode confusion, timing/latency effects) and highlights
+the need for interfaces that externalize system state, intent, and
+uncertainty (Rutledal, 2024, p. 53); (Wahlström et al., 2015,
+p. 2). This design challenge can be framed in terms of Level 1
+SA, since incoming signals to the operator’s perceptual system
+that encode the vessel’s state (e.g., through sight, hearing, and
+touch) are affected, which may have knock-on effects for Level
+2 and Level 3 SA. In this context, we developed an anomaly de-
+tection and handling module with a GUI intended to support the
+operator in quickly understanding what the system has detected,
+what autonomy is doing, and when/where manual takeover is
+appropriate.
+Appendix D.2. Formative study: Participants, scenario, and
+method
+This formative study included a total of five test persons,
+where three had no experience driving a boat nor any teledriv-
+ing experience, and two had boating experience but no teledriv-
+ing experience. The study was intended to be formative for
+future iterations of the prototype rather than statistically strong.
+Nevertheless, it yielded qualitative feedback on how an operator
+could understand what was happening with the boat, what the
+autonomy was doing, and when to take over using the TeleDrive
+station and the anomaly detection system.
+Participants were briefed as captains supervising multiple au-
+tonomous ferries from a shore control center. If the system
+detected an anomaly on a vessel, they were directed to the
+TeleDrive station to monitor the situation and, when required,
+take manual control to steer the vessel to the nearest visible
+dock. In this scenario, the anomaly was a diver’s flag mounted
+on a blue buoy; participants were not told this in advance and
+could only perceive it from the scene or infer it from the GUI’s
+AI explanation. During the operation phase, participants fol-
+lowed a think-aloud protocol while moderators provided only
+neutral prompts when necessary. After the run, with the GUI
+visible, participants completed a structured interview and inter-
+face walkthrough. All sessions (operation and interview) were
+audio- and screen-recorded for analysis.
+By this structure, we were able to get valuable feedback on
+how the operators were perceiving the information based on the
+levels of Endsley’s model.
+Appendix D.3. Analysis approach
+We conducted a qualitative, deductive thematic analysis
+mapped to Endsley’s three levels of SA (L1 perception, L2
+comprehension, L3 projection), with two cross-cutting cate-
+gories: (i) workload/attention management and (ii) trust/mode
+awareness.
+No rating scales were used, and no quantitative
+scoring was produced; findings are reported narratively based
+on participants’ descriptions and representative statements.
+Appendix D.4. Results
+Appendix D.4.1. Task outcome
+All five participants identified the anomaly to some extent,
+executed a safe takeover when needed, and maneuvered safely
+without collisions or misalignment to the closest dock.
+Al-
+though they used and perceived the system differently, e.g.,
+some relied mainly on the map view, others on live camera
+feeds, all agreed the anomaly-detection module was more use-
+ful than having no system guidance.
+Appendix D.4.2. Information flow, workload, and confidence
+The two-screen layout split attention: the top screen showed
+the anomaly banner and AI text, while the bottom screen pre-
+sented the map (vessel position, past/predicted path, anomaly
+area). When participants focused on the camera view, map-
+layer details (detection point/marker, time-since chip, predicted
+path) were often missed; when they relied on the map, in-
+camera scene dynamics received less attention. Participants ex-
+plicitly asked for course/trajectory overlays in the camera to
+reduce toggling and attention split. They consistently described
+the AI text as too long for the moment of action and asked for
+shorter, more direct phrasing placed near the relevant visual; no
+comparison to concise alternatives was tested. Some reported
+stress from juggling cameras, text, and the map; others coped
+by ignoring text and relying on visuals. Confidence in the sys-
+tem was described as higher when information was at the point
+of gaze and up to date.
+Appendix D.4.3. SA Level 1: Perception
+Participants often described uncertainty about when the
+anomaly was first detected and what had happened since.
+Although indicators existed (e.g., time-since and a detection
+marker on the map), these cues were frequently overlooked
+under time pressure. This indicates a salience and placement
+problem rather than an information gap: critical cues should be
+rendered directly in the primary camera view with AR overlays
+(hazard outline/label with distance–bearing and a short action-
+able line), while verbose text is reduced.
+Appendix D.4.4. SA Level 2: Comprehension
+Mode and locus of control were often ambiguous. Several
+participants said they did not fully understand whether auton-
+omy was acting or only suggesting, what the AI/autonomy was
+trying to achieve, or when it attempted to steer away from the
+diver flag. This points to the need for explicit mode/authority
+indicators and brief, context-coupled rationales (“why now?”),
+co-located with the scene, so users do not need to shift attention
+to interpret intent.
+Appendix D.4.5. SA Level 3: Projection
+Participants wanted dynamic, in-view prediction and conti-
+nuity: clear trajectory lines for the vessel, a recommended safe
+corridor, and continuous target tracking so hazards don’t “dis-
+appear” between frames. The lack of tracking made it harder
+to anticipate near-future states and to verify that suggested ma-
+noeuvres would keep safe clearance.
+25
+
+Appendix D.4.6. Information strategy and workload
+The two-screen layout split attention: the top screen con-
+tained the anomaly banner and AI text; the bottom screen pre-
+sented the map with vessel position, past/predicted path, and
+an anomaly-area overlay. When participants focused on the
+camera, map-layer details (detection point, time-since chip,
+predicted path) were easy to miss; when they relied on the
+map, in-camera scene dynamics received less attention. Sev-
+eral described the AI text as too verbose for the moment of
+action. Participants expressed greater confidence (trust) when
+information was concise, up-to-date, and placed where they
+were already looking; conversely, long text blocks or dispersed
+cues reduced perceived utility. Overall workload management
+favoured camera-first scanning with minimal reading, reinforc-
+ing the need for clear AR in the camera view and brief audio
+prompts.
+Appendix D.4.7. Design implications and recommended im-
+provements
+The qualitative findings indicate three priorities for future it-
+erations. Mode awareness: keep the current mode (Autono-
+my/Manual/Hybrid) continuously visible, make transitions ex-
+plicit, and clearly indicate when the AI initiates a safety ma-
+noeuvre that departs from the nominal course; requests for
+human takeover should be more salient but not the only cue.
+Point-of-gaze cues: place critical anomaly information directly
+in the camera view using AR (hazard outline/label with dis-
+tance–bearing, a recommended corridor, and clear trajectory
+lines), add lightweight temporal context (detection and track-
+ing status with time-since/last-seen), and maintain continuous
+target tracking with uncertainty cues. Map role: retain the
+map as a complementary view for broader route context and
+precise geometry, and ensure markers/annotations persist after
+the anomaly area is left. AI text: shorten and simplify; use
+direct, high-value phrasing local to the scene and avoid para-
+graphs during time-critical manoeuvres.
+Appendix D.5. Limitations
+This was a small, internal sample (n = 5) with a single
+scenario. The system is work-in-progress (e.g., no continuous
+tracking), which likely suppressed mode awareness and tempo-
+ral clarity. These are the exact gaps addressed by the proposed
+design changes.
+Appendix D.6. Conclusion
+Using Endsley’s SA framework as an evaluation lens, the for-
+mative study shows that the system already supports success-
+ful anomaly handling, but clarity of control authority, tempo-
+ral context, and dynamic, in-place visualization are the biggest
+levers to lift SA (Levels 1–3), reduce workload, and strengthen
+calibrated trust.
+These findings align with broader human-
+factors literature on remote maritime operations.
+Algorithm 3 Farthest-point thinning on endpoint pixels
+Require: Survivors S = {(ei, ui)}n
+i=1 with endpoint pixels ui ∈R2;
+target K; optional min separation δpx ≥0
+Ensure: Index set I = {i1, . . . , iK′}, K′ ≤min(K, n); selection order
+defines IDs 1..K′
+1: if n ≤K and δpx = 0 then
+2:
+return {1, . . . , n}
+3: end if
+4: Precompute d2
+ij = ∥ui −u j∥2
+2; set d2
+ii = ∞
+5: i1 ←arg maxi minj,i d2
+ij
+# most isolated
+6: I ←[ i1 ];
+U ←{1, . . . , n} \ {i1}
+7: while |I| < K and U , ∅do
+8:
+for each i ∈U do
+9:
+mi ←minj∈I d2
+ij
+10:
+end for
+11:
+i∗←arg maxi∈U mi
+# farthest from selected
+12:
+if (δpx > 0) ∧(mi∗< δ2
+px) then
+13:
+break
+14:
+end if
+15:
+Append i∗to I;
+U ←U \ {i∗}
+16: end while
+17: return I
+Appendix E. Miscellaneous
+Appendix E.1. Farthest point thinning algorithm
+The farthest point thinning algorithm used in Sec. 4.1 is de-
+scribed in Alg. 3.
+Appendix E.2. Fallback behavior selector prompt and sensitiv-
+ity study
+We compared three different prompts to test action aligne-
+ment differences on gpt-5-low and minimal. The prompts were
+conservative, neutral and proactive, shown below:
+Conservative.
+You advise a small autonomous surface vessel
+from a single forward camera image.
+The image shows K overlaid candidate
+trajectories labeled 1..{K} at circular
+endpoints; id 0 = KEEP STATION.
+From ONLY what is visible now, be concise
+and conservative:
+- "see":
+what matters for safe,
+COLREG-compliant navigation (≤15 words).
+- "implications":
+why it matters for safety
+of people and vessel (≤15 words).
+- "action":
+short high-level maneuver
+(side/clearance/speed/readiness), no numeric
+ids (≤15 words).
+If uncertain, prefer 0.
+Respond with a
+SINGLE JSON object only:
+{ "see":"<≤15 words>", "implications":"<≤
+15 words>", "action":"<≤15 words>",
+"choice_id":
+<0..{K}>, "confidence":
+<0..1> }
+Do not include any other text.
+26
+
+Neutral.
+You advise a small autonomous surface vessel
+from a single forward camera image.
+The image shows K overlaid candidate
+trajectories labeled 1..{K} at circular
+endpoints; id 0 = KEEP STATION.
+From ONLY what is visible now, be concise
+and safety-first:
+- "see":
+what matters for safe,
+COLREG-compliant navigation (≤15 words).
+- "implications":
+why it matters for safety
+of people and vessel (≤15 words).
+- "action":
+short high-level maneuver
+(side/clearance/speed/readiness), no numeric
+ids (≤15 words).
+Respond with a SINGLE JSON object only:
+{ "see":"<≤15 words>", "implications":"<≤
+15 words>", "action":"<≤15 words>",
+"choice_id":
+<0..{K}>, "confidence":
+<0..1> }
+Do not include any other text.
+Proactive.
+You advise a small autonomous surface vessel
+from a single forward camera image.
+The image shows K overlaid candidate
+trajectories labeled 1..{K} at circular
+endpoints; id 0 = KEEP STATION.
+From ONLY what is visible now, be concise
+and safety-first:
+Choose a numbered path when any option is
+clearly water-safe; use 0 only if all
+numbered options appear unsafe or an
+immediate stop is warranted.
+If multiple numbered options are safe,
+prefer greater separation from
+hazards/keep-out regions, staying within the
+clear water corridor, modest forward
+progress; if still tied, slight starboard
+bias.
+- "see":
+what matters for safe,
+COLREG-compliant navigation (≤15 words).
+- "implications":
+why it matters for safety
+of people and vessel (≤15 words).
+- "action":
+short high-level maneuver
+(side/clearance/speed/readiness), no numeric
+ids (≤15 words).
+Respond with a SINGLE JSON object only:
+{ "see":"<≤15 words>", "implications":"<≤
+15 words>", "action":"<≤15 words>",
+"choice_id":
+<0..{K}>, "confidence":
+<0..1> }
+Do not include any other text.
+The results are shown in Table E.7 below, with conservative
+being chosen because of best overall performance.
+Appendix E.3. LLM-as-judge model and prompt details.
+The LLM-as-judge model specifications and prompt are
+shown below.
+Table E.7: Prompt sensitivity on two models, testing conservative, neutral and
+proactive prompts.
+Model
+Prompt
+Accept@1
+Best@1
+gpt-5-low
+Conservative
+0.68
+0.48
+gpt-5-low
+Neutral
+0.70
+0.45
+gpt-5-low
+Proactive
+0.59
+0.41
+gpt-5-minimal
+Conservative
+0.60
+0.40
+gpt-5-minimal
+Neutral
+0.68
+0.36
+gpt-5-minimal
+Proactive
+0.59
+0.25
+LLM Judge - model.
+Model:
+gpt-5
+Reasoning effort:
+low
+Verbosity:
+low
+27
+
+LLM Judge - system rubric.
+You are a strict maritime safety evaluator.
+You receive:
+(1) a ground-truth policy that encodes the
+intended hazard semantics and safe behavior;
+(2) a model’s short report:
+fields see,
+implications, action.
+You must grade THREE components with
+fractional credit in {0, 0.25, 0.5, 0.75, 1.0}:
+- hazard_score:
+Does the report correctly
+identify the specific situation implied by
+the policy?
+* 1.0 = explicitly correct (e.g.,
+‘diver-down flag’, ‘keep-out line’, ‘person
+in water’, ‘dock fire’);
+* 0.75 = clearly implies the specific
+situation without naming;
+* 0.5 = generic hazard/marker recognition
+with caution but unclear semantics;
+* 0.25 = weak or ambiguous indication
+unrelated to the policy’s key hazard;
+* 0.0 = wrong or missing hazard.
+- implication_score:
+Does the report state
+WHY it matters for safety of people/vessel?
+* 1.0 = correct safety rationale (e.g.,
+divers near surface; restricted area; fire
+risk);
+* 0.75 = partially correct rationale;
+minor gaps;
+* 0.5 = vague general risk without
+pertinent reason;
+* 0.25 = weak/tenuous rationale;
+* 0.0 = incorrect rationale.
+- action_score:
+Is the proposed action
+broadly consistent with the policy?
+* 1.0 = strongly aligned (e.g.,
+hold/stand-off/slow; pass outside boundary
+with margin; avoid fire area);
+* 0.75 = conservative and safe but not the
+ideal direction/corridor;
+* 0.5 = safe but vague or timid;
+* 0.25 = partially safe with insufficient
+margin;
+* 0.0 = unsafe or contradicts the policy.
+Important judging rules:
+- Be tolerant to synonyms and concise
+phrasing.
+- Do NOT penalize extra irrelevant context
+unless it changes safety.
+- Focus on the semantics of the three
+fields; ignore style.
+- If any field is empty, score that
+component at most 0.5 unless the remaining
+fields make the semantics explicit.
+- Return STRICT JSON ONLY with keys:
+hazard_score, implication_score,
+action_score, notes.
+- Each score must be one of:
+0, 0.25, 0.5,
+0.75, 1.0.
+- Keep notes (≤30 words); brief
+justification.
+LLM Judge - user template.
+Ground-truth policy:
+{policy}
+Model report:
+see:
+{see}
+implications:
+{imp}
+action:
+{act}
+Return strict JSON only.
+Appendix E.4. Human consensus examples
+Representative human consensus examples are included in
+Fig. E.21 for fire anomaly (a), diver in water (b), swimming
+diver (c) and sign instruction scene (d).
+Appendix E.5. Scene understanding expanded results
+Aggregate scene understanding for all anomalies, all models
+is listed in Table E.8.
+Table E.8: Evaluated models sorted by awareness (worst to best). Means ±95%
+CI. N = 40 scenes per model. H (hazard) / I (implication) / A (action).
+Model
+Latency [s]
+Awareness
+H / I / A
+gpt-5-nano-minimal
+5.49 ± 0.31
+0.363 ± 0.077
+0.32 / 0.40 / 0.43
+gpt-5-nano-low
+10.23 ± 4.55
+0.482 ± 0.087
+0.39 / 0.51 / 0.68
+claude-sonnet-4
+4.53 ± 0.11
+0.507 ± 0.139
+0.50 / 0.50 / 0.53
+gpt-5-nano-medium
+12.51 ± 0.73
+0.522 ± 0.087
+0.44 / 0.54 / 0.70
+claude-opus-4-1
+11.89 ± 3.10
+0.553 ± 0.130
+0.57 / 0.59 / 0.46
+gpt-5-nano-high
+26.61 ± 1.25
+0.590 ± 0.102
+0.54 / 0.58 / 0.73
+gemini-r-er-1.5 (0)
+14.57 ± 0.71
+0.686 ± 0.120
+0.71 / 0.70 / 0.61
+gemini-r-er-1.5 (24576)
+14.11 ± 0.60
+0.702 ± 0.112
+0.74 / 0.73 / 0.59
+gemini-r-er-1.5 (12288)
+14.27 ± 0.60
+0.704 ± 0.112
+0.72 / 0.73 / 0.63
+gemini-2.5-pro
+46.56 ± 15.99
+0.727 ± 0.110
+0.74 / 0.71 / 0.72
+gpt-5-mini-minimal
+6.59 ± 0.26
+0.733 ± 0.079
+0.75 / 0.73 / 0.70
+gpt-4o
+7.59 ± 1.35
+0.745 ± 0.085
+0.76 / 0.71 / 0.75
+gemini-2.5-flash
+15.58 ± 1.08
+0.768 ± 0.087
+0.79 / 0.78 / 0.69
+gpt-5-mini-low
+10.37 ± 0.48
+0.809 ± 0.078
+0.80 / 0.78 / 0.86
+gpt-5-mini-medium
+18.78 ± 1.35
+0.822 ± 0.074
+0.81 / 0.79 / 0.88
+gpt-4.1
+5.69 ± 0.22
+0.830 ± 0.063
+0.83 / 0.83 / 0.84
+gpt-5-minimal
+7.07 ± 0.47
+0.833 ± 0.071
+0.82 / 0.82 / 0.86
+gpt-5-mini-high
+47.71 ± 11.93
+0.837 ± 0.072
+0.83 / 0.81 / 0.89
+gpt-5-low
+17.21 ± 1.11
+0.845 ± 0.068
+0.85 / 0.81 / 0.86
+gpt-5-medium
+30.04 ± 1.94
+0.866 ± 0.062
+0.87 / 0.85 / 0.88
+gpt-5-high
+59.22 ± 4.01
+0.866 ± 0.063
+0.87 / 0.85 / 0.87
+28
+
+(a) Fire anomaly scene.
+(b) Man overboard (MOB) anomaly scene.
+(c) Diver in water (MOB) anomaly scene.
+(d) Sign instructions scene.
+Figure E.21: Examples of human consensus rating results, green being acceptable and yellow rings being best trajectories.
+Appendix E.5.1. Fire anomaly scene understanding
+This subsection shows the expanded fire anomaly scene un-
+derstanding results from worst to best in Table E.9.
+Table E.9: Evaluated models for fire sorted by awareness (worst to best). Means
+±95% CI. N = 10 scenes per model. H (hazard) / I (implication) / A (action).
+Model
+Latency (s)
+Awareness
+H / I / A
+gpt-5-nano-minimal
+6.36 ± 0.67
+0.724 ± 0.104
+0.73 / 0.82 / 0.61
+claude-opus-4-1
+12.77 ± 10.04
+0.889 ± 0.053
+0.94 / 1.00 / 0.65
+gpt-4o
+6.29 ± 1.00
+0.892 ± 0.050
+0.98 / 0.85 / 0.71
+gpt-5-nano-medium
+14.56 ± 2.27
+0.895 ± 0.063
+0.93 / 0.96 / 0.74
+gpt-5-nano-high
+28.34 ± 2.62
+0.902 ± 0.101
+0.94 / 0.93 / 0.78
+gpt-5-nano-low
+17.83 ± 17.78
+0.906 ± 0.055
+0.94 / 0.96 / 0.77
+claude-sonnet-4
+4.68 ± 0.24
+0.929 ± 0.047
+0.95 / 1.00 / 0.81
+gpt-5-mini-minimal
+6.76 ± 0.48
+0.948 ± 0.037
+0.99 / 1.00 / 0.79
+gemini-2.5-flash
+15.24 ± 1.67
+0.951 ± 0.027
+1.00 / 0.99 / 0.79
+gemini-r-er-1.5 (0)
+13.05 ± 1.21
+0.951 ± 0.029
+1.00 / 0.97 / 0.81
+gemini-r-er-1.5 (24576)
+14.31 ± 1.04
+0.958 ± 0.022
+1.00 / 0.99 / 0.82
+gemini-r-er-1.5 (12288)
+13.82 ± 1.05
+0.960 ± 0.021
+1.00 / 0.99 / 0.83
+gpt-5-high
+60.89 ± 7.66
+0.964 ± 0.035
+1.00 / 0.99 / 0.85
+gpt-5-mini-high
+46.78 ± 4.61
+0.964 ± 0.025
+1.00 / 0.99 / 0.85
+gpt-4.1
+5.86 ± 0.54
+0.964 ± 0.023
+1.00 / 1.00 / 0.84
+gpt-5-medium
+32.06 ± 2.43
+0.966 ± 0.030
+1.00 / 1.00 / 0.85
+gpt-5-minimal
+7.91 ± 1.57
+0.966 ± 0.016
+1.00 / 1.00 / 0.85
+gpt-5-mini-medium
+18.79 ± 2.28
+0.968 ± 0.024
+1.00 / 1.00 / 0.86
+gpt-5-mini-low
+11.04 ± 0.78
+0.970 ± 0.016
+1.00 / 1.00 / 0.87
+gpt-5-low
+16.59 ± 1.70
+0.972 ± 0.027
+1.00 / 0.99 / 0.88
+gemini-2.5-pro
+21.43 ± 4.34
+0.985 ± 0.012
+1.00 / 1.00 / 0.93
+Appendix E.5.2. Flag anomaly scene understanding
+This subsection shows the expanded flag anomaly scene un-
+derstanding results from worst to best in Table E.10.
+Table E.10: Evaluated models for flag sorted by awareness. Means ±95% CI.
+N = 10 scenes per model. H (hazard) / I (implication) / A (action).
+Model
+Latency (s)
+Awareness
+H / I / A
+claude-sonnet-4
+4.37 ± 0.16
+0.072 ± 0.032
+0.02 / 0.02 / 0.26
+claude-opus-4-1
+11.31 ± 4.37
+0.131 ± 0.088
+0.12 / 0.15 / 0.12
+gemini-r-er-1.5 (0)
+15.12 ± 0.81
+0.197 ± 0.124
+0.23 / 0.16 / 0.17
+gpt-5-nano-minimal
+4.68 ± 0.35
+0.207 ± 0.022
+0.15 / 0.19 / 0.36
+gemini-r-er-1.5 (24576)
+14.79 ± 0.97
+0.208 ± 0.118
+0.23 / 0.18 / 0.19
+gemini-2.5-pro
+35.97 ± 9.44
+0.227 ± 0.079
+0.24 / 0.12 / 0.29
+gpt-5-nano-medium
+11.50 ± 0.83
+0.227 ± 0.025
+0.08 / 0.25 / 0.55
+gpt-5-nano-high
+24.31 ± 2.21
+0.229 ± 0.037
+0.08 / 0.22 / 0.59
+gemini-r-er-1.5 (12288)
+14.75 ± 1.01
+0.232 ± 0.114
+0.24 / 0.19 / 0.25
+gpt-5-nano-low
+7.07 ± 0.71
+0.268 ± 0.042
+0.13 / 0.34 / 0.52
+gpt-4o
+10.28 ± 4.17
+0.393 ± 0.113
+0.35 / 0.33 / 0.57
+gpt-5-mini-minimal
+6.24 ± 0.55
+0.407 ± 0.058
+0.42 / 0.32 / 0.47
+gemini-2.5-flash
+16.24 ± 1.81
+0.445 ± 0.069
+0.46 / 0.43 / 0.42
+gpt-5-mini-high
+28.93 ± 2.24
+0.463 ± 0.063
+0.42 / 0.31 / 0.71
+gpt-5-mini-medium
+17.51 ± 1.47
+0.476 ± 0.057
+0.42 / 0.32 / 0.76
+gpt-5-mini-low
+9.26 ± 0.60
+0.477 ± 0.061
+0.43 / 0.30 / 0.76
+gpt-5-minimal
+6.59 ± 0.34
+0.508 ± 0.062
+0.46 / 0.46 / 0.68
+gpt-5-low
+19.00 ± 2.13
+0.512 ± 0.060
+0.51 / 0.39 / 0.64
+gpt-4.1
+5.65 ± 0.38
+0.534 ± 0.016
+0.48 / 0.48 / 0.71
+gpt-5-medium
+34.37 ± 4.06
+0.593 ± 0.092
+0.57 / 0.50 / 0.75
+gpt-5-high
+67.85 ± 5.81
+0.615 ± 0.125
+0.60 / 0.53 / 0.74
+29
+
+Appendix E.5.3. MOB anomaly scene understanding
+This subsection shows the expanded MOB anomaly scene
+understanding results from worst to best in Table E.11.
+Table E.11: Evaluated models for mob sorted by awareness. Means ±95% CI.
+N = 10 scenes per model. H (hazard) / I (implication) / A (action).
+Model
+Latency (s)
+Awareness
+H / I / A
+claude-sonnet-4
+4.50 ± 0.26
+0.117 ± 0.185
+0.10 / 0.09 / 0.18
+gpt-5-nano-minimal
+5.22 ± 0.45
+0.191 ± 0.077
+0.12 / 0.22 / 0.34
+claude-opus-4-1
+14.73 ± 6.02
+0.281 ± 0.264
+0.28 / 0.30 / 0.26
+gpt-5-nano-low
+6.65 ± 0.75
+0.367 ± 0.132
+0.25 / 0.36 / 0.66
+gpt-5-nano-medium
+11.81 ± 0.73
+0.489 ± 0.154
+0.38 / 0.50 / 0.73
+gpt-5-nano-high
+24.94 ± 2.30
+0.554 ± 0.205
+0.51 / 0.52 / 0.70
+gemini-r-er-1.5 (0)
+15.00 ± 1.63
+0.626 ± 0.248
+0.63 / 0.69 / 0.54
+gemini-r-er-1.5 (12288)
+14.15 ± 1.77
+0.656 ± 0.219
+0.68 / 0.76 / 0.51
+gemini-r-er-1.5 (24576)
+13.29 ± 0.58
+0.676 ± 0.203
+0.72 / 0.77 / 0.47
+gemini-2.5-flash
+15.40 ± 1.70
+0.710 ± 0.220
+0.71 / 0.74 / 0.68
+gpt-4o
+8.02 ± 2.70
+0.747 ± 0.163
+0.72 / 0.75 / 0.81
+gpt-5-mini-minimal
+6.75 ± 0.52
+0.754 ± 0.152
+0.73 / 0.76 / 0.80
+gemini-2.5-pro
+77.05 ± 35.77
+0.764 ± 0.203
+0.73 / 0.79 / 0.81
+gpt-5-mini-low
+10.82 ± 1.04
+0.839 ± 0.176
+0.82 / 0.86 / 0.88
+gpt-5-minimal
+6.63 ± 0.62
+0.867 ± 0.141
+0.85 / 0.85 / 0.93
+gpt-5-mini-medium
+21.69 ± 3.87
+0.884 ± 0.132
+0.87 / 0.89 / 0.92
+gpt-4.1
+5.57 ± 0.47
+0.895 ± 0.109
+0.88 / 0.88 / 0.93
+gpt-5-high
+55.61 ± 8.49
+0.908 ± 0.119
+0.90 / 0.90 / 0.93
+gpt-5-low
+14.45 ± 1.61
+0.920 ± 0.105
+0.91 / 0.90 / 0.97
+gpt-5-medium
+25.82 ± 2.48
+0.920 ± 0.112
+0.91 / 0.93 / 0.93
+gpt-5-mini-high
+38.83 ± 3.32
+0.957 ± 0.045
+0.93 / 0.99 / 1.00
+Appendix E.5.4. Sign anomaly scene understanding
+This subsection shows the expanded sign anomaly scene un-
+derstanding results from worst to best in Table E.12.
+Table E.12: Evaluated models for sign sorted by awareness. Means ±95% CI.
+N = 10 scenes per model. H (hazard) / I (implication) / A (action).
+Model
+Latency (s)
+Awareness
+H / I / A
+gpt-5-nano-minimal
+5.69 ± 0.54
+0.330 ± 0.072
+0.28 / 0.38 / 0.41
+gpt-5-nano-low
+9.38 ± 2.53
+0.385 ± 0.051
+0.22 / 0.38 / 0.79
+gpt-5-nano-medium
+12.18 ± 0.59
+0.475 ± 0.073
+0.37 / 0.45 / 0.76
+gpt-5-nano-high
+28.87 ± 1.73
+0.675 ± 0.167
+0.61 / 0.65 / 0.86
+gpt-5-mini-minimal
+6.62 ± 0.53
+0.821 ± 0.114
+0.84 / 0.86 / 0.73
+claude-opus-4-1
+8.73 ± 1.45
+0.910 ± 0.065
+0.95 / 0.93 / 0.80
+claude-sonnet-4
+4.56 ± 0.18
+0.912 ± 0.069
+0.95 / 0.88 / 0.85
+gpt-4.1
+5.68 ± 0.44
+0.928 ± 0.076
+0.94 / 0.96 / 0.87
+gemini-2.5-pro
+51.78 ± 48.14
+0.934 ± 0.094
+0.97 / 0.94 / 0.85
+gpt-4o
+5.86 ± 0.75
+0.948 ± 0.027
+0.97 / 0.90 / 0.94
+gpt-5-mini-low
+10.36 ± 1.08
+0.951 ± 0.049
+0.94 / 0.97 / 0.96
+gpt-5-mini-medium
+17.13 ± 1.94
+0.962 ± 0.050
+0.96 / 0.94 / 0.99
+gemini-2.5-flash
+15.45 ± 3.31
+0.964 ± 0.028
+1.00 / 0.97 / 0.88
+gpt-5-mini-high
+76.32 ± 43.52
+0.964 ± 0.059
+0.96 / 0.96 / 0.98
+gemini-r-er-1.5 (12288)
+14.38 ± 0.87
+0.967 ± 0.039
+0.97 / 0.98 / 0.93
+gemini-r-er-1.5 (24576)
+14.06 ± 1.86
+0.968 ± 0.020
+1.00 / 0.97 / 0.89
+gemini-r-er-1.5 (0)
+15.10 ± 1.60
+0.973 ± 0.033
+0.99 / 0.99 / 0.91
+gpt-5-low
+18.82 ± 2.32
+0.975 ± 0.038
+0.99 / 0.97 / 0.93
+gpt-5-high
+52.53 ± 7.47
+0.978 ± 0.034
+0.99 / 0.97 / 0.96
+gpt-5-medium
+27.91 ± 4.21
+0.984 ± 0.023
+0.99 / 0.97 / 0.97
+gpt-5-minimal
+7.16 ± 0.58
+0.990 ± 0.009
+0.99 / 0.98 / 0.99
+Appendix E.6. Action expanded results
+Overall action alignment for all models and baselines are
+listed in Table E.13.
+Table E.13: Overall action alignment (majority-of-three). Means ±95% CI.
+N=40 scenes; latency shown as mean across scenes or ∼0 for baselines.
+Method
+Accept@1
+Best@1
+Latency (s)
+Keep-heading
+0.13 [0.05, 0.26]
+0.00 [0.00, 0.09]
+∼0.00
+Keep-forward
+0.25 [0.14, 0.40]
+0.10 [0.04, 0.23]
+∼0.00
+Keep-clearance
+0.30 [0.18, 0.45]
+0.05 [0.01, 0.17]
+∼0.00
+gpt-5-mini-minimal
+0.35 [0.22, 0.50]
+0.25 [0.14, 0.40]
+6.59
+claude-opus-4-1
+0.40 [0.26, 0.55]
+0.23 [0.12, 0.38]
+11.89
+gpt-5-nano-low
+0.45 [0.31, 0.60]
+0.38 [0.24, 0.53]
+10.23
+gpt-5-nano-high
+0.45 [0.31, 0.60]
+0.38 [0.24, 0.53]
+26.61
+gpt-5-nano-medium
+0.45 [0.31, 0.60]
+0.38 [0.24, 0.53]
+12.51
+gemini-r-er-1.5 (0)
+0.45 [0.31, 0.60]
+0.35 [0.22, 0.50]
+14.57
+gpt-4.1
+0.45 [0.31, 0.60]
+0.38 [0.24, 0.53]
+5.69
+Keep-station
+0.45 [0.31, 0.60]
+0.38 [0.24, 0.53]
+∼0.00
+gpt-5-nano-minimal
+0.45 [0.31, 0.60]
+0.38 [0.24, 0.53]
+5.49
+gemini-2.5-flash
+0.48 [0.33, 0.63]
+0.35 [0.22, 0.50]
+15.58
+gpt-5-mini-high
+0.48 [0.33, 0.63]
+0.38 [0.24, 0.53]
+47.71
+gpt-5-mini-low
+0.48 [0.33, 0.63]
+0.38 [0.24, 0.53]
+10.37
+claude-sonnet-4
+0.48 [0.33, 0.63]
+0.35 [0.22, 0.50]
+4.53
+gemini-r-er-1.5 (12288)
+0.50 [0.35, 0.65]
+0.45 [0.31, 0.60]
+14.27
+gemini-r-er-1.5 (24576)
+0.50 [0.35, 0.65]
+0.40 [0.26, 0.55]
+14.11
+gpt-5-mini-medium
+0.50 [0.35, 0.65]
+0.43 [0.29, 0.58]
+18.78
+Keep-starboard
+0.50 [0.35, 0.65]
+0.13 [0.05, 0.26]
+∼0.00
+gemini-2.5-pro
+0.53 [0.37, 0.67]
+0.40 [0.26, 0.55]
+46.56
+gpt-4o
+0.55 [0.40, 0.69]
+0.43 [0.29, 0.58]
+7.59
+gpt-5-high
+0.55 [0.40, 0.69]
+0.43 [0.29, 0.58]
+59.22
+gpt-5-medium
+0.58 [0.42, 0.71]
+0.40 [0.26, 0.55]
+30.04
+gpt-5-minimal
+0.60 [0.45, 0.74]
+0.40 [0.26, 0.55]
+7.07
+gpt-5-low
+0.68 [0.52, 0.80]
+0.48 [0.33, 0.63]
+17.21
+Appendix E.6.1. Fire anomaly action alignment
+Action alignment for all models and baselines on the fire sub-
+set are listed in Table E.14.
+30
+
+Table E.14: Action alignment for fire (majority-of-three) with 95% Wilson CIs.
+N = 10 scenes per method. Latency is mean across scenes for this anomaly
+(LLM methods) or ∼0 for baselines.
+Method
+Accept@1
+Best@1
+Latency (s)
+Keep-heading
+0.00 [0.00, 0.28]
+0.00 [0.00, 0.28]
+∼0.00
+Keep-forward
+0.20 [0.06, 0.51]
+0.10 [0.02, 0.40]
+∼0.00
+Keep-clearance
+0.40 [0.17, 0.69]
+0.10 [0.02, 0.40]
+∼0.00
+gpt-5-medium
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+32.06
+Keep-starboard
+0.50 [0.24, 0.76]
+0.40 [0.17, 0.69]
+∼0.00
+gpt-5-mini-minimal
+0.50 [0.24, 0.76]
+0.40 [0.17, 0.69]
+6.76
+gemini-r-er-1.5 (0)
+0.50 [0.24, 0.76]
+0.40 [0.17, 0.69]
+13.05
+gemini-r-er-1.5 (24576)
+0.50 [0.24, 0.76]
+0.40 [0.17, 0.69]
+14.31
+gpt-5-nano-low
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+17.83
+gpt-5-nano-high
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+28.34
+gpt-5-nano-medium
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+14.56
+gpt-4.1
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+5.86
+claude-sonnet-4
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+4.68
+Keep-station
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+∼0.00
+gpt-5-nano-minimal
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+6.36
+gpt-4o
+0.70 [0.40, 0.89]
+0.60 [0.31, 0.83]
+6.29
+gemini-2.5-flash
+0.70 [0.40, 0.89]
+0.60 [0.31, 0.83]
+15.24
+gpt-5-mini-high
+0.70 [0.40, 0.89]
+0.50 [0.24, 0.76]
+46.78
+gpt-5-mini-low
+0.70 [0.40, 0.89]
+0.50 [0.24, 0.76]
+11.04
+gpt-5-minimal
+0.70 [0.40, 0.89]
+0.60 [0.31, 0.83]
+7.91
+claude-opus-4-1
+0.70 [0.40, 0.89]
+0.40 [0.17, 0.69]
+12.77
+gemini-r-er-1.5 (12288)
+0.70 [0.40, 0.89]
+0.60 [0.31, 0.83]
+13.82
+gemini-2.5-pro
+0.80 [0.49, 0.94]
+0.60 [0.31, 0.83]
+21.43
+gpt-5-high
+0.80 [0.49, 0.94]
+0.70 [0.40, 0.89]
+60.89
+gpt-5-low
+0.80 [0.49, 0.94]
+0.60 [0.31, 0.83]
+16.59
+gpt-5-mini-medium
+0.80 [0.49, 0.94]
+0.70 [0.40, 0.89]
+18.79
+Appendix E.6.2. Flag anomaly action alignment
+Action alignment for all models and baselines on the flag
+subset are listed in Table E.15.
+Table E.15: Action alignment for flag (majority-of-three) with 95% Wilson CIs.
+N = 10 scenes per method. Latency is mean across scenes for this anomaly
+(LLM methods) or ∼0 for baselines.
+Method
+Accept@1
+Best@1
+Latency (s)
+Keep-heading
+0.00 [0.00, 0.28]
+0.00 [0.00, 0.28]
+∼0.00
+gemini-r-er-1.5 (12288)
+0.00 [0.00, 0.28]
+0.00 [0.00, 0.28]
+14.75
+gemini-r-er-1.5 (0)
+0.00 [0.00, 0.28]
+0.00 [0.00, 0.28]
+15.12
+gpt-4.1
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+5.65
+gpt-5-nano-low
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+7.07
+gpt-5-nano-high
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+24.31
+gpt-5-mini-medium
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+17.51
+gpt-5-mini-low
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+9.26
+gpt-5-mini-high
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+28.93
+gpt-5-nano-medium
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+11.50
+gpt-5-nano-minimal
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+4.68
+gemini-2.5-flash
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+16.24
+claude-sonnet-4
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+4.37
+claude-opus-4-1
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+11.31
+Keep-station
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+∼0.00
+gemini-2.5-pro
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+35.97
+gemini-r-er-1.5 (24576)
+0.20 [0.06, 0.51]
+0.10 [0.02, 0.40]
+14.79
+gpt-4o
+0.20 [0.06, 0.51]
+0.00 [0.00, 0.28]
+10.28
+gpt-5-high
+0.20 [0.06, 0.51]
+0.00 [0.00, 0.28]
+67.85
+gpt-5-mini-minimal
+0.20 [0.06, 0.51]
+0.00 [0.00, 0.28]
+6.24
+Keep-forward
+0.30 [0.11, 0.60]
+0.10 [0.02, 0.40]
+∼0.00
+gpt-5-minimal
+0.40 [0.17, 0.69]
+0.00 [0.00, 0.28]
+6.59
+gpt-5-medium
+0.50 [0.24, 0.76]
+0.10 [0.02, 0.40]
+34.37
+Keep-clearance
+0.50 [0.24, 0.76]
+0.00 [0.00, 0.28]
+∼0.00
+gpt-5-low
+0.60 [0.31, 0.83]
+0.20 [0.06, 0.51]
+19.00
+Keep-starboard
+0.70 [0.40, 0.89]
+0.00 [0.00, 0.28]
+∼0.00
+Appendix E.6.3. MOB anomaly action alignment
+Action alignment for all models and baselines on the MOB
+subset are listed in Table E.16.
+Table E.16: Action alignment for mob (majority-of-three) with 95% Wilson
+CIs. N = 10 scenes per method. Latency is mean across scenes for this anomaly
+(LLM methods) or ∼0 for baselines.
+Method
+Accept@1
+Best@1
+Latency (s)
+gpt-5-mini-minimal
+0.00 [0.00, 0.28]
+0.00 [0.00, 0.28]
+6.75
+Keep-clearance
+0.20 [0.06, 0.51]
+0.00 [0.00, 0.28]
+∼0.00
+Keep-forward
+0.30 [0.11, 0.60]
+0.10 [0.02, 0.40]
+∼0.00
+Keep-heading
+0.30 [0.11, 0.60]
+0.00 [0.00, 0.28]
+∼0.00
+claude-opus-4-1
+0.30 [0.11, 0.60]
+0.10 [0.02, 0.40]
+14.73
+gpt-5-nano-low
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+6.65
+gpt-5-nano-high
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+24.94
+gpt-5-minimal
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+6.63
+gpt-5-mini-medium
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+21.69
+gpt-5-mini-low
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+10.82
+gpt-5-mini-high
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+38.83
+gpt-4o
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+8.02
+gpt-4.1
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+5.57
+gemini-2.5-pro
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+77.05
+gemini-2.5-flash
+0.40 [0.17, 0.69]
+0.20 [0.06, 0.51]
+15.40
+claude-sonnet-4
+0.40 [0.17, 0.69]
+0.20 [0.06, 0.51]
+4.50
+Keep-station
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+∼0.00
+gpt-5-nano-medium
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+11.81
+gpt-5-nano-minimal
+0.40 [0.17, 0.69]
+0.30 [0.11, 0.60]
+5.22
+gpt-5-high
+0.50 [0.24, 0.76]
+0.30 [0.11, 0.60]
+55.61
+gpt-5-low
+0.50 [0.24, 0.76]
+0.40 [0.17, 0.69]
+14.45
+gpt-5-medium
+0.50 [0.24, 0.76]
+0.30 [0.11, 0.60]
+25.82
+gemini-r-er-1.5 (24576)
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+13.29
+gemini-r-er-1.5 (12288)
+0.60 [0.31, 0.83]
+0.50 [0.24, 0.76]
+14.15
+gemini-r-er-1.5 (0)
+0.60 [0.31, 0.83]
+0.40 [0.17, 0.69]
+15.00
+Keep-starboard
+0.70 [0.40, 0.89]
+0.10 [0.02, 0.40]
+∼0.00
+Appendix E.6.4. Sign anomaly action alignment
+Action alignment for all models and baselines on the sign
+subset are listed in Table E.17.
+Table E.17: Action alignment for sign (majority-of-three) with 95% Wilson
+CIs. N = 10 scenes per method. Latency is mean across scenes for this anomaly
+(LLM methods) or ∼0 for baselines.
+Method
+Accept@1
+Best@1
+Latency (s)
+Keep-clearance
+0.10 [0.02, 0.40]
+0.10 [0.02, 0.40]
+∼0.00
+Keep-starboard
+0.10 [0.02, 0.40]
+0.00 [0.00, 0.28]
+∼0.00
+Keep-forward
+0.20 [0.06, 0.51]
+0.10 [0.02, 0.40]
+∼0.00
+Keep-heading
+0.20 [0.06, 0.51]
+0.00 [0.00, 0.28]
+∼0.00
+claude-opus-4-1
+0.50 [0.24, 0.76]
+0.40 [0.17, 0.69]
+8.73
+gpt-5-nano-low
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+9.38
+gpt-5-nano-high
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+28.87
+gpt-5-mini-minimal
+0.70 [0.40, 0.89]
+0.60 [0.31, 0.83]
+6.62
+gpt-5-mini-medium
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+17.13
+gpt-5-mini-low
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+10.36
+gpt-5-mini-high
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+76.32
+gpt-5-high
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+52.53
+gpt-4.1
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+5.68
+gemini-r-er-1.5 (24576)
+0.70 [0.40, 0.89]
+0.60 [0.31, 0.83]
+14.06
+gemini-r-er-1.5 (12288)
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+14.38
+gemini-r-er-1.5 (0)
+0.70 [0.40, 0.89]
+0.60 [0.31, 0.83]
+15.10
+gemini-2.5-flash
+0.70 [0.40, 0.89]
+0.60 [0.31, 0.83]
+15.45
+Keep-station
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+∼0.00
+gpt-5-nano-medium
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+12.18
+gpt-5-nano-minimal
+0.70 [0.40, 0.89]
+0.70 [0.40, 0.89]
+5.69
+gpt-5-low
+0.80 [0.49, 0.94]
+0.70 [0.40, 0.89]
+18.82
+gemini-2.5-pro
+0.80 [0.49, 0.94]
+0.70 [0.40, 0.89]
+51.78
+claude-sonnet-4
+0.80 [0.49, 0.94]
+0.70 [0.40, 0.89]
+4.56
+gpt-4o
+0.90 [0.60, 0.98]
+0.80 [0.49, 0.94]
+5.86
+gpt-5-medium
+0.90 [0.60, 0.98]
+0.90 [0.60, 0.98]
+27.91
+gpt-5-minimal
+0.90 [0.60, 0.98]
+0.70 [0.40, 0.89]
+7.16
+31

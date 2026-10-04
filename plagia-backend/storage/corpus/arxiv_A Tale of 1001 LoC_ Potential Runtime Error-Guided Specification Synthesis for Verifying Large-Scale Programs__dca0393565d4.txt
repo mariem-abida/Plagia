@@ -1,0 +1,2126 @@
+A Tale of 1001 LoC: Potential Runtime Error-Guided
+Specification Synthesis for Verifying Large-Scale Programs
+ZHONGYI WANG∗, Zhejiang University, China
+TENGJIE LIN∗, Zhejiang University, China
+MINGSHUAI CHEN†, Zhejiang University, China
+HAOKUN LI, Peking University, China
+MINGQI YANG, Zhejiang University, China
+XIAO YI, The Chinese University of Hong Kong, China
+SHENGCHAO QIN, Xidian University, China
+YIXING LUO, Beijing Institute of Control Engineering, China
+XIAOFENG LI, Beijing Institute of Control Engineering, China
+BIN GU, Beijing Institute of Control Engineering, China
+LIQIANG LU, Zhejiang University, China
+JIANWEI YIN, Zhejiang University, China
+Fully automated verification of large-scale software and hardware systems is arguably the holy grail of
+formal methods. Large language models (LLMs) have recently demonstrated their potential for enhancing the
+degree of automation in formal verification by, e.g., generating formal specifications as essential to deductive
+verification, yet exhibit poor scalability due to long-context reasoning limitations and, more importantly, the
+difficulty of inferring complex, interprocedural specifications. This paper presents Preguss – a modular, fine-
+grained framework for automating the generation and refinement of formal specifications. Preguss synergizes
+between static analysis and deductive verification by steering two components in a divide-and-conquer fashion:
+(i) potential runtime error-guided construction and prioritization of verification units, and (ii) LLM-aided
+synthesis of interprocedural specifications at the unit level. We show that Preguss substantially outperforms
+state-of-the-art LLM-based approaches and, in particular, it enables highly automated RTE-freeness verification
+for real-world programs with over a thousand LoC, with a reduction of 80.6%∼88.9% human verification effort.
+CCS Concepts: • Theory of computation →Program verification; Program specifications; Program
+analysis; • Software and its engineering →Formal software verification; Automated static analysis.
+ACM Reference Format:
+Zhongyi Wang, Tengjie Lin, Mingshuai Chen, Haokun Li, Mingqi Yang, Xiao Yi, Shengchao Qin, Yixing Luo,
+Xiaofeng Li, Bin Gu, Liqiang Lu, and Jianwei Yin. 2026. A Tale of 1001 LoC: Potential Runtime Error-Guided
+Specification Synthesis for Verifying Large-Scale Programs. Proc. ACM Program. Lang. x, OOPSLA1, Article x
+(April 2026), 31 pages. https://doi.org/xx.xxxx/xxxxxxx
+∗Both authors contributed equally to this research.
+†Corresponding author.
+Authors’ Contact Information: Zhongyi Wang, Zhejiang University, Hangzhou, China, zhongyi.wang@zju.edu.cn; Tengjie
+Lin, Zhejiang University, Hangzhou, China, tengjie.lin@zju.edu.cn; Mingshuai Chen, Zhejiang University, Hangzhou,
+China, m.chen@zju.edu.cn; Haokun Li, Peking University, Beijing, China, ker@pm.me; Mingqi Yang, Zhejiang University,
+Hangzhou, China, mingqiyang@zju.edu.cn; Xiao Yi, The Chinese University of Hong Kong, Hong Kong, China, yixiao5428@
+link.cuhk.edu.hk; Shengchao Qin, Xidian University, Xi’an, China, shengchao.qin@gmail.com; Yixing Luo, Beijing Institute
+of Control Engineering, Beijing, China, luoyi_xing@126.com; Xiaofeng Li, Beijing Institute of Control Engineering, Beijing,
+China, li_x_feng@126.com; Bin Gu, Beijing Institute of Control Engineering, Beijing, China, gubin@ios.ac.cn; Liqiang
+Lu, Zhejiang University, Hangzhou, China, liqianglu@zju.edu.cn; Jianwei Yin, Zhejiang University, Hangzhou, China,
+zjuyjw@zju.edu.cn.
+2026. ACM 2475-1421/2026/4-ARTx
+https://doi.org/xx.xxxx/xxxxxxx
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+arXiv:2512.24594v1 [cs.SE] 31 Dec 2025
+
+x:2
+Wang et al.
+1
+INTRODUCTION
+Runtime errors (RTEs), such as division by zero, buffer/numeric overflows, and null pointer deref-
+erence, are a common cause of undefined behaviors (UBs) exhibited during the execution of C/C++
+programs [ISO/IEC JTC 1/SC 22 2024, Sect. 3.5.3]. These UBs can trigger catastrophic failures,
+rendering them critical considerations for safety-critical applications [ari 2000; America’s Cyber
+Defense Agency 2025; Shadab et al. 2025]. Consequently, in conventional program verification
+methodologies, establishing RTE-freeness (i.e., conformance to the C standard specification) con-
+stitutes a necessary precondition for verifying functional correctness (i.e., adherence to intended
+behaviors) [Souyris et al. 2009]. State-of-the-art static analyzers based on abstract interpretation
+[Cousot and Cousot 1977], such as Astrée [Kästner et al. 2023] and Frama-C/Eva [Bühler et al.
+2025], aim to reliably detect all potential UBs in large-scale C programs, thereby formally certifying
+the absence of RTEs. However, due to the inherent abstraction mechanism that soundly approxi-
+mates concrete program semantics [Cousot and Cousot 1977], these tools often emit numerous
+false positives. Manually identifying such false alarms or tuning analyzer configurations for better
+accuracy remains notoriously difficult [Ourghanlian 2015; Wang et al. 2024].
+Program verification tools, such as (automated) deductive verifiers [Ahrendt et al. 2016], provide a
+rigorous means for ensuring critical properties, including RTE-freeness and functional correctness.
+The verification process typically involves two stages: (i) constructing specifications to formalize
+intended program behaviors, and (ii) proving that the program adheres to the specifications. While
+modern verifiers such as Frama-C/Wp [Blanchard 2020] and Dafny [Leino 2010] automate the
+latter stage, the former – known as specification synthesis [Ammons et al. 2002] – still relies heavily
+on human expertise, especially for large-scale programs. [Djoudi et al. 2021; Ebalard et al. 2019].
+Recent studies [Ma et al. 2025; Pirzada et al. 2024; Wen et al. 2024; Wu et al. 2024b,a] have explored
+large language models (LLMs) for automated specification synthesis, demonstrating substantial im-
+provements over conventional techniques. Nevertheless, these methods exhibit significant scalability
+limitations when applied to real-world programs with, e.g., thousands of lines of code (LoC). The
+reasons are primarily twofold. First, the long-context reasoning limitation of LLMs prohibits them
+from processing large-scale programs as a whole: (i) the entire program may exceed the maximum
+context window length [Fang et al. 2024]; and (ii) even when the window is sufficiently long, LLMs
+often struggle to effectively locate and utilize the precise information needed to solve the task in
+one shot [Lekssays et al. 2025; Zhang et al. 2024]. Second, verifying large-scale programs – which
+typically feature complex call hierarchies – necessitates the synthesis of a diverse set of interprocedu-
+ral specifications, e.g., contracts (pre- and postconditions), loop invariants, etc. The latter is beyond
+the capability of existing approaches: (i) some focus exclusively on intraprocedural specifications of
+specific categories, e.g., invariants [Pirzada et al. 2024; Wu et al. 2024b,a] and assertions [Mugnier
+et al. 2025], and (ii) others generate interprocedural specifications holistically without modeling
+intrinsic differences between preconditions and postconditions [Ma et al. 2025; Wen et al. 2024],
+which are critical for identifying or validating the absence of RTEs (as demonstrated in Section 3).
+A more detailed review of related work is provided in Section 8.
+In response to the aforementioned challenges, we present Preguss – an LLM-assisted framework
+for synthesizing fine-grained formal specifications that enable the effective verification of large-scale
+programs. Preguss adopts a divide-and-conquer strategy orchestrating two synergistic phases: Phase
+1 (Divide) decomposes the monolithic task of RTE-freeness verification into manageable, prioritized
+units, guided by RTE assertions emitted by a static analyzer; Phase 2 (Conquer) employs an LLM
+to infer interprocedural specifications with fine-grained strategies tailored to different program
+contexts pertaining to the units. We show that this divide-and-conquer methodology facilitates (i)
+the synergy between static analysis and deductive verification: The RTE assertions reported by static
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:3
+analysis are used to either construct necessary specifications certifying RTE-freeness or help locate
+root causes triggering RTEs (à la the minimal contract paradigm [Gerlach 2019]); and (ii) modular
+synthesis of interprocedural specifications (at the granularity of verification units) and thereby a
+viable approach to the automated verification of large-scale programs.
+We have implemented Preguss on top of the deductive verifier Frama-C/Wp and abstract
+interpretation-based analyzers Frama-C/Eva and Frama-C/Rte [Herrmann and Signoles 2025].
+Experimental results show that Preguss substantially outperforms state-of-the-art LLM-based
+approaches in terms of the rate of successfully verified benchmarks. In particular, Preguss achieves
+highly automated RTE-freeness verification for real-world programs with over a thousand LoC, with a
+reduction of 80.6%∼88.9% human verification effort (measured by the number of human-intervened
+specifications). Moreover, Preguss facilitates the identification of 6 confirmed RTEs in a prac-
+tical spacecraft control system (1,280 LoC, 48 functions). These results demonstrate Preguss’s
+effectiveness in synthesizing high-quality specifications and scalability to large projects.
+Contributions. The main contributions of this paper are summarized as follows.
+• We propose and formalize the concept of potential RTE-guided specification synthesis as an
+effective means for LLM-aided specification synthesis towards scalable program verification.
+• We present Preguss – a modular, fine-grained framework for inferring formal specifications
+that integrates static analysis and deductive verification in a sound and terminating manner.
+Preguss is, to the best of our knowledge, the first automated method capable of proving
+RTE-freeness of real-world programs with over 1, 000 LoC (with marginal human effort).
+• We construct an open-source dataset consisting of real-world C programs annotated with
+specifications generated by Preguss and crafted by experts for RTE-freeness verification.
+• We implement Preguss and demonstrate its effectiveness and scalability on the benchmark
+dataset. We show that Preguss outperforms state-of-the-art LLM-based approaches, and
+achieves highly automated RTE-freeness verification of large-scale, real-world programs.
+Paper Structure. Section 2 recaps preliminaries on program verification. Section 3 motivates our
+conceptual idea of potential RTE-guided verification. Section 4 formalizes the problem of potential
+RTE-guided specification synthesis. Section 5 presents the technical underpinnings of our Preguss
+framework. Section 6 reports the evaluation results. Section 7 addresses several limitations and
+future directions. A review of related work is given in Section 8. The paper is concluded in Section 9.
+2
+PRELIMINARIES
+Program verification seeks to determine whether a program conforms to a given formal specification.
+This section recaps several basic concepts in program verification. The discussion is not confined to
+specific programming or specification languages; rather, we focus on general imperative programs
+(with instruction-based execution) assessed against predicate-based specifications.
+Program States and Configurations. A program state 𝜎maps every program variable in vars to its
+value in vals. We denote the set of program states by Σ ≜{𝜎| 𝜎: vars →vals}. A program
+configuration 𝑐≜⟨𝜎,𝜄⟩pairs a state 𝜎∈Σ with the next instruction 𝜄to be executed, representing
+the program’s instantaneous state immediately before executing 𝜄.
+Example 1. Consider a program snippet in C: “int x = 1; x++;”. The configuration ⟨{x ↦→1}, x++⟩
+captures the program state where variable x has value 1 immediately before executing x++.
+◁
+Properties. A property is a tuple 𝑝≜⟨𝜙,𝜄⟩, where 𝜙is a first-order logic predicate (possibly with
+quantifiers) representing a subset of program states in Σ immediately before executing instruction
+𝜄. We say that state 𝜎satisfies predicate 𝜙, written as 𝜎|= 𝜙, iff 𝜎is in the set specified by 𝜙,
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:4
+Wang et al.
+i.e., 𝜙(𝜎) = true; and 𝜎̸|= 𝜙otherwise. Moreover, a configuration 𝑐= ⟨𝜎,𝜄′⟩satisfies property
+𝑝= ⟨𝜙,𝜄⟩, denoted by 𝑐|= 𝑝, iff 𝜎|= 𝜙and 𝜄′ = 𝜄; otherwise, it is denoted by 𝑐̸|= 𝑝.
+In this paper, the terms specifications, hypotheses, and assertions all refer to instances of properties.
+Example 2. Consider the program abs.c given in Fig. 1 (a), which defines a function abs for
+computing the absolute value of an integer input x. The main function calls abs twice, respectively
+with argument -42 and INT_MIN. A potential integer-overflow UB may occur when x evaluates to
+INT_MIN immediately before executing instruction 𝜄1 (the return statement). As depicted in Fig. 1 (b),
+an abstract interpretation-based static analyzer (e.g., Frama-C/Eva) detects this risk and inserts
+an assertion 𝑝1 = ⟨𝜙1,𝜄1⟩at the potential UB point, using the ANSI/ISO C Specification Language
+(ACSL) [Baudin et al. 2025]. The predicate 𝜙1 = INT_MIN < x encodes the necessary constraint to
+prevent integer overflow during the execution of 𝜄1, thereby serving as an RTE guard.
+◁
+Definition 3 (Trace and Subtrace). A trace 𝜏is a finite sequence of program configurations, i.e.,
+𝜏≜(𝑐0, . . . ,𝑐𝑡) = (⟨𝜎0,𝜄0⟩, . . . , ⟨𝜎𝑡,𝜄𝑡⟩) .
+(1)
+Here, 𝜎0 is the initial state; and the state transition at each step 𝑖≥0 is governed by 𝜎𝑖+1 = ⟦𝜄𝑖⟧(𝜎𝑖),
+where ⟦𝜄𝑖⟧denotes the language-specific, single-step operational semantics of instruction 𝜄𝑖[Floyd
+1993; McCarthy 1961]. The length of trace 𝜏in (1) is 𝑡+1. A trace 𝜏′ = (𝑐′
+0, . . . ,𝑐′
+𝑠) is termed a subtrace
+of 𝜏, denoted by 𝜏′ ≺𝜏, iff it forms a proper prefix of 𝜏, i.e., 𝑠< 𝑡and 𝑐′
+𝑖= 𝑐𝑖for any 0 ≤𝑖≤𝑠.
+Example 4. The program fragment in Example 1 admits, in principle, infinitely many traces since
+its initial state is unconstrained. One such trace is the sequence 𝜏1 = (⟨x ↦→0, int x = 1⟩, ⟨{x ↦→
+1}, x++⟩, ⟨{x ↦→2},𝜄null⟩), where 𝜄null denotes a null instruction signifying termination.
+◁
+Next, we relate traces and properties via the notions of reachability and satisfaction:
+Definition 5 (Trace Reachability and Satisfaction). Given a property 𝑝= ⟨𝜙,𝜄⟩and a trace
+𝜏= (𝑐0, . . . ,𝑐𝑡) = (⟨𝜎0,𝜄0⟩, . . . , ⟨𝜎𝑡,𝜄𝑡⟩), we say that 𝜏reaches 𝑝, denoted by 𝜏{ 𝑝, iff 𝜄𝑡= 𝜄, i.e., the
+last instruction of 𝜏coincides with 𝜄. Furthermore, we extend the satisfaction relation |= to traces and
+properties: 𝜏satisfies 𝑝, written as 𝜏|= 𝑝, if and only if 𝜏{ 𝑝and 𝑐𝑡|= 𝑝.
+Example 6. Recall Fig. 1 (b) as discussed in Example 2. Consider two traces𝜏2 and𝜏3, which originate
+from instructions 𝜄2 and 𝜄3, respectively, and both terminate at 𝜄1 – the instruction associated with
+assertion 𝑝1 that signifies a potential integer-overflow UB. We have 𝜏2 { 𝑝1, 𝜏3 { 𝑝1, 𝜏2 |= 𝑝1, yet
+𝜏3 ̸|= 𝑝1. The latter is due to the argument INT_MIN of 𝜄3 which triggers a genuine RTE at 𝜄1.
+◁
+The following definition captures interdependencies between specifications:
+Definition 7 (Property Validity under Hypotheses). Given two properties 𝑝and 𝑞, we abuse the
+notation and write 𝑝|= 𝑞to denote that 𝑞is valid under hypothesis 𝑝, if and only if for every trace 𝜏
+that reaches 𝑞, i.e., 𝜏{ 𝑞, the following condition holds:
+∀𝜏′ : (𝜏′ ≺𝜏∧𝜏′ { 𝑝=⇒𝜏′ |= 𝑝)
+| {z }
+every subtrace of 𝜏that reaches 𝑝also satisfies 𝑝
+implies
+𝜏|= 𝑞
+|{z}
+𝜏satisfies 𝑞
+.
+(2)
+More generally, 𝑞is valid under a set of hypotheses H, written as H |= 𝑞, iff for any 𝜏{ 𝑞,
+∀ℎ∈H. ∀𝜏′ : (𝜏′ ≺𝜏∧𝜏′ { ℎ=⇒𝜏′ |= ℎ)
+implies
+𝜏|= 𝑞.
+(3)
+Example 8. Fig. 1 (c) demonstrates a well-designed precondition 𝑝2 = ⟨𝜙2,𝜄abs
+pre ⟩above function
+abs, where predicate 𝜙2 is identical to 𝜙1 and 𝜄abs
+pre denotes the first instruction following the entry
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:5
+#include<limits.h>
+int abs(int x) {
+if (x < 0)
+return -x; // 𝜾𝟏
+else
+return x;
+}
+int main() {
+abs(-42); // 𝜾𝟐
+abs(INT_MIN); // 𝜾𝟑
+}
+(a) program abs.c
+#include<limits.h>
+/*@ ensures 𝜙3 :
+(x<0 && \result==-x) ||
+(x>=0 && \result==x); */
+int abs(int x) {
+if (x < 0)
+return -x; // 𝜾𝟏
+else return x;
+}
+int main() {
+abs(-42); // 𝜾𝟐
+abs(INT_MIN); // 𝜾𝟑
+}
+(d) “ineffective” postcondition 𝜙3
+#include<limits.h>
+int abs(int x) {
+if (x < 0)
+/*@ assert overflow:
+𝜙1: INT_MIN < x; */
+return -x; // 𝜾𝟏
+else return x;
+}
+int main() {
+abs(-42); // 𝜾𝟐
+abs(INT_MIN); // 𝜾𝟑
+}
+(b) analysis result of abs.c
+#include<limits.h>
+/*@ requires 𝜙2: INT_MIN < x; */
+int abs(int x) {
+if (x < 0)
+/*@ assert overflow: 𝜙1 */
+return -x; // 𝜾𝟏
+else return x;
+}
+int main() {
+/*@ precondition 𝜙2 of abs */
+abs(-42); // 𝜾𝟐
+/*@ precondition 𝜙2 of abs */
+abs(INT_MIN); // 𝜾𝟑
+}
+(c) 𝜙1 is valid under precondition 𝜙2
+Fig. 1. Potential RTE-guided verification process (a)(b)(c) v.s. unguided verification (a)(d).
+point of function abs.1 This precondition ensures the validity of assertion 𝑝1, namely 𝑝2 |= 𝑝1, and
+thus function abs is certified RTE-free under hypothesis 𝑝2. An example of validity under multiple
+hypotheses can be found in Section 3.3.
+◁
+Now, we have all the ingredients to formally describe a sound program verifier:
+Definition 9 (Sound Verifier). Given a program prog, a hypothesis set H, and a target property 𝑞,
+a (deductive) verifier is a function mapping these inputs to a certain verification result:
+Verify:
+(prog, H,𝑞) ↦→status ,
+(4)
+where the output status is either (i) true signifying that 𝑞is valid under H; or (ii) unknown indicating
+invalidity or verification failure due to resource exhaustion and/or solver limitations (e.g., employing
+over-approximations of program semantics rather than exact representations) [Kroening and Strichman
+2016]. In particular, the verifier in (4) is sound if it satisfies the following soundness condition:
+Verify (prog, H,𝑞) = true
+implies
+H |= 𝑞.
+(5)
+This condition ensures that a true verdict guarantees the validity of𝑞under H, while H ̸|= 𝑞necessarily
+results in unknown. It then follows from the consequence rule of Floyd-Hoare Logic [Hoare 1969] that
+Verify (prog, H,𝑞) = true and H ⊆H ′
+implies
+Verify (prog, H ′,𝑞) = true ,
+(6)
+i.e., a property valid under hypotheses H must also be valid under logically stronger hypotheses H ′.
+The verifier-reported statuses (true or unknown) for all properties in Figs. 1 to 3 are visually indicated
+using their corresponding colors. Moreover, in practice, a sound verifier can take an extended form
+Verify:
+(prog, H,𝑞) ↦→⟨status, feedback⟩,
+(7)
+which augments (4) with auxiliary feedback information. Such feedback typically includes proof
+obligations (aka, verification conditions) – logical formulas that, when being valid, suffice to guarantee
+program adherence to specifications. A status of true indicates that all proof obligations are valid,
+whereas a status of unknown signifies that the verifier could neither prove nor refute the obligations.
+We show in Section 3.3 that such feedback can be leveraged to refine specifications.
+3
+MOTIVATION
+3.1
+Potential RTE-Guided Verification
+We use the simple example in Fig. 1 to demonstrate our idea of potential RTE-guided verifica-
+tion [Wang et al. 2025], which aims to synergize between static analysis and deductive verification
+1Given a function f, we use 𝜄f
+pre and 𝜄f
+post to denote the first instruction after the entry point of f and a null instruction
+representing the termination of f, respectively. The call-site preconditions in Fig. 1 (c) are explained in Section 3.1.
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:6
+Wang et al.
+(in line with the minimal contract paradigm [Gerlach 2019]): We first apply a static analyzer to
+the source program in Fig. 1 (a); if any RTE alarm is reported in the form of an assertion, e.g.,
+𝑝1 = ⟨𝜙1,𝜄1⟩in Fig. 1 (b) (as explained in Example 2), we construct necessary specifications, e.g.,
+the precondition 𝑝2 = ⟨𝜙2,𝜄abs
+pre ⟩in Fig. 1 (c) (as elaborated in Example 8), which assist a verifier in
+certifying the assertion. Both the assertion and the precondition then serve as guard assertions to
+ensure RTE-freeness of the source program. Fig. 1 (c) demonstrates this mechanism: By verifying
+whether the (weakest) precondition 𝑝2 is violated at call sites of function abs (i.e., 𝜄2 and 𝜄3), we
+can distinguish safe traces (e.g., 𝜏2) from unsafe ones (e.g., 𝜏3) that induce a definite RTE.
+Can LLMs generate such specifications? Taking abs.c as an example, most advanced LLMs – when
+fed with the source program context and the RTE assertion 𝑝1 – exhibit strong code comprehension
+capabilities and can readily generate weakest preconditions semantically equivalent to 𝑝2. However,
+state-of-the-art approaches to LLM-based specification synthesis [Ma et al. 2025; Pirzada et al. 2024;
+Wen et al. 2024; Wu et al. 2024b,a] do not exploit RTE assertions emitted by established static
+analysis techniques (most pertinently, abstract interpretation [Cousot and Cousot 1977]), thus
+significantly impairing their performance in generating necessary specifications for RTE-freeness
+verification. For instance, it is common for LLMs to produce specifications such as the postcondition
+𝑝3 = ⟨𝜙3,𝜄abs
+post⟩depicted in Fig. 1 (d), given only the source program abs.c in Fig. 1 (a). The predicate
+𝜙3 = (x<0 && \result ==-x) || (x>=0 && \result ==x) appears to correctly describe the
+behavior of abs, except for the case x = INT_MIN, leading verifiers to mark it as unknown. Moreover,
+postcondition 𝑝3 is “ineffective” for detecting the actual RTE source at 𝜄3. Hence, we have
+Insight 1. One can leverage RTE assertions from abstract interpretation-based analyzers – as
+targets for RTE-freeness verification – to guide LLMs to synthesize specifications effectively.
+Then, the following question naturally arises: Does it suffice to extend existing LLM-based synthesis
+approaches by simply feeding the LLM therein with RTE assertions? The answer is unfortunately
+negative: We discuss the corresponding technical challenges throughout the rest of this section
+and report the practical insufficiency of such a naïve extension in Section 6 (RQ1).
+3.2
+Interprocedural Specifications
+The example in Fig. 1 illustrates the simple case where an RTE assertion (i.e., 𝑝1) can be validated
+through specifications (i.e., 𝑝2) localized to its host function (abs). This approach with localized
+specifications is, however, insufficient for ensuring RTE-freeness in real-world programs featuring
+complex call hierarchies. Consider the program id.c in Fig. 2 (a), which defines a function id that
+returns the identical value of its input 𝑥, alongside functions one and zero that invoke id with
+arguments 1 and 0, respectively. The main function calls both one and zero. Static analysis reveals
+a potential division-by-zero UB in function one, flagged by the assertion 𝑝4 = ⟨𝜙4,𝜄4⟩in Fig. 2 (b)
+(with 𝜙4 = x != 0). Unlike the assertion 𝑝1 in Fig. 1, constructing any precondition for one does
+not suffice to validate 𝑝4, as one lacks parameters and thus imposes no constraints on its inputs.
+To eliminate such false alarms (e.g., 𝑝4), which frequently arise in practice, it is necessary to
+employ interprocedural specifications – specifications that extend beyond the host functions of
+target assertions. For instance, the postcondition 𝑝5 = ⟨𝜙5,𝜄id
+post⟩for function id in Fig. 2 (c) (with
+𝜙5 = \result == x) serves precisely this role. Specifically, the value of x at 𝜄4 is determined by
+argument 1 and the postcondition of id at the call site id(1), thereby validating 𝑝4 , i.e., 𝑝5 |= 𝑝4.
+The synthesis of interprocedural specifications, as exemplified by postcondition 𝑝5, depends on
+LLMs comprehending interprocedural program contexts that span across multiple functions. Specif-
+ically, LLMs must realize that discharging assertion 𝑝4 in function one necessitates constructing a
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:7
+int id(int x) {
+return x;
+}
+void one() {
+int x = id(1);
+1/x; // 𝜾𝟒
+}
+void zero() {
+id(0); // 𝜾𝟓
+}
+int main() {
+one(); zero();
+}
+(a) program id.c
+/*@ ensures 𝜙5: \result == x; */
+int id(int x) {return x;}
+void one() {
+int x = id(1);
+/*@ assert div_by_zero: 𝜙4 */
+1/x; // 𝜾𝟒
+}
+void zero() {
+id(0); // 𝜾𝟓
+}
+int main() {
+one(); zero();
+}
+(c) 𝜙4 is valid under postcondition 𝜙5
+int id(int x) {return x;}
+void one() {
+int x = id(1);
+/*@ assert div_by_zero:
+𝜙4: x != 0; */
+1/x; // 𝜾𝟒
+}
+void zero() {
+id(0); // 𝜾𝟓
+}
+int main() {
+one(); zero();
+}
+(b) analysis result of id.c
+/*@ requires 𝜙6: x != 0; */
+/*@ ensures 𝜙5: \result == x; */
+int id(int x) {return x;}
+void one() {
+int x = id(1);
+/*@ assert div_by_zero: 𝜙4 */
+1/x; // 𝜾𝟒
+}
+void zero() {
+/*@ precondition 𝜙6 of id */
+id(0); // 𝜾𝟓
+}
+int main() {
+one(); zero();
+}
+(d) precondition 𝜙6 that induces a false alarm
+Fig. 2. The dual role of interprocedural specifications: postconditions can help discharge false RTEs (c) while
+over-constrained preconditions can induce false alarms (d).
+postcondition for function id. Nonetheless, current approaches to interprocedural specification
+synthesis, e.g., [Ma et al. 2025; Wen et al. 2024], exhibit two key limitations: (i) They provide LLMs
+with the entire program as context, which is constrained by the finite context window of LLMs
+and thus do not scale to large programs; (ii) Even for small programs with full context, LLMs
+may generate over-constrained preconditions due to hallucination [Huang et al. 2025], thus yielding
+spurious false alarms. As illustrated in Fig. 2 (d), an LLM might be misled by the context “x != 0 (𝜙4)
+and 1/x” at 𝜄4, and thus forge an over-constrained precondition 𝑝6 = ⟨𝜙6,𝜄id
+pre⟩for id (with 𝜙6 = x
+!= 0), which triggers a false alarm at the call site 𝜄5 (id(0)). Although discarding over-constrained
+preconditions while retaining postconditions may resolve immediate false alarms (as in Fig. 2 (c)),
+determining whether a precondition is over-constrained is per se a nontrivial task (cf. Fig. 1 (c)
+vs. Fig. 2 (d)) [Cousot et al. 2013, 2011]: In Fig. 1 (c), indiscriminately discarding the precondition
+compromises soundness (as true RTEs are missed). In a nutshell, we observe
+Challenge 1. In the presence of long-context reasoning limitations, how to instruct LLMs
+to access particular program contexts required for generating interprocedural specifications
+for large-scale programs with complex call hierarchies?
+Challenge 2. How to design a fine-grained interprocedural-specification synthesis mecha-
+nism – e.g., determining which specifications to generate, at which program locations, and
+in what sequence – to alleviate the synthesis of over-constrained preconditions2?
+3.3
+Feedback-Driven Specification Refinement
+Section 3.2 has demonstrated the challenges in constructing interprocedural specifications; however,
+validating RTE assertions for individual functions can also be difficult. Consider, for example, the
+program search.c in Fig. 3 A○, which defines a function search that iterates through an integer
+array arr of length len and returns either the address of the first element matching the target value
+val, or NULL if no such element exists. Static analysis reveals a potential invalid-memory-access
+UB, flagged by the assertion 𝑝7 = ⟨𝜙7,𝜄7⟩in A○(where 𝜙7 = \valid_read(arr + i). Guided by 𝑝7,
+LLMs can generate a precondition 𝑝8 = ⟨𝜙8,𝜄search
+pre
+⟩, where 𝜙8 =\valid_read(arr + (0..len-1))
+2While over-constrained specifications beyond preconditions (e.g., postconditions and loop invariants) can also lead to
+issues such as false negatives, these can be addressed through simpler mechanisms, as discussed in Section 5.2.3.
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:8
+Wang et al.
+#include<stddef.h>
+/*@ requires 𝜙8:
+\valid_read(arr + (0..len-1)); */
+int* search(int* arr, int len, int val) {
+int i = 0;
+while (i < len) { // 𝜾𝟔
+/*@ assert memory_access: 𝜙7:
+\valid_read(arr + i); */
+if (arr[i] == val) // 𝜾𝟕
+return &arr[i];
+i ++;
+}
+return NULL;
+}
+search.c
+Ⓐ
+Goal Assertion ‘memory_access,𝜙7’:
+Assume {
+Type: is_intp(arr_0) ∧ is_intp(arr_1) ∧
+ is_int(i) ∧ is_int(len_0) ∧ is_int(len_1).
+P1: valid_read(M, arr_0 + 0, len_0).
+P2: i < len_1.
+}
+Prove Q: valid_read(M, arr_1 + i, 1).
+Proof Obligation Ⓑ
+M
+arr_0
+len_0
+P1:
+P2: i < len_1
+M
+arr_1
+Q:
+i
+1
+Ⓒ
+P1 ∧ P2 ∧ P3 ⇒ Q
+Ⓓ
+P3:
+arr_0==arr_1 ∧ len_0==len_1
+Ⓔ
+/*@ loop assigns i; */
+Ⓕ
+Fig. 3. Handcrafting missing specifications via verifier feedback (e.g., proof obligations) for validating 𝑝7.
+asserts read validity for the entire array arr with length len. Counterintuitively, the verifier fails
+to certify the validity of accessing a[i] (i.e., marking 𝑝7 at 𝜄7 as unknown) under the hypothesis 𝑝8.
+This behavior stems from the fact that modern deductive verifiers employ elaborate mechanisms
+to handle complex C semantics (e.g., memory access at 𝜄7 in A○). This necessitates understanding
+the verifier’s internal mechanisms and verification details when validating RTE assertions involving
+such semantic features. Fig. 3 B○- F○demonstrates a step-by-step process by a verification expert to
+construct missing specifications for discharging 𝑝7 leveraging verifier feedback, including the proof
+obligation of 𝑝7 in B○. Specifically, the obligation comprises hypotheses P1 (precondition 𝑝8), P2
+(loop condition i < len at 𝜄6), and type declarations of integer pointers (arr_0, arr_1) and integer
+variables (i, len_0, len_1), associated with the goal Q to be verified. Here, Q is a transformed version
+of 𝑝7 that is used internally by Frama-C/Wp. In Q, M denotes a simplified “typed” memory model
+(for integers in this case), as outlined in [Kosmatov et al. 2024, Sect. 4.3.4], where each memory
+block has the size of an int (i.e., 4 bytes), forming a region storing integer arrays such as arr_0 and
+arr_1. The variable arr_1 represents the base address of array arr at 𝜄7. It is distinguished from
+arr_0 – the base address of arr in precondition 𝑝8 – because arr is mutable and Frama-C/Wp
+assumes by default that it may be modified inside loops. At this stage, the assertion 𝑝7 remains
+unproven because P1 ∧P2 ⇒Q cannot be established by external solvers.
+The verification expert can model the semantics of P1 and Q through memory representations
+as depicted in C○. P1: valid_read(M,arr_0+0,len_0) denotes read validity for a memory block
+starting at arr_0 spanning len_0 elements, whilst Q: valid_rd(M,arr_1+i,1) asserts read validity
+for a single element at arr_1+i. Although no solver proves P1 ∧P2 ⇒Q, experienced practitioners
+may strengthen the antecedent by conjoining P3 and evaluating P1 ∧P2 ∧P3 ⇒Q (see D○). The
+missing predicate P3 is immediately derived (based on verification expertise) as arr_0 == arr_1
+∧len_0 == len_1 ( E○). This reveals the verifier’s over-approximation of side effects – assuming
+that variables defined outside the loop, such as array address arr and length len, could be modified
+inside the loop scope. Consequently, adding the specification loop assigns i (denoted by 𝑝9)
+becomes essential to restrict reassignment exclusively to variable i ( F○). Inserting this specification
+above the loop condition (𝜄6) enables verifiers to eliminate the false invalid-memory-access alarm,
+i.e., {𝑝8, 𝑝9} |= 𝑝7 as per (3). This gives rise to the idea of feedback-driven specification refinement:
+Insight 2. The feedback from a verifier, in particular, the proof obligations that remain to be
+discharged, can be leveraged to refine the specifications generated by LLMs effectively.
+4
+PROBLEM FORMULATION
+This section formalizes the problem of potential RTE-guided specification synthesis. To this end,
+we first introduce a formal characterization of RTE-freeness:
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:9
+Definition 10 (RTE-Freeness). Given a program prog, a set of RTE assertions A, and a set of
+specifications S, we say that prog is free-of-RTE if and only if
+∀𝑝∈A ∪S : A ∪S \ {𝑝} |= 𝑝,
+(8)
+namely, the properties in A ∪S are mutually consistent – every property in the set is valid under the
+rest. More generally, prog is said to be free-of-RTE under hypotheses H ⊆A ∪S if and only if
+∀𝑝∈A ∪S \ H : A ∪S \ {𝑝} |= 𝑝.
+(9)
+Note that (8) is a special case of (9) with H = ∅.
+It follows that the characterization (9) boils down to (8) if the hypotheses H are discharged:
+Theorem 11 (RTE-Freeness under Valid Hypotheses). Suppose prog is free-of-RTE under hy-
+potheses H as per (9). If every ℎ∈H is valid, i.e., |= ℎ, then prog is free-of-RTE in the sense of (8).
+Example 12. Recall the three real-world scenarios of RTE-freeness verification in Figs. 1 to 3:
+The program abs.c in Fig. 1 is free-of-RTE under hypothesis {𝑝2}. The precondition 𝑝2 facilitates
+detecting a real RTE in trace 𝜏3 while safeguarding trace 𝜏2. With 𝑝2, one can correct the program by
+removing the instruction abs(INT_MIN) (𝜄3) or revising the implementation of abs. This exemplifies
+a classic source-to-sink problem [Wang 2025] in static (taint) analysis, where the goal is to identify
+that abs(INT_MIN) at 𝜄3 (source) triggers an overflow RTE at 𝜄1 (sink). Potential RTE-guided
+specification synthesis provides a deductive verification mechanism for solving such problems.
+The program id.c in Fig. 2 is free-of-RTE. The postcondition 𝑝5 suffices to establish |= 𝑝5 |= 𝑝4.
+This represents the ideal case for RTE-freeness verification, where all alarms raised by static analyz-
+ers are false positives and can be eliminated by deductive verifiers with appropriate specifications.
+The program search.c in Fig. 3 is free-of-RTE under hypotheses {𝑝8, 𝑝9}. Unlike abs.c, precon-
+dition 𝑝8 cannot be used to locate RTEs directly, as no caller function to search exists in the program.
+This case depicts the scenario of constructing summaries for modules in large projects, known as
+modular static program analysis [Cousot and Cousot 2002]. Preconditions like 𝑝8 provide assurances
+that modules such as search are free-of-RTE if all callers adhere to these preconditions.
+◁
+The potential RTE-guided specification synthesis problem concerned in this paper reads as follows:
+Problem Statement. Given a program prog with a set of RTE assertions A annotated by
+an abstract interpretation-based static analyzer, automatically generate a set of specifications
+S by leveraging a large language model LLM, and prove with a deductive verifier Verify that
+prog is either (i) free-of-RTE, or (ii) free-of-RTE under hypotheses H ⊆A ∪S.
+Note that case (ii) predominates in the verification of large-scale, real-world programs. The presence
+of a hypothesis ℎ∈H typically stems from one of the four scenarios: (a) ℎsignifies a genuine RTE,
+which inherently cannot – and should not – be validated by any sound verifier; (b) ℎis a false alarm
+that fails to be discharged due to resource exhaustion or inherent solver limitations; (c) ℎis a false
+alarm resulting from an over-constrained precondition generated by the approach; or (d) ℎis a false
+alarm, but the specification-synthesis framework does not suffice to eliminate it – for instance,
+generating precise specifications for behaviors involving complex data structures and/or intricate
+memory models remains notoriously hard; see, e.g., [Djoudi et al. 2021] for dedicated research.
+A practical strategy for addressing these scenarios involves manual validation of the hypotheses
+in H (as justified by Theorem 11), supplemented by revising generated specifications (particularly
+for scenario (c)) and constructing additional specifications (particularly for scenario (d)). This
+approach proves substantially more feasible than attempting to verify RTE-freeness against the
+entire set of RTE assertions A produced by the static analyzer, as demonstrated in Section 6 (RQ2).
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:10
+Wang et al.
+Program
+Program with 
+RTE assertions
+Abstract
+Interpretation
+Call Graph
+Analysis
+Call Graph
+V-Unit Construction
+and Prioritization
+V-Unit Queue
+Phase 1 (Divide): Potential RTE-Guided Construction and Prioritization of Verification Units
+V-Unit
+Program Context
+⟨𝜙, 𝜄⟩
+Guard Assertion
+Phase 2 (Conquer): Fine-Grained Interprocedural Specification Synthesis
+Next V-Unit or 
+Termination
+Collect the Assertion 
+into Hypotheses ℋ
+❶
+❷
+❸
+❹
+❺
+❼
+❻
+❽
+Iterative Interprocedural Specification Generator
+LLM
+Verifier
+Specification
+Feedback
+Host-Function
+Specification
+Generation
+Callee-Functions
+Specification
+Generation
+Y
+N
+Fig. 4. Divide-and-conquer architecture of the Preguss framework.
+5
+METHODOLOGY
+This section presents Preguss – our framework for Potential Runtime Error-GUided Specification
+Synthesis. As sketched in Fig. 4, Preguss adopts a divide-and-conquer strategy (in a fashion similar
+to [Zheng et al. 2025]) which operates through two synergistic phases: Phase 1 (Divide) decomposes
+the monolithic task of RTE-freeness verification into manageable, prioritized units. Each unit
+contains a guard assertion together with its necessary program context for validation; Phase 2
+(Conquer) employs an LLM to infer interprocedural specifications along caller-callee chains, thereby
+certifying the target assertion in each verification unit. Below, we show how these two phases
+cooperate to enable RTE-freeness verification of real-world programs with complex call hierarchies.
+5.1
+Phase 1: Potential RTE-Guided Construction and Prioritization of Verification Units
+To address Challenge 1 (long-context reasoning limitation of LLMs), Phase 1 decomposes the
+monolithic RTE-freeness verification task into a sequence of manageable verification units (V-
+Units), as illustrated in Fig. 4 (upper part). The process begins by employing abstract interpretation
+conducted by static analyzers (e.g., Frama-C/Rte [Herrmann and Signoles 2025] and Frama-C/Eva)
+to generate RTE assertions signifying all potential UBs in the source program (❶). Subsequently, the
+program’s call graph is constructed while recording all of its call sites (❷), yielding a graph structure
+with a comprehensive set of guard assertions. For each assertion, a V-Unit is created, encapsulating
+both the assertion and its essential contextual program slices. These V-Units are then prioritized into
+a queue to streamline the verification workflow (❸). Below, we first elaborate on the generation of
+guard assertions, which serve as sub-goals for the holistic RTE-freeness verification (Section 5.1.1)
+and then introduce the V-Unit structure along with prioritization principles (Section 5.1.2).
+5.1.1
+Guard Assertion Generation. As discussed in Section 3.1, both the RTE assertions emitted by
+static analyzers and the synthesized preconditions act as guard assertions to ensure RTE-freeness
+of the source program. Whereas RTE assertions can be generated via abstract interpretation (❶),
+preconditions must be constructed on-the-fly during specification synthesis. However, we observe
+that validating a precondition (𝑝= ⟨𝜙,𝜄f
+pre⟩) involves two key components: (i) the predicate 𝜙
+describing expected states of the function, and (ii) all the call-site locations where the function is
+invoked. Thus, we statically extract all precondition check locations through call-graph analysis
+(❷) without generating actual specifications, initializing each predicate to the tautological true as
+a placeholder. The actual preconditions are generated and refined during Phase 2 (see Section 5.2).
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:11
+int id(int x) { return x; }
+(a) call graph with guard assertions initially marked as unknown
+void one() {
+/*@ precondition of id */
+int x = id(1); // 𝜾!one
+/*@ assert div_by_zero: 𝜙4 */
+1/x; // 𝜾"one
+}
+int main() {
+/*@ precondition of one */
+one(); // 𝜾!main
+/*@ precondition of zero */
+zero(); // 𝜾"main
+}
+void zero() {
+/*@ precondition of id */
+id(0); // 𝜾!zero
+}
+𝛖!
+ =
+𝝓#$%
+&' ,𝜾!
+()% , one, {id}
+𝛖*
+ =
+𝝓+
+ ,𝜾*
+()% , one, {id}
+𝛖,
+ =
+𝝓#$%
+&' ,𝜾!
+-%$( , zero, {id}
+𝛖+
+ =
+𝝓#$%
+()%,𝜾!
+./&) , main, {one, zero}
+𝛖0
+ =
+𝝓#$%
+-%$(,𝜾*
+./&) , main, {one, zero}
+(b) queue of V-Units (assertions + program contexts)
+Fig. 5. The call graph (a) and V-Unit queue (b) of program id.c in Fig. 2.
+During Phase 1, the location of a precondition check is more critical than its predicate content as it
+determines the structure of the V-Unit queue and thus the order of subsequent verification.
+Remark. The selection of preconditions (checked at call sites) as guard assertions, rather than
+postconditions or loop invariants, is motivated by their intrinsic role in RTE-freeness verification.
+Preconditions act as natural guards at function entry points, specifying requisite constraints on
+input parameters (e.g., value ranges, memory accessibility) (see Fig. 1 (c)). In contrast, postconditions
+and loop invariants capture semantic behaviors of programs or loops (cf. Fig. 1 (d) and Fig. 3). For
+RTE-freeness, the goal is to derive (weakest) preconditions that encompass all valid program traces
+while excluding erroneous ones. Consequently, a violated precondition signals a potential RTE,
+whereas a violated postcondition or invariant is possibly invalid. This focus on preconditions also
+contributes to the termination guarantee of Preguss, as established in Section 5.3.
+◁
+Preguss deals with acyclic call graphs formally described as follows:
+Definition 13 (Call Graph). A call graph is a directed acyclic graph G ≜⟨𝐹, 𝐸⟩, where
+• 𝐹= {𝑓1, . . . , 𝑓𝑛} is a finite set of function nodes,
+• 𝐸⊆𝐹× 𝐹is a set of call edges, with ⟨𝑓𝑖, 𝑓𝑗⟩∈𝐸indicating 𝑓𝑖calls 𝑓𝑗.
+The callees of a function 𝑓∈𝐹are collected into
+callee (𝑓) ≜{ 𝑓′ | ⟨𝑓, 𝑓′⟩∈𝐸} .
+Moreover, the ancestor relation is defined as
+ancestor ≜
+
+⟨𝑓anc, 𝑓des⟩∈𝐹× 𝐹| ∃𝑓𝑖, . . . , 𝑓𝑗: 𝑓𝑖∈callee(𝑓anc)∧
+𝑓𝑖+1 ∈callee(𝑓𝑖) ∧. . . ∧𝑓𝑗∈callee(𝑓𝑗−1) ∧𝑓des ∈callee(𝑓𝑗)
+ 
+.
+Intuitively, ⟨𝑓anc, 𝑓des⟩∈ancestor means that there exists a finite call chain from 𝑓anc to 𝑓des.
+Example 14. Fig. 5 (a) illustrates the call graph of program id.c in Fig. 2. The division-by-zero
+RTE assertion 𝑝4 = ⟨𝜙4,𝜄one
+2
+⟩as well as all the call-site precondition checks (as placeholders) –
+namely ⟨𝜙id
+pre,𝜄one
+1
+⟩, ⟨𝜙id
+pre,𝜄zero
+1
+⟩, ⟨𝜙one
+pre ,𝜄main
+1
+⟩, and ⟨𝜙zero
+pre ,𝜄main
+2
+⟩– are initially marked as unknown.
+Note that each precondition predicate is initialized to tautological true, which represents the
+weakest possible constraint, i.e., no semantic restrictions at the initial stage.
+◁
+Remark. Preguss admits, in its current implementation, merely acyclic call graphs. This is because
+the underlying deductive verifier Frama-C/Wp we use lacks comprehensive support for verifying
+recursive and mutually recursive functions [Blanchard 2020, Sect. 4.4.2]. Crucially, this acyclicity
+assumption greatly simplifies our methodological design of the V-Unit ordering (see Definition 16)
+and the interprocedural specification-synthesis mechanism (see Section 5.2), as it circumvents the
+complex dependencies in (mutual) recursions and their specifications. We foresee that Preguss could
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:12
+Wang et al.
+be extended to cope with cyclic call graphs by interfacing with verifiers that support recursion while
+adapting the methodological design, though such adaptations may increase the risk of generating
+over-constrained preconditions for recursive functions (as outlined in Section 3.2).
+◁
+5.1.2
+V-Unit Initialization and Prioritization. Preguss leverages the modularization principle of
+deductive verification [Ahrendt et al. 2016, Chap. 9], whereby each function is verified separately.
+Specifically, to verify that a function adheres to all its specifications except preconditions3, one
+needs not the entire program but essentially two elements: (i) the function’s own implementation,
+and (ii) the contracts of all its callees (which are recursively derived from further callees along
+the call chains in a bottom-up manner). Consequently, to validate an individual RTE assertion 𝛼,
+it suffices to extract a minimally constrained program context consisting of the host function of 𝛼
+and all its callees. This design prevents the verification context from growing substantially during the
+bottom-up verification, thereby enabling scalability to large-scale programs.
+Preguss encapsulates these minimally constrained program contexts into dedicated V-Units:
+Definition 15 (V-Unit). A V-Unit is a pair ⟨𝛼, 𝑃context⟩, where 𝛼= ⟨𝜙,𝜄⟩is a guard assertion and
+𝑃context ≜⟨𝑓, callee(𝑓)⟩is a two-layer program slice containing the host function 𝑓of 𝛼and its callees.
+Preguss prioritizes all V-Units into a queue (❸of Fig. 4) according to a total order ⊑:
+Definition 16 (Order over V-Units). Given two V-Units 𝜐𝑖= ⟨⟨𝜙𝑖,𝜄𝑖⟩, ⟨𝑓𝑖, callee(𝑓𝑖)⟩⟩and 𝜐𝑗=
+⟨⟨𝜙𝑗,𝜄𝑗⟩, ⟨𝑓𝑗, callee(𝑓𝑗)⟩⟩, we have 𝜐𝑖⊑𝜐𝑗if and only if
+⟨𝑓𝑗, 𝑓𝑖⟩∈ancestor
+| {z }
+Condition 1: bottom-up verification principle
+∨ ⟨𝑓𝑗, 𝑓𝑖⟩∉ancestor ∧⟨𝑓𝑖, 𝑓𝑗⟩∉ancestor ∧loc(𝜄𝑖) ≤loc(𝜄𝑗)
+| {z }
+Condition 2: total order enforcement
+,
+(10)
+where loc(𝜄) denotes the location (i.e., line number) of instruction 𝜄.
+The design principles underneath the total order ⊑are embodied in Conditions 1 and 2 of (10).
+Condition 1 captures the bottom-up verification progression [Wen et al. 2024]: Since verifying a
+function requires the contracts of its callees, functions higher in the call hierarchy (ancestors) must
+be verified after their callees. Condition 2 serves two primary purposes. First, for guard assertions
+𝛼𝑖and 𝛼𝑗within the same function, it is common that one assertion acts as a hypothesis for the
+other, e.g., H |= 𝛼𝑗with 𝛼𝑖∈H. In this case, validating 𝛼𝑖first may generate specifications that
+facilitate the verification of 𝛼𝑗. These hypothesis assertions typically appear at earlier program
+locations if goto statements and loop structures are disregarded (all properties within loops are
+mutually dependent and thus receive equal priority). Second, for properties from functions in
+disjoint call chains (i.e., ⟨𝑓𝑗, 𝑓𝑖⟩∉ancestor ∧⟨𝑓𝑖, 𝑓𝑗⟩∉ancestor ∧𝑓𝑖≠𝑓𝑗), their relative priority is
+arbitrary. The clause loc(𝜄𝑖) ≤loc(𝜄𝑗) in Condition 2 ensures that ⊑is a total order, simplifying its
+implementation. Fig. 5 (b) demonstrates the construction of five V-Units derived from the guard
+assertions in Fig. 5 (a) and their prioritization into a verification queue as per the order ⊑.
+5.2
+Phase 2: Fine-Grained Interprocedural Specification Synthesis
+To address Challenge 2 (fine-grained synthesis), Phase 2 employs a fine-grained strategy, for each
+V-Unit, to generate interprocedural specifications, as depicted in Fig. 4 (lower part). For each V-Unit
+𝜐= ⟨𝛼, ⟨𝑓, callee(𝑓)⟩⟩, Preguss utilizes an iterative approach (❺) comprising two core components:
+(i) an LLM agent producing specification candidates driven by verifier feedback on guard assertion 𝛼,
+and (ii) a verifier validating these candidates both syntactically and semantically, thereby ensuring
+the soundness of Preguss. Each iteration generates interprocedural specifications tailored to the
+program context ⟨𝑓, callee(𝑓)⟩in a refined manner (see details below). Upon successful verification
+3A function’s preconditions are validated at its call sites, as part of the verification obligation for its callers (see Section 5.1.1).
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:13
+Algorithm 1: Fine-Grained Interprocedural Specification Synthesis
+Input: 𝑄𝜐: V-Unit queue, prog: source program.
+Output: S: synthesized specifications, V: verified properties, H: unknown hypotheses.
+Parameters: Verify: an extended sound verifier (as per (7)), iter: maximum iterations.
+1 S ←∅, V ←∅, H ←∅;
+▷initialization
+2 while 𝑄𝜐is not empty do
+3
+⟨𝛼, ⟨𝑓, callee(𝑓)⟩⟩←pop(𝑄𝜐), S′ ←∅;
+▷pop the next V-Unit on the queue
+4
+for 𝑖from 1 to iter do
+5
+⟨status, feedback⟩←Verify(prog, V ∪H ∪S′, 𝛼) ;
+▷apply sound verifier
+6
+if status = unknown then
+▷refined specification synthesis
+7
+S′ ←S′ ∪generate_host_spec(𝛼, {𝑓}, V ∪H, feedback);
+8
+S′ ←S′ ∪generate_callees_spec(𝛼, {𝑓} ∪callee(𝑓), V ∪H, feedback);
+9
+S′ ←syntax_and_semantics_check(S′, prog);
+10
+else
+11
+break;
+12
+if Verify(prog, V ∪H ∪S′, 𝛼) = ⟨true, _⟩then
+▷𝛼is validated
+13
+S ←S ∪S′, P ←extract_preconditions(S) ;
+▷collect specifications
+14
+𝑄𝜐←update(𝑄𝜐, P), V ←V ∪{𝛼} ∪(S′ \ P) ;
+▷update 𝑄𝜐and V accordingly
+15
+else
+16
+H ←H ∪{𝛼} ;
+▷augment the hypothesis set with 𝛼
+17 return ⟨S, V, H⟩;
+of 𝛼, Preguss advances to the next V-Unit in the queue or terminates if 𝜐is the final unit (❻). If
+Preguss fails to generate specifications sufficient to validate 𝛼, the guard assertion is designated as
+a hypothesis requiring manual review upon termination (❼). Then, by assuming the validity of 𝛼,
+Preguss continues processing subsequent V-Units until the queue is exhausted (❽).
+Algorithm 1 elaborates the workflow of Phase 2. It takes as input the V-Unit queue 𝑄𝜐from
+Phase 1, along with the source program prog, and yields as output the synthesized specifications S,
+alongside the verified properties V and the unknown hypotheses H that require manual review.
+Key parameters to the algorithm include an extended sound verifier (see (7)) Verify: (prog, H,𝑞) ↦→
+⟨status, feedback⟩– which returns both verification status and auxiliary feedback – and the hyper-
+parameter iter that controls the maximum number of refinement iterations. The algorithm initializes
+S, V and H to empty sets (Algorithm 1) and processes each V-Unit in 𝑄𝜐in sequence (Lines 2–16).
+For each V-Unit 𝜐= ⟨𝛼, ⟨𝑓, callee(𝑓)⟩⟩, a temporary specification set S′ is initialized to accumulate
+newly generated properties (Algorithm 1). Within the refinement loop (Lines 4–11), Preguss first
+applies a sound verifier to obtain the status and feedback for the guard assertion 𝛼(Algorithm 1).
+If 𝛼is unknown (Algorithm 1), Preguss leverages the feedback to (i) generate preconditions and
+loop invariants for the host function 𝑓(Algorithm 1, detailed in Section 5.2.1), and (ii) generate
+postconditions for the callee functions callee(𝑓) (Algorithm 1, detailed in Section 5.2.2). For all
+these freshly generated specifications, Preguss employs a correction and refinement mechanism
+to enhance their quality and ensure syntactic and semantic validity (Algorithm 1, detailed in
+Section 5.2.3). Preguss exits the loop once 𝛼is proven (Algorithm 1) or the iteration limit iter is
+reached. Finally, if 𝛼is certified as true, Preguss appends the generated specifications S′ to S, and
+extracts the preconditions P from the S′ (Algorithm 1). As P will be validated at 𝑓’s call sites,
+Preguss then updates the corresponding guard assertions – which are precondition checks at these
+call sites – in 𝑄𝜐with P, and incorporates all the newly verified properties – 𝛼and generated
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:14
+Wang et al.
+(a) program context of 𝛖!
+ and feedback of 𝜙#
+ ,𝜾!
+$%&
+Goal Assertion ‘div_by_zero,𝜙4’:
+Assume {
+Type: is_int(x).
+}
+Prove Q: x != 0.
+void one() {
+int x = id(1); // 𝜾!one
+/*@ assert div_by_zero: 𝜙4 : x != 0; */
+1/x; // 𝜾"one
+}
+int id(int x) {return x;}
+program context
+proof obligation
+/*@ requires x != 0; */
+void one() {
+...
+}
+Syntax Error:
+unbound logic variable x in
+requires x != 0;
+Ignoring a specification of function one.
+void one() {...}
+/*@ ensures 𝜙9: \result == x;
+ensures 𝜙10 : \result != 0;
+ensures 𝜙11 : x != 0 ==> \result != 0; */
+int id(int x) {return x;}
+(b) syntactically illegal specification generated for the host function one
+(c) semantically valid and invalid specification generated for the callee function id
+Fig. 6. Fine-grained interprocedural specification synthesis for V-Unit 𝜐2 in Fig. 5.
+specifications S′ except for preconditions P – into V (Algorithm 1). Otherwise, assertion 𝛼is
+added to the hypothesis set H (Algorithm 1).
+5.2.1
+Host-Function Specification Generation. When the verifier fails to validate a guard assertion
+𝛼, Preguss leverages LLMs to generate additional specifications by incorporating verifier feedback
+and the relevant program context, including function 𝑓and existing specifications V ∪H. A
+simplified version of the prompt we use to instruct the LLM is as follows:
+Simplified Prompt for Host-Function Specification Generation
+You are an expert in Frama-C. I will provide a C program specified with ACSL, including an unproven
+guard assertion, alongside feedback in the form of proof obligations from the Frama-C/Wp verifier.
+Your tasks: (i) Diagnose the root cause of Frama-C/Wp’s failure to verify the assertion based on the
+provided feedback; (ii) Generate necessary specifications – such as preconditions, assigns clauses,
+and loop invariants – to enable successful verification.
+• Program context: {𝑓, V ∪H}
+• Target guard assertion: {𝑎}
+• Proof obligation for the assertion: {feedback}
+Preguss employs a chain-of-thought prompting strategy [Wei et al. 2022], which instructs the
+LLM to first reason about the verification failure (à la Insight 2 on verifier’s feedback) before
+proposing new specifications. Besides, Preguss integrates a few specified programs in the prompt
+as few-shot examples to improve the quality of generated specifications [Brown et al. 2020]. Notably,
+the synthesis is strictly confined to the local context of function 𝑓, excluding its call-site information
+to prevent over-constrained preconditions – a critical safeguard as illustrated in Section 3.2.
+Example 17. Fig. 6 (a) displays the program context of V-Unit 𝜐2 introduced in Fig. 5, along with
+the proof obligation for guard assertion ⟨𝜙4,𝜄one
+2
+⟩. Inspired by the proof goal Q: x != 0, Preguss
+hypothesizes a precondition requires x != 0 for the host function one, as shown in Fig. 6 (b).
+Although this candidate is syntactically illegal initially (as variable x is unbound in the scope of
+function one), it undergoes an automated correction via the mechanism detailed in Section 5.2.3.
+◁
+5.2.2
+Callee-Functions Specification Generation. In this stage, Preguss prompts the LLM using a
+similar approach to that described in Section 5.2.1, with two key distinctions: (i) the LLM is pro-
+vided with the complete program context ⟨𝑓, callee(𝑓)⟩(as opposed to only 𝑓in the host-function
+stage), and (ii) the LLM is instructed to generate postconditions (and loop invariants) exclusively
+for the callee functions callee(𝑓). This design addresses the scenarios illustrated in Section 3.2,
+where validating a guard assertion in function 𝑓requires interprocedural specifications – partic-
+ularly postconditions – from its callees. Furthermore, Preguss explicitly prohibits the generation
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:15
+of preconditions for callee(𝑓) to align with the host-function specification mechanism (detailed in
+Section 5.2.1), thereby minimizing the risk of synthesizing over-constrained preconditions.
+Example 18. Consider the program in Fig. 6 (c), where the LLM produces three postcondition
+candidates at this stage: ⟨𝜙9,𝜄id
+post⟩, ⟨𝜙10,𝜄id
+post⟩, and ⟨𝜙11,𝜄id
+post⟩. Here, ⟨𝜙9,𝜄id
+post⟩accurately captures
+the behavior of function id, while ⟨𝜙10,𝜄id
+post⟩and ⟨𝜙11,𝜄id
+post⟩are derived from the proof goal Q in
+Fig. 6 (a). Although all three candidates suffice to validate the assertion ⟨𝜙4,𝜄one
+2
+⟩, the postcondition
+⟨𝜙10,𝜄id
+post⟩is semantically invalid, which will be screened out as discussed in Section 5.2.3.
+◁
+5.2.3
+Syntactic and Semantic Validity Check of Specifications. For all the specification candidates
+generated in Sections 5.2.1 and 5.2.2, Preguss employs the verifier to (i) correct syntactically illegal
+specifications, and (ii) filter out semantically unsatisfiable properties.
+When a candidate is syntactically invalid, Preguss queries the LLM with verifier-supplied error
+messages to iteratively correct its syntax. If the candidate remains illegal after several correction
+attempts, it is discarded. For instance, Fig. 6 (b) shows that the precondition requires x != 0
+triggers a syntax error due to variable unboundedness. Indeed, any predicate containing variables
+is invalid for this precondition, as one has no input parameters. Consequently, Preguss fails to
+correct this candidate and hence removes it.
+For an unknown specification that cannot be verified – and is not a precondition (see Section 5.1.2)
+– Preguss immediately removes it to avoid inducing false negatives. Consider a pathological example:
+a loop invariant with predicate false would spuriously validate any property 𝑝within the loop,
+since false |= 𝑝trivially holds. To prevent such false negatives, all unknown non-precondition
+specifications are discarded. In contrast, an unknown precondition represents a guard assertion
+indicating a potential RTE (as discussed in Sections 3.1 and 3.2); it is thus retained in the V-Unit
+queue to be checked later at the corresponding call sites in caller functions.
+Example 19. We illustrate the overall Phase 2 of Preguss using the V-Unit queue in Fig. 5 (b):
+The first V-Unit 𝜐1 is verified immediately without additional specifications, as its predicate 𝜙id
+pre is
+initialized to true. Preguss then processes 𝜐2, validating it via the postconditions ⟨𝜙9,𝜄id
+post⟩and
+⟨𝜙11,𝜄id
+post⟩generated via steps illustrated in Examples 17 and 18. The subsequent V-Units 𝜐3, 𝜐4, and
+𝜐5 (pertaining to call sites of id, one, and zero, respectively) are verified immediately since none
+of these functions require preconditions, and thus no additional specifications are generated.
+◁
+5.3
+Soundness and Termination of Preguss
+This section establishes formal guarantees of Preguss, including soundness and termination.
+Theorem 20 (Soundness). Given a program prog, suppose Preguss annotates prog with a set of
+RTE assertions A and returns synthesized specifications S together with verified properties V and
+unknown hypotheses H. Then, prog is free-of-RTE under hypotheses H (in the sense of (9)).
+A formal proof of Theorem 20 is provided in Section A. Intuitively, if (i) H is empty or all
+hypotheses in H are validated (via manual reviews or auxiliary verification tools), and (ii) the
+underlying abstract interpretation-based static analyzer is sound (i.e., it misses no potential RTEs),
+then Preguss guarantees that the source program prog contains no runtime errors (by Theorem 11).
+In that case, all the RTE alarms in A emitted by the sound analyzer are false positives.
+With this soundness assurance, Preguss reduces the task of RTE-freeness verification from
+reviewing every analyzer-emitted alarm to validating each hypothesis generated by Preguss, which,
+in practice, demands significantly less manual effort; see experimental results in Section 6.
+In addition to soundness, Preguss exhibits termination – another essential property for practical
+verification systems. The following termination statement rests on two reasonable assumptions:
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:16
+Wang et al.
+(i) both abstract interpretation and call-graph analysis terminate successfully, and (ii) every LLM
+query terminates either naturally or upon reaching a prescribed time limit.
+Theorem 21 (Termination). The Preguss procedure always terminates.
+The following design principles constitute a proof sketch of Theorem 21:
+First, the V-Unit queue is constructed statically during Phase 1, before the on-the-fly specification
+synthesis in Phase 2. The queue length is determined solely by the number of RTE assertions
+generated through abstract interpretation plus the number of call sites identified via call-graph
+analysis. Although guard assertions in V-Units corresponding to call-site precondition checks may
+be updated during Phase 2, the number of the V-Units remains invariant.
+Second, the verification process exhibits a one-way progression along the V-Unit queue: Once
+a V-Unit is verified or marked as a hypothesis, its validity remains unchanged. As elaborated in
+Sections 5.2.1 and 5.2.2, for a V-Unit 𝜐= ⟨𝛼, ⟨𝑓, callee(𝑓)⟩⟩, Preguss prohibits the generation of
+preconditions for callee functions callee(𝑓) but only for the host function 𝑓. Such preconditions for
+𝑓are then used to update guard assertions in V-Units associated with callers of 𝑓. By Condition 1
+of the ordering ⊑(see Definition 16), these updated V-Units are positioned behind 𝜐in the queue,
+thereby preserving the validity of all previously verified V-Units.
+Third, the verification of each individual V-Unit is guaranteed to terminate. This is enforced
+by the hyper-parameter iter, which bounds the maximum number of feedback-driven refinement
+iterations. Moreover, each constituent step – host-function specification generation, callee-functions
+specification generation, and syntactic/semantic checking – is per se designed to terminate.
+5.4
+Generality of Preguss
+Our Preguss framework can be integrated with other sound deductive verifiers supporting formal
+specification languages, such as OpenJML with JML for Java [Cok 2011] and the Move Prover with
+MSL for Move [Fu et al. 2025]. Although Preguss is initially designed for RTE-freeness verification
+and RTE identification, it can be extended to cope with other vulnerability classes and functional
+correctness. The key is to substitute RTE assertions with formal annotations flagging the target
+properties. The subsequent stages, commencing from ❷in Fig. 4, remain fully generic to process
+these annotations. We prioritize RTE-freeness over full functional correctness because abstract
+interpretation-based static analysis for generating RTE assertions is mature and sound, while
+automatically constructing precise functional properties remains challenging [Djoudi et al. 2021].
+6
+EVALUATION
+The experimental evaluation is designed to address the following research questions (RQ):
+RQ1: How does Preguss compare against state-of-the-art baseline approaches?
+RQ2: How does Preguss perform on large-scale, real-world programs?
+RQ3: To what extent does each component of Preguss contribute to its overall effectiveness?
+RQ4: How sensitive is Preguss to the hyper-parameter iter and the underlying LLM?
+Below, we first report the evaluation setup (Section 6.1), then address RQ1–RQ4 (Sections 6.2
+to 6.5) and conduct case studies (Section 6.6), and finally discuss threats to validity (Section 6.7).
+6.1
+Evaluation Setup
+Implementation. We have implemented Preguss4 in about 18,000 lines of Python code, which
+orchestrates the two-phase divide-and-conquer pipeline, plus 3,000 lines of C++ code for static
+analysis (e.g., call-graph construction and compilation-context extraction) using Clang.
+4The anonymized artifact for replicating the experimental results is available at https://zenodo.org/records/17296158.
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:17
+We integrate Preguss with the deductive verifier Frama-C/Wp [Blanchard 2020] and two ab-
+stract interpretation-based static analyzers: Frama-C/Eva [Bühler et al. 2025] and Frama-C/Rte
+[Herrmann and Signoles 2025]. These analyzers exhibit distinct characteristics: Frama-C/Eva is a
+fine-grained analyzer equipped with advanced abstract domains and data-flow analysis techniques,
+but it requires the source project to have a unique entry function accompanied by a generalization
+mechanism, e.g., manual assignment of over-approximation value intervals to external variables. In
+contrast, Frama-C/Rte is a coarse-grained analyzer capable of simultaneously analyzing multiple
+modules (each with its own entry function), yet often yields more RTE alarms than Frama-C/Eva.
+Configurations. We repeat all experiments three times and report the averaged results to cope with
+the inherent uncertainty of LLMs. We use the LLM Claude 4 [Anthropic 2025] due to its exceptional
+performance in program comprehension (API: claude-sonnet-4-20250514; temperature: 0.7; max
+token: 4,096)5 and set the hyper-parameter iter (i.e., maximum number of refinement iterations)
+to 2. For RQ4 on sensitivity, we further examine GPT-5 [OpenAI 2025] (API: gpt-5-20250807;
+temperature: 0.7; max token: 4,096) and vary iter from 1 to 5. All the experiments are performed on
+a MacBook with an Apple M2 chip and 16 GiB RAM, except those for RQ1, which are conducted
+on a Ubuntu 24.04.2 LTS server with an AMD EPYC 7542 32-core processor and 16 GiB RAM. This
+is because the baseline approach AutoSpec (see below) relies on dependencies in Ubuntu.
+Baselines. We evaluate Preguss against two baseline approaches: (i) AutoSpec [Wen et al. 2024],
+a state-of-the-art LLM-based method for automated specification generation; and (ii) an enhanced
+variant, AutoSpecRte, which integrates the abstract interpretation-based analyzer Frama-C/Rte
+to generate RTE assertions for the source program before invoking AutoSpec. Additional rationale
+for excluding other related works as baselines is provided in Section 8.
+Benchmarks. We conduct evaluations on one C benchmark suite and four real-world C projects:
+• Frama-C-Problems [Fra 2020; Wen et al. 2024] is an open-source benchmark suite used
+by AutoSpec, containing 51 small programs with an average of 17.43 lines of code. Each
+program has an individual function alongside a main entry function. All the programs have
+been previously verified using Frama-C/Wp with 1∼3 ACSL specifications per program. The
+rationale for excluding other benchmarks employed by AutoSpec is provided in Section B.
+• Contiki [Peyrard et al. 2018] is an open-source operating system for Internet of Things. We
+evaluate its encryption-decryption module called AES-CCM*, which consists of 544 LoC
+and 10 functions. Although this module has been manually verified using Frama-C/Wp, the
+specifications used for its verification are not publicly available.
+• X509-parser [Ebalard et al. 2019] is an open-source, RTE-free parser for X.509 format certifi-
+cates. We evaluate its certificate-policy parsing module, which contains 1,199 LoC and 20
+functions. This module has been manually verified with 251 ACSL specifications.
+• SAMCODE is a spacecraft sun-seeking control system containing 1,280 LoC and 48 functions
+(not open-sourced due to confidentiality constraints). It has not been previously verified.
+• Atomthreads [Lawson 2015] is a real-time scheduler for embedded systems. We evaluate its
+kernel module, which consists of 1,451 LoC and 40 functions. To the best of our knowledge,
+this module has not been previously verified using Frama-C/Wp.
+Remark. To align with industrial verification practices, we adopt the following tactics for large-
+scale projects in RQ2–RQ4: (i) For SAMCODE, the complete software system with a unique entry
+function, we manually construct a generalization mechanism and analyze it using Frama-C/Eva;
+(ii) For Contiki, X509-parser, and Atomthreads, which are system modules requiring substantial
+5These settings match those of AutoSpec, with AutoSpec configured to use Claude 4 instead of its original model.
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:18
+Wang et al.
+Table 1. Experimental result of Preguss v.s. baselines on Frama-C-Problems.
+Approach
+Frama-C-Problems categorized per program features
+Overall
+(51)
+General
+(12)
+Pointers
+(8)
+Loops
+(8)
+Arrays
+(13)
+Arrays&Loops
+(5)
+Miscellaneous
+(5)
+Num
+Rate Num
+Rate Num
+Rate Num
+Rate Num
+Rate Num
+Rate Num
+Rate Time (m) Cost ($)
+AutoSpec
+6 47.2%
+6
+75.0%
+2 25.0%
+0
+0.0%
+1
+20.0%
+2
+40.0%
+17 32.7%
+287.23
+0.448
+AutoSpecRte
+9 69.4%
+8 100.0%
+1 12.5%
+0
+0.0%
+2
+40.0%
+2
+40.0%
+22 41.8%
+284.40
+0.455
+Preguss
+12 91.7%
+8 100.0%
+5 37.5%
+11 69.2%
+5
+93.3%
+5
+100.0%
+46 79.7%
+65.59
+2.721
+int amax(int *a, int n) {
+/*@ assert mem_access: 𝜙12: \valid_read(a + 0); */
+int max = *(a + 0); // 𝜾𝟖
+/*@ loop invariant i <= n;
+loop invariant \forall integer k; 0 <= k < i ==> max >= a[k];
+loop invariant \exists integer k; 0 <= k < i && max == a[k];
+loop assigns max, i; */
+for (int i = 1; i < n; i++) // 𝜾𝟗
+/*@ assert mem_access: 𝜙13:\valid_read(a + i); */
+if (max < *(a + i)) // 𝜾𝟏𝟎
+max = *(a + i);
+return max;
+}
+void main(void){
+int arr[5] = {1, 2, 3, 4, 5};
+int sum = amax(arr,5); // 𝜾𝟏𝟏
+}
+/*@ requires 𝜙15: n > 0 && \valid_read(a + (0 .. n-1)); */
+int amax(int *a, int n) {
+/*@ assert mem_access: 𝜙12: \valid_read(a + 0); */
+int max = *(a + 0); // 𝜾𝟖
+/*@ loop invariant 1 <= i <= n;
+loop invariant \forall integer k; 0 <= k < i ==> max >= a[k];
+loop invariant 𝜙16: i < n ==> \valid_read(a + (0 .. n-1)); */
+for (int i = 1; i < n; i++) // 𝜾𝟗
+/*@ assert mem_access: 𝜙13:\valid_read(a + i); */
+if (max < *(a + i)) // 𝜾𝟏𝟎
+max = *(a + i);
+return max;
+}
+void main(void){
+int arr[5] = {1, 2, 3, 4, 5};
+int sum = amax(arr,5); // 𝜾𝟏𝟏
+}
+(a) AUTOSPEC fails to validate RTE assertions
+(b) PREGUSS succeeds in verifying RTE-freeness
+Fig. 7. AutoSpec fails to generate specifications such as ⟨𝜙15,𝜄amax
+pre ⟩and ⟨𝜙16,𝜄9⟩as Preguss does, thereby
+failing to verify the RTE-freeness of max.c.
+manual effort for generalization, we directly apply Frama-C/Rte. For small programs in Frama-C-
+Problems used for RQ1, Frama-C/Eva alone suffices to establish RTE-freeness without any auxiliary
+specification or verifier. Therefore, we employ Frama-C/Rte to generate RTE assertions (all of
+which are false alarms) as verification targets, enabling a comparative evaluation of specification
+generation and RTE-freeness verification effectiveness between AutoSpec and Preguss.
+◁
+6.2
+RQ1: Comparison against Baselines
+Table 1 reports the experimental results of Preguss against AutoSpec and AutoSpecRte. Here,
+Num indicates the number of programs verified as RTE-free (marked as success) in at least one trial
+across repeated experiments, and Rate represents the average success rate per benchmark category.
+Additionally, we report the average execution time (in minutes) and LLM inference cost (in dollars)
+for evaluating each approach on the entire Frama-C-Problems benchmark suite. In general, we
+observe two remarkable disparities between Preguss and the baselines:
+Verification Success Rate. Overall, Preguss successfully verifies 46 out of 51 programs, achieving
+an average success rate of 79.7%, which substantially outperforms both AutoSpec (17/51, 32.7%) and
+AutoSpecRte (22/51, 41.8%). Notably, Preguss resolves all verification tasks except for a few cases
+in categories Loops and Arrays, which require complex (nested) loop invariants. These results
+suggest a promising future improvement of Preguss by incorporating advanced invariant synthesis
+techniques, e.g., [Pirzada et al. 2024; Wu et al. 2024b].
+It is noteworthy that AutoSpec underperforms in RTE-freeness verification compared to its
+functional correctness results (31/51 programs as reported in [Wen et al. 2024, RQ1]) on the same
+benchmark suite. Besides LLM uncertainty, the primary performance gap lies in the Arrays6 and
+Arrays&Loops categories. Here, AutoSpec verifies functional correctness for 12/18 cases [Wen
+et al. 2024] but succeeds in RTE-freeness for only 1/18 program (see Table 1). This discrepancy is
+6For simplicity, we consolidate the “immutable_arrays”, “mutable_arrays”, and “more_arrays” categories from [Wen et al.
+2024] into the single Arrays category.
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:19
+exemplified by program max.c from the Arrays category, as depicted in Fig. 7. For max.c, which
+computes the maximum value in an array a of length n, AutoSpec generates four loop invariants
+prior to instruction 𝜄9. Under the assumption that max.c is RTE-free (i.e., |= ⟨𝜙12,𝜄8⟩and |= ⟨𝜙13,𝜄10⟩),
+as adopted in [Wen et al. 2024, Sect. 4.1], AutoSpec produces loop invariants that ensure functional
+correctness – the output max indeed represents the array maximum. However, this guarantee
+presupposes the validity of RTE assertions ⟨𝜙12,𝜄8⟩and ⟨𝜙13,𝜄10⟩, which are ultimately ensured by
+the precondition ⟨𝜙15,𝜄amax
+pre ⟩and loop invariant ⟨𝜙16,𝜄9⟩generated by Preguss.
+The performance gap roots in two fundamental methodological distinctions:
+(1) Guidance Principle: AutoSpec is not RTE assertion-guided; it decomposes the program and
+synthesizes specifications based solely on program structures – specifically, an extended call
+graph where loops and functions are treated as nodes. In contrast, Preguss uses guard RTE
+assertions to decompose the holistic verification task into fine-grained V-Units, generating
+necessary specifications for each. The 29.4% increase in verified programs (22 by AutoSpecRte
+vs. 17 by AutoSpec) underscores the critical role of RTE-assertion guidance.
+(2) Specification-Synthesis Strategy: The sequence and dependencies of specification generation
+differ markedly. For instance, in Fig. 7 (b), Preguss first generates precondition 𝜙15 to validate
+guard assertion 𝜙12, then produces loop invariant 𝜙16 at 𝜄9 for guard assertion 𝜙13 (due to the
+design principle of the order ⊑over V-Units; see Definition 16). Note that 𝜙16 depends on 𝜙15.
+AutoSpec, however, prioritizes loop invariants (at 𝜄9 as the loop is the leaf node in its call
+graph) without necessary preconditions, leading to invariants such as 𝜙16 being discarded
+during verification due to their semantic unsatisfiability.
+Execution Time and LLM Inference Cost. Under a 10-minute limit per program, Preguss
+completes all the specification synthesis, whereas AutoSpec fails to terminate within this limit for
+28/51 programs (though it often produces partial output, as seen in Fig. 7(a) for max.c). This results
+in AutoSpec’s average execution time being over 4× longer than that of Preguss. Furthermore,
+Preguss consumes approximately 6× more LLM inference resources than the baselines. This
+increased cost reflects Preguss’s strategy of guiding LLMs through a fine-grained synthesis process
+– such as employing different strategies upon specification types and incorporating proof obligations
+– which yields higher-quality specifications. This aligns with the test-time scaling paradigm [Jurayj
+et al. 2025], whose viability was recently justified by reasoning models such as OpenAI-o1 [OpenAI
+2024]. Moreover, these high-quality specifications substantially reduce manual verification effort,
+far outweighing the marginal cost of LLM inference, as demonstrated in Section 6.3.
+In summary, Preguss demonstrates a substantial advantage over AutoSpec in verifying RTE-
+freeness on the Frama-C-Problems benchmark suite. Although AutoSpecRte improves upon Au-
+toSpec by incorporating RTE assertion generation, both baselines lack a fine-grained synthesis
+mechanism that is essential for consistently producing high-quality specifications.
+6.3
+RQ2: Evaluation on Large-Scale Real-World Programs
+First, we observe that for each of the four large-scale projects, both AutoSpec and AutoSpecRte typ-
+ically fail to terminate within the allotted 15-hour time limit, producing fewer than 15 specifications
+or aborting unexpectedly. Therefore, we exclude them from the comparison in RQ2.
+Table 2 reports the experimental results of Preguss applied to large-scale, real-world projects.
+In addition to metrics described in the table, we compute the average V-Unit success rate (Avg. SR)
+and the average reduction rate of human verification effort (Avg. HER) as follows:
+Avg. SR =
+Í Verified #V-Unit
+𝑛× Total #V-Unit ,
+Avg. HER = 1 −
+Í Modified #Spec
+𝑛× Std. #Spec
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:20
+Wang et al.
+Table 2. Effectiveness of Preguss on large-scale, real-world programs. #RTE: the number of RTE assertions
+generated by the static analyzer; Total #V-Unit: the total number of V-Units constructed; Verified #V-Unit:
+the number of verified V-Units (i.e., V-Units with validated guard assertions) across three independent trials;
+Std. #Spec: the number of specifications required to verify RTE-freeness, which are either sourced from
+public repositories (X509-parser) or manually crafted by verification experts within a five person-day effort
+(Contiki and SAMCODE); Generated #Spec: the number of specifications synthesized by Preguss in each
+experiment; Modified #Spec: the number of specifications adjusted by experts to achieve full RTE-freeness
+based on Preguss’s output, including three types of interventions (from left to right): (i) adding a new property,
+(ii) correcting an over-constrained precondition, and (iii) removing a property that becomes unknown after
+modifying other specifications; Avg. SR and Avg. HER are explained in Section 6.3.
+Benchmark #RTE
+Total
+#V-Unit
+Verified
+#V-Unit
+Avg.
+SR
+Std.
+#Spec
+Generated
+#Spec
+Modified
+#Spec
+Avg.
+HER
+Time
+(m)
+Cost
+($)
+Contiki
+163
+182 (181, 174, 162) 94.7%
+111 (110, 90, 96)
+(8, 15, 14) 88.9%
+65.58
+1.77
+X509-parser
+142
+174 (151, 153, 148) 86.6%
+251
+(108, 116, 142) (39, 41, 40) 84.1% 151.80
+3.84
+SAMCODE
+44†
+133 (121, 116, 119) 87.9%
+225
+(186, 202, 206) (34, 59, 38) 80.6%
+80.48
+2.36
+Atomthreads
+239
+328 (252, 258, 258) 78.1%
+–‡
+(416, 398, 544)
+–‡
+–‡
+807.58 18.52
+† We omit floating-point alarms in SAMCODE, which, according to the developers, are not of primary interest.
+‡ Std. #Spec, Modified #Spec, and Avg. HER for Atomthreads are unavailable as the manual verification (handcrafting
+std. specifications and refining Preguss-generated specifications) was not completed within the 5 person-day limit.
+where 𝑛= 3 is the number of repeated experiments accounting for the inherent uncertainty of LLMs.
+Given the impracticality of fully automating RTE-freeness verification for large-scale projects, Avg.
+SR and Avg. HER serve as the primary quantitative measures of Preguss’s effectiveness. The former
+reflects the proportion of guard assertions successfully resolved, directing expert attention to the
+remaining unverified hypotheses. The latter quantifies the reduction in manual effort achieved by
+Preguss compared to verifying the project from scratch.
+We observe that Preguss achieves highly automated RTE-freeness verification for the three real-
+world programs – Contiki (544 LoC, 10 functions), X509-parser (1,199 LoC, 20 functions), and
+SAMCODE (1,280 LoC, 48 functions) – as reflected by Avg. SR and Avg. HER both exceeding 80%
+with average execution times under 3 hours and LLM inference costs below $4. These results
+underscore Preguss’s effectiveness in synthesizing high-quality specifications and scalability to
+large projects. In particular, compared to traditional approaches that often require months or even
+years of expert effort for verifying systems with thousands of LoC [Djoudi et al. 2021; Ebalard et al.
+2019], the computational and financial costs incurred by Preguss are marginal.
+An interesting observation is that, for the X509-parser benchmark, the total number of generated
+and modified specifications is substantially lower than the number of standard specifications in all
+experimental trials. This discrepancy indicates that the ground-truth specifications handcrafted by
+the X509-parser authors contain many redundant properties – such as assertions/postconditions
+describing program states that are not directly relevant to verification, as detailed in Section C. This
+finding further highlights the capability of Preguss to produce concise, high-quality specifications.
+For the spacecraft control system SAMCODE, besides the 87.9% automatically verified V-Units,
+we identified 6 genuine RTEs (uninitialized left-value accesses) within the hypothesis set returned
+by Preguss. These errors, which stem from two logical bugs in the system implementation, have
+been subsequently confirmed by the developers. One such case is detailed in Section 6.6 (Case 2).
+An analysis of the manual modifications made to Preguss’s generated specifications also reveals
+certain limitations (elaborated in Section 7). For Contiki, most adjustments involve adding precon-
+ditions for C standard library functions such as memcpy and memset from string.h. Since these
+external functions lack implementation details in the source project, Preguss currently relies on
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:21
+Contiki
+SAMCODE
+X509-parser
+75
+80
+85
+90
+95
+100
+avg. success rate (%)
+avg. V-Unit success rate by benchmark
+Contiki
+SAMCODE
+X509-parser
+0
+20
+40
+60
+80
+100
+120
+140
+avg. time (m)
+avg. time by benchmark
+Contiki
+SAMCODE
+X509-parser
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+avg. cost ($)
+avg. cost by benchmark
+Preguss
+Preguss - SC
+Preguss - FDR
+Preguss - FDR - SC
+Fig. 8. Experimental results of the ablation study.
+handcrafted contracts for them. In X509-parser and SAMCODE, a small number of over-constrained
+preconditions are generated – one of which is examined in Section 6.6 (Case 3). After correcting
+such an over-constrained precondition 𝑝, properties which are valid under hypotheses including 𝑝
+may become unknown, and thus should be removed.
+For the Atomthreads benchmark, Preguss achieves an average V-Unit success rate of 78.1%,
+albeit with higher resource consumption (average time of 807.58 mins and cost of $18.52). Resolving
+the remaining guard assertions is particularly challenging due to the presence of linked-list man-
+agement modules, which require advanced specifications such as inductive definitions [Blanchard
+2020] for full verification (see Section 7). Constructing these specifications demands prohibitive
+expert effort – exceeding our five person-day budget – and falls outside Preguss’s current design
+scope. Nevertheless, Preguss successfully generates high-quality specifications for RTE assertions
+unrelated to the linked-list module, contributing significantly to the overall success rate.
+Specification-Quality Metrics. We evaluate the quality of Preguss-generated specifications
+through soundness guarantees and the Avg. HER metric, instead of the completeness metrics used in
+[Endres et al. 2024; Ma et al. 2025]. Soundness encompasses (i) syntactic correctness of all generated
+specifications and (ii) semantic satisfiability under the hypothesis set H, while Avg. HER measures
+how well Preguss-generated specifications can substitute for standard oracles. The completeness
+metrics, which assess how well specifications capture program behaviors for functional correctness
+verification, are not suitable for Preguss. This is because Preguss aims to generate minimal
+contracts [Gerlach 2019] – the necessary specifications on which guard assertions depend, rather
+than pursuing the strongest specifications that precisely describe all program behaviors.
+6.4
+RQ3: Ablation Study
+We conduct an ablation study to assess the individual contributions of key components within the
+Preguss framework, using the large-scale, real-world projects from RQ2 (excluding Atomthreads
+due to its computationally prohibitive verification cost; the same applies to RQ4). Several core
+modules are deemed essential and thus excluded from ablation: (i) the modules for V-Unit construc-
+tion and prioritization (Section 5.1), which are fundamental to determining the verification targets
+establishing the pipeline; (ii) the fine-grained specification synthesis strategies for host and callee
+functions (Sections 5.2.1 and 5.2.2), as allowing precondition generation for callees would compro-
+mise termination guarantees (Section 5.3); and (iii) the semantic validity check (Section 5.2.3), which
+prevents false negatives and is critical for soundness. Consequently, we focus on two adjustable
+mechanisms: feedback-driven refinement (FDR) and syntax correction (SC). We evaluate three ablated
+configurations against the full Preguss configuration from RQ2: Preguss without FDR (Preguss -
+FDR), Preguss without SC (Preguss - SC), and Preguss without both (Preguss - FDR - SC).
+As illustrated in Fig. 8, disabling either FDR or SC reduces the average V-Unit success rate, execution
+time, and LLM inference cost across most benchmarks, with the combined ablation Preguss - FDR -
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:22
+Wang et al.
+void SendUartData(unint08 const *data, unint32 const len, unint32 const addr) {
+unint32 i = 0;
+for (; i < len; i ++)
+/*@ assert initialization: 𝜙12: \initialized(data + i); */
+*((unint32 *)addr) = (unint32)*(data + i); // 𝜾𝟖
+}
+void TMProcess(void) {
+unint32 i = 0; unint08 pkv[32]; ... // initialization of other variables
+for (; i < 32; i ++)
+pkv[i] = (unint08) 0; // 𝜾𝟗
+... // leave out irrelevant code
+/*@ precondition of SendUartData */
+SendUartData((unint08 const *)(pkv), (unint32)32, (unint32)0x88DB); // 𝜾𝟏𝟎
+}
+Ⓐ
+/*@ requires len > 0 ==>
+\initialized(data + (0 .. len-1));
+*/
+Ⓒ
+/*@ loop invariant 0 <= i <= 32;
+loop invariant \forall integer j;
+0 <= j < i ==> \initialized(&pkv[j]);
+loop assigns i, pkv[0 .. 31];
+*/
+Ⓑ
+/*@ loop assigns i, *((unint32 *)addr); */
+Fig. 9. Case 1: discharge false alarm ⟨𝜙12,𝜄8⟩through specifications in A○– C○.
+SC exhibiting the strongest negative effect. An exception occurs in the Contiki benchmark, where
+the V-Unit success rate unexpectedly increases when SC or FDR is disabled. This anomaly arises
+because Preguss - FDR - SC achieves a high baseline success rate (94.5%) on Contiki’s relatively
+small codebase (544 LoC, 10 functions), where LLM uncertainty (temperature = 0.7) dominates over
+the contributions of FDR and SC. Overall, the high success rates (exceeding 83%) across all ablated
+configurations underscore the critical role of Preguss’s essential modules – V-Unit management,
+fine-grained synthesis, and semantic checks – in achieving effective verification.
+6.5
+RQ4: Sensitivity to iter and LLMs
+We observe that Preguss exhibits no significant sensitivity of the V-Unit success rate to variations in
+iter, and achieves better performance with Claude 4 compared to GPT-5; Details are in Section D.
+6.6
+Case Studies
+We now discuss three representative cases found in SAMCODE, the spacecraft sun-seeking control
+system, to showcase how Preguss contributes to discharging false alarms (Fig. 9) and identifying
+genuine RTEs (Fig. 10). We also reveal a situation where Preguss may induce false alarms (Fig. 11).
+For clarity, we display minimal program contexts and retain only essential specifications.
+Case 1: Discharging False Alarms via Interprocedural Specifications. The program depicted
+in Fig. 9 consists of two functions: (i) SendUartData, which iteratively transmits each element of
+array data (length len) to address addr at instruction 𝜄8; (ii) TMProcess, which initializes each
+element of the uint8 array pkv (length 32) at 𝜄9 and invokes SendUartData at 𝜄10 to transmit pkv
+to hardware address 0x88DB. The static analyzer generates assertion 𝑝12 = ⟨𝜙12,𝜄8⟩, indicating a
+potential uninitialized left-value access UB at 𝜄8. Although 𝑝12 constitutes a false alarm and could
+be resolved through exhaustive analyzer configurations (e.g., full loop unrolling), such approaches
+often incur prohibitive computational costs. Leveraging 𝑝12 and its verification feedback, Preguss
+synthesizes precondition A○and loop invariant B○that collectively validate 𝑝12. Recognizing that
+the precondition of SendUartData serves as a guard assertion at call site 𝜄10, Preguss further
+generates specifications in TMProcess to discharge this precondition. This yields loop invariants C○
+which guarantee initialization of all pkv elements, and all relevant properties are verified as true.
+Case 2: Identifying Genuine RTEs via Interprocedural Specifications. The program in Fig. 10
+comprises two functions: GetUartData and GyroStateGet. The former first reads value from
+address 0x88D0 into variable fifoCnt and then branches as follows: If fifoCnt == len holds,
+it iteratively receives values from address addr, writes each into the array data (of length len)
+at instruction 𝜄12, and returns 1; Otherwise, it returns 0. The function GyroStateGet invokes
+GetUartData at 𝜄11 to initialize array gyroRecvData from hardware address 0x881C. The static
+analyzer flags assertion 𝑝13 = ⟨𝜙13,𝜄13⟩, indicating a potential uninitialized left-value access UB.
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:23
+unint32 GetUartData(unint32 const len, unint32 const addr, unint08 *data) {
+unint32 fifoCnt = *((unint32 volatile *)0x88D0), bSucc = 0;
+if (fifoCnt == len) {
+for (unint32 i = 0; i < len; i ++)
+*(data + i) = (unint08)*((unint32 volatile *)addr); // 𝜾𝟏𝟐
+bSucc = 1;
+}
+return bSucc;
+}
+void GyroStateGet(...) {
+unint08 gyroRecvData[30];
+GetUartData(30, (unint32)0x881C, gyroRecvData); // 𝜾𝟏𝟏
+/*@ assert initialization: 𝜙13: \initialized((unint08 *)gyroRecvData); */
+if (gyroRecvData[0] == 0xEB) // 𝜾𝟏𝟑
+{ ... }
+}
+/*@ ensures \result == 1 ==>
+\initialized(data + (0 .. len-1));
+*/
+Ⓓ
+/*@ loop invariant i <= len;
+loop invariant 0 <= i <= len ==>
+\initialized(data + (0 .. i-1));
+loop assigns i, data[0 .. len-1];
+*/
+Ⓔ
+Fig. 10. Case 2: specifications in D○and E○aid in diagnosing the cause of invalid RTE assertion ⟨𝜙13,𝜄13⟩.
+/*@ requires 𝜙15: \valid(rate + (0..2)); */
+unint32 SAMSubMD(float32 const *rate, ...) {
+/*@ assert mem_access: 𝜙14: \valid_read(rate + 0) ∧\valid_read(rate + 1) ∧valid_read(rate + 2); */
+float32 fabsmax = TripleFabsMax(*(rate + 0), *(rate + 1), *(rate + 2)); // 𝜾𝟏𝟒
+...
+}
+Fig. 11. Case 3: the over-constrained precondition ⟨𝜙15,𝜄SAMSubMD
+pre
+⟩induces a false alarm.
+To validate 𝑝13, Preguss generates loop invariants D○and a postcondition E○for GetUartData,
+both verified as true. However, 𝑝13 remains unknown, suggesting that gyroRecvData[0] may
+be uninitialized under certain conditions. Manual inspection of postcondition E○reveals that
+gyroRecvData is guaranteed initialized only if GetUartData returns 1. This indicates a latent issue:
+initialization may fail when the value at address 0x88D0 does not equal len, causing GetUartData
+to return 0. To address this, we introduce a conditional check at 𝜄11 to handle the return value of
+GetUartData, ensuring subsequent instructions execute only when the return value is 1.
+Case 3: Inducing a False Alarm by an Over-Constrained Precondition. The function SAMSubMD
+in Fig. 11 accepts a set of input parameters, including a constant array rate, and invokes function
+TripleFabsMax to compute the maximum absolute value of the first three elements of rate. Guided
+by the analyzer-generated assertion ⟨𝜙14,𝜄14⟩– which requires the first three elements of rate to
+be readable to prevent an invalid memory access UB – Preguss synthesizes a precondition with
+predicate \valid(rate + (0..2)). This predicate incorrectly asserts that the first three elements
+of rate must be writable, contradicting the constant nature of rate and thus triggering a false
+alarm. The correct predicate should be \valid_read(rate + (0..2)). Although Preguss employs
+refined strategies to mitigate over-constrained preconditions, such issues may still arise occasionally,
+forming a primary component of the hypotheses H and necessitating expert intervention (e.g.,
+manual weakening of preconditions) to complete the verification.
+6.7
+Threats to Validity
+Internal Validity. The first primary threat to internal validity arises from the inherent uncertainty in
+LLM-based inference. To mitigate this, we repeat each experiment three times and report averaged
+results. The second primary threat is data leakage, i.e., are the evaluation code and the corresponding
+ground-truth ACSL specifications already part of Claude 4’s training data? To isolate this potential
+influence, we build our dataset with three representative real-world projects: (i) Contiki, whose AES-
+CCM* module is verified but lacks publicly available ACSL specifications; (ii) Atomthreads, which to
+our knowledge has not been previously verified; and (iii) SAMCODE, which is both unverified and
+not publicly accessible. The consistent performance of Preguss on these benchmarks effectively
+rules out data-leakage concerns. The third threat concerns the potential misalignment between our
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:24
+Wang et al.
+evaluation metric – the V-Unit success rate in RQ3 and RQ4 – and the actual reduction in human
+verification effort (as assessed in RQ2), since the V-Units that remain unvalidated may require more
+sophisticated specifications than those successfully verified. Nonetheless, given that the primary
+objectives of RQ3 and RQ4 are to qualitatively assess the impact of individual components in
+Preguss on its overall performance, V-Unit success rate remains a robust, adequate metric.
+External Validity. Major threats to external validity concern the soundness of the static analyzer and
+the completeness of the deductive verifier underpinning Preguss. Regarding the former, abstract
+interpretation-based static analyzers like Frama-C/Rte and Frama-C/Eva typically target specific
+categories of UBs and RTEs, which may limit the soundness of Preguss in guaranteeing RTE-
+freeness for those categories. For the latter, verifiers such as Frama-C/Wp rely critically on the
+underlying SMT solvers (e.g., Z3 [de Moura and Bjørner 2008] and CVC5 [Barbosa et al. 2022]).
+Limitations in these solvers – such as inadequate theorem modeling capabilities – can lead to false
+alarms where valid properties are incorrectly reported as unknown hypotheses.
+7
+LIMITATIONS AND FUTURE DIRECTIONS
+We pinpoint scenarios where Preguss is inadequate and provide potential solutions thereof.
+Preguss currently faces challenges in handling advanced specifications, such as inductive defini-
+tions and axioms [Blanchard 2020], which are especially crucial for verifying programs involving
+complex data structures like linked lists and trees (recall Atomthreads in RQ2). One potential
+improvement is to incorporate few-shot examples of such specifications to prompt the LLM.
+Despite its refined mechanisms, Preguss may occasionally produce over-constrained precondi-
+tions due to LLM hallucinations, as illustrated in Case 3 of Section 6.6. A promising direction is to
+explore how abstract interpretation-based static analyzers can be used to adjust LLM-generated
+preconditions by reasoning about over-approximated constraints at call sites.
+As project scale increases, the program context of a single V-Unit – comprising the host function
+and its callees – may exceed the LLM’s context window limit. Employing program slicing to extract
+only the callee functions (or the minimal set of statements) that are semantically relevant to the
+guard assertion could help reduce context size. Moreover, the current design of the program context
+omits global and external variables, which may result in false alarms related to these variables.
+Incorporating fine-grained data-flow analysis to retrieve such information could remedy this issue.
+Finally, when a project uses external library APIs with unavailable implementations, handcrafted
+contracts are currently required. A promising extension would be to leverage LLMs to infer plausible
+contracts from function names and parameter types, thereby reducing the manual effort involved.
+8
+RELATED WORK
+Automated specification synthesis remains a critical challenge for scaling program verification [Am-
+mons et al. 2002]. Traditional techniques are often tailored to specific types of specifications, such
+as loop invariants [Colón et al. 2003; Jhala and McMillan 2006; Le et al. 2019; McMillan 2010],
+preconditions [Cousot et al. 2013, 2011], postconditions [Alshnakat et al. 2020; Molina et al. 2022;
+Wei et al. 2011], and assertions [Terragni et al. 2020]. Recently, the emergence of LLMs has led
+to a new paradigm (cf. [Zhang et al. 2025]), with several approaches demonstrating significant
+advantages over traditional methods by leveraging LLMs for specification synthesis [Cao et al. 2025;
+Ma et al. 2025; Mugnier et al. 2025; Pirzada et al. 2024; Wen et al. 2024; Wu et al. 2024b,a]. Below,
+we review closely related LLM-based approaches and clarify their distinctions from Preguss.
+LLM-Based Intraprocedural Specification Generation. Several studies [Pirzada et al. 2024; Wu et al.
+2024b,a] aim to generate loop invariants in support of bounded model checkers like ESBMC [Menezes
+et al. 2024], while Laurel [Mugnier et al. 2025] targets assertion synthesis for deductive verifiers
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:25
+such as Dafny. These methods primarily address the synthesis of intraprocedural properties within
+individual functions or lemmas, without considering call relations. In contrast, Preguss is designed
+to generate comprehensive interprocedural specifications – including contracts and invariants – for
+programs with complex call hierarchies. Given this fundamental difference in scope and objective,
+these intraprocedural approaches are orthogonal to Preguss and are thus not selected as baselines.
+LLM-Based Interprocedural Specification Generation. Two notable works, AutoSpec [Wen et al.
+2024] and SpecGen [Ma et al. 2025], address interprocedural specification synthesis. Our Preguss
+framework is inspired by AutoSpec, which employs static analysis to construct a comprehensive
+call graph (treating both functions and loops as nodes) and iteratively generates specifications for
+each node in a bottom-up fashion (cf. Section 5.1.2). A thorough discussion of the fundamental
+methodological distinctions between Preguss and AutoSpec is presented in Section 6.2. SpecGen
+adopts a mutation-based strategy to refine semantically invalid specifications by applying four
+mutation operators to predicate expressions and selecting the corrected variants. Moreover, SpecGen
+is implemented on OpenJML [Cok 2011] and targets JML specifications [Burdy et al. 2005] for
+Java programs, whereas Preguss is built on Frama-C/Wp to synthesize ACSL specifications for C
+programs. Given these fundamental differences in verification targets, implementation frameworks,
+and specification languages, we select only AutoSpec as a baseline for comparative evaluation.
+In a nutshell, Preguss demonstrates superior scalability to large-scale programs – exceeding a
+thousand lines of code – due to two key distinctions from existing approaches: (i) it decomposes the
+monolithic RTE-freeness verification problem into a sequence of V-Units with sliced code contexts,
+thereby mitigating LLM context limitations; and (ii) it generates context-aware interprocedural
+specifications tailored to the host function and callee functions, rather than producing intrapro-
+cedural properties of specific types [Mugnier et al. 2025; Pirzada et al. 2024; Wu et al. 2024b,a] or
+synthesizing all types of specifications indiscriminately [Ma et al. 2025; Wen et al. 2024].
+9
+CONCLUSION
+We have presented Preguss – a modular, fine-grained framework for inferring formal specifications
+synergizing between static analysis and deductive verification. We showcase that Preguss paves
+a compelling path towards the automated verification of large-scale programs: It enables nearly
+fully automated RTE-freeness verification of real-world programs with over a thousand LoC, while
+facilitating the identification of 6 confirmed RTEs in a practical spacecraft control system.
+10
+DATA-AVALLABILITY STATEMENT
+The preliminary version of the anonymized artifact (including dataset) is available at https://doi.
+org/10.5281/zenodo.17296157. We plan to submit a complete version for the artifact evaluation.
+ACKNOWLEDGMENTS
+This work has been partially funded by the NSFC under grant No. 62572427, by the ZJNSF Major
+Program (No. LD24F020013), by the Huawei Cooperation Project (No. TC20250422031), by the
+CCF-Huawei Populus Grove Fund (No. CCF-HuaweiSY202503), by the CASC Open Fund (No.
+LHCESET202502), by the NSFC under grant No. 62402038 and 62192730, and by the Fundamental
+Research Funds for the Central Universities of China (No. 226-2024-00140). The authors would like
+to thank Cheng Wen and Yutao Sun for their helpful discussions, Huangying Dong for specifying
+the SAMCODE spacecraft software, and the anonymous reviewers for their constructive feedback.
+REFERENCES
+2000. The Explosion of the Ariane 5. Retrieved October, 2025 from https://www-users.cse.umn.edu/~arnold/disasters/ariane.
+html
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:26
+Wang et al.
+2020. A repository dedicated for problems related to verification of programs using the tool Frama-C. Retrieved October, 2025
+from https://github.com/manavpatnaik/frama-c-problems
+Wolfgang Ahrendt, Bernhard Beckert, Richard Bubel, Reiner Hähnle, Peter H. Schmitt, and Mattias Ulbrich (Eds.). 2016.
+Deductive Software Verification – The KeY Book – From Theory to Practice. Lecture Notes in Computer Science, Vol. 10001.
+Springer. https://doi.org/10.1007/978-3-319-49812-6
+Anoud Alshnakat, Dilian Gurov, Christian Lidström, and Philipp Rümmer. 2020. Constraint-Based Contract Inference
+for Deductive Verification. In 20 Years of KeY. Lecture Notes in Computer Science, Vol. 12345. Springer, 149–176.
+https://doi.org/10.1007/978-3-030-64354-6_6
+America’s Cyber Defense Agency. 2025. Secure by Design Alert: Eliminating Buffer Overflow Vulnerabilities.
+https:
+//www.cisa.gov/resources-tools/resources/secure-design-alert-eliminating-buffer-overflow-vulnerabilities
+Glenn Ammons, Rastislav Bodík, and James R. Larus. 2002. Mining specifications. In POPL. ACM, 4–16. https://doi.org/10.
+1145/503272.503275
+Anthropic. 2025. System Card: Claude Opus 4 & Claude Sonnet 4. Retrieved October, 2025 from https://www-cdn.anthropic.
+com/6be99a52cb68eb70eb9572b4cafad13df32ed995.pdf
+Haniel Barbosa, Clark W. Barrett, Martin Brain, Gereon Kremer, Hanna Lachnitt, Makai Mann, Abdalrhman Mohamed,
+Mudathir Mohamed, Aina Niemetz, Andres Nötzli, Alex Ozdemir, Mathias Preiner, Andrew Reynolds, Ying Sheng, Cesare
+Tinelli, and Yoni Zohar. 2022. cvc5: A Versatile and Industrial-Strength SMT Solver. In TACAS (1) (Lecture Notes in
+Computer Science, Vol. 13243). Springer, 415–442. https://doi.org/10.1007/978-3-030-99524-9_24
+Patrick Baudin, Pascal Cuoq, Jean-Christophe Filliâtre, Claude Marché, Benjamin Monate, Yannick Moy, and Virgile
+Prevosto. 2025. ANSI/ISO C Specification LanguageVersion 1.22.
+https://www.frama-c.com/download/frama-c-acsl-
+implementation.pdf
+Allan Blanchard. 2020. Introduction to C program proof with Frama-C and its WP plugin. https://allan-blanchard.fr/publis/
+frama-c-wp-tutorial-en.pdf
+Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav
+Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon
+Child, Aditya Ramesh, Daniel M. Ziegler, Jeffrey Wu, Clemens Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz
+Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and
+Dario Amodei. 2020. Language Models are Few-Shot Learners. In NeurIPS. https://dl.acm.org/doi/abs/10.5555/3495724.
+3495883
+David Bühler, Pascal Cuoq, and Boris Yakobowski. 2025. The Eva plug-in. https://www.frama-c.com/download/frama-c-
+eva-manual.pdf
+Lilian Burdy, Yoonsik Cheon, David R. Cok, Michael D. Ernst, Joseph R. Kiniry, Gary T. Leavens, K. Rustan M. Leino, and
+Erik Poll. 2005. An overview of JML tools and applications. Int. J. Softw. Tools Technol. Transf. 7, 3 (2005), 212–232.
+https://doi.org/10.1007/s10009-004-0167-4
+Jialun Cao, Yaojie Lu, Meiziniu Li, Haoyang Ma, Haokun Li, Mengda He, Cheng Wen, Le Sun, Hongyu Zhang, Shengchao
+Qin, Shing-Chi Cheung, and Cong Tian. 2025. From Informal to Formal - Incorporating and Evaluating LLMs on Natural
+Language Requirements to Verifiable Formal Proofs. In ACL (1). Association for Computational Linguistics, 26984–27003.
+https://doi.org/10.18653/v1/2025.acl-long.1310
+David R. Cok. 2011. OpenJML: JML for Java 7 by Extending OpenJDK. In NASA Formal Methods (Lecture Notes in Computer
+Science, Vol. 6617). Springer, 472–479. https://doi.org/10.1007/978-3-642-20398-5_35
+Michael Colón, Sriram Sankaranarayanan, and Henny Sipma. 2003. Linear Invariant Generation Using Non-linear Constraint
+Solving. In CAV (Lecture Notes in Computer Science, Vol. 2725). Springer, 420–432. https://doi.org/10.1007/978-3-540-
+45069-6_39
+Patrick Cousot and Radhia Cousot. 1977. Abstract Interpretation: A Unified Lattice Model for Static Analysis of Programs
+by Construction or Approximation of Fixpoints. In POPL. ACM, 238–252. https://doi.org/10.1145/512950.512973
+Partick Cousot and Radhia Cousot. 2002. Modular Static Program Analysis. In Compiler Construction, R. Nigel Horspool
+(Ed.). Springer Berlin Heidelberg, Berlin, Heidelberg, 159–179. https://doi.org/10.1007/3-540-45937-5_13
+Partick Cousot, Radhia Cousot, Manuel Fähndrich, and Francesco Logozzo. 2013. Automatic Inference of Necessary
+Preconditions. In (VMCAI), Roberto Giacobazzi, Josh Berdine, and Isabella Mastroeni (Eds.). LNCS 7737, Springer,
+Heidelberg, Berlin, Heidelberg, 128–148. https://doi.org/10.1007/978-3-642-35873-9_10
+Partick Cousot, Radhia Cousot, and Francesco Logozzo. 2011. Precondition Inference from Intermittent Assertions and
+Application to Contracts on Collections. In (VMCAI), D. Schmidt R. Jhala (Ed.). LNCS 6538, Springer, Heidelberg, Austin,
+Texas, 150–168. https://doi.org/10.1007/978-3-642-18275-4_12
+Leonardo Mendonça de Moura and Nikolaj S. Bjørner. 2008. Z3: An Efficient SMT Solver. In TACAS (Lecture Notes in
+Computer Science, Vol. 4963). Springer, 337–340. https://doi.org/10.1007/978-3-540-78800-3_24
+Adel Djoudi, Martin Hána, and Nikolai Kosmatov. 2021. Formal Verification of a JavaCard Virtual Machine with Frama-C.
+In FM (Lecture Notes in Computer Science, Vol. 13047). Springer, 427–444. https://doi.org/10.1007/978-3-030-90870-6_23
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:27
+Arnaud Ebalard, Patricia Mouy, and Ryad Benadjila. 2019. Journey to a RTE-Free X.509 Parser. In Symposium sur la sécurité
+des technologies de l’information et des communications (SSTIC 2019). https://www.sstic.org/media/SSTIC2019/SSTIC-
+actes/journey-to-a-rte-free-x509-parser/SSTIC2019-Article-journey-to-a-rte-free-x509-parser-ebalard_mouy_
+benadjila.pdf
+Madeline Endres, Sarah Fakhoury, Saikat Chakraborty, and Shuvendu K. Lahiri. 2024. Can Large Language Models
+Transform Natural Language Intent into Formal Method Postconditions? Proc. ACM Softw. Eng. 1, FSE (2024), 1889–1912.
+https://doi.org/10.1145/3527325
+Chongzhou Fang, Ning Miao, Shaurya Srivastav, Jialin Liu, Ruoyu Zhang, Ruijie Fang, Asmita, Ryan Tsang, Najmeh Nazari,
+Han Wang, and Houman Homayoun. 2024. Large Language Models for Code Analysis: Do LLMs Really Do Their Job?. In
+USENIX Security Symposium. USENIX Association. https://www.usenix.org/system/files/usenixsecurity24-fang.pdf
+Robert W. Floyd. 1993. Assigning Meanings to Programs. In Program Verification. Studies in Cognitive Systems, Vol. 14.
+Springer Netherlands, 65–81. https://doi.org/10.1007/978-94-011-1793-7_4
+Yu-Fu Fu, Meng Xu, and Taesoo Kim. 2025. Agentic Specification Generator for Move Programs. CoRR abs/2509.24515
+(2025). https://arxiv.org/html/2509.24515
+Jens Gerlach. 2019.
+Minimal contract Hoare-style verification versus abstract interpretation.
+Technical Re-
+port.
+https://vessedia.technikon.com/downloads/VESSEDIA-D5.7-Minimal-contract-Hoare-style-verification-vs-
+abstract-interpretation-PU-M36.pdf
+Philippe Herrmann and Julien Signoles. 2025. RTE - Runtime Error Annotation Generation. https://www.frama-c.com/
+download/frama-c-rte-manual.pdf
+C. A. R. Hoare. 1969. An axiomatic basis for computer programming. Commun. ACM 12, 10 (Oct. 1969), 576–580. https:
+//doi.org/10.1145/363235.363259
+Lei Huang, Weijiang Yu, Weitao Ma, Weihong Zhong, Zhangyin Feng, Haotian Wang, Qianglong Chen, Weihua Peng,
+Xiaocheng Feng, Bing Qin, and Ting Liu. 2025. A Survey on Hallucination in Large Language Models: Principles,
+Taxonomy, Challenges, and Open Questions. ACM Trans. Inf. Syst. 43, 2 (2025), 42:1–42:55. https://doi.org/10.1145/3703155
+ISO/IEC JTC 1/SC 22. 2024. ISO/IEC 9899:2024 Information technology — Programming languages — C. ISO.
+https:
+//www.iso.org/standard/82075.html
+Ranjit Jhala and Kenneth L. McMillan. 2006. A Practical and Complete Approach to Predicate Refinement. In TACAS (Lecture
+Notes in Computer Science, Vol. 3920). Springer, 459–473. https://doi.org/10.1007/11691372_33
+William Jurayj, Jeffrey Cheng, and Benjamin Van Durme. 2025. Is That Your Final Answer? Test-Time Scaling Improves
+Selective Question Answering. In ACL (2). Association for Computational Linguistics, 636–644. https://doi.org/10.18653/
+v1/2025.acl-short.50
+Daniel Kästner, Reinhard Wilhelm, and Christian Ferdinand. 2023. Abstract Interpretation in Industry - Experience and
+Lessons Learned. In SAS (Lecture Notes in Computer Science, Vol. 14284). Springer, 10–27. https://doi.org/10.1007/978-3-
+031-44245-2_2
+Nikolai Kosmatov, Virgile Prevosto, and Julien Signoles. 2024. Guide to Software Verification with Frama-C. Springer Cham.
+https://doi.org/10.1007/978-3-031-55608-1
+Daniel Kroening and Ofer Strichman. 2016. Decision Procedures - An Algorithmic Point of View, Second Edition. Springer.
+https://doi.org/10.1007/978-3-662-50497-0
+Kelvin Lawson. 2015. Atomthreads: Open Source RTOS. Retrieved October, 2025 from https://github.com/kelvinlawson/
+atomthreads
+Ton Chanh Le, Guolong Zheng, and ThanhVu Nguyen. 2019. SLING: using dynamic analysis to infer program invariants in
+separation logic. In PLDI. ACM, 788–801. https://doi.org/10.1145/3314221.3314634
+K. Rustan M. Leino. 2010. Dafny: An Automatic Program Verifier for Functional Correctness. In LPAR (Dakar) (Lecture Notes
+in Computer Science, Vol. 6355). Springer, 348–370. https://doi.org/10.1007/978-3-642-17511-4_20
+Ahmed Lekssays, Hamza Mouhcine, Khang Tran, Ting Yu, and Issa Khalil. 2025. LLMxCPG: Context-Aware Vulnerability
+Detection Through Code Property Graph-Guided Large Language Models. In USENIX Security Symposium. USENIX
+Association, 489–507. https://www.usenix.org/conference/usenixsecurity25/presentation/lekssays
+Lezhi Ma, Shangqing Liu, Yi Li, Xiaofei Xie, and Lei Bu. 2025. SpecGen: Automated Generation of Formal Program
+Specifications via Large Language Models. In ICSE. IEEE, 16–28. https://doi.org/10.1109/ICSE55347.2025.00129
+John McCarthy. 1961. A basis for a mathematical theory of computation, preliminary report. In IRE-AIEE-ACM Computer
+Conference (Western). ACM, 225–238. https://doi.org/10.1145/1460690.1460715
+Kenneth L. McMillan. 2010. Lazy Annotation for Program Testing and Verification. In CAV (Lecture Notes in Computer
+Science, Vol. 6174). Springer, 104–118. https://doi.org/10.1007/978-3-642-14295-6_10
+Rafael Sá Menezes, Mohannad Aldughaim, Bruno Farias, Xianzhiyu Li, Edoardo Manino, Fedor Shmarov, Kunjian Song, Franz
+Brauße, Mikhail R. Gadelha, Norbert Tihanyi, Konstantin Korovin, and Lucas C. Cordeiro. 2024. ESBMC v7.4: Harnessing
+the Power of Intervals - (Competition Contribution). In TACAS (3) (Lecture Notes in Computer Science, Vol. 14572). Springer,
+376–380. https://doi.org/10.1007/978-3-031-57256-2_24
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:28
+Wang et al.
+Facundo Molina, Marcelo d’Amorim, and Nazareno Aguirre. 2022. Fuzzing Class Specifications. In ICSE. ACM, 1008–1020.
+https://doi.org/10.1145/3510003.3510120
+Eric Mugnier, Emmanuel Anaya Gonzalez, Nadia Polikarpova, Ranjit Jhala, and Zhou Yuanyuan. 2025. Laurel: Unblocking
+Automated Verification with Large Language Models. Proc. ACM Program. Lang. 9, OOPSLA1 (2025), 1519–1545.
+https://doi.org/10.1145/3720499
+OpenAI. 2024. Learning to reason with LLMs. Retrieved October, 2025 from https://openai.com/index/learning-to-reason-
+with-llms/
+OpenAI. 2025. GPT-5 System Card. Retrieved October, 2025 from https://cdn.openai.com/gpt-5-system-card.pdf
+Alain Ourghanlian. 2015. Evaluation of static analysis tools used to assess software important to nuclear power plant safety.
+Nuclear Engineering and Technology 47, 2 (2015), 212–218. https://doi.org/10.1016/j.net.2014.12.009 Special Issue on
+ISOFIC/ISSNP2014.
+Alexandre Peyrard, Nikolai Kosmatov, Simon Duquennoy, Inria Lille, and Shahid Raza. 2018. Towards Formal Verification
+of Contiki: Analysis of the AES-CCM* Modules with Frama-C. In EWSN. Junction Publishing, Canada/ ACM, 264–269.
+https://dl.acm.org/doi/10.5555/3234847.3234910
+Muhammad A. A. Pirzada, Giles Reger, Ahmed Bhayat, and Lucas C. Cordeiro. 2024. LLM-Generated Invariants for Bounded
+Model Checking Without Loop Unrolling. In ASE. ACM, 1395–1407. https://doi.org/10.1145/3691620.3695512
+Narges Shadab, Pritam M. Gharat, Shrey Tiwari, Michael D. Ernst, Martin Kellogg, Shuvendu K. Lahiri, Akash Lal, and
+Manu Sridharan. 2025. Lightweight and modular resource leak checking (extended version). Int. J. Softw. Tools Technol.
+Transf. 27, 2 (2025), 267–288. https://doi.org/10.1007/s10009-025-00804-2
+Jean Souyris, Virginie Wiels, David Delmas, and Hervé Delseny. 2009. Formal Verification of Avionics Software Products. In
+FM (Lecture Notes in Computer Science, Vol. 5850). Springer, 532–546. https://doi.org/10.1007/978-3-642-05089-3_34
+Valerio Terragni, Gunel Jahangirova, Paolo Tonella, and Mauro Pezzè. 2020. Evolutionary improvement of assertion oracles.
+In ESEC/SIGSOFT FSE. ACM, 1178–1189. https://doi.org/10.1145/3368089.3409758
+Chengpeng Wang. 2025. Advances in AI-Powered Code Security: Next-Level Bug Detection. Technical Report.
+https:
+//chengpeng-wang.github.io/slides/talk_GitHub.pdf
+Zhongyi Wang, Tengjie Lin, Mingshuai Chen, Mingqi Yang, Haokun Li, Xiao Yi, Shengchao Qin, and Jianwei Yin. 2025.
+Preguss: It Analyzes, It Specifies, It Verifies (LMPL ’25). Association for Computing Machinery, New York, NY, USA,
+118–123. https://doi.org/10.1145/3759425.3763394
+Zhongyi Wang, Linyu Yang, Mingshuai Chen, Yixuan Bu, Zhiyang Li, Qiuye Wang, Shengchao Qin, Xiao Yi, and Jianwei
+Yin. 2024. Parf: Adaptive Parameter Refining for Abstract Interpretation. In ASE. ACM, 1082–1093. https://doi.org/10.
+1145/3691620.3695487
+Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten Bosma, Brian Ichter, Fei Xia, Ed H. Chi, Quoc V. Le, and Denny Zhou.
+2022. Chain-of-Thought Prompting Elicits Reasoning in Large Language Models. In NeurIPS. https://dl.acm.org/doi/10.
+5555/3600270.3602070
+Yi Wei, Carlo A. Furia, Nikolay Kazmin, and Bertrand Meyer. 2011. Inferring better contracts. In ICSE. ACM, 191–200.
+https://doi.org/10.1145/1985793.1985820
+Cheng Wen, Jialun Cao, Jie Su, Zhiwu Xu, Shengchao Qin, Mengda He, Haokun Li, Shing-Chi Cheung, and Cong Tian. 2024.
+Enchanting Program Specification Synthesis by Large Language Models Using Static Analysis and Program Verification. In
+CAV (2) (Lecture Notes in Computer Science, Vol. 14682). Springer, 302–328. https://doi.org/10.1007/978-3-031-65630-9_16
+Guangyuan Wu, Weining Cao, Yuan Yao, Hengfeng Wei, Taolue Chen, and Xiaoxing Ma. 2024b. LLM Meets Bounded Model
+Checking: Neuro-Symbolic Loop Invariant Inference. In ASE. ACM, 406–417. https://doi.org/10.1145/3691620.3695014
+Haoze Wu, Clark W. Barrett, and Nina Narodytska. 2024a. Lemur: Integrating Large Language Models in Automated
+Program Verification. In ICLR. https://iclr.cc/virtual/2024/poster/18684
+Yedi Zhang, Yufan Cai, Xinyue Zuo, Xiaokun Luan, Kailong Wang, Zhe Hou, Yifan Zhang, Zhiyuan Wei, Meng Sun, Jun
+Sun, Jing Sun, and Jin Song Dong. 2025. Position: Trustworthy AI Agents Require the Integration of Large Language
+Models and Formal Methods. In ICML. https://icml.cc/virtual/2025/poster/40101
+Yusen Zhang, Ruoxi Sun, Yanfei Chen, Tomas Pfister, Rui Zhang, and Sercan Ö. Arik. 2024. Chain of Agents: Large Language
+Models Collaborating on Long-Context Tasks. In NeurIPS. https://doi.org/10.52202/079017-4202
+Mingwei Zheng, Danning Xie, Qingkai Shi, Chengpeng Wang, and Xiangyu Zhang. 2025. Validating Network Protocol
+Parsers with Traceable RFC Document Interpretation. Proc. ACM Softw. Eng. 2, ISSTA, Article ISSTA078 (June 2025),
+23 pages. https://doi.org/10.1145/3728955
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:29
+APPENDIX
+A
+FORMAL PROOFS
+Given a source program prog, Preguss first employs a sound abstract interpretation-based static
+analyzer to generate a set of RTE assertions A. It then returns the synthesized specifications S,
+alongside verified properties V and unknown hypotheses H.
+A.1
+Proof of RTE-Freeness under Valid Hypotheses
+Theorem 11 (RTE-Freeness under Valid Hypotheses). Suppose prog is free-of-RTE under hy-
+potheses H as per (9). If every ℎ∈H is valid, i.e., |= ℎ, then prog is free-of-RTE in the sense of (8).
+Proof. To demonstrate that the program satisfies the free-of-RTE condition per (8), it suffices
+to show that every property 𝑝∈A ∪S is valid under A ∪S \ {𝑝} (i.e., A ∪S \ {𝑝} |= 𝑝). We
+proceed by case analysis on the membership of 𝑝in H.
+(1) Case: 𝑝∈A ∪S \ H. By the definition of free-of-RTE under hypotheses (9), we directly
+obtain:
+A ∪S \ {𝑝} |= 𝑝.
+(2) Case: 𝑝∈H. Since every hypothesis ℎ∈H is valid by assumption, the specific hypothesis
+𝑝is valid (i.e., |= 𝑝). Consequently, by the definition of |= (Definition 7), 𝑝is valid by any set
+of premises, and in particular:
+A ∪S \ {𝑝} |= 𝑝.
+Since the entailment holds in both cases, we conclude that ∀𝑝∈A ∪S, A ∪S \ {𝑝} |= 𝑝, thereby
+satisfying the free-of-RTE criterion in (8).
+□
+A.2
+Proof of Soundness
+Lemma 22. The set of all properties is partitioned such that A ∪S = V ∪H, where A ∩S = ∅and
+V ∩H = ∅.
+Proof. The classification of properties is based on two orthogonal criteria:
+(1) Generation source: Any property 𝑝is either generated by the abstract interpretation-based
+analyzer during Phase 1 (i.e., 𝑝∈A) or synthesized by the LLM during Phase 2 (i.e., 𝑝∈S).
+(2) Verification status: Any property 𝑝is either verified as true (i.e., 𝑝∈V) or remains unknown
+(i.e., 𝑝∈H).
+Since these criteria are mutually exclusive and collectively exhaustive, the equality holds.
+□
+Lemma 23. For any RTE assertion 𝑎∈A ∩V, the entailment V ∪H \ {𝑎} |= 𝑎holds. This signifies
+that every RTE assertion classified into V is valid under the hypotheses V ∪H \ {𝑎}.
+Proof. Consider an arbitrary 𝑎∈A ∩V and its associated V-Unit 𝜐𝑖. Let V𝑖−1 and H𝑖−1
+denote the verified properties and unknown hypotheses prior to processing 𝜐𝑖, and let S′
+𝑖be the
+specifications generated during 𝜐𝑖’s verification (lines 4–11 of Algorithm 1). The verification step
+(line 12) ensures:
+Verify(prog, V𝑖−1 ∪H𝑖−1 ∪S′
+𝑖,𝑎) = true,
+with 𝑎∉V𝑖−1 ∪H𝑖−1 ∪S′
+𝑖. By the soundness condition of the verifier (cf. (5)), this implies:
+V𝑖−1 ∪H𝑖−1 ∪S′
+𝑖|= 𝑎.
+(11)
+Observe that S′
+𝑖⊆S, V𝑖−1 ⊆V, and H𝑖−1 ⊆H, while 𝑎∉S′
+𝑖∪V𝑖−1 ∪H𝑖−1 (since 𝑎is neither
+generated during 𝜐𝑖’s verification nor previously classified). Thus applying Lemma 22:
+V𝑖−1 ∪H𝑖−1 ∪S′
+𝑖⊆V ∪H ∪S \ {𝑎} = V ∪H \ {𝑎}.
+(12)
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+x:30
+Wang et al.
+Applying (6) (monotonicity of Verify) to (11) and (12) yields Verify(prog, V ∪H \ {𝑎},𝑎) = true,,
+and thus V ∪H \ {𝑎} |= 𝑎holds.
+□
+Lemma 24. For any property 𝑝∈V, the entailment V ∪H \ {𝑝} |= 𝑝holds. This establishes that
+every verified property remains valid under the set of all other verified properties and hypotheses.
+Proof. Similar to the proof of Lemma 23, consider an arbitrary property 𝑞∈V \ A. By the
+verification process detailed in Section 5.2.3, 𝑞is confirmed to be syntactically and semantically
+valid through a series of refinement steps. Specifically, during the verification of the corresponding
+V-Unit, we have Verify(prog, V𝑖−1 ∪H𝑖−1,𝑞) = true. Since V𝑖−1 ∪H𝑖−1 ⊆V ∪H \ {𝑞} (since 𝑞is
+not generated in verification of previous V-Units), the monotonicity of Verify (cf. (6)) guarantees
+that V ∪H \ {𝑞} |= 𝑞holds.
+Then combining Lemma 23, V ∪H \ {𝑝} |= 𝑝holds for any property 𝑝∈V.
+□
+Theorem 20 (Soundness). Given a program prog, suppose Preguss annotates prog with a set of
+RTE assertions A and returns synthesized specifications S together with verified properties V and
+unknown hypotheses H. Then, prog is free-of-RTE under hypotheses H (in the sense of (9)).
+Proof. Consider an arbitrary 𝑝∈A ∪S \ H. By Lemma 22, 𝑝∈V because A ∪S \ H ⊆V.
+Applying Lemma 24 yields V ∪H \ {𝑝} |= 𝑝. Since Lemma 22 implies V ∪H = A ∪S, we have
+V ∪H \ {𝑝} = A ∪S \ {𝑝}, concluding that A ∪S \ {𝑝} |= 𝑝.
+□
+B
+RATIONALE FOR NOT EMPLOYING THE FULL DATASET OF AUTOSPEC
+The unemployed datasets fall into two categories:
+(1) Six functions extracted from X509-parser: Although AutoSpec evaluates these as six separate
+small-scale verification tasks (each with a handcrafted main function), we consider the X509-
+parser submodule used in Preguss to be more representative. This submodule is larger (over
+1,000 LoC with 20 functions) and exhibits a more realistic call hierarchy (with a single entry
+point). Besides, 2 of the 6 functions evaluated by AutoSpec are included in the X509-parser
+submodule used by Preguss.
+(2) SyGuS, OOPSLA-13, and SV-COMP benchmarks: These suites consist primarily of single-
+function programs that either (i) require no preconditions (due to absent input parameters) or
+(ii) need only very simple preconditions. Moreover, such single-function programs lack call
+sites for precondition checks and do not require postconditions. These benchmarks are de-
+signed for evaluating intraprocedural specification generation (e.g., loop invariants), whereas
+Preguss targets interprocedural specification synthesis, which is essential for verifying
+medium- to large-scale programs. A detailed rationale is provided in Section 8.
+C
+DETAILS OF REDUNDANT SPECIFICATIONS IN THE STANDARD SET FOR RQ2
+By comparing with Preguss-generated specifications, we identified two primary types of redun-
+dancies in the standard specification set: (i) 40 assertions (e.g., assert len >= rbytes) manually
+introduced by developers as checkpoints to record intermediate program states, and (ii) a large
+portion of the 80 postconditions – compared to the 23, 17, and 35 postconditions generated by
+Preguss in three repeated experiments. Although these assertions and postconditions correctly
+describe certain program behaviors, they do not directly contribute to validating guard assertions.
+D
+DETAILS OF RQ4
+We investigate the effects of the hyper-parameter iter (Fig. 12) and different LLMs (Fig. 13) on the
+performance of Preguss, evaluated across the Contiki, SAMCODE, and X509-parser benchmarks in
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.
+
+A Tale of 1001 LoC: Potential Runtime Error-Guided Specification Synthesis for Verifying Large-Scale Programs
+x:31
+1
+2
+3
+5
+#iterations (iter)
+50
+60
+70
+80
+90
+100
+avg. success rate (%)
+avg. V-Unit success rate vs #Iterations
+1
+2
+3
+5
+#iterations (iter)
+100
+200
+300
+400
+500
+avg. time (m)
+avg. time vs #Iterations
+1
+2
+3
+5
+#iterations (iter)
+2
+3
+4
+5
+6
+7
+avg. cost ($)
+avg. cost vs #Iterations
+Contiki
+SAMCODE
+X509-parser
+Fig. 12. Sensitivity analysis of Preguss to the hyper-parameter iter.
+Contiki
+SAMCODE
+X509-parser
+50
+60
+70
+80
+90
+100
+avg. success rate (%)
+avg. V-Unit success rate by benchmark
+Contiki
+SAMCODE
+X509-parser
+0
+50
+100
+150
+avg. time (m)
+avg. time by benchmark
+Contiki
+SAMCODE
+X509-parser
+0
+2
+4
+6
+8
+avg. cost ($)
+avg. cost by benchmark
+Claude 4
+GPT-5
+Fig. 13. Comparative performance of Preguss when integrated with Claude 4 v.s. GPT-5.
+terms of V-Unit success rate, execution time, and LLM inference cost. Fig. 12 indicates no significant
+sensitivity of the V-Unit success rate to variations in iter, whereas execution time and inference cost
+exhibit a clear increasing trend with higher iter values. The configuration iter = 2 used throughout
+our other experiments is not finely tuned, yet demonstrates already effective performance. Fig. 13
+shows that Preguss integrated with Claude 4 achieves a higher V-Unit success rate, reduced execution
+time, and lower inference cost compared to that with GPT-5. This performance disparity suggests
+differences in code comprehension capabilities between the two LLMs.
+Proc. ACM Program. Lang., Vol. x, No. OOPSLA1, Article x. Publication date: April 2026.

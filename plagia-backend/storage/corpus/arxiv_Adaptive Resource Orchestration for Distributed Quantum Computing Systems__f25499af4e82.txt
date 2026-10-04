@@ -1,0 +1,741 @@
+Adaptive Resource Orchestration for
+Distributed Quantum Computing Systems
+Kuan-Cheng Chen†‡∗, Felix Burt †‡, Nitish K. Panigrahy§, Kin K. Leung†
+†Department of Electrical and Electronic Engineering, Imperial College London, London, UK
+‡Centre for Quantum Engineering, Science and Technology (QuEST), Imperial College London, London, UK
+§ Binghamton University SUNY, New York, USA
+∗Email: kuan-cheng.chen17@imperial.ac.uk
+Abstract—Scaling quantum computing beyond a single device
+requires networking many quantum processing units (QPUs)
+into a coherent quantum-HPC system. We propose the Modular
+Entanglement Hub (ModEn-Hub) architecture: a hub-and-spoke
+photonic interconnect paired with a real-time quantum network
+orchestrator. ModEn-Hub centralises entanglement sources and
+shared quantum memory to deliver on-demand, high-fidelity Bell
+pairs across heterogeneous QPUs, while the control plane sched-
+ules teleportation-based non-local gates, launches parallel entan-
+glement attempts, and maintains a small ebit cache. To quantify
+benefits, we implement a lightweight, reproducible Monte Carlo
+study under realistic loss and tight round budgets, comparing
+a na¨ıve sequential baseline to an orchestrated policy with
+logarithmically scaled parallelism and opportunistic caching.
+Across 1–128 QPUs and 2,500 trials per point, ModEn-Hub-style
+orchestration sustains roughly 90% teleportation success while
+the baseline degrades toward about 30%, at the cost of higher av-
+erage entanglement attempts (approximately 10–12 versus about
+3). These results provide clear, high-level evidence that adaptive
+resource orchestration at the ModEn-Hub enables scalable and
+efficient quantum-HPC operation on near-term hardware.
+Index Terms—Distributed Quantum Computing, Quantum
+Networks, Teleportation Orchestration, Modular Entanglement
+Hub, Quantum-HPC
+I. INTRODUCTION
+Quantum computing is poised to address problems that
+remain out of reach for classical machines, including crypto-
+graphic analysis, large-scale optimisation, and accurate simula-
+tion of quantum many-body systems. Contemporary quantum
+processing units (QPUs) nevertheless contain only tens to
+hundreds of physical qubits, a scale far below that required
+for practical quantum advantage. Many estimates suggest that
+thousands of logical qubits which translates to millions of
+physical qubits. will be needed to support error-corrected,
+industry-relevant workloads, a capacity beyond the foreseeable
+capability of any single device.
+A promising route to this scale is distributed quantum com-
+puting, wherein multiple QPUs are interconnected through a
+quantum network and operate as a single virtual computer [1].
+These QPUs often differ in size, fidelity, and connectivity,
+and the underlying network topology may evolve over time
+due to link failures or reconfiguration. When processors share
+quantum entanglement in advance, the collective computa-
+tional power can grow exponentially with the number of
+participating QPUs, a stark contrast to the linear scaling
+characteristic of classical distributed systems. Realising such
+an architecture is non-trivial because qubits decohere rapidly
+and cannot be cloned, precluding straightforward transmission
+of quantum states [2]. Instead, remote operations rely on
+entangled pairs of qubits, also known as e-bits, distributed
+between QPUs so that quantum teleportation and non-local
+gates can bind distant qubits as if they were co-located [3].
+Recent advances in quantum internet research illustrate steady
+progress: for example, Main et al. [4] have experimentally
+demonstrated the distribution of quantum computations be-
+tween two photonically interconnected trapped-ion modules,
+including the deterministic teleportation of a controlled-Z
+gate and the execution of distributed Grover’s search. These
+developments highlight the need for architectural frameworks
+able to orchestrate entanglement generation and management
+across many nodes.
+We propose a Modular Entanglement Hub (ModEn-Hub)
+architecture
+that
+adapts
+principles
+from
+classical
+high-
+performance computing to the unique constraints of quantum
+mechanics. This specialised hub acts as an entanglement-
+centric interconnect linking multiple QPU clusters. It inte-
+grates an Adaptive Entanglement Generation Module and
+a Quantum Network Orchestrator, coordinating the creation
+and distribution of entangled Bell pairs over high-fidelity
+photonic links—building on emerging hardware efforts fo-
+cused on modular entanglement sources and quantum network
+interfaces. A parallel low-latency classical channel carries
+measurement outcomes required for feed-forward control and
+teleportation-based operations. By centralising entanglement
+sources, quantum memory, and optical switching within the
+hub, the architecture enables efficient resource sharing and
+provides dynamic, on-demand connectivity between any pair
+of processors, thereby overcoming the scalability limitations
+inherent in point-to-point or nearest-neighbour topologies.
+This work makes four primary contributions. First, it in-
+troduces a modular hub-and-spoke network design that en-
+ables heterogeneous QPUs to operate coherently, effectively
+extending the logical qubit count beyond the physical limits
+of standalone devices. Second, it develops a network-aware
+circuit orchestration strategy that aligns quantum gate schedul-
+ing with the dynamic state of the network and coordinates
+classical feed-forward signals. Third, it proposes adaptive
+entanglement management policies, grounded in reinforcement
+arXiv:2512.24902v1 [quant-ph] 31 Dec 2025
+
+learning techniques, that determine which links to entangle,
+when to schedule entanglement swaps, and how to cache
+Bell pairs, thereby improving request success probability.
+Finally, it presents a prototype-level simulator and a four-
+QPU case study demonstrating that the hub distributes high-
+fidelity entanglement with latencies compatible with near-term
+algorithms.
+II. OPPORTUNITIES AND PROSPECTS
+Connecting multiple processors to operate cooperatively
+is a time-honoured strategy in classical computing—from
+cloud data centres to peta- and exa-scale supercomputers.
+The quantum data-centre concept extends the same principle
+to the quantum domain: by networking several modest-sized
+QPUs, one can construct a virtual machine whose qubit count
+and computational reach far exceed those of any individual
+device [1]. In a distributed setting, an algorithm is partitioned
+across nodes that exchange quantum information; when exe-
+cuted efficiently, N small processors linked by entanglement
+can emulate a system with ≫N logical qubits because the
+joint Hilbert space grows exponentially with the number of
+nodes [5]–[7].
+Partitioning requires decomposing the quantum circuit into a
+number of sub-circuits, which interact only via the generation
+of e-bits. Using graphical optimisation techniques, the required
+entanglement between sub-circuits can be minimised to avoid
+strain on the network [5], [7].
+Classical networking techniques cannot be applied verbatim.
+Transmitting physical qubits—-typically photons through op-
+tical fibre—is lossy, and any loss or decoherence irreversibly
+destroys the quantum state [2]. Moreover, the no-cloning
+theorem forbids amplification or regeneration of unknown
+quantum states, ruling out classical repeater strategies. En-
+tanglement therefore becomes the essential communication
+resource: pairs of entangled qubits (e-bits) are distributed
+so that quantum-teleportation or remote-gate protocols can
+move logical states between processors without physically
+transporting fragile qubits [4].
+Early architectural proposals relied on point-to-point links,
+sometimes aided by chains of quantum repeaters [8]. While
+feasible for a handful of nodes, such designs do not
+scale gracefully as the network size grows. Subsequent
+work adopted topologies inspired by classical intercon-
+nects. Switch-centric approaches place reconfigurable photonic
+switches at the core to establish ephemeral circuits among
+QPUs on demand, mirroring circuit-switched telecommunica-
+tion networks. Server-centric schemes connect each QPU to
+a structured subset of peers—evoking fat-tree or hypercube
+layouts—to balance connectivity against hardware cost. All
+of these architectures must contend with the probabilistic
+nature of entanglement generation: photon loss, detector dark
+counts, and finite-memory lifetimes mean that attempts to
+entangle remote qubits often fail. Consequently, considerable
+research targets quantum-routing algorithms and scheduling
+policies that maximise entanglement throughput under latency
+constraints. State-of-the-art methods employ reinforcement
+TABLE I
+OPPORTUNITIES ENABLED BY ADAPTIVE RESOURCE ORCHESTRATION IN
+DISTRIBUTED QUANTUM COMPUTING.
+Opportunity
+Implication for DQC
+Virtual
+large-scale
+QPU
+Entangling N modest devices yields an effective
+Hilbert-space dimension 2
+P
+i ni, surpassing the
+qubit count of any single node.
+Dynamic
+topology
+adaptation
+Control-plane
+decisions
+re-route
+entanglement
+around lossy links, preserving connectivity as
+physical conditions drift.
+Resource-aware
+scheduling
+Joint optimisation of link usage and local-gate
+queues reduces idle time and maximises algorith-
+mic throughput under decoherence constraints.
+Load balancing
+Temporal multiplexing of Bell-pair generation
+equalises utilisation across heterogeneous hard-
+ware, mitigating bottlenecks.
+Fault tolerance
+Adaptive allocation of e-bits to error-corrected
+logical qubits supports distributed surface codes
+[12] and enhances resilience to local failures.
+Hybrid cloud integra-
+tion
+Orchestration middleware exposes a unified API,
+enabling seamless inclusion of remote QPUs as
+accelerators within classical workflows.
+Algorithmic
+co-design
+Real-time knowledge of network state informs cir-
+cuit partitioning and compilation heuristics, lower-
+ing total entanglement cost for VQE, QAOA, and
+related algorithms [7].
+learning to select links and to time swap operations, achieving
+faster decisions and higher success rates by caching Bell pairs
+when advantageous [9].
+An intelligent entanglement orchestrator has thus emerged
+as a critical control-plane component. It dynamically recon-
+figures connectivity between QPUs by instructing local opera-
+tions on distributed entangled states and by allocating limited
+entanglement resources to meet algorithmic demands [10].
+Recent prototypes integrate tunable entanglers with real-time
+orchestration logic and have demonstrated multi-node links
+with high fidelity, indicating that the underlying control-plane
+concepts are technologically viable. Major platform providers
+are likewise exploring middleware that decomposes quantum
+circuits across multiple processors and later recombines the
+results [11].
+In summary, the literature identifies two foundational pillars
+for scalable distributed quantum computing: (i) quantum-
+network hardware, including entanglement sources, quan-
+tum memories, optical switches, and transducers; and (ii)
+quantum-network
+control, encompassing algorithms for
+routing, scheduling, and orchestration. The framework pre-
+sented in this paper integrates these data-plane and control-
+plane components into a unified system designed for practical
+quantum–data-centre deployment. Table I distils the principal
+opportunities enabled by adaptive resource orchestration.
+III. ARCHITECTURAL FRAMEWORK: A QUANTUM
+NETWORK HUB CONNECTING QPU CLUSTERS
+At the centre of the proposed ModEn-Hub (shown in Fig. 2)
+is the Quantum Network Hub, a smart switching node that
+delivers on-demand entanglement while avoiding the hardware
+explosion that would arise if every QPU were directly wired
+
+to every other. Each individual processor, or small processor
+cluster, connects to this hub via a photonic link, allowing
+the hub to mediate entanglement among any pair of nodes
+as required.
+A key component inside the hub is the Entanglement Gen-
+eration Module. Acting as a programmable source, it produces
+Bell pairs and routes each photon to a designated output port
+connected to a target QPU. This module integrates tunable
+entanglement sources—such as spontaneous parametric down-
+conversion or quantum-dot-based emitters—with Bell-state
+measurement stations to enable entanglement swapping. Real-
+time orchestration allows dynamic adaptation: if a particular
+fibre link shows reduced heralded success probability, the
+module can reroute entanglement attempts through alternate
+paths or initiate multiple parallel trials until successful dis-
+tribution is confirmed. Ongoing experimental advancements
+continue to improve the efficiency of photonic entanglement
+generation and transduction across diverse quantum platforms,
+including optical, microwave, and telecom domains [13].
+The Quantum Network Orchestrator is a classical control
+unit—possibly a small cluster—that maintains a global map
+of entanglement, link status, and queued quantum opera-
+tions. Given a high-level circuit that spans many processors,
+the orchestrator decomposes it into local gates and inter-
+processor operations, schedules entanglement generation or
+swapping, and coordinates the classical messages that com-
+plete teleportation-based gates [11]. Its role mirrors that of a
+distributed job scheduler in a conventional cluster, but with the
+added burden of tracking fragile quantum states and enforcing
+timing constraints that are tight compared with qubit coherence
+times.
+When a multi-QPU program arrives, the orchestrator first
+compiles it into QPU-specific sub-tasks and then drafts an
+entanglement connection plan. Suppose processor A must
+execute a CNOT whose control qubit resides on A and whose
+target qubit sits on processor B. If no Bell pair is cached
+between the two, the orchestrator triggers the entanglement
+module to create one: a photon pair is emitted, with one photon
+routed to A’s receiver and the other to B’s. Upon heralded
+confirmation, the orchestrator notifies both QPUs that an e-
+bit is available. The processors then perform a teleportation-
+based CNOT, exchanging measurement results via the clas-
+sical channel under orchestrator supervision. Measurement
+outcomes—classical bits—are relayed back to the orchestrator,
+which updates its global state and issues subsequent com-
+mands. Throughout execution, the orchestrator refreshes or
+reallocates Bell pairs as demand evolves, enabling flexible all-
+to-all connectivity even though only a single photonic link per
+QPU is physically installed.
+By funnelling traffic through a hub, the architecture reduces
+hardware overhead from O(N 2) point-to-point links to O(N)
+links for N processors, while allowing the hub’s optical-switch
+fabric to scale incrementally—additional ports, sources, and
+memories can be added as new QPUs join the network. Central
+management also enables strategies such as maintaining an
+entanglement cache: during idle periods the module pre-
+generates Bell pairs between frequently interacting nodes, so
+that subsequent teleportation steps can proceed without the
+latency of fresh pair creation.
+A dedicated low-latency classical channel accompanies ev-
+ery quantum link. Precise timing is essential: operations on
+spatially separated qubits must be completed within their
+Fig. 1. ModEn-Hub Architecture for Distributed Quantum Computing. The figure illustrates the Modular Entanglement Hub (ModEn-Hub) architecture, which
+enables entanglement-based interconnectivity between two quantum computing clusters (Cluster 1 and Cluster 2). Each cluster contains one or more quantum
+processing units (QPUs), each coupled with a local Control Module and an Interconnect. A central Quantum Network Hub connects the clusters and comprises
+two main components: (1) the Adaptive Entanglement Generation Module, responsible for generating high-fidelity entangled photon pairs on demand and
+distributing them via optical quantum links (blue dashed lines), and (2) the Quantum Network Orchestrator, which coordinates the timing and routing of
+entanglement generation, quantum teleportation, and remote gate operations across QPUs. In parallel, low-latency classical control channels (gray dashed
+lines) carry measurement outcomes and synchronization signals between the hub and QPUs to enable real-time feed-forward control. The architecture supports
+scalable and heterogeneous distributed quantum computing by decoupling entanglement generation and control coordination from the quantum clusters.
+
+coherence windows. Advanced synchronisation protocols over
+optical fibre are being integrated into prototype hubs to ensure
+temporal alignment. With control latencies on the order of
+hundreds of nanoseconds across data-centre-scale distances,
+classical communication becomes effectively negligible com-
+pared to typical quantum gate times, allowing the orchestrator
+to meet stringent feedback requirements.
+A near-term prototype could comprise a small number of
+superconducting or trapped-ion QPUs co-located within a sin-
+gle facility and interconnected via optical fibre to a centralised
+photonic entanglement module. The proposed architecture em-
+phasises a clear separation between the quantum-optical data
+plane and the classical control plane, established through well-
+defined interfaces. This modular design allows both layers
+to evolve independently—for example, by integrating higher-
+rate entanglement sources or implementing more sophisticated
+control algorithms—mirroring the long-standing separation of
+data and control planes in classical networking systems.
+IV. APPLICATIONS AND USE CASES
+A fully realised Modular Entanglement Hub promises to
+extend quantum computing resources on demand, enabling
+workloads that would otherwise exceed the capacity of indi-
+vidual processors. The paragraphs below outline representative
+scenarios in which the proposed architecture is especially
+impactful.
+Modular quantum cloud services can emerge once multiple
+QPUs—possibly from different vendors and based on het-
+erogeneous technologies—are interconnected in a data-centre
+environment. Consider a facility that houses several 100-qubit
+superconducting processors alongside a set of 50-qubit ion-
+trap devices. A user requesting 200 logical qubits submits a
+job to the cloud interface; the network orchestrator partitions
+the circuit across three QPUs and employs entanglement links
+to execute cross-processor gates [7], [11]. From the user’s
+perspective the system behaves as a monolithic 200-qubit
+computer, yet the underlying hardware remains modular and
+incrementally upgradable: additional QPUs may be added
+without replacing existing nodes, provided that entanglement
+links can be established with acceptable fidelity and rate.
+Beyond computation, entangled networks of quantum de-
+vices can enhance distributed sensing and metrology. In a
+Quantum-HPC center with distributed quantum computers,
+certain QPUs may be dedicated to precision magnetic field
+sensing or optical clock stabilization, while others perform
+computation. Periodic entanglement distribution allows the
+orchestrator to form a composite sensor network whose
+joint measurements outperform any single device. Entangled
+atomic-clock QPUs, for instance, could constitute a globally
+synchronised time reference with accuracy exceeding that of
+individual clocks, coordinated through scheduled entangle-
+ment exchange.
+Multi-node connectivity also enables secure multi-party
+quantum computation. Organisations that each operate a small
+quantum processor can jointly evaluate an algorithm without
+disclosing their private data, relying on protocols related to
+multi-party key distribution or blind quantum computation
+[14]. The hub facilitates Bell-pair distribution while quantum-
+encryption techniques ensure that it remains oblivious to
+the plaintext data. Recent proposals for quantum-internet ex-
+changes envisage such trusted hubs as a central element of
+cryptographic infrastructure.
+Fault-tolerant quantum computing benefits significantly
+from networked modules. Large-distance error-correcting
+codes demand sizeable physical-qubit overheads if imple-
+mented within a single monolithic device. An alternative is
+to realise each logical qubit, or small cluster of logical qubits,
+Fig. 2. Quantum-HPC implementation of the ModEn-Hub architecture. Heterogeneous QPUs and classical control servers are interconnected via a central
+Quantum Network Hub that delivers on-demand Bell pairs and orchestrates teleportation-based non-local gates. The inset shows a reconfigurable, blocking
+circuit-switched photonic fabric of bounded degree (not full mesh): any-to-any connections are scheduled on demand using time/frequency multiplexing and,
+when needed, entanglement swapping, subject to hub/QPU port constraints.
+
+on a separate module and to connect these modules via high-
+quality entanglement. The orchestrator enables the dynamic
+distribution of entanglement between logical blocks, a capa-
+bility that could support higher-level paradigms. Theoretical
+studies show that moderate-fidelity interconnects suffice to
+improve overall fault-tolerance thresholds when arranged in
+suitable graph states.
+V. CHALLENGES AND OPEN ISSUES
+Although
+the
+proposed
+Modular
+Entanglement
+Hub
+(ModEn-Hub) architecture offers a credible path toward scal-
+able distributed quantum computation, several technical and
+scientific challenges must be addressed before deployments
+can reach data-centre scale. In particular, the data-centre
+realisation depicted in the preceding figure—where QPUs and
+classical servers interface with a central Quantum Network
+Hub—places stringent requirements on photonic interfaces,
+network-level switching, synchronisation, software interoper-
+ability, and control-plane optimisation.
+Superconducting QPUs operate at microwave frequen-
+cies
+and
+therefore
+require
+efficient
+cryogenic-to-optical
+(microwave-to-photon) transduction to communicate over
+photonic links, whereas trapped-ion and neutral-atom plat-
+forms can emit telecom photons directly but still de-
+mand high-efficiency collection optics. Laboratory demon-
+TABLE II
+PRINCIPAL CHALLENGES FACING MODULAR ENTANGLEMENT HUBS AND
+THE ASSOCIATED RESEARCH PRIORITIES.
+Challenge / Open Issue
+Key Obstacles and Research Directions
+High-fidelity
+transduction
+Cryogenic-to-optical and stationary-to-photonic
+converters must exceed > 99 % fidelity while
+remaining compact, power efficient, and rack-
+mountable. Integration with superconducting,
+trapped-ion, and neutral-atom QPUs is still an
+engineering frontier.
+Entanglement
+distribution at scale
+Multi-tier topologies require dynamic entangle-
+ment routing and congestion control that meet
+stringent fidelity-latency targets across many
+hops. Algorithms for adaptive path selection and
+hierarchical swap scheduling are still immature.
+Timing and synchronisa-
+tion
+Sub-nanosecond clock alignment is needed for
+interference-based Bell measurements. Scaling
+White Rabbit-class timing to hundreds of QPUs
+in production data centres raises deployment cost
+and stability challenges.
+Standards,
+APIs,
+and
+programming models
+The lack of common abstractions for entangle-
+ment establishment, error handling, and resource
+allocation inhibits multi-vendor interoperability.
+Formal language constructs for circuit partition-
+ing and coordination across disjoint QPUs are
+still emerging.
+Error management and
+fault tolerance
+Coordinating error-correction cycles over lossy
+links introduces latency overhead and new failure
+modes. Practical schemes must balance physical-
+qubit overhead, network bandwidth, and achiev-
+able logical error rates.
+Performance
+optimisation
+Joint scheduling of circuit mapping and entangle-
+ment generation is largely unexplored. Machine-
+learning-based resource-management agents of-
+fer promise but lack rigorous performance guar-
+antees on real hardware.
+strations
+have
+exceeded
+99 %
+entanglement
+fidelity
+for
+stationary-to-photonic qubit conversion, and substantial ef-
+fort
+targets
+microwave-to-telecom
+transduction.
+Integrat-
+ing these components into reliable, rack-mountable mod-
+ules—consistent with the hub-centric, data-centre form factor
+shown previously—remains an active engineering frontier, and
+present transducers continue to bound system efficiency.
+While a single hub simplifies topology for modest node
+counts, scaling to hundreds of QPUs will likely necessitate
+multi-tier architectures analogous to classical spine–leaf net-
+works. Hierarchical entanglement switching introduces the
+entanglement-routing problem, wherein the controller must
+select multi-hop swap paths that satisfy end-to-end fidelity
+and latency targets [15]. Preliminary algorithms exist, but
+efficient and robust techniques under dynamic traffic remain
+limited. Generalising the current design to a network of
+ModEn-Hubs raises further questions about inter-hub syn-
+chronisation, long-haul delays, and fidelity preservation over
+many hops—issues that are directly implicated by the photonic
+fan-out and reconfigurable fabric suggested in the figure.
+Because
+interference-based
+Bell
+measurements
+require
+sub-nanosecond alignment, clock drift or fibre-length fluctua-
+tions can abort entanglement attempts. Precision-timing solu-
+tions such as White Rabbit achieve sub-nanosecond accuracy
+over optical fibre and are being integrated into prototypes;
+however, scaling such infrastructure to hundreds of QPUs and
+multiple hubs in a production data-centre entails non-trivial
+deployment and stability challenges. These constraints di-
+rectly underpin the low-latency classical control channels and
+real-time feed-forward highlighted in the figure.
+Despite the execution model provided by the orchestrator,
+programmers lack mature language constructs to express par-
+allelism across disjoint QPUs and to bind network constraints
+into compilation. Protocols for entanglement establishment
+and confirmation, error handling, and resource allocation
+must be formalised to enable multi-vendor interoperability.
+Standards initiatives are beginning to address these needs,
+yet a plug-and-play ecosystem remains distant. Security con-
+siderations for multi-tenant facilities—particularly workload
+isolation and authenticated entanglement—are likewise insuf-
+ficiently specified for the data-centre setting.
+Distributed execution introduces additional failure points,
+since every entanglement link or swap operation can corrupt
+qubits. Full quantum error correction (e.g., [12]) appears
+unavoidable for large-scale applications, but coordinating
+error-correction cycles across networked QPUs remains open.
+One approach retains only logical (error-corrected) qubits at
+each node and teleports data among them, at the cost of
+increased physical-qubit overhead and coupling of network
+latency to code-cycle duration. Near-term systems may instead
+rely on lighter error-mitigation strategies, accepting limited
+circuit depth in exchange for reduced complexity.
+Scheduling decisions—how to map circuits onto hetero-
+geneous QPUs, when to trigger entanglement generation or
+swapping, and how to leverage cached Bell pairs—strongly
+affect throughput and latency. While heuristics from clas-
+
+sical networking and recent quantum-routing work inform
+current orchestrators, richer optimisation methods (includ-
+ing machine-learning-based resource-management agents) are
+likely to yield substantial gains. As prototypes mature, a
+dedicated subfield of quantum-network resource management
+is expected to emerge, directly aligned with the orchestration
+roles indicated in the data-centre deployment figure.
+Despite these open problems, rapid advances in photonic
+interfaces, precision timing, and quantum-network prototypes
+indicate steady progress. Converging academic and industrial
+efforts on transduction, routing, synchronisation, and standard-
+isation will accelerate the viability of hub-centric architectures
+such as ModEn-Hub, bringing scalable, data-centre-style net-
+worked quantum computing closer to practice.
+VI. RESULTS
+We evaluate distributed teleportation over a growing multi–
+QPU network using a lightweight Monte Carlo simulaton. For
+each network size N ∈[1, 128], we draw 2,500 independent
+source–destination pairs (s, d) uniformly at random with s ̸=
+d. A round is one entanglement–generation window during
+which a node pair may attempt to create a heralded Bell pair.
+The na¨ıve baseline performs one attempt per round (no reuse);
+the orchestrated policy performs K(N) parallel attempts per
+round and caches at most one additional successful Bell pair
+Fig. 3. Scalability and cost of distributed teleportation under two strategies. (a)
+Teleportation success rate versus number of QPUs (N): the orchestrated policy
+sustains high performance as N grows, while the na¨ıve sequential baseline
+degrades. (b) Average entanglement attempts per teleportation, showing the
+higher resource expenditure required by orchestration to obtain the reliability
+gains in (a).
+per unordered node pair. We impose a tight round budget of
+R=3; if no Bell pair is obtained within R rounds, telepor-
+tation is declared a failure for that request. The per–attempt
+success probability models aggregate physical loss and control
+overhead and degrades with scale as peff(N) =
+p0
+1+β log2 N ,
+where p0 = 0.35 captures small–network transmissivity
+and β
+=
+0.35 captures increasing attenuation and con-
+tention (e.g., longer optical paths, coupling/detection loss,
+time–multiplexing and classical timing overhead). Under
+orchestration, parallelism scales logarithmically with size,
+K(N) = max{2, ⌈κ log2 N⌉} with κ = 0.9, giving one–round
+success probability pround(N) = 1−(1−peff(N))K(N). Over
+R rounds the success event is 1−
+ 1−pround(N)
+R. Caching
+is opportunistic: if multiple parallel attempts succeed in the
+same round, one spare pair is stored (capacity = 1) and may
+serve a future request for that node pair with zero additional
+attempts and zero waiting.
+For each (N, strategy) we report: (i) the teleportation
+success rate, i.e., Pr[at least one Bell pair within R rounds],
+and (ii) the average entanglement attempts per teleporta-
+tion (counting all parallel attempts; cache hits contribute
+0). Loss mechanisms (source brightness, coupling, channel
+attenuation, detector efficiency, heralding) are aggregated into
+peff(N), which decreases with N to reflect longer paths and
+multiplexing overhead. With K(N) = max{2, ⌈κ log2 N⌉},
+orchestration converts added parallelism into higher one-round
+success pround(N) = 1 −(1 −peff(N))K(N) and thus higher
+end-to-end success under fixed R, whereas the single-attempt
+baseline degrades with scale. Each point averages 2,500 trials;
+worst-case standard error is ≤1% (at p = 0.5), so error bars
+are omitted.
+Fig. 3(a) shows that the orchestrated policy sustains high
+performance across scale (near ∼90% over most N), whereas
+the na¨ıve baseline declines markedly as N grows (to roughly
+∼30% at large N), demonstrating the advantage of adaptive
+parallelism and caching under strict round limits. Fig. 3(b)
+reports the corresponding cost: the orchestrated method con-
+sumes more entanglement attempts on average, increasing with
+N (about 10–12 attempts at the largest sizes), while the na¨ıve
+approach remains near a constant ∼3 attempts.
+Together, Fig. 3(a) and (b) highlight a clear scalabil-
+ity–efficiency trade-off: the orchestrator trades additional
+Bell-pair generation for higher and more stable end-to-end
+success.
+VII. CONCLUSION
+Here we have presented ModEn-Hub, a modular archi-
+tecture that centralizes high-fidelity entanglement generation
+in a dedicated hub while distributing quantum computation
+across peripheral QPUs under a real-time software orches-
+trator. By cleanly separating the quantum-optical data plane
+from the classical control plane, ModEn-Hub translates prin-
+ciples from cloud/HPC interconnects to quantum systems
+while addressing decoherence, probabilistic link formation,
+and the no-cloning constraint. Early prototypes suggest that
+photonic interfaces and low-latency control can be integrated
+
+into compact, rack-mountable modules, pointing toward pro-
+gressive scaling from small multi-QPU ensembles to larger
+clustered deployments. Future work will quantify and optimize
+memory–performance trade-offs for entanglement caching (in-
+cluding decoherence of stored Bell pairs, buffer-capacity lim-
+its, and cache-eviction policies), integrate orchestration with
+fault-tolerant protocols, and extend the framework to hetero-
+geneous workloads such as hybrid sensing and distributed
+cluster-state generation.
+ACKNOWLEDGMENTS
+This work was supported by the Engineering and Physical
+Sciences Research Council (EPSRC) under grant number
+EP/W032643/1.
+REFERENCES
+[1] D. Cuomo, M. Caleffi, and A. S. Cacciapuoti, “Towards a distributed
+quantum computing ecosystem,” IET Quantum Communication, vol. 1,
+no. 1, pp. 3–8, 2020.
+[2] A. S. Cacciapuoti, M. Caleffi, F. Tafuri, F. S. Cataliotti, S. Gherardini,
+and G. Bianchi, “Quantum internet: Networking challenges in distributed
+quantum computing,” IEEE Network, vol. 34, no. 1, pp. 137–143, 2019.
+[3] M. Pompili, C. Delle Donne, I. te Raa, B. van der Vecht, M. Skrzypczyk,
+G. Ferreira, L. de Kluijver, A. J. Stolk, S. L. Hermans, P. Pawełczak,
+et al., “Experimental demonstration of entanglement delivery using a
+quantum network stack,” npj Quantum Information, vol. 8, no. 1, p. 121,
+2022.
+[4] D. Main, P. Drmota, D. Nadlinger, E. Ainley, A. Agrawal, B. Nichol,
+R. Srinivas, G. Araneda, and D. Lucas, “Distributed quantum computing
+across an optical network link,” Nature, pp. 1–6, 2025.
+[5] F. Burt, K.-C. Chen, and K. K. Leung, “Generalised circuit partition-
+ing for distributed quantum computing,” in 2024 IEEE International
+Conference on Quantum Computing and Engineering (QCE), vol. 2,
+pp. 173–178, IEEE, 2024.
+[6] F. Burt, K.-C. Chen, and K. K. Leung, “A multilevel framework for
+partitioning quantum circuits,” 2025.
+[7] F. Burt, K.-C. Chen, and K. K. Leung, “Entanglement-efficient com-
+pilation of quantum circuits over large-scale quantum networks,” arXiv
+preprint arXiv:2507.16036, 2025.
+[8] K. Azuma, S. E. Economou, D. Elkouss, P. Hilaire, L. Jiang, H.-K.
+Lo, and I. Tzitrin, “Quantum repeaters: From quantum networks to the
+quantum internet,” Reviews of Modern Physics, vol. 95, no. 4, p. 045006,
+2023.
+[9] J. Li, T. Coopmans, P. Emonts, K. D. Goodenough, J. Tura Brugu´es,
+and E. van Nieuwenburg, “Optimising entanglement distribution policies
+under classical communication constraints assisted by reinforcement
+learning,” Machine Learning: Science and Technology, 2024.
+[10] L. D’Avossa, A. S. Cacciapuoti, and M. Caleffi, “Modelling quantum
+transduction for multipartite entanglement distribution,” IEEE Transac-
+tions on Communications, 2025.
+[11] R. Mengoni, W. Nadalin, M. Rennela, J. Rotureau, T. Darras, J. Laurat,
+E. Diamanti, and I. Lavdas, “Efficient gate reordering for distributed
+quantum compiling in data centers,” arXiv preprint arXiv:2507.01090,
+2025.
+[12] J. Kim, D. Min, J. Cho, H. Jeong, I. Byun, J. Choi, J. Hong, and J. Kim,
+“A fault-tolerant million qubit-scale distributed quantum computer,” in
+Proceedings of the 29th ACM International Conference on Architectural
+Support for Programming Languages and Operating Systems, Volume 2,
+pp. 1–19, 2024.
+[13] A. Rueda, W. Hease, S. Barzanjeh, and J. M. Fink, “Electro-optic
+entanglement source for microwave to telecom quantum state transfer,”
+npj Quantum Information, vol. 5, no. 1, p. 108, 2019.
+[14] Y.-C. Wei, P.-J. Stas, A. Suleymanzade, G. Baranes, F. Machado, Y. Q.
+Huan, C. M. Knaut, S. W. Ding, M. Merz, E. N. Knall, et al., “Universal
+distributed blind quantum computing with solid-state qubits,” Science,
+vol. 388, no. 6746, pp. 509–513, 2025.
+[15] A. Abane, M. Cubeddu, V. S. Mai, and A. Battou, “Entanglement routing
+in quantum networks: A comprehensive survey,” IEEE Transactions on
+Quantum Engineering, 2025.
+BIOGRAPHIES
+Kuan-Cheng Chen (kuan-cheng.chen17@imperial.ac.uk)
+received the M.Sc. and Ph.D. degrees from Imperial College
+London (ICL), London, UK, where his research focused on
+Quantum Information Processing. He is currently a post-
+doctoral research associate working on distributed quantum
+computing in the Department of Electrical and Electronic
+Engineering, ICL. His research interests include distributed
+quantum computing systems, quantum-based consensus pro-
+tocols, and distributed quantum algorithms.
+Felix Burt (f.burt23@imperial.ac.uk) is a Ph.D. candidate
+at Imperial College London, researching algorithms, compilers
+and protocols for quantum information processing systems. He
+received the M.Sci. degree in Physics and Philosophy from the
+University of Bristol in 2022, researching noise in quantum
+thermal machines. Felix’s current work is focused on dis-
+tributed quantum computing architectures, with a major focus
+on entanglement-efficient compilation of distributed quantum
+circuits. He also works for the Quantum Engineering Science
+and Technology (QuEST) centre at Imperial, helping to bring
+quantum to wider audiences through public engagement.
+Nitish K. Panigrahy (npanigrahy@binghamton.edu) re-
+ceived the Ph.D. degree in computer science from the Uni-
+versity of Massachusetts Amherst in 2021. He is currently an
+Assistant Professor with the School of Computing, The State
+University of New York, Binghamton, NY, USA. His research
+interests include modeling, optimization, and performance
+evaluation of quantum and classical information networks.
+Kin K. Leung (kin.leung@imperial.ac.uk) received the
+B.S. degree from The Chinese University of Hong Kong in
+1980 and the M.S. and Ph.D. degrees from the University
+of California, Los Angeles, in 1982 and 1985, respectively.
+He is currently the Tanaka Chair Professor with the Depart-
+ments of Electrical and Electronic Engineering and Computing
+and Co-Director of the School of Convergence Science in
+Space, Security and Telecoms at Imperial College London.
+Previously, he held positions as Distinguished Member of
+Technical Staff at Bell Labs, Lucent Technologies, Technology
+Consultant at AT&T Labs, and Member and Distinguished
+Member of Technical Staff at AT&T Bell Labs. He is a Fellow
+of the Royal Academy of Engineering, IEEE, and IET, and a
+Member of Academia Europaea. His research interests include
+distributed optimization, machine learning, communication
+networks, wireless systems, mobile and quantum computing,
+and stochastic models. He serves on the editorial boards of
+ACM Computing Surveys and the International Journal of
+Sensor Networks.

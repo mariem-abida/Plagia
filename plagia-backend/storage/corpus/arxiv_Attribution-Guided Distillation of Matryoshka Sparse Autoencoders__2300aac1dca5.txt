@@ -1,0 +1,1048 @@
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+Cristina P. Martin-Linares 1 Jonathan P. Ling 1
+Abstract
+Sparse autoencoders (SAEs) aim to disentangle
+model activations into monosemantic, human-
+interpretable features. In practice, learned fea-
+tures are often redundant and vary across training
+runs and sparsity levels, which makes interpreta-
+tions difficult to transfer and reuse. We introduce
+Distilled Matryoshka Sparse Autoencoders (DM-
+SAEs), a training pipeline that distills a compact
+core of consistently useful features and reuses it
+to train new SAEs.
+DMSAEs run an iterative distillation cycle: train a
+Matryoshka SAE with a shared core, use gradient
+× activation to measure each feature’s contribu-
+tion to next-token loss in the most nested recon-
+struction, and keep only the smallest subset that
+explains a fixed fraction of the attribution. Only
+the core encoder weight vectors are transferred
+across cycles; the core decoder and all non-core
+latents are reinitialized each time.
+On Gemma-2-2B layer 12 residual stream activa-
+tions, seven cycles of distillation (500M tokens,
+65k width) yielded a distilled core of 197 features
+that were repeatedly selected. Training using this
+distilled core improves several SAEBench met-
+rics and demonstrates that consistent sets of latent
+features can be transferred across sparsity levels.
+Introduction
+Sparse autoencoders (SAEs) have become a popular method
+for understanding neural network activations, mapping
+dense model representations into sparse latent spaces that
+aim to encode distinct human-interpretable concepts. De-
+spite their success, SAEs face fundamental interpretability
+challenges when scaled up, including feature splitting, ab-
+sorption, and redundancy. For instance, a broad concept
+such as animal may fragment into overly specialized fea-
+1Department of Pathology, Johns Hopkins University, Bal-
+timore, USA. Correspondence to: Cristina P. Martin-Linares
+<cristina.martinlinares@jhu.edu>.
+Preprint. January 1, 2026.
+tures like ”dog” or ”cat,” or a general concept may par-
+tially split, creating systematic blind spots in the represen-
+tation (Chanin et al., 2024). These phenomena degrade
+interpretability and limit the utility of SAEs in downstream
+tasks (Bricken et al., 2023; Gao et al., 2024).
+Matryoshka SAEs represent a recent advancement, introduc-
+ing hierarchical nested dictionaries trained simultaneously
+to preserve general features and reduce feature absorption.
+This nested approach successfully retains broad concepts
+in smaller dictionaries and progressively specializes con-
+cepts in larger dictionaries, improving interpretability across
+scales (Bussmann et al., 2025). However, despite this in-
+novation, Matryoshka SAEs still exhibit redundancy, am-
+biguity, and instability in their latent features, leading to
+interpretability and computational challenges (Leask et al.,
+2025). Recent work argues that mechanistic interpretability
+should explicitly prioritize feature consistency to support re-
+producibility and reuse of interpretations (Song et al., 2025;
+Paulo & Belrose, 2025).
+In this work, we introduce Distilled Matryoshka Sparse
+Autoencoders (DMSAEs), an attribution-guided extension
+of Matryoshka SAEs that distills a compact, reusable set
+of consistently high-value latent features. DMSAEs run
+a sequence of train-and-select distillation cycles. In each
+cycle, we train a Matryoshka SAE that reserves a shared core
+of latents that are included in every prefix reconstruction.
+After training, we score the latents used in the most nested
+reconstruction (core + prefix-0) using gradient × activation
+attribution to the model’s next-token loss, and we select
+the smallest subset whose cumulative attribution reaches
+a fixed fraction of the total attribution. We then restart
+training with this selected subset as the next cycle’s core by
+copying and freezing only the encoder weight vectors, while
+reinitializing the decoder and all non-core latents. Iterating
+this cycle helps identify features that remain consistently
+useful across restarts, aiming to improve feature consistency
+across runs and sparsity levels.
+Contributions
+(1) Attribution-guided feature distillation. We introduce
+DMSAEs, an iterative train-and-select pipeline that uses gra-
+dient × activation to distill a compact set of latents (core).
+(2) Feature consistency via transferable encoder directions.
+1
+arXiv:2512.24975v1 [cs.LG] 31 Dec 2025
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+By transferring and freezing only core encoder weight vec-
+tors, DMSAEs can enforce a consistent set of features across
+checkpoints and sparsity levels.
+(3) Improved SAEBench performance. On Gemma-2-2B
+layer 12 activations, we distill a 197-latent core over seven
+training cycles and use this core to improve on several
+SAEBench metrics versus Matryoshka SAE baselines.
+Background
+0.1. Sparse Autoencoders can disentangle polysemantic
+features
+Early mechanistic interpretability work focused on inspect-
+ing individual latents, attention heads, and MLP units. How-
+ever, polysemanticity complicated these approaches because
+a single unit could activate for several unrelated features
+depending on the context (Olah et al., 2020; Elhage et al.,
+2022). Sparse autoencoders (SAEs) were proposed as a
+way to move from neuron-level to feature-level analysis by
+learning a sparse, overcomplete basis over model activations
+(Bricken et al., 2023; Cunningham et al., 2023).
+Given an activation vector x ∈Rd taken from a layer of a
+language model, an SAE learns an encoder and decoder
+f(x) = ReLU(Wencx + benc),
+(1)
+ˆx = Wdecf(x) + bdec.
+(2)
+where f(x) ∈Rm is constrained to be sparse and non-
+negative, and each dimension of f is interpreted as a can-
+didate ”feature”. Variants differ primarily in how sparsity
+is enforced, e.g. ℓ1 penalties, TopK-style ℓ0 constraints, or
+learned thresholds (Gao et al., 2024; Bussmann et al., 2024).
+This framework has enabled a wide range of interpretabil-
+ity applications: manual feature analysis (Bricken et al.,
+2023), automated feature labelling (Gao et al., 2024), cir-
+cuit discovery (Marks et al., 2025), attention-head analysis
+(Kissane et al., 2024), and model comparison via sparse
+”cross-coders” (Lindsey et al., 2024). In principle, SAEs
+aim to map activations to sparse latents that correspond to
+distinct, human-interpretable features.
+0.2. Limitations of Sparse Autoencoders
+In practice, current SAEs do not always achieve this ideal.
+One key consideration is that SAE training minimizes a loss
+of the form
+L(x) = ∥x −ˆx∥2
+2 + λ sparsity(f(x)),
+but only the reconstruction term is directly tied to the un-
+derlying model behavior. Sparsity regularization is a proxy
+for interpretability, and aggressively minimizing it produces
+several characteristic failure modes.
+Feature splitting and redundancy.
+When the dictionary
+is large relative to the intrinsic dimensionality of the activa-
+tions, sparsity pressure encourages SAEs to fragment broad
+concepts into many narrowly specialized latents (Bricken
+et al., 2023). For example, a single ”punctuation marks”
+feature may fragment into separate latents for commas, pe-
+riods, and question marks, with no latent corresponding to
+the more abstract category that may actually be the behav-
+iorally relevant feature for the base model. As dictionary
+size increases, this fragmentation often continues, leading
+to many latents that are only more selective versions of ex-
+isting features rather than genuinely new concepts (Leask
+et al., 2025; Karvonen et al., 2025).
+Feature absorption.
+A related but more difficult to mea-
+sure failure mode is feature absorption (Chanin et al., 2024).
+Instead of fully splitting, a general latent develops system-
+atic gaps whenever more specific latents can take over. For
+instance, a latent that initially fires on numerical quantities
+may stop activating on dates or percentages once separate,
+specialized latents for dates and percentages emerge. Over
+time, latents affected by absorption can cover fewer cases,
+making them less reliable for downstream tasks and harder
+to interpret.
+Feature composition and entanglement.
+Sparsity also
+incentivizes composite features: when two underlying fac-
+tors co-occur frequently (e.g. color and shape), the SAE
+can minimize the number of active latents by representing
+their conjunctions (”red triangle”) instead of the indepen-
+dent factors (”red”, ”triangle”) (Wattenberg & Vi´egas, 2024).
+Meta-SAE analyses suggest that many SAE latents are not
+truly independent. Instead, a single latent can often be ap-
+proximated as a sparse mixture of a smaller set of more
+basic “meta-latents.” This implies that even after training an
+SAE, the learned features can still overlap and share struc-
+ture, meaning some superposition remains in the dictionary
+(Leask et al., 2025). High cosine similarity among decoder
+vectors and the large variance explained by meta-SAEs both
+suggest that standard architectures have a lot of redundant
+and composite features (Gao et al., 2024; Bussmann et al.,
+2024).
+Scaling pathologies and downstream performance.
+These problems become more severe as dictionary size
+grows. Larger SAEs consistently achieve better reconstruc-
+tion loss (Gao et al., 2024; Templeton et al., 2024), but their
+performance on downstream tasks often plateaus or deterio-
+rates (Karvonen et al., 2025). Intuitively, the model exploits
+the additional capacity to rearrange information in ways that
+are favorable for the reconstruction and sparsity objective,
+but worse for human-interpretable disentanglement.
+Recent benchmarks reinforce a cautious view of the current
+2
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+state of the field. SAEBench compares many SAE architec-
+tures against simple baselines and finds that linear probes
+or shallow MLPs trained directly on raw activations often
+match or exceed the performance of SAE-derived features
+when labeled data is available (Karvonen et al., 2025). Thus,
+SAEs do not outperform other methods for supervised down-
+stream tasks and instead introduce a unique set of trade-offs.
+Their clearest advantage is unsupervised feature discovery:
+they can reveal structure in model activations without cu-
+rated labels, and resulting features can in theory be reused
+across analyses. (Bricken et al., 2023; Templeton et al.,
+2024).
+In summary, architectural and objective improvements
+are still needed before SAEs can reliably discover stable,
+monosemantic features at scale.
+0.3. Matryoshka SAEs can address some SAE
+limitations
+Matryoshka Representation Learning (MRL) (Kusupati
+et al., 2024) trains a single representation with a broad-to-
+specific structure. It optimizes losses over multiple nested
+prefixes of the embedding, so early coordinates capture
+broad features and later coordinates are more specific.
+Matryoshka Sparse Autoencoders (MSAEs) adapt this idea
+to the SAE setting by training multiple nested dictionaries
+of increasing size inside a single autoencoder (Bussmann
+et al., 2025). MSAEs define a sequence of prefix sizes M =
+{m1 < m2 < · · · < mn} and optimize reconstruction
+losses using only the first mi latents for every mi ∈M.
+Early latents must therefore carry enough information to
+reconstruct the input on their own and are encouraged to
+capture broad, high-frequency features, while later latents
+can specialize in increasingly specific refinements without
+being allowed to absorb or overwrite the earlier ones.
+When evaluated in SAEBench on Gemma-2-2B, MSAEs
+achieve competitive reconstruction performance while sub-
+stantially reducing feature absorption, feature splitting, and
+feature composition relative to other SAE architectures (Kar-
+vonen et al., 2025). They also tend to perform best or near-
+best on sparse probing, targeted concept removal, and spu-
+rious correlation removal, and their performance improves
+or remains stable as dictionary size increases. These results
+make MSAEs a strong candidate for interpretability work
+that must scale to large dictionaries.
+However, Matryoshka training does not fully resolve SAE
+pathologies. Even within an MSAE, latents at a given prefix
+can remain redundant, composed, or difficult to interpret.
+Hierarchical constraints enforce that earlier features remain
+general and useful, but they do not guarantee that the same
+high-value features are reused consistently across training
+runs or across sparsity levels, and they introduce additional
+computational cost via multiple reconstruction heads. This
+motivates methods that can further reduce redundancy and
+stabilize feature semantics on top of Matryoshka SAEs.
+Distilled Matryoshka Sparse Autoencoders
+DMSAEs build on Matryoshka SAEs by reserving a small
+set of latent features, termed the ”core”, that is used in
+every prefix reconstruction during a training run. After each
+run, latents are scored by how much they contribute to the
+base model’s next-token loss and select a new core from
+the highest-scoring features. We use the word distillation to
+mean selecting a compact set of encoder directions that stay
+useful across training cycles.
+Core placement and prefix structure.
+Let the total dictionary size be K. We index cycles by t =
+0, 1, . . . , T, where t = 0 denotes the released SAEBench
+Matryoshka SAE checkpoint (not trained by us) and cycles
+t ≥1 are the train-and-select training runs in our distillation
+procedure. We use the convention that C(t) denotes the
+set of latents selected after cycle t by the attribution rule
+below (for t = 0 this selection is computed directly from the
+SAEBench checkpoint) and then used as the frozen core in
+cycle t+1. In cycle t+1, we place the core latents as the first
+|C(t)| indices in the dictionary, followed by non-core latents
+partitioned into Matryoshka groups. Let M = {m0 <
+m1 < · · · < mL} denote cumulative non-core prefix sizes.
+The reconstruction losses begin at core + prefix-0 (size
+m0 of non-core), then core + prefix-1, etc. There is no
+reconstruction term for the core alone. An overview of the
+train-and-select workflow is shown in Figure 1.
+Core and two-group sparsity
+DMSAEs split the latent dictionary into a core and a non-
+core set. Although there is no reconstruction loss for the
+core alone, the core contributes to every Matryoshka recon-
+struction during each training cycle, and its encoder weight
+vectors are frozen. The non-core latents remain fully train-
+able.
+During distillation training cycles, the core is kept dense so
+that attribution scores are not confounded by competition
+for the sparsity budget. We instead apply BatchTopK only
+to the non-core latents so that the expected non-core L0
+remains approximately knon-core active non-core latents per
+token. Fixing this non-core activity budget keeps non-core
+representations approximately consistent across distillation
+cycles despite changes in core size.
+3
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+Algorithm 1 DMSAE train-and-select distillation (dense
+core)
+Require: SAEBench Matryoshka SAE checkpoint (cycle
+t=0); dataset D; total width K; non-core prefix sizes
+M = {m0 < · · · < mL}; cycles T; sparsity target k;
+quantile q; attribution coverage τ.
+Ensure: Selected cores {C(t)}T
+t=0 and distilled core C⋆.
+1: Cycle 0 (no training):
+set c
+←
+0, P (0)
+←
+{0, . . . , m0
+−
+1},
+and
+compute
+C(0)
+←
+SELECTCOREBYATTRIBUTION(θ(0), P (0), q, τ, k, c).
+2: for t = 1 to T do
+3:
+c ←|C(t−1)|.
+4:
+Restart: initialize θ(t)
+0 .
+5:
+Set Wenc[0:c, :] ←W (t−1)
+enc
+[C(t−1), :] and freeze
+rows 0:c.
+6:
+Reinitialize:
+(i) all encoder biases benc, (ii) all
+non-core encoder rows c:K, (iii) the entire decoder
+(Wdec, bdec).
+7:
+θ(t) ←arg min
+θ∈Θt
+Ex∼D
+h X
+m∈M
+∥x −ˆxm(x; θ, ˜f)∥2
+2
++ α Laux(x; θ, ˜f)
+i
+,
+where ˜f(x; θ, c, k) :=
+ (f(x; θ))0:c,
+BatchTopKk((f(x; θ))c:K)
+
+.
+8:
+Reselect core:
+define candidate pool P (t)
+=
+{0, . . . , c + m0 −1} (core+prefix-0).
+9:
+C(t) ←SELECTCOREBYATTRIBUTION(θ(t), P (t),
+q, τ, k, c).
+10: end for
+11: Distilled core: C⋆←C(T ) ∩C(T −1).
+˜f(x; θ, c, kNC) :=
+
+(f(x; θ))0:c,
+BatchTopKkNC
+ (f(x; θ))c:K
+
+.
+(3)
+When benchmarking at a SAEBench target sparsity k for a
+total dictionary size K, we scale the non-core BatchTopK
+target to
+knon-core = round
+
+k · K −|C⋆|
+K
+
+,
+(4)
+so that the fraction of non-core latents permitted to be active
+matches the baseline setting. When the core is dense, the
+measured global activity decomposes as in Eq. (9).
+Algorithm 1 provides end-to-end pseudocode for the train-
+and-select distillation procedure, including (i) cycle index-
+ing and core placement, (ii) within-cycle Matryoshka train-
+ing with dense core, and (iii) attribution-based core replace-
+ment. The attribution ranking and coverage-based selection
+rule used to form C(t) from the candidate pool P (t) are
+given explicitly in Algorithm 2 (Appendix F).
+Training objective (within a cycle).
+Let ˆxm(x) denote
+the reconstruction using the core latents together with the
+first m non-core latents. Each cycle minimizes the Ma-
+tryoshka reconstruction loss
+LDMSAE(x) =
+X
+m∈M
+∥x −ˆxm(x)∥2
+2 + α Laux(x),
+(5)
+where Laux denotes the standard auxiliary loss used in
+BatchTopK-style SAEs.
+What is transferred, what is frozen, what is reinitialized.
+At the end of cycle t, we obtain a selected set C(t) (defined
+by attribution below). To start cycle t+1, we initialize
+a new model by copying the encoder weight vectors for
+the selected core latents C(t) into the first |C(t)| rows of
+Wenc and freezing those rows during cycle t+1. We do not
+transfer encoder biases, and we reinitialize: (i) all non-core
+encoder weights, (ii) all encoder biases (core and non-core),
+and (iii) the entire decoder (core and non-core, including
+bdec). Thus the only information carried across cycles is the
+set of frozen encoder directions.
+Attribution-guided core selection (what we actually com-
+pute).
+After each cycle t, we score each latent in the
+most nested reconstruction prefix (core + prefix-0) by how
+strongly it contributes along directions that the base model’s
+next-token loss is locally sensitive to. For token position
+u, let xu ∈Rd be the captured activation vector (e.g. a
+residual-stream vector) and let
+gu = ∂LNT
+∂xu
+∈Rd
+be the gradient of next-token cross-entropy loss with respect
+to that activation. Let au,j be the SAE activation of latent
+j at xu after applying the relevant BatchTopK masking for
+the candidate pool (i.e., in the smallest reconstruction prefix,
+core + prefix-0), and let wdec
+j
+be latent j’s decoder direction.
+Define its unit direction ¯wdec
+j
+= wdec
+j
+/∥wdec
+j
+∥2. We define
+the per-token gradient projection
+su,j = g⊤
+u ¯wdec
+j
+,
+and the per-token attribution magnitude (gradient × activa-
+tion)
+GxAu,j =
+au,j su,j
+.
+To aggregate over sampled token positions, we use a high
+quantile (e.g. q=0.99) because per-token |au,jsu,j| is typi-
+cally heavy-tailed; a high quantile emphasizes latents that
+achieve large attribution repeatedly while being less sensi-
+tive than a max to single outliers:
+4
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+Figure 1. DMSAE distillation schematic. Each cycle trains a Matryoshka SAE where the smallest reconstruction uses core + prefix-0
+and larger reconstructions use progressively larger non-core prefixes. After training, we score latents in core + prefix-0 using a gradient ×
+activation score for next-token loss, and then choose the smallest set that accounts for a target fraction (τ) of the total attribution. This set
+becomes the core for the next cycle. Across cycles, we copy and freeze only the core encoder weight vectors, while core encoder biases,
+core decoder weights and biases, and all non-core latents are randomly reinitialized.
+Aj = Quantileu
+ GxAu,j; q
+
+.
+(6)
+We then sort candidate latents by Aj and select the small-
+est set whose cumulative score reaches a target attribution
+coverage τ:
+C(t) = arg min
+S⊆P (t)
+
+
+|S| :
+X
+j∈S
+Aj ≥τ
+X
+j∈P (t)
+Aj
+
+
+.
+(7)
+In practice we compute these scores over sampled token po-
+sitions and then form C(t) by sorting and taking the smallest
+prefix achieving attribution coverage τ; see Algorithm 2
+(Appendix F) for pseudocode, including the precise Batch-
+TopK masking used for the candidate pool.
+where P (t) is the candidate pool, defined as exactly the
+latents used in the smallest reconstruction loss term in cycle
+t (the current core union prefix-0). In our experiments we
+use τ=0.9.
+Two-stage training procedure: core distillation and
+distilled-core transfer
+The full train-and-select core distillation stage corresponds
+to running Algorithm 1 for T cycles at fixed non-core spar-
+sity (e.g. k=320), while the distilled-core transfer stage
+(training new DMSAEs at multiple target sparsities using
+the fixed C⋆) is summarized in Algorithm 3 (Appendix F).
+Core distillation. We run T train-and-select cycles at a fixed
+non-core sparsity (here k=320). In each cycle, we train a
+DMSAE, compute attribution scores for latents in the small-
+est reconstruction prefix (core + prefix-0), and define the
+next cycle’s core C(t) as the smallest subset whose cumula-
+tive attribution reaches the target coverage. Repeating this
+yields a sequence of candidate cores {C(t)} (Fig. 2).
+Distilled-core selection and transfer. We then extract a
+compact set of latents from cycle 7 that persisted across
+training cycles. In our experiments, we define the distilled
+core as the subset of latents from cycle 7 that persisted
+through successive training cycles,
+C⋆:= C(T ) ∩C(T −1).
+(8)
+yielding 197 latents. We train new DMSAEs from scratch
+at multiple sparsity targets, freezing only the encoder
+weight vectors indexed by C⋆and reinitializing all remain-
+ing parameters; these models are the ones evaluated by
+SAEBench.
+5
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+Figure 2. Evolution of core latents across distillation cycles (target sparsity k=320, selection threshold τ=0.9). After each training cycle
+t (including t = 0, the SAEBench checkpoint), we rank latent features by their contribution to the language model’s next-token loss and
+select the smallest set C(t) whose cumulative score reaches 90% of the total attribution. The y-axis shows the number of latents selected
+into the core at the end of cycle t. Colors indicate when a feature was first selected (the earliest cycle in which it appears in any C(t)),
+showing how later cycles combine previously discovered latents with newly identified ones. For benchmarking, we defined the distilled
+core as the intersection of the final two cycle cores, yielding 197 latents.
+Core/non-core sparsity variants.
+Our main results use
+the dense core DMSAE variant; Appendix E reports a sparse
+core ablation for direct sparsity-matched comparison to
+SAEBench.
+Dense core variant. We apply BatchTopK only to non-
+core latents, using the two-group masking rule in Eq. (3).
+For SAEBench plots indexed by a target sparsity k and total
+dictionary size K, we use the scaled non-core target knon-core
+defined in Eq. (4).
+The effective expected global sparsity is
+L0,global = L0,core + L0,non-core.
+(9)
+In the dense core variant, BatchTopK calibration keeps
+L0,non-core ≈knon-core by construction, and L0,core is mea-
+sured empirically.
+Sparse core variant. We apply the standard global Batch-
+TopK constraint (target k) across the full dictionary (core
+included). The only architectural difference from vanilla
+MSAE is that the core encoder weight vectors are frozen.
+Experiments
+We evaluate Distilled Matryoshka SAEs (DMSAEs) on the
+SAEBench interpretability benchmark suite using activa-
+tions from layer 12 of Gemma-2-2B. Our experiments pro-
+ceed in three stages: (1) selecting a sparsity level and pro-
+motion threshold that yield stable cores under distillation,
+(2) running a longer distillation schedule at the chosen hy-
+perparameters to obtain a compact ”distilled core”, and
+(3) benchmarking DMSAEs built from this distilled core
+against the Matryoshka SAEs in SAEBench. Throughout,
+we follow the SAEBench evaluation protocol and report the
+same set of metrics.
+Selecting sparsity and promotion threshold.
+We sweep
+over target sparsities k ∈{20, 40, 80, 120, . . . , 640} and
+run four train-and-select training cycles per setting (cy-
+cles 1-4), starting from the SAEBench Matryoshka SAE
+checkpoint (cycle 0). In each cycle, we compute gradient
+× activation attribution scores as defined in Eq. (6) and
+form an attribution coverage curve: the cumulative fraction
+of cumulative attribution score captured by the top-ranked
+latents.
+We first sweep the attribution coverage threshold (τ) from
+τ=0.1 to τ=1.0 and find that promoting more latents
+steadily reduces reconstruction loss and increases fraction of
+variance explained, with τ=0.9 close to τ=1.0 (Figure 5).
+Fixing the coverage threshold at τ=0.9, we then compare
+cross-cycle carryover of selected core latents as a function
+of sparsity. As shown in Figure 6, very low sparsities (k =
+20-80) yield little carryover, while very large k (a weak
+sparsity constraint / high activity, e.g. k=640) can lead to
+degenerate optimization behavior (e.g. collapse at k=640).
+Intermediate sparsities exhibit substantially higher reuse
+across cycles; we therefore focus subsequent experiments
+on this intermediate regime and use k=320 in all distillation
+6
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+Figure 3. Distillation uncovers useful latents. We trained two DMSAEs (k = 320), one that uses a core derived from our distillation
+procedure (blue; Fig. 2, cycle 7) and another that uses a randomly initialized core of equivalent size (red). The y-axis shows the mean
+number of core latents active per sample during training (L0,core). The model with a randomly initialized core drives L0,core towards zero
+during training, while the model with the distilled core continues to rely on the core throughout training. This suggests that distillation
+identifies core latents that are systematically useful for reconstruction.
+runs reported below.
+Multi-cycle distillation and the distilled core.
+Having
+identified k=320 and an attribution coverage threshold
+τ=0.9 as our working hyperparameters, we run T=7 train-
+and-select training cycles (cycles 1-7) on 500M tokens from
+The Pile. We denote by cycle 0 the released SAEBench
+Matryoshka SAE checkpoint (not trained by us) and com-
+pute an initial promoted core C(0) from this checkpoint
+using Eq. (6) to seed cycle 1. Each subsequent cycle is
+a restart: we transfer and freeze only the selected encoder
+weight vectors for the next cycle’s core, and we reinitialize
+all non-core parameters and the entire decoder.
+At the end of each cycle t, we score latents in the smallest
+reconstruction prefix (core + prefix-0) using the gradient ×
+activation attribution in Eq. (6), sort latents by attribution,
+and select the smallest set C(t) whose cumulative attribu-
+tion reaches 90% of the total attribution score. Figure 2
+summarizes how the selected sets evolve across cycles and
+shows that, while many latents are newly selected in each
+cycle, a subset persists across multiple restarts.
+After completing T=7 cycles, we extract a compact distilled
+core by retaining only latents that persist through successive
+training cycles. We define the distilled core C⋆as in Eq. (8).
+However, to first confirm that C⋆reflects genuinely useful
+encoder directions, we repeat the same procedure with a
+randomly initialized core of the same size. While the non-
+core BatchTopK budget is fixed by construction (Eq. (4)),
+the random-core model drives L0,core toward zero during
+training, whereas the distilled-core model continues to rely
+on the core for reconstruction (Figure 3). This indicates
+that attribution-guided distillation is essential for obtaining
+a core that remains useful under retraining.
+Building DMSAEs from the distilled core.
+Using the
+distilled core C⋆(197 latents), we train new models with
+random initialization at each target sparsity: we initialize all
+non-core parameters randomly, initialize the core encoder
+weight vectors from the distilled core, and freeze only these
+core encoder weights. Thus, the training cost for each model
+matches the SAEBench baselines and the computationally
+expensive multi-cycle training procedure is used only to
+identify C⋆at k = 320.
+For SAEBench benchmarking we evaluate two sparsity
+regimes. In the dense core regime (used in the main pa-
+per), we apply top k only to the non-core latents with the
+proportionally scaled integer with knon-core set by Eq. (4),
+and do not sparsify the core. In the sparse core regime (Ap-
+pendix E), we apply standard global top k across the entire
+dictionary (core included), which is otherwise identical to
+the vanilla MSAE setup except for the frozen core encoder
+weight vectors.
+Figure 4 summarizes SAEBench metrics for DMSAEs and
+Matryoshka SAEs across sparsities.
+We summarize this fixed-core training procedure (including
+the dense core knon-core scaling in Eq. (4) and the sparse core
+ablation) in Algorithm 3 (Appendix F).
+Sparsity matching.
+Our primary SAEBench results use
+the dense core DMSAE variant, where sparsity is only en-
+forced on the non-core latents. We use this setting for core
+discovery because allowing the core to activate freely max-
+7
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+Figure 4. SAEBench performance across sparsities (dense core DMSAE). SAEBench metrics versus measured sparsity (mean number of
+active latents) for Distilled MSAE (DMSAE) with a dense core, compared with Matryoshka SAE (MSAE) and BatchTopK, evaluated
+on Gemma-2-2B layer 12 activations (all SAEs have a dictionary size of 65k). Here, the DMSAE core (197 latents) is taken from the
+distilled core produced by the k=320 distillation run (Figure 2). We then used this core to train new DMSAEs from scratch at each target
+sparsity (k ∈{20, 40, 80, 160, 320, 640}). Core encoder weights are frozen while sparsity is enforced on the remaining non-core latents.
+DMSAE matches or improves several metrics, particularly absorption and RAVEL, but AutoInterp drops sharply at the lowest sparsities.
+For a more direct comparison to the SAEBench baselines, Appendix E reports a sparsity-matched setting in which BatchTopK is applied
+globally (including the core); these runs exhibit similar overall trends (Fig. 7).
+imizes its opportunity to contribute to reconstruction and
+yields a more reliable attribution signal for promotion. A
+second motivation is conceptual: the core encoder directions
+are distilled from models trained under sparse coding, so the
+transferred encoder vectors already represent features that
+are monosemantic and non-redundant. Thus, we treat the
+repeatedly selected core as a small set of validated encoder
+directions and allow them to fire whenever relevant, rather
+than force them to compete with newly learned non-core
+features for the sparsity budget.
+Dense core models are therefore not strictly sparsity-
+matched to vanilla Matryoshka SAEs at the same nominal
+target k, because the measured global L0 also includes core
+activity. To make a more explicit comparison, we have
+additionally trained sparse core DMSAEs that apply the
+standard global sparsity constraint across the full dictio-
+nary (core included). These sparse core DMSAEs differ
+from vanilla MSAE only in the freezing of the core encoder
+weight vectors (Appendix E; Figure 7) and follow similar
+overall trends compared to the core dense DMSAEs.
+Limitations
+The DMSAE method requires multiple cycles of distillation
+to identify a stable core, leading to much higher computa-
+tional costs relative to training a single Matryoshka SAE.
+However, once a high-value core has been identified, train-
+ing and evaluating DMSAEs with a fixed core costs the
+same as training a standard Matryoshka SAE. It is likely
+that useful latents can be identified more efficiently than via
+multi-cycle distillation.
+Core selection depends on the attribution method. Gradient
+× activation is a fast first-order approximation, but may be
+suboptimal. Latent ablation offers a more direct measure of
+importance, but at higher computational cost.
+Freezing encoder weight vectors stabilize each core latent’s
+detection direction, which largely determines what it re-
+sponds to. However, because the core encoder biases and
+decoder weights and biases are reinitialized, a latent’s thresh-
+old, firing rate, and contribution to reconstruction can still
+change across cycles. Thus, DMSAEs enforce consistency
+at the level of detection directions, but do not guarantee
+identical latent behavior across retrainings.
+8
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+Finally, we do not enforce sparsity on the distilled core dur-
+ing transfer, because these directions were selected under
+sparse training and are intended to remain available when-
+ever they are useful. This can increase the total number of
+active latents, so comparisons can depend on how sparsity
+is defined. Therefore, Figure 7 reports a sparsity-matched
+control (global BatchTopK that includes the core) for direct
+comparison to baseline Matryoshka SAEs, and these results
+show the same qualitative trends as dense core DMSAEs.
+Conclusion
+We introduce Distilled Matryoshka Sparse Autoencoders
+(DMSAEs), which use an attribution-guided training strat-
+egy to distill a compact core of reusable latent features from
+Matryoshka SAEs. By transferring and freezing only core
+encoder directions across cycles, DMSAEs promote a con-
+sistent set of high-value features. This provides a practical
+route toward feature consistency across SAEs and transfer-
+ability of interpretations across training runs and sparsity
+levels. On Gemma-2-2B layer 12 activations, distillation
+yields a 197-latent core and improves multiple SAEBench
+metrics compared to Matryoshka SAE baselines. Future
+work focuses on reducing the computational cost of distilla-
+tion and extending the DMSAE framework to other models
+and scientific domains.
+References
+Bricken, T., Templeton, A., Batson, J., Chen, B., Jermyn,
+A., Conerly, T., Turner, N., Anil, C., Denison, C., Askell,
+A., and et al. Towards monosemanticity: Decomposing
+language models with dictionary learning, 2023.
+Bussmann, B., Leask, P., and Nanda, N. Batchtopk sparse
+autoencoders, 2024.
+URL https://arxiv.org/
+abs/2412.06410.
+Bussmann, B., Nabeshima, N., Karvonen, A., and Nanda, N.
+Learning multi-level features with matryoshka sparse au-
+toencoders, 2025. URL https://arxiv.org/abs/
+2503.17547.
+Cand`es, E. J., Li, X., Ma, Y., and Wright, J. Robust principal
+component analysis? Journal of the ACM, 58(3), 2011.
+Chanin, D., Wilken-Smith, J., Dulka, T., Bhatnagar, H.,
+and Bloom, J. A is for absorption: Studying feature
+splitting and absorption in sparse autoencoders, 2024.
+URL https://arxiv.org/abs/2409.14507.
+Cunningham, H., Ewart, A., Riggs, L., Huben, R., and
+Sharkey, L. Sparse autoencoders find highly interpretable
+features in language models, 2023. URL https://
+arxiv.org/abs/2309.08600.
+Elhage, N., Hume, T., Olsson, C., Schiefer, N., Henighan,
+T., Kravec, S., Hatfield-Dodds, Z., Lasenby, R., Drain,
+D., Chen, C., Grosse, R., McCandlish, S., Kaplan, J.,
+Amodei, D., Wattenberg, M., and Olah, C. Toy models
+of superposition, 2022. URL https://arxiv.org/
+abs/2209.10652.
+Gao, L., la Tour, T. D., Tillman, H., Goh, G., Troll, R.,
+Radford, A., Sutskever, I., Leike, J., and Wu, J. Scaling
+and evaluating sparse autoencoders, 2024. URL https:
+//arxiv.org/abs/2406.04093.
+Jalali, A., Sanghavi, S., Ruan, C., and Xing, E. P. A dirty
+model for multi-task learning. In Advances in Neural
+Information Processing Systems, 2010.
+Jenatton, R., Mairal, J., Obozinski, G., and Bach, F. Proxi-
+mal methods for hierarchical sparse coding. In Proceed-
+ings of the 28th International Conference on Machine
+Learning (ICML), 2011.
+Karvonen, A., Rager, C., Lin, J., Tigges, C., Bloom, J.,
+Chanin, D., Lau, Y.-T., Farrell, E., McDougall, C., Ayon-
+rinde, K., Wearden, M., Conmy, A., Marks, S., and Nanda,
+N. Saebench: A comprehensive benchmark for sparse
+autoencoders in language model interpretability, 2025.
+URL https://arxiv.org/abs/2503.09532.
+Kissane, C., Krzyzanowski, R., Bloom, J. I., Conmy, A.,
+and Nanda, N. Interpreting attention layer outputs with
+sparse autoencoders, 2024. URL https://arxiv.
+org/abs/2406.17759.
+Kusupati, A., Bhatt, G., Rege, A., Wallingford, M., Sinha,
+A., Ramanujan, V., Howard-Snyder, W., Chen, K.,
+Kakade, S., Jain, P., and Farhadi, A. Matryoshka represen-
+tation learning, 2024. URL https://arxiv.org/
+abs/2205.13147.
+Leask, P., Bussmann, B., Pearce, M., Bloom, J., Tigges, C.,
+Moubayed, N. A., Sharkey, L., and Nanda, N. Sparse
+autoencoders do not find canonical units of analysis, 2025.
+URL https://arxiv.org/abs/2502.04878.
+Lindsey,
+J.,
+Templeton,
+A.,
+Marcus,
+J.,
+Conerly,
+T.,
+Batson,
+J.,
+and
+Olah,
+C.
+Sparse
+cross-
+coders
+for
+cross-layer
+features
+and
+model
+diff-
+ing.
+https://transformer-circuits.pub/
+2024/crosscoders/index.html, 2024.
+Ac-
+cessed: 2025-12-26.
+Marks, S., Rager, C., Michaud, E. J., Belinkov, Y., Bau,
+D., and Mueller, A. Sparse feature circuits: Discovering
+and editing interpretable causal graphs in language mod-
+els, 2025. URL https://arxiv.org/abs/2403.
+19647.
+9
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+Obozinski, G., Wainwright, M. J., and Jordan, M. I. Support
+union recovery in high-dimensional multivariate regres-
+sion.
+In Advances in Neural Information Processing
+Systems, 2010.
+Olah, C., Cammarata, N., Schubert, L., Goh, G., Petrov,
+M., and Carter, S.
+Zoom in: An introduction to cir-
+cuits. Distill, 5(3):e00024–001, 2020. doi: 10.23915/
+distill.00024. URL https://distill.pub/2020/
+circuits/.
+Paulo, G. and Belrose, N. Sparse autoencoders trained
+on the same data learn different features, 2025. URL
+https://arxiv.org/abs/2501.16615.
+Song, X., Muhamed, A., Zheng, Y., Kong, L., Tang, Z., Diab,
+M. T., Smith, V., and Zhang, K. Position: Mechanistic
+interpretability should prioritize feature consistency in
+saes, 2025. URL https://arxiv.org/abs/2505.
+20254.
+Templeton, A., Conerly, T., Marcus, J., Lindsey, J., Bricken,
+T., Chen, B., Pearce, A., Citro, C., Ameisen, E., Jones,
+A., Cunningham, H., Turner, N. L., McDougall, C.,
+MacDiarmid, M., Tamkin, A., Durmus, E., Hume, T.,
+Mosconi, F., Freeman, C. D., Sumers, T. R., Rees, E., Bat-
+son, J., Jermyn, A., Carter, S., Olah, C., and Henighan,
+T. Scaling monosemanticity: Extracting interpretable
+features from claude 3 sonnet. Transformer Circuits,
+2024. URL https://transformer-circuits.
+pub/2024/scaling-monosemanticity/.
+Wattenberg, M. and Vi´egas, F. B. Relational composition in
+neural networks: A survey and call to action, 2024. URL
+https://arxiv.org/abs/2407.14662.
+Yang, E. and Ravikumar, P. Dirty statistical models. In Ad-
+vances in Neural Information Processing Systems, 2013.
+Zhao, P., Rocha, G., and Yu, B. The composite absolute
+penalties family for grouped and hierarchical variable
+selection. The Annals of Statistics, 37(6A):3468–3497,
+2009.
+10
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+A. Core and non-core sparsity: formal statements
+This appendix records simple bookkeeping facts for the two-group sparsity scheme used by DMSAEs.
+Let C and N denote the index sets of core and non-core latents. For an input x, let f(x) ∈RK be the post-nonlinearity
+latent vector (before any top-k / BatchTopK masking). Let ˜f(x) denote the latent vector actually used for reconstruction
+after applying the relevant sparsity mechanism: in dense core variants we apply BatchTopK only to the non-core coordinates,
+while in sparse core variants we apply BatchTopK globally across all K latents. We define the active sets using ˜f:
+SC(x) = {j ∈C : ˜fj(x) > 0},
+SN(x) = {j ∈N : ˜fj(x) > 0}.
+We denote the corresponding average sparsities by
+L0,core = Ex|SC(x)|,
+L0,non-core = Ex|SN(x)|.
+Remark (Non-core budget calibration).
+In the dense core variant, BatchTopK is applied only to the non-core coordinates
+and is calibrated to a fixed target ¯L0,non-core (equivalently, a fixed knon-core). Consequently, the expected non-core activity
+L0,non-core is approximately invariant across distillation cycles even as the core size changes; the global activity L0,global can
+still vary due to changes in L0,core.
+Proposition 2 (Global L0 decomposition).
+Under the definitions above, the expected global sparsity decomposes as in
+Eq. (9).
+Proof. SC(x) and SN(x) are disjoint by construction, so |SC(x) ∪SN(x)| = |SC(x)| + |SN(x)|. Taking expectations
+yields Eq. (9).
+□
+These identities justify Eq. (9): in dense core variants, the effective global sparsity increases by the observed L0,core while
+keeping the non-core budget fixed.
+B. Connections to structured sparsity and multi-task feature learning
+This appendix situates DMSAEs relative to several classical viewpoints in representation learning and structured regulariza-
+tion. These connections are intended as conceptual guides rather than formal equivalences, since DMSAEs use a nonconvex
+training objective and a BatchTopK-style activation constraint.
+Shared-plus-sparse decomposition (multi-task / ”dirty model”).
+The DMSAE core can be viewed as a shared represen-
+tation reused across the family of reconstruction problems induced by different Matryoshka prefixes and distillation cycles.
+Each prefix length defines a related task, and DMSAEs reuse a common subset of latents while allowing the remaining
+latents to specialize. This resembles multi-task feature learning and ”dirty model” formulations in which parameters for
+multiple related tasks are decomposed into a shared component plus a sparse task-specific component (Jalali et al., 2010;
+Yang & Ravikumar, 2013). Under appropriate incoherence and sparsity assumptions, these models admit guarantees for
+support recovery and bounded estimation error, motivating the intuition that a small shared set of features can be beneficial
+when tasks share structure.
+Hierarchical and structured sparsity.
+Requiring that core latents participate in every Matryoshka prefix induces a
+simple hierarchical structure: the core provides a mandatory base representation, and additional (non-core) latents provide
+refinements as the prefix grows. This is related in spirit to hierarchical and tree-structured sparsity constraints, where
+activation patterns are restricted so that ”child” variables can be active only when their ”ancestor” variables are active (Zhao
+et al., 2009; Jenatton et al., 2011). In such settings, structured penalties encourage coarse-to-fine representations, with
+high-level groups capturing broad structure and lower-level groups capturing specialized refinements. DMSAEs induce an
+analogous coarse-to-fine decomposition via architecture (shared core + growing non-core prefix) rather than via an explicit
+tree-structured penalty.
+Backbone-plus-residual perspective (low-rank plus sparse).
+A complementary analogy comes from low-rank plus
+sparse decompositions such as robust PCA, where a data matrix is decomposed into a low-rank component capturing global
+structure and a sparse component capturing localized deviations (Cand`es et al., 2011). Conceptually, the DMSAE core
+11
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+plays the role of a dense ”backbone” of globally useful, high-frequency directions, while the non-core latents act as a
+sparser residual mechanism that corrects reconstruction errors and captures more specialized structure. This perspective
+helps explain why allowing the core to activate more frequently can be beneficial without sacrificing the effective capacity
+allocated to the non-core dictionary.
+Group-specific ℓ0 constraints and the dynamic global L0 schedule.
+The dynamic global L0 rule in Eq. (9) can be
+interpreted as a practical approximation to a group-specific sparsity constraint that treats core and non-core latents differently.
+Ideally, one would like to solve an optimization problem of the form
+min
+θ
+Ex
+
+Lrecon(x; θ)
+
+subject to
+Ex
+
+∥fN(x; θ)∥0
+
+≤¯L0,non-core,
+where fN(x) denotes the non-core activations and no analogous constraint is imposed on the core activations fC(x).
+This corresponds to a hard budget on the non-core group while leaving the core effectively unpenalized. Related convex
+formulations appear in sparse-group and dirty-model regularization, where shared and task-specific components are penalized
+with different norms or strengths (Jalali et al., 2010; Obozinski et al., 2010; Yang & Ravikumar, 2013).
+In practice, our main dense core DMSAE variant applies BatchTopK only to the non-core latents, leaving the distilled
+core free to activate. Operationally, this keeps the non-core capacity approximately fixed across cycles while allowing the
+core to contribute whenever relevant, so the effective global activity is L0,global = L0,core + L0,non-core (Eq. (9)). For direct
+comparability to SAEBench, Appendix E additionally reports a sparse core ablation that applies BatchTopK globally across
+all latents (core included).
+12
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+C. Choosing the attribution coverage threshold for core promotion
+Figure 5. Choosing the attribution coverage threshold for core promotion. We trained DMSAEs (k=320) using different attribution
+coverage thresholds (τ). Promoting more latents steadily reduces reconstruction loss (top) and increases fraction of variance explained
+(bottom) throughout training, with no clear saturation up to τ=1.0. The τ=0.9 setting nearly overlaps τ=1.0 in fraction of variance
+explained and achieves similar reconstruction loss. These results justify using τ=0.9 as our default attribution threshold.
+13
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+D. Core stability depends strongly on the sparsity target.
+Figure 6. We ran four DMSAE distillation cycles for each top k setting. After each cycle t, we score latents in the smallest reconstruction
+prefix (core + prefix-0) by gradient × activation attribution to next-token loss and select the smallest set whose cumulative score reaches
+90% of the total attribution score (τ=0.9) as the next cycle’s core. Bars show the number of selected core latents per cycle and colors
+indicate the earliest cycle in which each latent was first selected (origin), visualizing carryover across cycles. Only the intermediate values
+(k=160 and k=320) exhibit substantial carryover into later cores. At k=640 (largest k, i.e., weakest sparsity constraint / highest activity),
+optimization degenerated after cycle 1 and reconstruction failed, thus we omitted subsequent cycles for k=640.
+14
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+E. Core sparsity ablation on SAEBench.
+Figure 7. Performance across top k targets in the SAEBench (as in Fig. 4), but comparing two DMSAE sparsity rules using the same
+distilled core (197 latents). Dense core (blue) applies BatchTopK sparsity only to the non-core latents and leaves the distilled core free to
+activate. Sparse core (purple) applies the standard global BatchTopK constraint to the entire dictionary, including the core, matching the
+vanilla Matryoshka SAE setup for a more direct comparison. The sparse core DMSAE follows the same overall trends as dense core
+DMSAE. BatchTopK and Matryoshka SAE baselines from SAEBench are included for reference, and all SAEs were trained using a 65k
+sized dictionary.
+15
+
+Attribution-Guided Distillation of Matryoshka Sparse Autoencoders
+F. Pseudocode for DMSAE training and core selection
+This appendix provides pseudocode for (i) the attribution-guided core selection rule used to construct C(t) from the candidate
+pool P (t) (Algorithm 2) and (ii) training a new DMSAE from a fixed distilled core C⋆across sparsity targets (Algorithm 3).
+Algorithm 2 SELECTCOREBYATTRIBUTION(θ, P, q, τ, k, c)
+Require: SAE parameters θ = {Wenc, benc, Wdec, bdec}; candidate pool P (core+prefix-0); quantile q; coverage τ;
+sparsity target k; core size c.
+Ensure: Ordered selected set C ⊆P for the next cycle.
+1: Sample token positions U; obtain (xu, gu) where gu = ∂LNT/∂xu.
+2: for each attribution batch {(xu, gu)} do
+3:
+Compute fu ←ReLU(Wencxu + benc) ∈RK.
+4:
+Set ˜fu ←
+ (fu)0:c, BatchTopKk((fu)c:K)
+
+.
+5:
+for each latent j ∈P do
+6:
+¯wdec
+j
+←Wdec[:, j]/∥Wdec[:, j]∥2.
+7:
+For each u in batch: compute su,j ←g⊤
+u ¯wdec
+j
+and GxAu,j ←| ˜fu,jsu,j|.
+8:
+end for
+9: end for
+10: For each j ∈P, set Aj ←Quantileq({GxAu,j}u).
+11: Sort P by descending Aj: (j1, . . . , j|P |); let Atot = P
+j∈P Aj.
+12: Return the smallest prefix C = (j1, . . . , jr) s.t. Pr
+ℓ=1 Ajℓ≥τ Atot.
+Algorithm 3 Training a DMSAE from a fixed distilled core C⋆(core-transfer stage)
+Require: Distilled core encoder directions {w⋆
+1, . . . , w⋆
+c} where c = |C⋆|; total width K;
+non-core prefix sizes M = {m0 < · · · < mL}; target sparsity k; dataset D; step size η.
+Ensure: Trained DMSAE parameters θ⋆∈Θ⋆.
+1: Initialize parameters θ = {Wenc, benc, Wdec, bdec}.
+2: Set Wenc[0:c, :] ←[w⋆
+1; . . . ; w⋆
+c] and freeze rows 0:c.
+3: Randomly initialize Wenc[c:K, :], all benc, all Wdec, and bdec.
+4: Define feasible set Θ⋆:= {θ : Wenc[0:c, :] = [w⋆
+1; . . . ; w⋆
+c]}.
+5: Set knon-core ←round
+ k · K−c
+K
+
+.
+6: for each mini-batch X from D do
+7:
+Compute F ←f(X; θ) = ReLU(WencX⊤+ benc)⊤.
+8:
+Set ˜F ←
+ F:,0:c, BatchTopKknon-core(F:,c:K)
+
+.
+9:
+ˆ
+J (X; θ) ←P
+m∈M ∥X −ˆXm(X; θ, ˜F)∥2
+F + α Laux(X; θ, ˜F).
+10:
+θ ←ΠΘ⋆
+
+θ −η ∇θ ˆ
+J (X; θ)
+
+.
+11: end for
+12: Return: θ⋆←θ.
+16

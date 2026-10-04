@@ -1,0 +1,864 @@
+Generative forecasting with joint probability models
+Patrick Wyroda, Ashesh Chattopadhyaya, Daniele Venturia,∗
+aDepartment of Applied Mathematics, University of California Santa Cruz
+Santa Cruz (CA) 95064
+Abstract
+Chaotic dynamical systems exhibit strong sensitivity to initial conditions and often contain unresolved mul-
+tiscale processes, making deterministic forecasting fundamentally limited. Generative models offer an ap-
+pealing alternative by learning distributions over plausible system evolutions; yet, most existing approaches
+focus on next-step conditional prediction rather than the structure of the underlying dynamics. In this work,
+we reframe forecasting as a fully generative problem by learning the joint probability distribution of lagged
+system states over short temporal windows and obtaining forecasts through marginalization. This new per-
+spective allows the model to capture nonlinear temporal dependencies, represent multistep trajectory seg-
+ments, and produce next-step predictions consistent with the learned joint distribution. We also introduce a
+general, model-agnostic training and inference framework for joint generative forecasting and show how it
+enables assessment of forecast robustness and reliability using three complementary uncertainty quantifica-
+tion metrics (ensemble variance, short-horizon autocorrelation, and cumulative Wasserstein drift), without
+access to ground truth. We evaluate the performance of the proposed method on two canonical chaotic
+dynamical systems, the Lorenz–63 system and the Kuramoto–Sivashinsky equation, and show that joint
+generative models yield improved short-term predictive skill, preserve attractor geometry, and achieve sub-
+stantially more accurate long-range statistical behaviour than conventional conditional next-step models.
+1. Introduction
+Generative modelling has become a central paradigm in modern machine learning due to its ability
+to learn complex, high-dimensional probability distributions and generate samples representative of those
+distributions. Unlike discriminative models, which directly map inputs to outputs, generative models seek
+to approximate the underlying data-generating process itself. This capability enables sampling, uncertainty
+quantification, and distribution-level reasoning. They have transformed applications in computer vision,
+natural language processing, and scientific machine learning as a result. These strengths are particularly
+compelling in settings where the underlying processes are stochastic, only partially observed, or governed by
+incomplete physical laws—contexts in which a single deterministic prediction cannot adequately represent
+the evolution of the system. The central motivation behind generative forecasting is the recognition that
+model insufficiency/inadequacy is unavoidable in high-dimensional chaotic dynamical systems without scale
+separation. In fact, unresolved subgrid processes, imperfect parameterizations, truncated modes, and limited
+training data all create epistemic uncertainty that accumulates and amplifies unpredictability under chaotic
+dynamics. Traditionally, generative models address this by learning a distribution over physically plausible
+trajectories conditioned on known information. In this sense, probabilistic forecasting becomes a principled
+∗Corresponding author
+Email addresses: pwyrod@ucsc.edu (Patrick Wyrod), aschatto@ucsc.edu (Ashesh Chattopadhyay),
+venturi@ucsc.edu (Daniele Venturi)
+arXiv:2512.24446v1 [cs.LG] 30 Dec 2025
+
+framework for representing the ensemble of futures consistent with the available data and with the intrinsic
+variability of the system.
+Forecasting chaotic dynamical systems exemplifies this setting. High-dimensional, multiscale chaotic
+systems arising in climate, atmosphere, ocean, and turbulence are extremely sensitive to initial conditions
+and contain unresolved physical processes that no deterministic model, numerical or neural, can perfectly
+capture [3, 12]. These structural deficiencies motivate a shift from point forecasting to probabilistic forecast-
+ing, where the objective is to characterize a distribution over plausible futures rather than a single trajectory.
+Recent research highlights the suitability of generative models for this task. For example, Chattopadhyay
+et al. [4] demonstrated that generative surrogates can produce statistically consistent long-term trajectories
+for canonical multiscale chaotic systems. The GenCast model [17] shows that fully data-driven conditional
+diffusion models can generate accurate ensemble weather forecasts by learning the distribution of next-step
+atmospheric states conditioned on the previous ones. DYffusion [2] proposes generative forecasting through
+a predictor–corrector scheme leveraging a pair of neural network estimators to forecast several steps into
+the future and interpolate for the intermediate steps. While these are novel approaches to forecasting di-
+rectly employing generative models, they are built upon conditional generative models directly modelling
+the target density. Other hybrid approaches explicitly combine deterministic forecasting with generative
+modelling: G-LED [10] uses a generative diffusion model to represent unresolved small-scale dynamics,
+while the “thermalizer” approach in Pedersen et al. [16] stabilizes deterministic forecasts by nudging unsta-
+ble states back toward plausible initial conditions sampled from a trained generative model. Collectively,
+these lines of work underscore a key insight: generative stochasticity is not merely noise, but an essential
+mechanism for representing uncertainty and missing physics in chaotic systems.
+In this work, we extend this philosophy by modelling the dynamics as a generative process similar to
+the approaches adopted in Sambamurthy et al. [21] and Ruhling et al. [2, 20]. However, a key difference
+in our approach is that instead of directly learning a conditional next-step map p(xt | xt−∆t, . . .), we learn
+the joint distribution over multiple adjacent time steps and treat forecasting as a marginalization problem.
+This reframes forecasting as a purely generative task: the next-step prediction corresponds to selecting (via
+marginalization) the appropriate conditional component of a learned joint distribution. Modelling short
+temporal windows jointly allows the generative model to capture nonlinear dependencies and correlations
+between neighbouring states, enabling richer representations of uncertainty [9] and more robust sampling.
+A major contribution of this paper is the use of the joint probability distributions to perform intrinsic uncer-
+tainty quantification. Because each generative sample corresponds to a plausible short trajectory segment,
+the geometry of the sampled point cloud encodes valuable information about the model’s confidence. Lever-
+aging this structure, we introduce several joint probability-driven uncertainty metrics, including ensemble
+variance, short-horizon autocorrelation, and a cumulative Wasserstein drift. Collectively, these allow us to
+estimate forecast reliability a priori, without requiring ground truth observations or running additional in-
+ference passes. This capability is of particular importance for long-range forecasting, model diagnostics,
+and out-of-distribution stability assessment.
+Beyond uncertainty quantification, we evaluate forecasting performance through traditional metrics such
+as short-term skill, long-term statistical consistency, and the ability to extrapolate to extremes beyond the
+training distribution. The latter is especially crucial for long-term emulation of the coupled climate system,
+as emphasized in Sun et al. [23], where tail behaviour and extreme events play a central scientific role. Our
+generative joint modelling framework unifies these goals, enabling robust prediction, principled uncertainty
+representation, and diagnostic interpretability within a single modelling paradigm. In summary, our con-
+tributions are threefold: (1) a fully generative forecasting framework based on modelling joint temporal
+distributions and extracting next-step predictions via marginalization, (2) general and model-agnostic train-
+ing and inference procedures compatible with any generative model architecture, and (3) novel uncertainty
+metrics derived from joint probabilities which can diagnose forecast quality without observational data.
+Together, these contributions demonstrate that forecasting can be formulated fundamentally as a generative
+2
+
+A: Motivation
+Epistemic uncertainty in forecasts
+Diverging forecast
+Forecast distribution
+B: Formulation
+Multi-step joint distributions
+Joint n-tuples
+p
+ xtn | xt1, xt2, . . .
+
+=
+p
+ xtn, xt1, xt2, . . .
+
+p
+ xt1, xt2, . . .
+
+C: Inference
+Observation-match sieving
+x∗
+=
+minj
+
+ˆx{n−1:1}
+t
+(j) −˜x{n−2:0}
+t−∆t
+
+ xt1, xt2
+
+Observation
+{(xt2, xt3)}
+Samples
+ x∗
+t2, x∗
+t3
+
+Sieved match
+t
+D: Error prediction
+Information within joint samples
+(ii)
+(i)
+(iii)
+(i)
+Variance
+(ii) Autocorrelation
+(iii) ∆in distribution
+(i), (ii), (iii) ∝|ˆx −x|
+Figure 1: Schematic overview of the proposed generative joint forecasting framework for chaotic dynamical systems. (A) Inherent
+challenges of forecasting high-dimensional chaotic systems, characterized by extreme sensitivity to initial conditions and complex
+multi-scale dynamics. (B) Proposed core methodology: modelling the joint probability distribution of temporal sequences, e.g.,
+p(xtn, xt1, xt2, . . .). The forecast for the current state, xtn, is then obtained through marginalization of this learned joint distribu-
+tion. (C) Forecasts are obtained by sieving a joint ensemble using components overlapping with an observed segment. (D) Joint
+samples enable intrinsic uncertainty quantification through ensemble variance, autocorrelation, and Wasserstein drift metrics.
+problem, yielding improved uncertainty representation, stronger long-term stability, and deeper insights into
+the behaviour of data-driven dynamical system models.
+This paper is organized as follows: In Section 2, we describe the proposed joint generative forecasting
+framework, including the training procedure, inference via joint marginalization, and uncertainty quantifi-
+cation based on joint samples. In Section 3, we demonstrate the performance of the generative forecasting
+algorithm using synthetic data from two canonical chaotic dynamical systems, namely the Lorenz–63 sys-
+tem and the Kuramoto–Sivashinsky equation. The main findings and their implications are summarized in
+Section 4.
+2. Methods
+In Figure 1, we provide a high-level overview of the proposed generative forecasting method based
+on joint probability models. Forecasting can be viewed as predictive statistical inference on ordered data.
+Given a time series {xt}t with temporal spacing ∆t, a forecasting model ultimately targets the conditional
+probability density
+ˆpθ(xt) ≈p
+ xt | xt−∆t = ˜xt−∆t, xt−2∆t = ˜xt−2∆t, . . .
+
+,
+(1)
+where ˜xt−k∆t denotes the observed state at time t−k∆t. Traditional approaches seek to directly parameter-
+ize this conditional distribution. However, p
+ xt | xt−∆t = ˜xt−∆t, xt−2∆t = ˜xt−2∆t, . . .
+
+can equivalently
+3
+
+be written in terms of joint distributions over a short temporal window as
+p
+ xt | xt−∆t = ˜xt−∆t, xt−2∆t = ˜xt−2∆t, . . .
+
+= p
+ xt, xt−∆t = ˜xt−∆t, xt−2∆t = ˜xt−2∆t, . . .
+
+p
+ xt−∆t = ˜xt−∆t, xt−2∆t = ˜xt−2∆t, . . .
+
+.
+(2)
+Generative models can be naturally defined in terms of such joint distributions. We therefore propose to
+model the joint distribution over a short sequence of adjacent time steps,
+ˆpθ (xt, xt−∆t, xt−2∆t, . . .) ≈p (xt, xt−∆t, xt−2∆t, . . .) ,
+(3)
+and to obtain the forecasting objective, i.e. the conditional density given by Eq. (1), at inference time by
+marginalization and conditioning via Eq. (2).
+Within this framework, ˆpθ can be realized using any suitable generative modelling paradigm (e.g. vari-
+ational autoencoders [13]) in conjunction with any estimator backbone (such as simple feedforward neural
+networks or transformers [24]). The generative model learns to sample from ˆpθ, rather than to approximate
+its functional form explicitly. The key structural feature is that the state dimension d and the number of
+jointly modelled time steps n reside on distinct axes and can therefore be handled separately by the architec-
+ture. For low-dimensional or non-complex data, a simple concatenation-based estimator architecture may
+suffice; for high-dimensional or long-horizon data, sequence-aware estimators are preferable.
+2.1. Training protocol
+The temporal window length n is a hyperparameter of the method. Larger n allows the model to exploit
+longer temporal correlations but increases the difficulty of the learning problem and hence the required
+model capacity. Given n and a time step ∆t, we construct training samples as short sequences of adjacent
+states. One must select both a generative modelling technique and a neural network estimator backbone
+well-suited to model (3) for a given application. For sequence-aware models, such as those built upon
+recurrent neural networks or transformers, the input at time t is the ordered sequence defined as
+x{n−1:0}
+t
+=
+ xt−(n−1)∆t, . . . , xt−∆t, xt
+
+∈Rn×d,
+(4)
+while for models that operate on a single vector, the same information is provided via concatenation:
+x{n−1:0}
+t
+=
+
+xt−(n−1)∆t, . . . , xt−∆t, xt
+
+∈Rnd.
+(5)
+In either case, the generative model Jθ is trained to sample from the joint distribution (3) over n adjacent
+states, so that drawing a sample from the model yields
+x{n−1:0}
+t
+= Jθ(z),
+x{n−1:0}
+t
+∼ˆpθ (xt, xt−∆t, xt−2∆t, . . .) ,
+(6)
+where the input z is a sample from the generative model’s latent space (see also Figure 4 for an example).
+Throughout this work, we focus on uniformly spaced temporal data with fixed ∆t, but the formulation easily
+generalizes by including the time step size as an explicit conditioning variable,
+ˆpθ ≈p
+ xt, xt−∆t, . . . , xt−(n−1)∆t, ∆t
+
+,
+(7)
+and, if desired, additional parameters for nonautonomous systems.
+4
+
+Figure 2: Visualization of a single inference step with Algorithm 1 for n = 5. The trajectory formed by the orange points (top)
+serves as the reference for isolating the closest-matching tail points, ˆxt−(n−1)∆t through ˆxt−∆t, from the joint point cloud (bottom).
+The corresponding head point ˆxt (purple star) is the prediction, which can then be appended to the input set (orange) to perform a
+successive autoregressive step.
+Algorithm 1 Forecasting through marginalization
+1: Input: Jθ, ˜x{n−1:0}
+t−∆t
+▷trained model & observed n-lag sequence
+2: Initialization: Sample
+n
+ˆx{n−1:0}
+t
+(j)
+oN
+j=1 ∼Jθ
+3: repeat
+4:
+j∗←arg minj
+
+ˆx{n−1:1}
+t
+(j) −˜x{n−2:0}
+t−∆t
+
+▷match on trailing n −1 states
+5:
+retain x∗
+t ←ˆx{0}
+t
+(j∗)
+6:
+update observation ˜x{n−1:0}
+t
+←˜x{n−1:1}
+t−∆t
+⊕x∗
+t
+▷shift window and append forecast
+7:
+t ←t + ∆t
+8: until desired forecast horizon reached
+9: Return: retained {x∗
+t }
+2.2. Inference via joint marginalization
+Once the joint distribution, given by Eq. (3), has been modelled, we obtain point forecasts by marginal-
+izing an ensemble of joint samples. The basic procedure is summarized in Algorithm 1 and illustrated in
+Figure 2. At each autoregressive step, we draw a point cloud of N joint samples from the unconditional
+model and select the sample whose “tail” subsequence best matches the most recent observed history on a
+chosen metric (e.g. Euclidean distance); the corresponding “head” state is used as the forecast.
+Each sample corresponds to a short, self-consistent trajectory segment of length n, and the argmin step
+selects the segment whose past matches the current observed history. Formally, we draw
+ ˆxt, ˆxt−∆t, . . . , ˆxt−(n−1)∆t
+
+(j)
+ N
+i=1 ∼ˆpθ
+ xt, xt−∆t, . . . , xt−(n−1)∆t
+
+,
+(8)
+then isolate
+
+x∗
+t , x∗
+t−∆t, . . . , x∗
+t−(n−1)∆t
+
+=
+ ˆxt, ˆxt−∆t, . . . , ˆxt−(n−1)∆t
+
+(j∗)
+using overlapping entries with the current observed sequence of states
+j∗= arg minj
+
+ˆx{n−1:1}
+t
+(j) −˜x{n−2:0}
+t−∆t
+
+ ,
+5
+
+and use the leading entry to realize the conditional forecast
+x∗
+t ∼p
+ xt | xt−∆t = ˜xt−∆t, xt−2∆t = ˜xt−2∆t, . . . , xt−(n−2)∆t = ˜xt−(n−2)∆t
+
+.
+This inference scheme uses an unconditional generative model: because all samples are i.i.d. draws from
+the same joint distribution, the point cloud {ˆx{n−1:0}
+t
+(j)}N
+j=1 can be sampled once and reused across all
+autoregressive steps, or resampled at each autoregressive step, trading computation for memory as needed.
+2.3. Uncertainty quantification from joint samples
+Beyond point prediction, the joint point cloud produced by Jθ encodes rich information about short-
+horizon uncertainty and model self-consistency. To exploit this, we retain not only the best-matching sample
+but also its k nearest neighbours in the matching metric. Concretely, at each step we define the subset
+n
+x∗
+t , x∗
+t−∆t, . . . , x∗
+t−(n−1)∆t
+
+(i)
+ok
+i=1 = top-k
+h
+arg minj
+
+ˆx{n−1:1}
+t
+(j) −˜x{n−2:0}
+t−∆t
+
+i
+,
+(9)
+where ˆx{n−1:1}
+t
+(j) are obtained from (8) and k ≤N. The first element (i = 1) is used for the point forecast,
+while all k elements taken together form a local ensemble drawn from intermediate posteriors
+n
+ˆpθ
+
+xt, xt−∆t = ˜xt−∆t + ϵ(j)
+t−∆t, . . . , xt−(n−2)∆t = ˜xt−(n−2)∆t + ϵ(j)
+t−(n−2)∆t
+ok
+j=1 .
+Here,
+
+ϵ(j) k
+j=1 quantify the mismatches between the selected ensemble members in (9) and the observed
+˜x. From this ensemble we construct the following three complementary uncertainty metrics.
+Ensemble variance. The spread of the ensemble around its mean provides a natural measure of uncertainty.
+Let xt(i) denote the ith ensemble member at time t, and let wi be optional importance weights. We define
+σens(xt) =
+k
+X
+i=1
+wi
+ xt(i) −¯xt
+⊙2
+k
+X
+i=1
+wi
+,
+¯xt =
+k
+X
+i=1
+wi xt(i)
+k
+X
+i=1
+wi
+,
+(10)
+where ⊙denotes elementwise multiplication (Hadamard product). Unlike the subsequent metrics, ensemble
+variance is not specific to joint modelling; it is a generic property of any generative forecaster. However, the
+ranking induced by the matching step to create the ensemble as specific in Eq. (9) allows us to compute σens
+on a continuum of posteriors, from tightly conditioned to loosely conditioned ensembles.
+Autocorrelation. Each joint sample in the ensemble provides a pairwise correspondence between xt and
+xt−∆t. This allows us to estimate the linear dependence between successive states via an empirical autocor-
+relation:
+AC(xt, xt−∆t) =
+1
+k
+k
+X
+i=1
+ x(i)
+t
+−¯xt
+
+⊙
+ x(i)
+t−∆t −¯xt−∆t
+
+σt ⊙σt−∆t
+,
+(11)
+where ¯xt, ¯xt−∆t and σt, σt−∆t are the empirical means and standard deviations of the ensemble at times t
+and t−∆t, respectively. Although other dependence measures (e.g. mutual information) could be used, AC
+is attractive for its interpretability and low computational cost.
+6
+
+Wasserstein drift. In addition to pairwise structure, the joint model provides redundant marginal informa-
+tion across successive time steps: for a given physical time t, the “head” component of one joint sample
+and the “tail” component of the next joint sample both correspond to the same state xt. We quantify the
+self-consistency of these overlapping marginals using a Wasserstein distance between their empirical distri-
+butions. Let ˆpt and ˆpt−∆t denote the empirical marginals at time t formed from the relevant heads and tails.
+We define
+WDt = W2 (ˆpt, ˆpt−∆t) ,
+(12)
+where W2 is the 2-Wasserstein distance, estimated in practice using a Sinkhorn-regularized optimal transport
+solver [5]. An increasing WDt indicates that the modelled marginals corresponding to the same physical
+time are drifting apart, suggesting growing uncertainty or inconsistency.
+To relate this drift to forecast error, we construct a signed version of the Wasserstein distance using
+changes in ensemble variance:
+g
+WDt =
+
+
+
+−WDt,
+σens(xt+∆t) < σens(xt),
+WDt,
+otherwise,
+(13)
+and define the cumulative reconstruction
+WDrecon(xt; {xs : s ≤t}) =
+t
+X
+s=1
+g
+WDs.
+(14)
+This scalar time series serves as a correlate of the accumulated forecast error and is used in Section 3 to
+assess the ability of our uncertainty metrics to predict pointwise mean absolute error (MAE) a priori.
+2.4. Conditional joint models and latent optimal control
+The joint generative framework is flexible and admits several useful extensions. Here we highlight two:
+conditional joint modelling and latent optimal control.
+Conditional joint models. While our baseline formulation is fully generative and unconditional, the joint
+target (3) can also be formulated as a conditional joint distribution,
+ˆpθ
+ xt, xt−∆t, . . . , xt−(n−1)∆t
+
+≈p
+ xt, xt−∆t, . . . , xt−(n−1)∆t | xt−∆t, xt−2∆t, . . . , xt−(n−1)∆t
+
+,
+(15)
+and used as a drop-in replacement in the marginalization step (2). In this case, the observed history appears
+both as an explicit conditioning input and implicitly through the marginalization of the joint distribution.
+By contrast, the unconditional formulation conditions solely through the selection step in Algorithm 1. We
+compare unconditional and conditional variants empirically in Section 3.
+Latent optimal control. For high-dimensional states or long sequences, Algorithm 1 may suffer from the
+curse of dimensionality: an impractically large point cloud may be required to ensure a close enough match
+in the argmin step. When the underlying generative model admits a differentiable sampling map Jθ(z) from
+a latent variable z, we can refine the inference procedure by replacing discrete sieving with optimization in
+latent space. The resulting latent optimal control strategy is summarized in Algorithm 2. Latent optimal
+control requires only a single sample (effectively N = 1) and can be combined with Algorithm 1 by using
+a sieved sample as the initial latent. This hybrid approach retains the interpretability of the joint point cloud
+perspective while mitigating sparsity issues in very high-dimensional settings.
+7
+
+Algorithm 2 Forecasting via latent optimal control
+1: Input: Observed ˜x{n−1:0}
+t
+, initial latent ˜zt such that Jθ(˜zt) = ˜x{n−1:0}
+t
+2: Optimize: update z by gradient descent on
+L(z) =
+
+(Jθ(z)){n−1:1} −˜x{n−1:1}
+t
+
+ ,
+starting from z ←˜zt, to obtain z∗
+t
+3: Return: x∗
+t = (Jθ(z∗
+t )){0}
+Figure 3: Single trajectory of Lorenz–63, 10 time units forward from t = 2.5 × 104. Top row shows each models’ x in time series,
+with the corresponding (y, z)-phase space view below.
+3. Numerical results
+We evaluate the proposed joint generative forecasting framework on synthetic data from two canonical
+chaotic dynamical systems: Lorenz–63 [15] and the Kuramoto–Sivashinsky (KS) equation [14, 22]. Chaotic
+systems are a natural testbed for generative forecasting: they exhibit strong sensitivity to initial conditions,
+multi-scale structure, and accumulation of epistemic uncertainty, while still allowing access to a well-defined
+ground truth trajectory for quantitative assessment. Although we focus on chaotic dynamics as a principal
+application setting, the method is fully data-driven and applies to general time series forecasting problems.
+Throughout this section we compare three forecasting configurations:
+1. Unconditional joint (0 →2):
+ˆpθ(xt, xt−∆t),
+2. Conditional joint
+(2 →2):
+ˆpθ(xt, xt−∆t | xt−∆t, xt−2∆t),
+3. Baseline conditional (2 →1):
+ˆpθ(xt | xt−∆t, xt−2∆t),
+where (a →b) denotes an input sequence of length a and output of length b. The first two are instances
+of the joint generative framework (unconditional and conditional variants), while the third is a conventional
+8
+
+Training
+x{n−1:0}
+t
+qϕ(x)
+z{n−1:0}
+t
+Jθ(z)
+ˆx{n−1:0}
+t
+Input sequence (4)
+VAE encoder
+(transformer)
+Latent mapping
+VAE decoder
+(transformer)
+Output sequence
+x{n−1:0}
+t−∆t
+x{n−1:0}
+t−∆t
+cond’n
+cond’n
+Inference
+z{n−1:0}
+t
+Jθ(z)
+ˆx{n−1:0}
+t
+Latent sample
+VAE decoder
+(transformer)
+Output sequence
+x{n−1:0}
+t−∆t
+cond’n
+Figure 4: Schematic overview of the specific model implementation throughout Section 3. The transformers (blue) are configured
+to have an input dimension of 256 (8 reserved for sinusoidal position encoding), feedforward dimension of 1024, 4 layers, and
+4 attention heads. They are configured as encoder–decoder architectures for the conditional models and decoder-only for the
+unconditional model; the input and latent sequences are inputs for their respective transformers’ decoders. Red outlines denote the
+conditioning inputs passed into the encoder portion of the transformers (when present).
+conditional next-step model; all implementations take the simplest case of n = 2. Inference for the un-
+conditional model in the short-term setting is performed via Algorithm 2. All other configurations and
+experiments use Algorithm 1 with an ensemble size of 5 × 104. We report both short-term deterministic
+results and long-term statistics, followed by an analysis of uncertainty-aware error prediction based on the
+joint samples.
+A common transformer-based variational autoencoder (VAE) Jθ backbone is held constant across all
+model and experiment configurations. In particular, Jθ is selected such that conditioning information is
+ingested through a transformer encoder, while the decoder produces samples from the learned distribution.
+This means the unconditional model is implemented as a decoder-only transformer, while both conditional
+models use the full encoder–decoder architecture. Across all models, each transformer component has 4
+attention heads, a model dimension of 256 (of which 8 are reserved for a sinusoidal position encoding), 4
+feedforward layers of dimension 1024, and a dropout rate of 0. All feedforward activations are ReLU [1].
+Each model is trained for 500 epochs with a batch size of 500 using the Adam optimizer with a learning rate
+of 1 × 10−4, scheduled to decay exponentially with γ = 0.999. A schematic overview of the specific model
+implementation is provided in Figure 4.
+3.1. Lorenz–63 model
+Consider the Lorenz–63 model
+dx
+dt = σ(y −x),
+dy
+dt = x(ρ −z) −y,
+dz
+dt = xy −βz,
+(16)
+9
+
+Figure 5: Mean absolute error (MAE) across 500 different initial conditions for Lorenz–63; for each individual component in
+the first 3 rows, and for the mean across all components below. Each plot redundantly overlays the other columns’ MAEs for
+comparison.
+with σ = 10, ρ = 28, and β = 8/3. For this choice of parameters, all orbits are attracted to a compact
+strange attractor with Kaplan–Yorke dimension 2.06, and exhibit exponential sensitivity to perturbations in
+the initial conditions. We integrate the system (16) using RK4 with fixed time step ∆t = 2.5 × 10−2, and
+generate a trajectory of 105 steps. This produces 4 × 106 resolved states from which we extract contiguous
+n-step windows to construct the empirical joint distribution p(xt, xt−∆t . . . xt−(n−1)∆t) used for training.
+A total of 106 −(n −1) joint windows are sampled uniformly in t = [0, 2.5 × (104 −(n −1)10−2)]
+from the attractor for training. For testing, we consider 500 unseen initial conditions drawn uniformly in
+t = [2.5 × 104, 105] forming nonoverlapping trajectories. For the distribution adherence test we instead use
+a smaller train–test boundary of 103 and forecast the single trajectory segment in t = [103, 1.5 × 103].
+In Figures 3–6 we summarize the results of all three configurations defined in Section 3 on Lorenz–
+63. We first examine single-trajectory behaviour in Figure. 3. All three configurations track the reference
+trajectory well over the first Lyapunov time, preserving the geometry of the attractor in phase space. By
+the second Lyapunov time, however, the unconditional joint model maintains its adherence to the reference
+trajectory, while the conditional joint and baseline models exhibit divergence. Past the fifth Lyapunov time,
+both joint models continue to reproduce the attractor structure, whereas the baseline model collapses towards
+the center of a lobe.
+For a quantitative assessment we compute the mean absolute error (MAE) across an ensemble of 500
+test initial conditions drawn from the attractor but not used for training. Each initial state is forecasted
+for 10 time units (400 steps at ∆t = 2.5 × 10−2). The MAE at each forecast lead time is averaged over
+trajectories and reported separately for each component and for the componentwise mean in Figure 5. Here,
+the unconditional approach dominates both the conditional joint and baseline: initial error is similar initially,
+but grows at a significantly slower rate over the first Lyapunov time, before converging to the common error
+level across all configurations by the end of the second. Layering the joint methodology onto the baseline
+conditional model does not appear to confer any advantage for this system, as observed by the near-identical
+performance of both the conditional joint and baseline models.
+To assess long-term forecasting accuracy and reliability, we integrate a single trajectory for 1500 time
+10
+
+Figure 6: Log scale probability density (estimated using relative frequencies) computed over entire synthetic dataset (grey), training
+set (black), a single trajectory (blue), and the corresponding predicted trajectory (red) for all 3 components of Lorenz–63. Below
+each component’s histogram is a zoomed view for its tails (extreme values).
+units starting from the state immediately following the 1000-time-unit training interval. Each forecasting
+configuration is run autoregressively over the same horizon, and we compare the resulting distributions of
+state values. Figure 6 shows log scale histograms for all three components, including: (i) the full syn-
+thetic dataset, (ii) the training set, (iii) the long reference trajectory, and (iv) the corresponding predicted
+trajectories for each model. Tail-focused zooms highlight extreme events.
+11
+
+Both joint models reproduce the bulk distributions well and substantially improve tail behaviour relative
+to the baseline. The baseline conditional model underrepresents extremes and develops visible distortions in
+the wings of the attractor. The conditional joint model achieves the closest match to the reference tails across
+all components, whereas the unconditional model demonstrates the closest distribution adherence overall.
+This indicates that the joint generative formulation not only enhances short-term skill but also yields more
+statistically consistent long-range emulations. Moreover, by more faithfully representing tail probabilities
+and rare events beyond the typical range explored during training, the joint models suggest a path toward
+data-driven emulators that can, in principle, better approximate “grey swan” events: physically admissible
+but extremely rare extremes that may be absent from the historical record. This stands in contrast to many
+state-of-the-art neural network weather models, which have been shown to systematically underestimate
+such out-of-distribution grey swan tropical cyclones when stronger events are excluded from the training
+data [23], highlighting the importance of improved tail modelling for robust risk assessment.
+3.2. Kuramoto–Sivashinsky equation
+To evaluate performance on high-dimensional multiscale chaos, we consider the one-dimensional Kuramoto–
+Sivashinsky equation
+∂u
+∂t + u∂u
+∂x + ∂2u
+∂x2 + ∂4u
+∂x4 = 0,
+x ∈[−25, 25],
+t > 0
+(17)
+with initial condition
+u(x, 0) = sin(x) exp
+
+−(x −10)2
+2
+
+,
+(18)
+u and periodic boundary conditions. This setting generates spatiotemporal chaotic dynamics with a broad
+spectrum of unstable and dissipative modes. We discretize (17) using second-order finite differences on a
+evenly-spaced spatial grid with spacing ∆x = 50/200 = 0.25. We exclude the upper boundary to produce a
+199-dimensional semi-discrete system. Time integration is performed using the two-step Adams–Bashforth
+method with ∆t = 10−1, which sufficiently resolves the convective and dissipative scales characteristic
+of KS turbulence. After an initial transient, the solution reaches a statistical steady state associated with
+dynamics on a compact strange attractor with Kaplan–Yorke dimension 8.67. From the statistical stationary
+regime, we extract 106−(n−1) overlapping n-step joint windows for training in t = [0, 105−(n−1)10−1].
+Similarly to the Lorenz–63 case, we evaluate on 500 unseen initial conditions forming nonoverlapping
+trajectories outside the training window, with the distribution adherence tests using a smaller train–test
+boundary of 2.5 × 103 and forecast endpoint of 6.25 × 103.
+Figure 7 shows representative spatiotemporal fields over a 1000-step forecast for each configuration.
+The joint models more faithfully retain the coherent structures and fine-scale patterns of the reference KS
+field, while the baseline tends to smear small-scale features and exhibits earlier loss of phase information.
+For a systematic comparison, we again compute MAE over an ensemble of 500 test initial conditions, each
+integrated forward for 10 time units (100 steps at ∆t = 10−1). MAE is reported as a function of time
+for each spatial component (heatmap) and for the spatially averaged error in Figure 8. Across the forecast
+horizon, both joint configurations dominate the baseline in MAE: the joint conditional model has the lower
+initial error and growth in the first Lyapunov time, while the unconditional model stands out in intermediate
+times where nonlinear interactions are strongest.
+Long-term statistical consistency for KS is assessed in the same manner as for Lorenz–63. We generate
+a long reference trajectory, 50% longer than the span of the training range, from the stationary regime and
+compare it with the corresponding long-horizon forecasts produced by each configuration. In Figure 9 we
+show log scale histograms of the aggregated KS field values over all spatial locations and times. As before,
+we include the full synthetic dataset, the training subset, the evaluation trajectory, and the forecasts.
+Here, the unconditional model strictly dominates both the conditional joint and baseline models, with
+the latter two performing similarly.
+12
+
+Figure 7: Single trajectory of the Kuramoto–Sivashinsky equation, 100 time units forward from t = 105. Clockwise from top
+left: reference data, conditional joint model, baseline model, unconditional joint model. Visual jumps in the unconditional output
+(bottom left) are sharp corrections resulting from prioritizing error minimization over smoothness during inference. This tradeoff
+can be regulated by adjusting ensemble size in Alg. 1 and/or optimization depth in Alg. 2.
+3.3. Error prediction metrics
+The proposed joint generative framework provides, in addition to point forecasts, a rich ensemble of
+joint samples at each time step. Section 2.3 introduced three uncertainty quantification (UQ) metrics de-
+rived from this ensemble: (i) the ensemble variance σens in Eq. (10), (ii) the short–horizon autocorrelation
+AC in Eq. (11), and (iii) the cumulative Wasserstein drift reconstruction WDrecon in Eq. (14). Here, we eval-
+uate their ability to predict pointwise forecast error without access to ground truth at inference time. This
+inherently gives an a priori estimate of the quality of a forecast model without running extensive evaluations.
+For each trajectory and configuration of interest (we focus solely on the unconditional joint model), we
+perform linear regressions in which the response variable is the MAE at each time step and the regressors
+are the UQ metrics. Specifically, we consider four regressions per trajectory: each metric individually, and
+all three metrics jointly in a multiple regression. The baseline and conditional models are omitted from this
+analysis because they do not produce a joint ensemble from which these metrics can be computed.
+In Figure 10 we show histograms of cross-validated Pearson correlation coefficient values ρ across 500
+different initial conditions for Lorenz–63 and KS. Any single metric alone yields relatively low explana-
+tory power (median ρ ≤0.51), indicating that no single scalar diagnostic fully captures the structure of
+the forecast error. When all three metrics are used together, however, the median ρ rises beyond 0.7 for
+both systems. This demonstrates that ensemble variance, autocorrelation, and Wasserstein drift provide
+complementary information and, when combined, can explain a substantial fraction of the pointwise error
+variance.
+Finally, in Figure 11 we report ρ values when the regressions are performed on the mean trajectory
+obtained by averaging 10 independent realizations across 50 unique initial conditions. This results in 50
+nonoverlapping trajectories used for 50 instances of each of the four regression. In this aggregated setting,
+a similar trend if observed with higher correlation values overall, with the multiple regression achieving
+median ρ ≥0.84 for both systems. These results suggest that the UQ metrics based on joint probability are
+particularly effective at predicting forecast error in an ensemble setting, strengthening the case for modelling
+temporal windows jointly rather than conditionally alone.
+13
+
+Figure 8: MAE across 500 different initial conditions for KS; for each individual component as a heatmap in the first row, and for
+the mean across all components below. The componentwise mean MAE plots redundantly overlay the other columns’ MAEs for
+comparison.
+4. Conclusion
+This work introduced a fully generative perspective on forecasting chaotic dynamical systems by mod-
+elling short temporal windows as joint probability distributions and extracting next-step predictions via
+marginalization. By reframing forecasting as a generative task rather than a conditional regression problem,
+the proposed framework enables richer representations of temporal dependencies, enhances short–term pre-
+dictive skill, and yields markedly improved long-term statistical fidelity for both low–dimensional and high-
+dimensional chaotic systems. Across Lorenz–63 and the Kuramoto–Sivashinsky equation, the unconditional
+joint model consistently outperforms a baseline next–step model, particularly in its ability to maintain attrac-
+tor geometry, reproduce long-term PDFs near the tails, and suppress spurious divergence over long horizons.
+Furthermore, the joint generative formulation naturally provides intrinsic uncertainty quantification metrics
+(ensemble variance, autocorrelation, and Wasserstein drift) that collectively predict a substantial fraction of
+pointwise forecast error without requiring access to ground truth. Together, these results demonstrate that
+joint generative modelling provides a unified, coherent, and effective approach for probabilistic forecasting
+in nonlinear dynamical systems that can capture tail statistics, highlighting its potential for modelling rare
+and extreme events.
+Despite these strengths, several limitations warrant consideration. First, joint modelling introduces ad-
+ditional computational overhead due to the need to sample and compare trajectory segments, which may
+become burdensome as the state dimension or temporal window length increases. Second, the quality of
+the marginalization-based inference procedure depends on the density of the sampled joint point cloud;
+if the point cloud is too sparse, nearest-neighbour matching may fail to provide meaningful conditioning.
+Third, while long-term statistics are well reproduced, the framework remains data-driven and ultimately
+inherits any biases or coverage limitations present in the training distribution. As with most generative
+surrogates, performance may degrade under strong distribution shift or in regimes poorly represented in the
+training data. Addressing these limitations will be essential for deploying joint generative forecasting in real-
+world scientific settings. A key challenge revealed by the high-dimensional KS experiments is scalability.
+14
+
+Figure 9: Log scale distribution of all values over entire synthetic dataset (grey), training set (black), a single trajectory (blue), and
+the corresponding predicted trajectory (red) for all values of KS in aggregate. Below each component’s histogram is a zoomed view
+for its tails (extreme values).
+Although the unconditional joint model performs well even in 199 dimensions, the curse of dimensional-
+ity manifests itself during the inference stage: large point clouds are required for reliable matching, and
+sampling cost rises accordingly. Latent optimal control provides partial relief by replacing combinatorial
+search with continuous optimization in latent space, but further architectural and algorithmic innovations
+are needed. Efficient sequence-aware generative models, structured latent spaces, and dimension-reduced
+temporal embeddings may offer pathways to reduce sampling requirements. Moreover, because the joint
+distribution factorizes across the temporal vs. spatial axes, exploiting tensorized [19, 8, 6, 7] or factored
+parameterizations could allow scaling to domains with thousands to millions of degrees of freedom, such as
+climate, ocean, or turbulence simulations.
+The proposed generative forecasting framework can be extended in several directions. First, physical
+constraints, such as invariances, conservation laws, or energy-based regularization terms, can be incorpo-
+rated to improve extrapolation and stability in long-horizon forecasts [18, 11]. Second, integrating adaptive
+temporal window lengths could allow the model to dynamically adjust the memory of the joint distribution
+based on local flow regimes. Third, the demonstrated ability of the joint model to reproduce extreme-event
+tail statistics suggests promise for grey swan prediction and risk assessment in systems where rare events
+play an outsized role. This aligns with recent findings that standard neural forecasting models system-
+atically underpredict out-of-distribution extremes, such as grey swan tropical cyclones. Finally, combin-
+ing the joint generative framework with hybrid physical–neural architectures, flow-matching techniques,
+or diffusion-based priors may further enhance both scalability and uncertainty quantification. Overall, the
+results presented here position joint generative forecasting as a principled and extensible foundation for
+next-generation data-driven modelling of complex dynamical systems.
+Acknowledgements
+This work was supported by the U.S. Department of Energy (DOE) under grant “Resolution-invariant deep
+learning for accelerated propagation of epistemic and aleatory uncertainty in multi-scale energy storage
+systems, and beyond,” contract number DE-SC0024563.
+15
+
+Lorenz–63
+Kuramoto–Sivashinsky
+Figure 10: Histograms of Pearson correlation coefficients ρ over 500 time series of various linear regression configurations: 3
+single-variable (blue), and one multiple regression with all 3 as regressors (orange). Each median ρ is indicated by the vertical red
+line. The regressors are defined in Section 2.3: ensemble variance σens (10), autocorrelation AC (11), and Wasserstein distance
+reconstruction WDrecon (12).
+References
+[1] Abien Fred Agarap. Deep learning using rectified linear units (ReLU). arXiv:1803.08375, 2018.
+[2] Salva Rühling Cachay, Bo Zhao, Hailey Joren, and Rose Yu. DYffusion: a dynamics-informed dif-
+fusion model for spatiotemporal forecasting. In Proceedings of the 37th International Conference on
+Neural Information Processing Systems, NIPS ’23, Red Hook, NY, USA, 2023. Curran Associates Inc.
+[3] Ashesh Chattopadhyay, Ebrahim Nabizadeh, and Pedram Hassanzadeh.
+Analog forecasting of
+extreme–causing weather patterns using deep learning. Journal of Advances in Modeling Earth Sys-
+tems, 12(2):1–14, 2020.
+[4] Ashesh Chattopadhyay, Jaideep Pathak, Ebrahim Nabizadeh, Wahid Bhimji, and Pedram Hassanzadeh.
+Long-term stability and generalization of observationally-constrained stochastic data-driven models
+for geophysical turbulence. Environmental Data Science, 2:e1, 2023.
+[5] Lenaic Chizat, Pierre Roussillon, Flavien Léger, François-Xavier Vialard, and Gabriel Peyré. Faster
+wasserstein distance estimation with the sinkhorn divergence, 2020.
+[6] Alec Dektor, Abram Rodgers, and Daniele Venturi.
+Rank-adaptive tensor methods for high-
+dimensional nonlinear PDEs. Journal of Scientific Computing, 88(2):36, 2021.
+[7] Alec Dektor and Daniele Venturi. Dynamic tensor approximation of high-dimensional nonlinear PDEs.
+Journal of Computational Physics, 437:110295, 2021.
+[8] Alec Dektor and Daniele Venturi. Tensor rank reduction via coordinate flows. Journal of Computa-
+tional Physics, 491:112378, 2023.
+16
+
+Lorenz–63
+Kuramoto–Sivashinsky
+Figure 11: Histograms of Pearson correlation coefficients ρ over 50 time series mean from ensembles of size 10 of various linear
+regression configurations: 3 single-variable (blue), and one multiple regression with all 3 as regressors (orange). Each median ρ is
+indicated by the vertical red line. The regressors are defined in Section 2.3: ensemble variance σens (10), autocorrelation AC (11),
+and Wasserstein distance reconstruction WDrecon (12).
+[9] Jeremy Diamzon and Daniele Venturi. Uncertainty propagation in feed-forward neural network mod-
+els. Neural Networks, 194:108178, 2026.
+[10] Han Gao, Sebastian Kaltenbach, and Petros Koumoutsakos. Generative learning for forecasting the
+dynamics of complex systems. Nature Communications, 15(8904), 2024.
+[11] G. E. Karniadakis, I. G. Kevrekidis, L. Lu, P. Perdikaris, S. Wang, and L. Yang. Physics-informed
+machine learning. Nature Reviews Physics, 3:422–440, 2021.
+[12] K. Kashinath, M. Mustafa, A. Albert, J-L. Wu, C. Jiang, S. Esmaeilzadeh, K. Azizzadenesheli,
+R. Wang, A. Chattopadhyay, A. Singh, A. Manepalli, D. Chirila, R. Yu, R. Walters, B. White, H. Xiao,
+H. A. Tchelepi, P. Marcus, A. Anandkumar, P. Hassanzadeh, and Prabhat. Physics-informed machine
+learning: case studies for weather and climate modelling. Philosophical Transactions of the Royal
+Society A: Mathematical, Physical and Engineering Sciences, 379(2194):20200093, 2021.
+[13] Diederik P Kingma and Max Welling. Auto-encoding variational Bayes. arXiv:1312.6114, 2022.
+[14] Yoshiki Kuramoto. Diffusion-induced chaos in reaction systems. Progress of Theoretical Physics
+Supplement, 64:346–367, 02 1978.
+[15] Edward N. Lorenz. Deterministic nonperiodic flow. Journal of the Atmospheric Sciences, 20:130–141,
+1963.
+[16] Chris Pedersen, Laure Zanna, and Joan Bruna. Thermalizer: Stable autoregressive neural emulation of
+spatiotemporal chaos. arXiv preprint arXiv:2503.18731, 2025.
+17
+
+[17] Ilan Price, Alvaro Sanchez-Gonzalez, Ferran Alet, Tom R. Andersson, Andrew El-Kadi, Dominic
+Masters, Timo Ewalds, Jacklynn Stott, Shakir Mohamed, Peter Battaglia, Remi Lam, and Matthew
+Willson. Gencast: Diffusion-based ensemble forecasting for medium-range weather, 2024.
+[18] M. Raissi, P. Perdikaris, and G. E. Karniadakis. Physics-informed neural networks: A deep learning
+framework for solving forward and inverse problems involving nonlinear partial differential equations.
+J. Comput. Phys., 378:606–707, 2019.
+[19] Abram Rodgers and Daniele Venturi. Tensor approximation of functional differential equations. Phys.
+Rev. E, 110:015310, Jul 2024.
+[20] Salva Rühling Cachay, Brian Henn, Oliver Watt-Meyer, Christopher S Bretherton, and Rose Yu. Proba-
+blistic emulation of a global climate model with spherical DYffusion. Advances in Neural Information
+Processing Systems, 37:127610–127644, 2024.
+[21] Anish Sambamurthy and Ashesh Chattopadhyay. Lazy diffusion: Mitigating spectral collapse in gen-
+erative diffusion-based stable autoregressive emulation of turbulent flows. arXiv:2512.09572, 2025.
+[22] G. I. Sivashinsky. Nonlinear analysis of hydrodynamic instability in laminar flames—I. Derivation of
+basic equations. Acta Astronautica, 4(11):1177–1206, January 1977.
+[23] Y Qiang Sun, Pedram Hassanzadeh, Mohsen Zand, Ashesh Chattopadhyay, Jonathan Weare, and Do-
+rian S Abbot. Can AI weather models predict out-of-distribution gray swan tropical cyclones? Pro-
+ceedings of the National Academy of Sciences, 122(21):e2420914122, 2025.
+[24] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz
+Kaiser, and Illia Polosukhin.
+Attention is all you need.
+In Proceedings of the 31st International
+Conference on Neural Information Processing Systems, NIPS’17, pages 6000–6010, Red Hook, NY,
+USA, 2017. Curran Associates Inc.
+18

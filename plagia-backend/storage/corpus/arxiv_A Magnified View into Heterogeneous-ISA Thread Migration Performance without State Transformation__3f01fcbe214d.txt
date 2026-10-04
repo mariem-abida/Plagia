@@ -1,0 +1,2515 @@
+A Magnified View into Heterogeneous-ISA Thread Migration
+Performance without State Transformation
+NIKOLAOS MAVROGEORGIS, University of Edinburgh, United Kingdom
+CHRISTOS VASILADIOTIS, University of Edinburgh, United Kingdom
+PEI MU, University of Edinburgh, United Kingdom
+AMIR KHORDADI, University of Edinburgh, United Kingdom
+BJÖRN FRANKE, University of Edinburgh, United Kingdom
+ANTONIO BARBALACE, University of Edinburgh, United Kingdom
+Heterogeneous-ISA processor designs have attracted considerable research interest. However, unlike their
+homogeneous-ISA counterparts, explicit software support for bridging ISA heterogeneity is required. The
+lack of a compilation toolchain ready to support heterogeneous-ISA targets has been a major factor hindering
+research in this exciting emerging area. For any such compiler, “getting right” the mechanics involved in state
+transformation upon migration and doing this efficiently is of critical importance. In particular, any runtime
+conversion of the current program stack from one architecture to another would be prohibitively expensive.
+In this paper, we design and develop Unifico, a new multi-ISA compiler that generates binaries that maintain
+the same stack layout during their execution on either architecture. Unifico avoids the need for runtime
+stack transformation, thus eliminating overheads associated with ISA migration. Additional responsibilities
+of the Unifico compiler backend include maintenance of a uniform ABI and virtual address space across
+ISAs. Unifico is implemented using the LLVM compiler infrastructure, and we are currently targeting the
+x86-64 and ARMv8 ISAs. We have evaluated Unifico across a range of compute-intensive NAS benchmarks
+and show its minimal impact on overall execution time, where less than 6% (10%) overhead is introduced on
+average for high-end (low-end) processors. We also analyze the performance impact of Unifico’s key design
+features and demonstrate that they can be further optimized to mitigate this impact. When compared against
+the state-of-the-art Popcorn compiler, Unifico reduces binary size overhead from ∼200% to ∼10%, whilst
+eliminating the stack transformation overhead during ISA migration.
+1
+Introduction
+Heterogeneity in computing hardware (CPUs, GPUs, TPUs, and FPGAs) is common practice today
+in a multitude of deployments and configurations [56, 60, 87]. This has been driven by the ever-
+increasing computational demands of workloads, whose data-processing requirements boomed
+recently [63]. Yet, processing (large amounts of) data across heterogeneous processing units poses
+several problems, like hindering programmability.
+Extension of conference paper: Earlier version presented at CC 2024 [67]. We extend prior work in the following directions:
+1. We present an analysis of Unifico’s impact to native performance on ARM and x86, identifying the most critical features
+introduced for an identical stack layout (Section 6.3). 2. For the most impactful features (callsite alignment, register pressure,
+register allocation, and machine scheduling), we provide insights on why some applications are affected more than others,
+and present performance improvements (Sections 6.4 to 6.6). 3. We demonstrate the performance portability of Unifico
+across additional machines with different microarchitectures (Section 6.8). 4. We extend a transformation framework based
+on HetCRIU [24, 84] to support heterogeneous checkpoint-restore with and without transformation, and compare the
+end-to-end performance with Popcorn-compiled binaries. We show that the transformation cost savings depend on the
+size of the transformed state, execution time of the application, and number of migrations (Section 6.9).
+Authors’ Contact Information: Nikolaos Mavrogeorgis, University of Edinburgh, United Kingdom, nikos.mavrogeorgis@
+ed.ac.uk; Christos Vasiladiotis, University of Edinburgh, United Kingdom, c.vasiladiotis@ed.ac.uk; Pei Mu, University of
+Edinburgh, United Kingdom, pei.mu@ed.ac.uk; Amir Khordadi, University of Edinburgh, United Kingdom, amir.khordadi@
+ed.ac.uk; Björn Franke, University of Edinburgh, United Kingdom, b.franke@ed.ac.uk; Antonio Barbalace, University of
+Edinburgh, United Kingdom, antonio.barbalace@ed.ac.uk.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+arXiv:2512.24530v1 [cs.SE] 31 Dec 2025
+
+111:2
+Mavrogeorgis et al.
+Classical software compilation, targeting a single instruction set architecture (ISA) and the related
+programming models, e.g., shared memory programming, is not applicable as-is to heterogeneous-
+ISA platforms. Instead, the current practice is to isolate (or mark) a set of functions to be run on a
+processing unit different from the main central processing unit (CPU), compile them for the specific
+ISA, and offload them at runtime. Bespoke programming frameworks exist to support the application
+programmer (e.g., OpenCL, CUDA), and include development and runtime environments [58].
+To improve the programmability of such platforms, different solutions have been introduced,
+like the reuse of data pointers across CPUs and heterogeneous processing units. These required
+hardware memory management per processing unit, and motivated the introduction of coherent
+shared memory between the host CPU and heterogeneous processing units, either on the same
+chip [1], or via the peripheral bus [5, 7, 9, 13].
+Emerging heterogeneous-ISA platforms. At the same time, the landscape of heterogeneous hard-
+ware computing is widening. While classical heterogeneous-ISA platforms, comprising a single
+general-purpose CPU and multiple special-purpose processing units (GPUs, TPUs, and FPGAs),
+are widely available, platforms with multiple general-purpose diverse-ISA processing units are
+emerging. Similarly to classical heterogeneous hardware, emerging heterogeneous-ISA platforms
+are also going to offer shared memory amongst ISAs.
+While academia proposed single-chip, cache-coherent heterogeneous-ISA CPUs, e.g., BYOC [23],
+which never reached the market, new peripheral interconnects like CXL [7] promise to enable
+coherent shared memory between the main CPU and the processing units of peripheral devices, such
+as SmartNICs [3, 42] or SmartSSDs [25, 80] (ARM- or RISC-V- based). Also, CXL will accommodate
+memory expansion cards that will likely integrate general- and special-purpose processing units
+for near-data processing (NDP) [73], as in UPMEM [39] processing-in-memory (PIM), where such
+processing units directly access the same memory as the main CPU.
+Programming emerging platforms. Classic heterogeneous computing runs an application on the
+CPU and offloads a specific part of it to special-purpose processing units. However, when multiple
+CPUs of diverse ISAs lie on the same platform, thread migration has been shown to be more
+beneficial than offloading, enabling decisions at runtime rather than statically deciding on the
+function to offload at compile time [28, 29, 41, 65].
+While earlier works on heterogeneous-ISA migration [57, 75] require the transformation of
+the entire application state before execution on another ISA, recent approaches transform only
+part of the state (e.g., the registers and stack), guided by metadata derived during compilation.
+Despite that, the transformation step and related metadata still incur execution time and binary size
+overheads, respectively, which are mostly linear to the number and size of active stack frames when
+migrating [28, 41]. Both overheads impact migration time, potentially hindering its benefits. Lastly,
+although outside the scope of this work, state transformation approaches constitute a potential
+attack surface for the binaries [31], e.g., by exposing the return addresses of functions that can be
+leveraged to create return-oriented programming (ROP) gadgets.
+Unifico. Motivated by the emerging heterogeneous-ISA platforms with shared memory, with
+the goal of making programmability as simple as homogeneous-ISA platforms, and removing
+execution time and code size overheads of state transformation, we propose Unifico. Unifico is a
+compilation technique that generates multi-ISA binaries with a unified address space layout and
+application state (including stack, heap, thread-local storage, etc.) across different ISAs, enabling
+thread migration without transformations. We achieve this by rethinking how compiler backends
+generate code, extending the code generation passes that impact the application state to adhere to
+a common set of rules, without the need to graft any metadata in the binary.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:3
+We prototyped Unifico targeting the 64-bit versions of the ARM and x86 ISAs, and studied
+its efficacy on different benchmarks. Comparing against binaries generated using previous het-
+erogeneous-ISA CPU migration projects, we demonstrate that Unifico adds on average no more
+than 6% execution time overheads and no more than 10% code size increases. We envision Unifico
+integrated in existing compiler frameworks, and used in modern heterogeneous hardware platforms.
+We make the following contributions:
+• A compilation technique, Unifico, that enables thread migration amongst heterogeneous-ISA
+CPUs without state transformation, removing its initialization, runtime, and code overheads.
+• We prototype Unifico targeting the x86 and ARM LLVM backends, and validate migration on
+the NAS Parallel Benchmarks (NPB) suite, utilizing the CRIU checkpoint and restore software.
+Unifico is released as open source software (OSS) at https://github.com/systems-nuts/unifico.
+• An evaluation across different benchmarks and microarchitectures demonstrating, on average,
+no more than 10% binary size overhead, no more than 6% overhead on execution time (without
+migration) for high-end processors, and no more than 10% overhead for low-power ones.
+• A comprehensive performance analysis of Unifico-compiled binaries identifying key features
+for a common stack layout and proposing improvements to alleviate performance bottlenecks.
+2
+Background and Motivation
+We provide background on software migration along with its main issues motivating our approach.
+2.1
+Heterogeneous-ISA Architectures
+This work is motivated by the emerging compute heterogeneity, i.e., heterogeneous ISAs [23, 28, 29,
+37, 41, 62, 82], coupled with next-generation memory architectures materialized by new interconnect
+technologies [5, 9, 13, 43, 61, 78], e.g., CXL [7, 19]. In such configurations, thread migration has
+been shown to be more advantageous than the typical prevalent offloading techniques [29, 41].
+In particular, we focus on a combination of x86 and ARM CPUs inspired by a family of emerging
+platforms closely related to NDP [12, 26, 39, 73, 76]. These usually accommodate a brawny host
+processor (e.g., x86) plus one or more simpler reduced instruction set computer (RISC) processors
+(usually of different ISAs, e.g., ARM) near the memory, to avoid data movement and increase
+bandwidth utilization. Memory-intensive applications that exhibit weak locality are well suited for
+these architectures [48], with offloading being their dominant programming paradigm.
+2.2
+Thread Migration Techniques
+Dynamic software thread migration is the act of moving a thread’s execution context (e.g., register
+state, stack contents, page mappings, etc.) between different processing units in a system [20, 44, 57,
+75]. In shared-memory programming (SMP) systems, this can be achieved through hardware and
+operating system (OS) mechanisms. However, in the case of heterogeneous-ISA systems, additional
+compiler and runtime support is needed, since the thread state needs to be transformed in order to
+match the architecture-specific details of the target processor [27–29, 37, 41, 82, 84].
+There are three main axes to consider when performing thread migration: First, migration
+granularity, which denotes where the program is able to migrate (e.g., function boundaries [28,
+37, 83]). This property directly affects programmability and performance (Sections 2.3 and 2.4).
+Second, state transformation cost, which is incurred at runtime before the migration, affects the
+overall performance of the migration. Finally, compiler support, which describes the changes made
+to the compiler in order not only to enable migration (i.e., generate code for both ISAs), but also
+control the granularity of migration and transformation costs. Unfortunately, trying to improve
+on two of the axes, means that compromise or more effort should be placed on the third one. For
+example, to maximize granularity without modifying extensively the compiler, binary translation
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:4
+Mavrogeorgis et al.
+bt
+cg
+ep
+ft
+is
+2
+3
+4
+5
+6
+7
+Stack Frame Count (#)
+60
+80
+100
+120
+140
+160
+Stack Frame Size (Bytes)
+Stack Count
+Stack Size
+(a) NPB benchmarks.
+perlbench
+gcc
+mcf
+omnetpp
+xalancbmk
+x264
+deepsjeng
+imagick
+leela
+nab
+xz
+10
+20
+30
+40
+50
+Stack Frame Count (#)
+100
+300
+500
+700
+900
+Stack Frame Size (Bytes)
+Stack Count
+Stack Size
+(b) SPEC CPU2017 benchmarks.
+Fig. 2. Stack frame size and count distribution for benchmarks on ARM. Larger, more complex applications
+like those in SPEC CPU2017 also have higher frame sizes and frame counts and will benefit more from the
+elimination of stack transformation during migration by Unifico.
+can help migrate threads across architectures before reaching a valid migration point, though this
+approach introduces additional execution overhead [41, 83].
+We believe that in order to maximize programmability and performance in heterogeneous-ISA
+systems, more weight should be put in the compiler support, as described in the following sections.
+2.3
+The Burden of Programmability
+Utilizing offloading commonly requires modifications at the source code level of an application in
+order to use a specific supported application programming interface (API). This mainly involves:
+i) setup/teardown of communication with the accelerator, and ii) code segmentation and data move-
+ment for offloading computation. This approach is inherently at odds with ease of programming,
+portability and programmer productivity [86].
+1 queue.push(root)
+2 while len(queue) > 0:
+3
+for src in queue:
+4
+for dst in out_edges(src):
+5
+# Can migrate here with UNIFICO
+6
+if parent[dst] == -1:
+7
+parent[dst] = src
+8
+queue.push(dst)
+Fig. 1. Pseudo-code of a queue-based BFS applica-
+tion. The for-loops cannot be used directly as offload
+kernels without major modifications.
+Figure 1 shows the main part of a small frag-
+ment of the breadth-first search (BFS) algorithm,
+as taken from [50]. Porting the algorithm to an
+offloading-based programming model, e.g., the re-
+cently introduced UPMEM PIM architecture [39],
+requires substantial modifications to the code and
+replicating the data structures among all process-
+ing units [6, 48]. However, with thread migration,
+there is no need of replicating data structures be-
+cause threads can migrate where the data is, and
+Unifico also enables more fine-grained migration,
+beyond just function boundaries.
+2.4
+The Overhead of State Transformation
+Related work shows that for a set of applications
+from the NAS Parallel Benchmarks (NPB), the cost of stack transformation is not significant [28].
+However, since state transformation requires traversing all stack frames for migration between
+ISAs, the cost depends on the number of variables, stack frames, and their sizes, potentially resulting
+in higher overheads for other applications. Thus, we examine stack sizes and stack frame counts
+of a wide range of high-performance computing (HPC) and compute-intensive benchmarks from
+the NPB [21] and SPEC CPU2017 [35] suites (Figure 2), showing their 5-point summary (min/max,
+lower/upper quartile, median values).
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:5
+1
+int i;
+2
+double x = 0, sum = 0;
+3
+4
+5
+for (i = 0; i < 16; ++i)
+6
+sum += hot_func(&x);
+7
+8
+9
+// x also accessed here
+(a) Code snippet in C.
+1
+push Rcs //spill
+2
+load Rcs, xaddr //hoisted
+3
+Rtmp1 = 1
+4
+jmp end if Rtmp1 > 15
+5 loop:
+6
+call hot_func()
+//arg:Rcs
+7
+Rtmp1++
+8
+jmp loop if Rtmp1 < 16
+9 end:
+(b) x86 pseudo-assembly for (a).
+1
+Rtmp1 = 1
+2
+jmp end if Rtmp1 > 15
+3 loop:
+4
+//address recalculation
+5
+load Rtmp2, FP + 3
+6
+call hot_func()
+//arg:Rtmp2
+7
+Rtmp1++
+8
+jmp loop if Rtmp1 < 16
+9 end:
+(c) ARM pseudo-assembly for (a).
+x86
+x
+i
+old FP
+return address
+offset of x: 4
+offset of i: 3
+1
+2
+3
+4
+5
+ARM
+xaddr
+i
+Registers
+Stack
+FP
+Rtmp2
+Rtmp1
+RFP
+Rcs
+Static Metadata
+xaddr
+i
+Registers
+FP
+Rcs
+Rtmp1
+RFP
+Rtmp2
+x
+i
+old Rcs
+old FP
+return address
+offset of x: 5
+offset of i: 4
+1
+2
+3
+4
+5
+PC
+RPC
+PC
+RPC
+required by
+state-of-the-art
+for migration {
+x
+i
+old FP
+return address
+Common Stack
+xaddr
+i
+ARM
+Registers
+FP
+Rtmp2
+Rtmp1
+RFP
+Rcs
+PC
+RPC
+x86/ARM
+- no metadata required
+- identical stack layout for 
+  both architectures
+     R: register
+    PC: program counter
+    FP: frame pointer
+ xaddr: address of var x
+    cs: callee-saved
+Legend
+1
+2
+3
+4
+5
+xaddr
+i
+x86
+Registers
+FP
+Rtmp2
+Rtmp1
+RFP
+PC
+RPC
+Rcs
+(d) Unaligned stack layout (left) and Unifico aligned stack layout for (a).
+Fig. 3. Execution snapshot of the stack layout of a simple loop (a) on x86 (b) and ARM (c) ISAs just before
+a function call. Red highlighted areas (bottom left) show the differences and their required bookkeeping
+to enable migration using a state-of-the-art technique [28]. Unifico (this work) enforces a common layout
+(bottom right) with minimal overhead for heterogeneous migration.
+We observe that larger and more complex applications also have higher frame sizes and frame
+counts on average, e.g, up to 30 times more when comparing SPEC CPU2017 against NPB applica-
+tions. For example, xalancbmk can have up to 40 stack frames with an average stack frame size of
+500 bytes, amounting to a stack size of ∼20KB. If we conservatively assume 8 byte variables, the
+runtime stack transformation will need to convert the state of 2500 variables. This is an order of
+magnitude larger when compared to the worst case of bt in NPB with only 6 frames, 120 bytes
+stack size, and 90 variables on average. Moreover, we see that there is a direct correspondence
+between the number of stack frames and the frame size. Lastly, frame count and size variability
+depend on the application and there is no correlation between programs even within the same
+benchmark suite. We conclude that larger applications can incur a higher overhead in execution
+time during migration. Finally, stack transformation also increases binary size due to additional
+metadata required (Section 6.2). Both costs are completely avoided by Unifico.
+3
+The Stack Layout Problem
+Consider the top left-hand side of Figure 3, where a simple loop in C accumulates the result of calls
+to function hot_func, using as input local variable x passed by reference. We assume an ARM and
+x86 hardware setup which can facilitate migration and that hot_func represents a computationally
+intensive series of operations of a program which typically resides on the low-power ARM processor
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:6
+Mavrogeorgis et al.
+since it is not demanding outside this function. Then, the function call boundary represents a
+natural point for migrating the long-running computation to the more powerful x86 processor
+which would significantly reduce the overall execution time of this program [30].
+Despite its simplicity, this code snippet results in different stack layouts on x86 and ARM ISAs
+that would inhibit heterogeneous process migration. Figures 3(b) and 3(c) show, respectively, the
+simplified x86 and ARM pseudo-assembly generated for Figure 3(a) by the LLVM compiler backend
+code generators. The main difference between the two versions relates to the treatment of the
+pass-by-reference parameter. On x86, the compiler hoists the load operation outside the loop
+(Figure 3(b), line 2) since it is expensive to perform at every iteration, based on the compiler cost
+model for this ISA. This is achieved by using a callee-saved register since the value of x needs to
+be preserved across calls to hot_func, which in turn forces its prior contents to be spilled on the
+stack (Figure 3(b), line 1). On ARM, the compiler decides the opposite; the address is deemed cheap
+and, hence, kept in the loop and recalculated (i.e., rematerialized) using the frame pointer FP at
+every iteration (Figure 3(c), line 5).
+Figure 3(d) shows a snapshot of the register file state and the top-most stack frame for each
+process when execution reaches the call to hot_func. It also shows the bookkeeping information
+required by the state-of-the-art Popcorn compiler [28] to perform heterogeneous migration. The
+main differences are highlighted in red. Comparing the two ISA execution states, we note that:
+i) the stack slot contents differ,
+ii) the registers assigned to program variables differ, and
+iii) the state-of-the-art Popcorn compiler [28] requires metadata embedded in the binaries to
+track differences for correct transformation during migration.
+Popcorn Linux uses a runtime library to transform the stack, guided by the metadata embedded
+in the binaries during their compilation. Conversely, Unifico generates code that preserves the
+stack layout across ISAs (Figure 3(d)). Hence, a binary compiled with Unifico does not require any
+metadata to account for the differences during heterogeneous migration. This obviates the stack
+transformation costs by significantly reducing binary size and state transformation overheads.
+4
+Design of Unifico
+Our goal is to provide the automatic generation of a unified memory stack layout that will simplify
+programming and allow faster heterogeneous migration without the associated overheads of
+metadata-dependent approaches. To this end, we have developed Unifico, a compiler backend
+technique which imposes a uniform stack layout between the targeted architectures and eliminates
+the need for stack transformation during migration.
+We chose the 64-bit x86 and ARM ISAs as targets, being the most widespread architectures. More-
+over, their primary application binary interface (ABI) properties partially overlap (e.g., alignment,
+register width, pointer size, endianness, etc.), simplifying an initial prototype.
+A high-level overview of our approach is shown in Figure 4, where a modern modular compiler
+structure is assumed. The intermediate representation (IR) of the program is given as input to
+both compiler backends, in order to be lowered to the target assembly. By extending each of the
+backend passes, we mitigate the differences in the final stack layout. Code is lowered in every stage
+of the backend, so that the final binary (one per architecture), when executed, will have the same
+stack layout for both architectures. Hence, no metadata is required, as we do not need any stack
+transformation.
+The rest of the section presents the main design challenges of Unifico. First, we decompose the
+variations related to each architecture’s ABIs. These are mostly straightforward to fix, since they
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:7
+Addressing Modes
+Immediate Encoding
+Materializing Values
+LICM
+Data Layout Alignment
+Register Specifications
+Register Costs
+LICM
+Rematerialization
+Stack Object Alignment
+Calling Conventions
+Callsite Padding
+Assembly
+Emitter
+Frame
+Lowering
+Register
+Allocation
+Pre-Register
+Allocation
+Instruction
+Selection
+Post-Register
+Allocation
+Fig. 4. High-level design of Unifico showing code generation passes with our extensions in each backend
+compilation stage for both architectures.
+are clearly documented as specifications and solving them first will also ease mitigating the rest of
+the differences. Then, we examine the differences that arise from the different instructions offered
+by each ISA. Finally, in every compiler implementation, certain decisions have gone into it that
+reflect tacit knowledge based on practice and experience, which is challenging to identify.
+4.1
+ABI Treatment
+The first fundamental factor that causes stack layout mismatch is the register file. Registers are
+finite, so any values that they cannot hold, need to be stored (spilled) on the stack. Also, if a register
+is callee-saved, it must be pushed to the stack before being used by a function, affecting the stack
+layout (contrary to a caller-saved or temporary).
+Table 1. Unifico’s mapping between x86 and ARM
+register files ensures a low execution-time impact.
+We show the callee-saved, return value, parameter
+passing, and temporary registers. This applies for
+both general-purpose and FP/vector registers.
+Registers
+Usage
+x86
+ARM
+Callee-saved
+rsp
+SP
+Stack pointer
+–
+r30
+Link register
+rbp
+r29
+Frame pointer
+rbx, r15
+r19, r20
+General purpose
+Caller-saved
+rax, rdx
+r8, r2
+Return
+rdi
+r0
+Arg #1/return
+rsi,rdx,rcx,r8,r9
+r1–r5
+Args #2–#6
+r10–r14
+r6, r7, r16–r18 Temp registers
+xmm0–xmm1
+v0–v1
+FP args/return
+xmm2–xmm7
+v2–v7
+FP args
+xmm8–xmm15
+v8–v15
+Temp FP registers
+One of Unifico’s guiding principles is to use
+the same number of registers between the archi-
+tectures, while mapping the registers to the same
+functionality (we assume that such mapping ex-
+ists, e.g., if one architecture supports 256-bit vector
+registers, the other one should support them too).
+However, removing registers that have a dedicated
+purpose in the ISA is challenging. For instance, in
+ARM, the registers r16 and r17 can be used to
+support long branches, and the register r18 can
+be used to carry inter-procedural state (e.g., the
+thread context) [11]. Therefore, we give priority to
+those registers and keep them in the ISA, whereas
+we can freely remove others with no special use,
+e.g., simple temporary registers.
+For the calling conventions [11, 64], we need
+to maintain: i) the same number of registers for
+function arguments since the extra arguments are
+passed through the stack, ii) the same return value
+registers, and iii) match the callee-saved registers
+which are also pushed on the stack. We apply this
+to both general-purpose and FP registers.
+Table 1 shows the register sets of x86 and ARM after our mapping. Overall, we reduced the number
+of the ARM general-purpose and FP registers from 32 to 16, per category, which is compatible with
+x86, and modified the usage of a series of registers. For the callee-saved registers, we also ensured
+that they are saved in the same order on the stack by the called functions.
+Moreover, if a register has a special use in one architecture (e.g., r16–r18 in ARM), we pre-
+serve it and map the register to its counterpart in the other architecture, as long as there are no
+incompatibilities between the registers (e.g., if they both need to be reserved for a different purpose).
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:8
+Mavrogeorgis et al.
+4.2
+Instruction Treatment
+Another contributing factor to stack layout mismatch stems from the instructions offered by each
+architecture. For example, loading a constant from memory in x86 and ARM requires different
+number of instructions (Figure 5). x86 calculates the address of the constant and loads the value
+from memory in one instruction. On the other hand, ARM calculates the address using a separate
+instruction and then loads the value in a subsequent instruction. Therefore, ARM requires an
+additional register and may spill one more value to the stack compared to x86.In addition, ARM
+uses two instructions to complete this behavior, which affects the register allocation regions and,
+hence, indirectly the stack layout.
+1 R0 = constant
+2
+(a)
+R0 = addressof(constant)
+R1 = load R0
+(b)
+Fig. 5. Pseudo-assembly for loading a constant
+value on x86 (left) and ARM (right). ARM requires
+an additional instruction for the same high-level
+operation.
+These differences are tightly coupled with two
+important compiler problems: register allocation
+and instruction selection. Register allocation deter-
+mines which values reside in registers and which
+in memory, and for each architecture it may uti-
+lize a different number of registers for a specific
+operation. Instruction selection lowers the IR code
+into machine instructions and may choose differ-
+ent instructions for the same high-level operation,
+depending on the architecture or implementation-
+specific decisions (Sections 4.3 and 5).
+4.3
+Compiler Backend Treatment
+Finally, independently of the ABI or the instructions of an ISA, there are some differences caused
+by the manner the code is generated and optimized in the compiler. As shown in Figure 3, the code
+motion caused by the compiler reflects specific implementation decisions in the backend, affecting
+the stack layout even when the ABI differences between ISAs have been bridged.
+These differences comprise alignment decisions (apart from the ABI specifications), register
+allocation decisions, and a series of optimizations, like rematerialization [32] and code motion
+(Section 5). We make up for the differences described in the last two sections by modifying the
+instruction selection (to select instructions with similar behavior), register allocation, and other
+phases (e.g., optimizations of constants).
+5
+Implementation
+5.1
+The Unifico Backend
+We implemented Unifico by extending the ARM and x86 backends of LLVM. Having demonstrated
+how code generation can affect the stack layout, Table 2 enumerates how we implemented Unifico
+based on the LLVM backend infrastructure, in order to achieve a unified address space layout and
+application state. We describe the various backend parts based on their functionality.
+5.1.1
+Alignment.
+Symbol Alignment. Similarly to related work [28, 41], the symbols of the program, namely the
+functions and the data, need to lie on the same virtual addresses for both architectures. This way,
+accesses to global data will be consistent between the architectures, and the functions will be
+aliased to the same address, which is necessary when copying the memory images between ISAs.
+Therefore, we align the symbols in the code and data sections, by having one symbol per section
+and by adding padding between these sections during linking. The result is shown for main in the
+first lines in the snippets of Figures 6(a) and 6(b), which are all aligned to the address 1000.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:9
+Table 2. Unifico’s code generation extensions to the ARM and x86 backends maintaining a unified stack
+layout.
+Category & Description
+x86 ARM
+Alignment (§ 5.1.1)
+Align symbols in code & data sections
+Ë
+Ë
+Align return addresses after callsites
+Ë
+Ë
+Allocate emergency spill slot
+Ë
+Ë
+Align local stack objects to at least 4 bytes
+Ë
+Align callee-saved registers to 8 bytes
+Ë
+Addressing Modes (§ 5.1.2)
+Do not encode complex addressing
+Ë
+Match legal address immediates
+Ë
+Ë
+Immediate Encoding (§ 5.1.3)
+Do not encode immediates in multiplication
+Ë
+Encode same immediates for data-processing
+Ë
+Do not materialize non-zero FP constants
+Ë
+Register Allocation (§ 5.1.4)
+Match register cost and allocation order
+Ë
+Ë
+Category & Description
+x86 ARM
+Register Allocation (cont.) (§ 5.1.4)
+Hold the zero constant in temp registers
+Ë
+Optimized two-address format
+for integer instructions
+Ë
+Match instruction input/output operand size
+Ë
+Ë
+Rematerialization & Code Motion (§ 5.1.5)
+Rematerialize local variable loads
+Ë
+Do not rematerialize movss/movsd
+Ë
+Rematerialize lea
+Ë
+Rematerialize adrp
+Ë
+Reuse constants instead of rematerializing
+Ë
+Other Optimizations
+Disable heuristic for frame object ordering
+Ë
+Match optimization of special constants
+Ë
+Lower conditional select similarly
+Ë
+Ë
+Vectorize pairs of double
+Ë
+Callsite Alignment. When calling a function, the address of the instruction after the call is pushed
+to the stack (at least for the calling conventions in question). Typically, the return addresses pushed
+will differ for the two architectures, so if a migration happens inside a function the destination
+processor will return to a wrong address after the function returns. As shown in Figures 6(a)
+and 6(b), in the original version of the assembly, the instructions that follow the call to hot_func
+differ by three bytes (offset 1104 vs offset 1107).
+To address this issue, we align the callsites similarly to our approach for the program symbols,
+using nop instructions. Before the call instructions, we emit nop instructions to pad the return
+addresses (Figures 6(c) and 6(d)).
+Stack Object Alignment. We ameliorate the alignment differences for the objects in the stack of
+the two architectures. These include the use of an emergency spill slot and the alignment of local
+stack objects and callee-saved registers, as listed in Table 2. To elaborate on the emergency spill
+slot, the ARM backend will scavenge an extra register in case it needs to materialize large stack
+offsets (i.e., more than 255 bytes), which do not fit in one instruction. If a register cannot be found,
+a special spill slot is reserved. For simplicity, Unifico conservatively reserves this slot and places it
+after the callee-saved registers for both architectures.
+5.1.2
+Addressing Modes. ARM does not support addressing modes of the form [base + scaled register
++ offset] for indexing arrays. When the x86 backend uses this mode, the ARM backend needs to
+reserve an extra register for the same operation. Usually, the ARM backend keeps the address of
+the array, i.e., [base + offset], in a separate callee-saved register, to be able to reuse it for indexing
+the array multiple times. This usage of one extra callee-saved register may introduce extra spills,
+hence, we disable the former complex addressing mode in x86, to get the same behaviour in ARM.
+5.1.3
+Immediate Encoding. The two ISAs do not support the same set of immediates. Due to smaller
+instruction size, ARM instructions can encode explicitly up to 21 bits of immediates for pc-relative
+addressing [4], 12 bits (with an optional shift of 12) for arithmetic operations [68], and up to 64-bit
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:10
+Mavrogeorgis et al.
+1 1000: main:
+2 1000: SP = SP - 32
+3 ...
+4 1108: call hot_func()
+5 1112: // after call
+(a)
+1 1000: main:
+2 1000: push FP
+3 ...
+4 1102: call hot_func()
+5 1107: // after call
+(b)
+1 1000: main:
+2 1000: SP = SP - 32
+3 ...
+4 1100: four_byte_nop
+5 1104: call hot_func()
+6 1108: // after call
+(c)
+1 1000: main:
+2 1000: push FP
+3 ...
+4 1102: one_byte_nop
+5 1103: call hot_func()
+6 1108: // after call
+(d)
+Fig. 6. Call site alignment in pseudo-assembly before (top) and after (bottom) Unifico’s operation for ARM
+(left) and x86 (right). The main symbol is placed at the same address (offset 1000) for both ISAs. Highlighted
+lines in top figures show the difference in return addresses, while in bottom figures show the code emitted
+after Unifico adds nop instructions for padding, resulting in same return address.
+logical immediates [53]. Finally, the ISA allows moving up to 16-bit immediates, optionally shifted,
+to registers. Unifico keeps the same immediate encoding in x86.
+5.1.4
+Register Allocation. To limit possible overheads, we have kept the default greedy register
+allocator [10], which uses global live range splitting, minimizing the cost of spilled code. However,
+we need to make sure that the allocator will take the same decisions when assigning registers for
+the two backends, despite the heuristics it uses internally. Expanding on the first two corresponding
+entries of the table, we first assign the same order of preference to the registers. For example, r15
+is more expensive on x86 than rbx, due to encoding reasons, so we do the same for ARM’s x20
+and x19, even though their cost is the same, to achieve similar allocation. Also, since ARM has a
+dedicated zero register that is not callee-saved, we avoid using callee-saved registers for x86 to
+hold the zero constant, as this would require extra spills in memory.
+1
+push Rcs
+2
+load Rcs, xaddr
+3
+Rtmp1 = 1
+4
+jmp end if Rtmp1 > 15
+5 loop:
+6
+7
+// arg: Rcs
+8
+call hot_func()
+9
+jmp loop if Rtmp1 < 16
+(a)
+Rtmp1 = 1
+jmp end if Rtmp1 > 15
+loop:
+load Rtmp2, xaddr
+// arg: Rtmp2
+call hot_func()
+jmp loop if Rtmp1 < 16
+(b)
+Fig. 7. x86 pseudo-assembly from Figure 3 with (left) and
+without (right) rematerialization of &x using load. In (a) the
+address calculation is hoisted out of the loop (highlighted),
+occupying a callee-saved register whose contents are spilled
+to the stack. In (b), Unifico does not hoist the calculation,
+keeping the stacks among ISAs aligned.
+5.1.5
+Rematerialization and Code Motion.
+Most changes in this category are related
+to how the compiler generates code for get-
+ting the values or the addresses of variables.
+As discussed in Section 3 and shown in Fig-
+ure 7, we instruct the compiler to remate-
+rialize the load instructions, leading to the
+code in Figure 7(b), where load is kept in-
+side the loop without the need for a callee-
+saved register. This way the address is cal-
+culated at every iteration (line 6) and passed
+to the first argument register (line 7). There
+are eight different cases (Table 3).
+Getting values of variables. Getting the
+value of local variables is done similarly in
+both architectures, with simple loads from
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:11
+the stack frame. For global variables, x86
+needs only one instruction (a rip-relative
+mov), whereas ARM requires two instruc-
+tions (one to calculate the global address and one to load from it). Since LLVM cannot currently
+rematerialize multiple instructions, when ARM needs to reuse a global variable it will spill it in the
+stack, while for x86 it suffices to recompute the rip-relative mov. Regardless, we ensure that x86
+will also spill the value in this case.
+Getting references of variables. Getting the reference (i.e., address) of a local variable in ARM uses
+simple arithmetic (add/sub) with the frame pointer (Figure 3), while lea instructions (termed load
+in our pseudo-assembly) are used in x86 (Figures 3 and 7). The add/sub instructions are usually
+not hoisted out of loops by the compiler, whereas the lea instruction is, since it is a little more
+expensive in the general case [2, 46]. Hoisting the instruction may consume a callee-saved register
+so, instead, our compiler rematerializes these instructions if it needs to reuse their result. Since
+we are not hoisting lea instructions, however, we need to do the same for the adrp instructions
+(the ARM counterpart), to also have an aligned behavior for the case of global variables (adrp vs
+rip-relative lea). Therefore, we additionally rematerialize adrp instructions.
+Table 3. Accessing values (x) and references
+(&x) of variables per architecture.
+Scope
+Access x
+Access &x
+ARM
+Local
+simple load
+simple add/sub
+Global
+adrp + load
+adrp
+x86
+Local
+simple load
+lea
+Global
+rip-relative mov
+rip-relative lea
+Reusing constants. When the same constant is used
+multiple times in ARM, the compiler tries to place its
+value in a register. Instead, x86 tries to materialize the
+constant again by encoding it separately for every in-
+struction. Unifico emulates the first behavior for x86.
+5.1.6
+Verifying Stack Layout. To verify that the stack
+layout between an x86 and an ARM binary is the same
+and, hence, that migration will be successful, we use the
+LLVM StackMaps [17] to track the location of values in
+the stack. These are inserted in a separate executable
+and linkable format (ELF) section, which is cross-checked
+after compilation for both binaries and then discarded. Compilation correctness is ensured by the
+LLVM backend tests, after they are ported to the new Unifico changes.
+5.2
+Other Considerations and Limitations
+Libraries. We currently only support static linking for the libraries, to simplify the engineering
+effort required to align all the symbols, and to create consistent memory images of the binaries
+between the machines. Moreover, we are not migrating inside library calls, so they do not need a
+consistent layout. However, some functions in the musl libc library (e.g., setjmp/longjmp) use
+inline assembly when handling signals/exceptions, so we modified their assembly to obey our new
+ABIs for compatibility.
+Interaction with the OS.. We assume a replicated-kernel OS, where there is a kernel per core and
+each kernel loads the address space of the respective binary [28]. The address space of each binary
+has an identical layout, but the .text section is natively compiled, and then aligned (Section 5.1.1),
+so that each function in the two ISAs will have the same virtual address. The OS-specific details
+(e.g., page mapping, process scheduling, view of the OS by different processors, etc.) are out of
+scope and can be found in related work [29].
+Backend and optimization flags. Regarding the backend infrastructure, we are not using the
+machine instruction scheduler since it can lead to instruction reorderings that invert the order
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:12
+Mavrogeorgis et al.
+of spilling. Identifying a good compromise between allowing machine scheduling and getting
+a predictable order of spilled values is left for future work. In addition, although the ARMv8
+architecture is bi-endian, we keep the (default) little-endian setting to match with x86. The technical
+effort to support different endianness is outside the scope of this work. Finally, migration is
+supported currently for up to the -O1 flag. An open issue in the LLVM code generator1 makes the
+allocator run out of registers for most of the NPB in -O2/-O3, when using stackmaps. Therefore,
+we cannot verify Unifico for the full suite in -O2 or higher, although we are working on an LLVM
+patch to fix that. However, since the LLVM backend enables optimizations for any optimization
+level other than -O0, having supported -O1 should cover from the outset many programs compiled
+with higher flags.
+Applicability to other architectures. Even though the details described in this section are specific
+to x86 and ARM, our technique provides a blueprint and the high-level ideas for supporting
+other combinations of general-purpose processors (e.g., x86 and RISC-V). Much of the target-
+specific details, e.g., unifying the ABIs, the instruction formats, the register allocation costs, the
+rematerialization properties of values, etc., are usually encoded easily as a backend specification,
+e.g., in LLVM’s TableGen [18] or GCC’s Machine Description [15]. More elaborate implementation,
+e.g., which address immediates are legal, can be guided using the insights gleaned from this section
+and our OSS artifact. For target features not covered in this work, these can be detected through
+the stackmap machinery, e.g., a constant optimized specifically in one architecture will appear as a
+different architecture-specific value (or values) in the stackmaps.
+Multithreading and memory consistency. Our evaluation is for a single thread, however Unifico’s
+design is orthogonal to multithreaded execution. Since Unifico is based on a unified address space
+between the architectures, and the evaluated architectures support different memory consistency
+models [38, 69], an inter-device coherence protocol is assumed (e.g., CXL [7]), along with a fused
+memory model (e.g., compound models [47]) between the two architectures. In our setup, we
+assume that upon migration all threads are stopped and buffers/caches are flushed to memory,
+therefore migration points act as memory barriers. We will investigate multithreaded execution in
+future work.
+5.3
+Migration
+There is no platform available today with x86 and ARM that share memory. Therefore, to validate
+migration under our approach, we are using CRIU [8] for a prototype. CRIU offers a checkpoint-
+restore mechanism in user space, by dumping a multi-file image of the application when pausing
+it, and restoring the state later, continuing the execution. However, in our prototype, we are
+leveraging multi-ISA binaries, so we dump the state of the binary in the starting processor, rewrite
+the necessary CRIU images to be consistent with the target machine, transfer the images (via SSH),
+and continue execution of the other binary by restoring the rewritten state, similarly to related
+work [24, 84].
+Contrary to related work [24, 28, 82, 84], we do not transform the state at all, but only rewrite
+images like core [8], which contain core process and architecture-specific state information, e.g., the
+registers. For example, based on our register mapping (Table 1), we need to simply copy the value
+of the callee-saved rbx from the source image to the value of r19 in the destination image, if we
+are migrating from x86 to ARM. Rewriting happens through a script invoked by a simple runtime,
+but in our ideal use-case scenario, e.g., an x86/ARM machine with coherent shared memory, this is
+1https://github.com/llvm/llvm-project/issues/56880
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:13
+facilitated by a user- or kernel-space service without the need to transfer the state between the
+machines.
+We take some further steps to keep the virtual memory address mappings between the architec-
+tures consistent. First, we disable address space layout randomization (ASLR) on both machines,
+otherwise the start address of the stack will be different between the architectures, thus breaking
+the match of the stack layouts. We do this for simplicity and leave the effort of assigning the same
+random stack start address to both architectures as a future extension. Furthermore, by default, x86
+programs map their stack to addresses starting from 0x800000000000, whereas in ARM, frames
+start from the address 0xffffffffffff [11, 64]. We modify the startup function from the C library,
+so that the frame of the main function starts from 0x800000000000 in both machines.
+6
+Evaluation
+We answer the following questions to evaluate Unifico: i) What is the binary size improvement
+compared to related work (Section 6.2)? ii) What is the overall and per feature impact of Unifico on
+execution time (Section 6.3)? iii) How to analyze and limit the effect of the most impactful features
+(Sections 6.4 to 6.6)? iv) How does performance vary on different microarchitectures (Section 6.8)?
+v) How does Unifico compare in execution time with related work (Section 6.9)?
+6.1
+Setup
+Hardware. We use two hardware configurations for evaluation: i) (ARM) GIGABYTE® R181-T92-00
+(SABER SKU), Dual Cavium ThunderX2® CPU CN9980 v2.2 2.20GHz (32 cores/128 threads), and
+ii) (x86) Dell PowerEdge R440, Intel® Xeon® Silver 4110 CPU 2.10GHz (8 cores/16 threads). For the
+performance portability experiment (Section 6.8) we additionally use: iii) (x86) Intel® Xeon® Gold
+6230R CPU @ 2.10GHz, iv) (x86) Intel® Core™i9-10900 CPU @ 2.80GHz, v) (ARM) Neoverse-N1:
+Ampere® Altra @ 1.7GHz, and vi) (ARM) Cortex-A53™@ 1.5GHz
+Software. Unifico extends LLVM version 9.0.1, consisting of ∼3450 lines of code (LoC) (1520
+and 860 LoC for the x86 and AArch64 backends respectively). The rest of the code relates to
+target-independent functionality, including a few changes on clang version 9.0.1. We reuse the
+modified linker and symbol aligner from the Popcorn compiler [16] (commit 4cc8805). Regarding
+the migration mechanism, we prototype a method using HetCRIU[84], an extension of CRIU[14]
+at version 3.17.1. Specifically, we extend the Dapper framework [24], a lightweight program
+state rewriter based on HetCRIU, to support heterogeneous checkpoint-restore with and without
+transformation2. Finally, we employ a modified version of musl libc version 1.1.22, which we
+statically link to the binaries and release with our LLVM modifications.
+Benchmarks. We focus on compute- and memory-intensive C benchmarks to explore the impact
+of Unifico’s code modifications which may have been hidden otherwise (e.g., by system calls, I/O
+operations, etc.). In our experiments, we used a C implementation [72] of the NPB suite [21] (input
+classes A, B, C). All benchmarks are compiled with the -O1 flag. For the class C of the ft and mg
+benchmarks, the enormous amount of static data declared lead to a relocation overflow error in
+ARM (hence we cannot compile also the aligned x86 binary), so we omit these results. This is under
+investigation (e.g., using different code models), but does not affect our overall exploration here.
+6.2
+Size Comparison
+We explore the sizes for binaries compiled with the following different methods: i) an unmodified
+clang/LLVM compiler (statically linked with the C library), ii) the Popcorn compiler toolchain
+2https://github.com/systems-nuts/TransProc
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:14
+Mavrogeorgis et al.
+bt
+cg
+ep
+ft
+is
+lu
+mg
+sp
+ua
+0.0
+0.2
+0.4
+0.6
+Section Size (MB)
+x
+x
+X86 - Class B
+Compiler
+popcorn
+uniﬁco
+unmodiﬁed
+Binary Sections
+.data
+.rodata
+.debug
+.text
+Compiler
+popcorn
+uniﬁco
+unmodiﬁed
+(a)
+bt
+cg
+ep
+ft
+is
+lu
+mg
+sp
+ua
+0.0
+0.2
+0.4
+0.6
+Section Size (MB)
+x
+x
+AArch64 - Class B
+Compiler
+popcorn
+uniﬁco
+unmodiﬁed
+Binary Sections
+.data
+.rodata
+.debug
+.text
+Compiler
+popcorn
+uniﬁco
+unmodiﬁed
+(b)
+Fig. 8. Binary size analysis generated with static linking (unmodified LLVM), the Popcorn compiler, and
+Unifico, for x86 (left) and ARM (right) using the NPB suite. Unlike the Popcorn compiler, Unifico requires
+no metadata and its size overhead is minimal, within 10% of statically linked binaries generated with LLVM.
+(statically linked with the C library), and iii) Unifico (statically linked with the C library). We
+include the unmodified compiler in our evaluation to show the impact of our modifications to the
+code section size (Figure 8).3 The binaries are for the class B of NPB, but the trends are similar for
+the other classes.
+We make three observations. First, in all compilation categories, the x86 binaries are smaller
+than the ARM binaries. This can be attributed to the x86 being a complex instruction set computer
+(CISC) ISA, encoding more complex instructions that can lead to compact binaries. Second, in both
+architectures, the Popcorn binaries are up to 2𝑥the size of the statically compiled binaries of the
+unmodified compiler. This is caused by additional metadata, debug information, as well as libraries
+(in the .text section) that are used to facilitate migration and state transformation. Finally, we
+observe that in both architectures Unifico leads to much smaller binaries relatively to Popcorn,
+and within 10% of the unmodified compiler. The size of the Unifico binaries is slightly larger than
+those compiled with the standard clang due to the constraints we imposed to the code generation,
+visible in the code and data sections. Overall, we reduced the binary size overhead from ∼200% to
+∼10%.
+6.3
+Analysis of Impact per Architecture
+For each architecture, we evaluate the impact of Unifico, relative to the unmodified compilation.
+We run each benchmark three times and all standard deviations were below 1%. We compare the
+overhead introduced by Unifico against an unmodified baseline.
+Since Unifico comprises different feature changes in the backend, to understand and potentially
+mitigate their overhead, we perform a comprehensive evaluation analysis for all the modification
+categories seen in Table 2. To this end, we only apply each time the changes of one category and
+compare it with the baseline. For a fair comparison, all categories are applied on top of the ABI
+changes (Section 4.1), since their true impact can only be highlighted when the final set of registers
+is available to them. For example, the changes in the register allocation category might show
+minimal impact for ARM if the full set of registers is available, but if we proactively examine their
+impact on the reduced set of registers, we will likely get more representative results. We do this for
+x86 as well, although the changes in its ABI are less consequential.
+3Popcorn cannot compile mg and ua in -O1 due to register allocation issues with stackmaps, but it does not affect our
+analysis.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:15
+bt
+cg
+ep
+ft
+is
+lu
+mg
+sp
+ua
+Mean
+−2
+0
+2
+4
+6
+8
+10
+12
+14
+16
+Overhead (%)
+X86 - NPB - Class B
+Feature Class
+abi
+call-frame-opt
+callsite-alignment
+constant-mul
+lowering
+register-allocation
+remat-code-motion
+scheduling
+stack-slot-alignment
+vectors
+uniﬁco
+(a) x86
+bt
+cg
+ep
+ft
+is
+lu
+mg
+sp
+ua
+Mean
+−6
+−4
+−2
+0
+2
+4
+6
+8
+10
+12
+14
+16
+18
+20
+Overhead (%)
+AArch64 - NPB - Class B
+Feature Class
+abi
+callsite-alignment
+lowering
+register-allocation
+remat-code-motion
+scheduling
+stack-slot-alignment
+vectors
+uniﬁco
+(b) ARM
+Fig. 9. Percentage overhead of Unifico (last feature) and analysis of the overhead per feature category for
+NPB class B.
+Results are shown in Figure 9(a) for x86 and Figure 9(b) for ARM, for the class B of the NPB. For
+each benchmark, we show the overhead of all the categories (on top of the ABI changes, namely abi
+in the legend) versus a baseline unmodified LLVM compiler. We make five observations. First, in
+the case of x86, almost all benchmarks compiled with Unifico demonstrate less than 5% difference
+from the unmodified compiler. Whereas in the case of ARM, the performance has not noticeably
+degraded, except for the cases of lu and sp. Second, in x86, the total overhead (unifico), seems
+to be an accumulation of the individual overheads from the categories. Contrary, in ARM, the
+individual overheads (which are on top of the abi changes), are within a large portion of the total
+overhead, although combined they don’t lead to an exorbitant performance change. Third, in
+x86, callsite-alignment constitutes the most significant overhead factor, for cg, ft, and ua. Then,
+remat-code-motion follows. Fourth, in ARM, we observe more overhead in register-allocation and
+scheduling. The other categories do not show much difference compared to the abi category (which
+they already encapsulate), suggesting that their effect is not significant. Finally, we observe a few
+speedups compared to the baseline.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:16
+Mavrogeorgis et al.
+cg
+ft
+ua
+0
+2
+4
+6
+8
+10
+12
+14
+16
+Overhead (%)
+X86 - B
+w/o callsite alignment
+w/ callsite alignment
+(a) Execution time overhead with/without the call-
+site alignment in Unifico for x86.
+cg
+ft
+ua
+0
+2
+4
+6
+8
+10
+12
+14
+16
+Overhead (%)
+X86 - B
+Feature Class
+NOPS
+NOPS+DBA
+(b) Analysis of the callsite alignment overhead
+for the most impacted benchmarks on x86.
+Fig. 10. Impact of callsite alignment to cg, ft, and ua.
+In the following sections, we analyze the above observations, focusing on the aforementioned
+categories with the most impact, we explain the results, and propose solutions.
+6.4
+Callsite Alignment
+Considering Figure 9(a), we observe that cg, ft, and ua show the most notable overheads because
+of the alignment of callsites. First, we check how much the callsite alignment is contributing to the
+total Unifico impact. Figure 10(a) compares the execution time overhead before and after aligning
+the callsites of the Unifico-compiled binaries. We observe that the callsite alignment explains most
+of the total overhead for cg, and a large portion for ua.
+Analysis of callsite alignment. To further pinpoint and mitigate the impact of callsite alignment,
+we examine the impact of all its components: i) insertion of nop padding (NOPS), and ii) disabling
+the block alignment restrictions (DBA). The nops are needed to insert the padding. Disabling
+block alignment is needed because after calculating and inserting the padding, the compiler would
+potentially add additional padding to satisfy the alignment requirements of blocks. This would
+break again the alignment between x86 and ARM since it would require recalculating and inserting
+the padding, which could cause another padding change for the branch alignment, and so on. We
+later show how to fix the last issue using more than two compilations.
+Figure 10(b) shows the impact of each component in the most affected x86 benchmarks. First, we
+observe that the nop insertion (NOPS) has significant impact on cg. Second, disabling the alignment
+constraints on top of the nop insertion (NOPS+DBA), causes the performance to further degrade in
+all benchmarks. The first observation is explained partly by the number of nops inserted in cg. In
+conj_grad, its hottest function, there are 76 nops inserted, meaning that they introduce significant
+more stalls to the processor. Finally, the following section uses performance counters to better
+understand the impact the alignment.
+6.4.1
+Top-Down Microarchitecture Analysis. To better understand the overhead and how to mitigate
+it, we perform a top-down microarchitecture analysis (TMA) [55, 85]. TMA combines performance
+counters to evaluate how the CPU pipeline slots are being used, classifying bottlenecks into four
+high-level categories (described below), and then optionally drilling deeper into each category. To
+run TMA and access the deeper levels, we use toplev, a python tool from the pmu-tools suite [59]
+invoking perf [40] under the hood.
+We first examine the top level of the analysis, estimating how much time the CPU pipeline
+spends:
+i) Stalling to issue new instructions ready to be executed (Frontend Bound).
+ii) Stalling to recover from mispredicted instruction issues (Bad Speculation).
+iii) Stalling to execute issued instructions and access the memory system (Backend Bound).
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:17
+iv) Retiring instructions and committing their results (Retiring).
+Then, we can identify one node of interest and drill down using node-specific metrics into the
+subcomponents that are actually under more pressure inside the node itself.
+The results of the TMA analysis are shown in Figure 11, where we compare the TMA metrics
+between the callsite alignment and a baseline compiler, for the most affected benchmarks of Fig-
+ure 10(a) against a relatively unaffected benchmark (bt). We make three observations. First, in level
+1 (columns 1–4), we observe that the first three benchmarks become more frontend-bound after
+applying the callsite alignment, whereas BT is not impacted notably. Therefore, we expand only
+the frontend-related metrics of level 2, fetch latency and fetch bandwidth (columns 5–6), in level 3
+(columns 7–14), ignoring the rest nodes of level 1. Second, in level 3, cg, ft, and ua show higher
+pressure on the macro instruction translation engine (MITE) and less on the decoded stream buffer
+(DSB) Switches, suggesting that fewer opcodes are being cached during decoding in the DSB and
+need to switch to MITE [54]. Third, ft demonstrates increased pressure for both DSB and MITE.
+Finally, the affected benchmarks do not show differences in the other frontend metrics (like icache
+misses, iTLB misses, etc.).
+The increased pressure in the DSB Switches and in MITE can be attributed to the alignment issues
+created by the extra nops in tandem with the relaxation of alignment constraints. For example,
+if the code of a hot loop is not aligned to the recommended boundaries by the architecture, then
+control may flow out of the region cached by the DSB, leading to thrashing and requiring more work
+from MITE [22, 54]. Overall, we conclude that if adding the nops and not abiding to the alignment
+constraints decrease the fetch bandwidth in the pipeline, then performance will be impacted (at
+least for x86 which has more alignment constraints).
+6.4.2
+Improving the performance. Based on the above analysis, we apply the following fixes during
+code generation of padding.
+Jump over padding. The nop instructions inserted might be keeping the processor idle, introducing
+stalls in the pipeline. To reduce their impact, we transform the code so that before the nops there is
+an unconditional jump instruction that skips over them. We enable this in both architectures, i.e.,
+by inserting a b instruction for ARM and a jmp instruction for x86 respectively. The b instruction is
+an unconditional branch with a ±128MB offset [51], while the jmp we use is a near, unconditional,
+relative, 4-byte memory jump [49]. Since these instructions constitute padding by themselves, we
+take them into account when calculating the padding, if the compiler decides to emit them. The
+compiler only emits them if the nop number is larger than the branch instruction size itself (4 bytes
+for ARM and 5 for x86). In practice, this means that there will never be a case where both ISAs will
+need an unconditional jump.
+An example where the compiler emits a nop instruction in x86, is shown in Figure 12. In Fig-
+ure 12(b), x86 needed a relatively large padding of 17 nops to align with ARM in Figure 12(a).
+This is not uncommon, since x86, being a CISC architecture, usually has a more condensed code
+section than ARM, thus needing more padding in many cases to align its callsites. To limit the
+overheads caused by nops, in Figure 12(d) the compiler inserts a jmp instruction (5 bytes) before an
+ensemble of 12 bytes of nops, instead of emitting 17 byte nops. This change improved cg by 2%,
+while improving the whole suite slightly on average.
+Accumulated padding. To satisfy both the alignment constraints recommended by the CPU
+vendors, and the callsite alignment needed by Unifico, we can apply a multi-pass compilation
+technique. The key idea is to cache the calculated nop padding for the callsites in every compilation,
+then allow the compiler to emit further padding to satisfy the block alignment and, finally, repeat
+another padding calculation on top of the previous one. Applying this enough times converges
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:18
+Mavrogeorgis et al.
+Frontend Bound
+Bad Speculation
+Backend Bound
+Retiring
+Fetch Latency
+Fetch Bandwidth
+ICache Misses
+ITLB Misses
+Branch Resteers
+MS Switches
+LCP
+DSB Switches
+MITE
+DSB
+0
+5
+10
+15
+20
+25
+30
+35
+40
+45
+50
+55
+Percentage (%)
+Level 1
+Level 2
+Level 3
+Perf Top-Down Metrics - X86 - Class B
+baseline
+callsite-alignment
+(a) CG
+Frontend Bound
+Bad Speculation
+Backend Bound
+Retiring
+Fetch Latency
+Fetch Bandwidth
+ICache Misses
+ITLB Misses
+Branch Resteers
+MS Switches
+LCP
+DSB Switches
+MITE
+DSB
+0
+5
+10
+15
+20
+25
+30
+35
+40
+45
+50
+55
+Percentage (%)
+Level 1
+Level 2
+Level 3
+Perf Top-Down Metrics - X86 - Class B
+baseline
+callsite-alignment
+(b) FT
+Frontend Bound
+Bad Speculation
+Backend Bound
+Retiring
+Fetch Latency
+Fetch Bandwidth
+ICache Misses
+ITLB Misses
+Branch Resteers
+MS Switches
+LCP
+DSB Switches
+MITE
+DSB
+0
+5
+10
+15
+20
+25
+30
+35
+40
+45
+50
+55
+Percentage (%)
+Level 1
+Level 2
+Level 3
+Perf Top-Down Metrics - X86 - Class B
+baseline
+callsite-alignment
+(c) UA
+Frontend Bound
+Bad Speculation
+Backend Bound
+Retiring
+Fetch Latency
+Fetch Bandwidth
+ICache Misses
+ITLB Misses
+Branch Resteers
+MS Switches
+LCP
+DSB Switches
+MITE
+DSB
+0
+5
+10
+15
+20
+25
+30
+35
+40
+45
+50
+55
+Percentage (%)
+Level 1
+Level 2
+Level 3
+Perf Top-Down Metrics - X86 - Class B
+baseline
+callsite-alignment
+(d) BT
+Fig. 11. Comparison of TMA metrics, between the callsite alignment and a baseline compiler, for the most
+affected cg, ft, and ua, versus the unaffected bt. For the TMA, we show level 1 (columns 1–4), the frontend-
+related metrics of level 2 (columns 5–6), and their expansion in level 3 (rest of the columns).
+1 1000: main:
+2 1000: SP = SP - 32
+3 ...
+4 1120: call hot_func()
+5 1124: // after call
+(a)
+1000: main:
+1000: push FP
+...
+1102: call hot_func()
+1107: // after call
+(b)
+1 1000: main:
+2 1000: SP = SP - 32
+3 ...
+4
+5
+6 1118: call hot_func()
+7 1124: // after call
+(c)
+1000: main:
+1000: push FP
+...
+1102: jmp 1119
+1107: twelve_byte_nop
+1119: call hot_func()
+1124: // after call
+(d)
+Fig. 12. Callsite alignment with jump in pseudo-assembly before (top) and after (bottom) Unifico’s operation
+for ARM (left) and x86 (right). x86 needed a 17-byte padding so, instead, the compiler emits a 5-byte jmp to
+the call before a 12-byte padding.
+to the right padding, at the expense of a slower compilation. In our experiments, this technique
+improved the performance by an average of 1% −2%, converging after 7 iterations on average, and
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:19
+with only slightly increased nop insertion for the best padding. Nevertheless, we keep it off by
+default and exclude it in our total results in Section 6.7, to avoid the compilation overhead, but it
+can be activated optionally when compile time can be traded off for a lower alignment impact.
+6.5
+Register Pressure and Register Allocation
+We examine the impact of limiting the number of general-purpose and floating-point registers
+available during code generation, specifically in ARM.
+Register Pressure and Rematerialization. We define register pressure as the number of simultaneous
+live values in registers at a specific instruction, and we use the number of spilled values in the stack
+as a proxy to estimate it [33, 36, 81]. This makes register pressure a local instruction property. For
+example, spilling a value means keeping a value in memory instead of a register, which reduces
+register pressure. Thus, if altering code generation leads to more spills and refills to or from the stack,
+we say that register pressure was decreased (and vice-versa). Finally, rematerialization (Section 5.1.5)
+generally increases register pressure, which further compounds the tradeoff between choosing to
+apply it and increase register pressure (with potentially more future spills), or allow directly the
+spill to the stack (increasing the memory pressure).
+6.5.1
+Impact of reducing the registers. As a first step, we measure the impact of only reducing
+the registers in ARM, versus a baseline LLVM compiler, without other Unifico features. We only
+include the remaining ABI changes, such as which registers are callee-saved or temporary, since
+these are directly relevant to register usage and spilling. We use the dynamic instruction distribution
+as a proxy to changes in register pressure. There are five ARM opcode families affecting register
+pressure:
+i) Load instructions indicate either a load from a spill slot in the stack or a load of a global
+symbol or of a constant (e.g., ldp/ldr).
+ii) Store instructions indicate a store to a spill slot.
+iii) Arithmetic instructions to compute load/store addresses or other values (e.g., add).
+iv) Move immediate instructions used for moving immediates to registers (e.g., movk).
+v) Address calculation instructions used for materializing addresses (e.g., adrp).
+Note that these instructions serve other purposes as well, but we focus on the ones related
+to register pressure. Load and store instructions are relevant because they implement spills and
+refills. Arithmetic instructions are relevant because of their role in spilling and rematerialization.
+For example, more spills increase arithmetic instructions since more offsets to the stack pointer
+will be needed. Also, arithmetic instructions take part in rematerialization to recalculate values.
+Move immediate instructions are used in rematerialization of global values or constants. Similarly,
+address calculation instructions are used in rematerialization of memory addresses (that are not
+stack related).
+We track the changes in dynamic instruction count of the above categories after applying the
+Unifico ABI using DynamoRIO [34]. Specifically, we use the opcodemix tool similarly to benchmark
+characterization methodologies [74]. The reduction of registers applies only to ARM, so we only
+show results for this architecture.
+Figure 13 shows the dynamic instruction distribution for all NPB workloads, compiled for ARM,
+for class B. We show the top 15 instructions per workload, in terms of dynamic count, for the
+baseline compilation (baseline), which is an unmodified LLVM compiler, and the feature tested
+(abi), which is applying all the Unifico ABI rules, including reducing the registers and modifying
+the calling conventions.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:20
+Mavrogeorgis et al.
+bcondbl
+fdiv
+fmul
+fnmul
+fsub
+ldp
+ldr
+movk
+movzorr
+ret
+stp
+str
+stur
+sub
+subs
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(a) BT
+add
+adds
+b
+bcond
+fadd
+fmul
+ldr
+ldrsw
+ldur
+orr
+str
+sub
+subs
+tbnz
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(b) CG
+add
+adrp
+bcond
+fabs
+fadd
+fcmp
+fcvtzs
+fmov
+fmul
+fsubldr
+ldur
+movz
+sbfm
+scvtfstr
+stur
+ubfm
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(c) EP
+add
+b
+bcond
+fadd
+fmov
+fmul
+fsub
+ldp
+ldr
+ldur
+orr
+scvtf
+stp
+str
+subs
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(d) FT
+add
+adrp
+bcond
+fadd
+fcvtzs
+fmul
+fsub
+ldr
+ldrsw
+sbfm
+scvtf
+str
+subs
+ubfm
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(e) IS
+add
+adds
+adrp
+bcond
+fadd
+fmov
+fmul
+fnmul
+ldp
+ldr
+madd
+movk
+orr
+stp
+stur
+sub
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(f) LU
+add
+bcond
+fadd
+fcmp
+fmov
+fmul
+fsub
+ldp
+ldr
+ldur
+orr
+str
+stur
+subs
+ubfm
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(g) MG
+add
+adrp
+fadd
+fcmp
+fcsel
+fmul
+fnmul
+fsub
+ldp
+ldr
+ldur
+madd
+movk
+movzorr
+str
+stur
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(h) SP
+add
+adrp b
+bcond
+fmov
+fmul
+fsub
+ldp
+ldr
+ldur
+movk
+movzorr
+ret
+stp
+str
+subs
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+2.4
+2.8
+3.2
+3.6
+4.0
+4.4
+4.8
+Instruction Count
+×109
+AArch64 - Class B
+baseline
+abi
+(i) UA
+Fig. 13. Dynamic instruction distribution analysis showing the effect of applying the ABI from Unifico (abi),
+which includes reducing the available registers in ARM, versus baseline. Only the top 15 instructions are
+shown in each case (a bar pair has only one bar if the instruction is top-15 in one version, but not the other).
+1 // Enough registers
+2 // to host addresses
+3 ldr d1, [x26, x13]
+4 ldr d2, [x25, x13]
+5 ldr d3, [x27, x13]
+6 ldr d4, [x28, x13]
+(a)
+// Rematerialization in x19
+add x19, x2, x5
+ldr d3, [x19, #4120]
+ldr d2, [x19]
+ldr d4, [x4, #3352]
+ldr d0, [x3, x5]
+(b)
+Fig. 14. A hot loop snippet in sp compiled with an unmodified LLVM (left) and with Unifico after reducing
+the available registers for code generation (right).
+We make three observations. First, cg and is exhibit almost no change in their instruction
+distributions, without changing the mix in the other opcodes. Second, bt, ep, lu, mg, sp, and ua
+exhibit increased arithmetic and address materialization instructions. Finally, ep, ft, and sp exhibit
+increased load and store instructions.
+The results for cg and is are consistent with their performance impact shown in Figure 9(b) (abi),
+which is minimal. On the other hand, all the benchmarks where the spills and/or rematerialization
+activity is increased, exhibit notable performance impact in the abi category, mostly on lu, sp, and
+ua.
+As an example on how reduced registers can increase spills or rematerialization, consider the
+code snippet in Figure 14. The snippet is extracted from a compute-intensive loop in SP, through
+perf. On Figure 14(a), we observe that there are enough registers to hold the global addresses
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:21
+bt
+cg
+lu
+sp
+ua
+−6
+−4
+−2
+0
+2
+4
+6
+8
+10
+12
+14
+16
+18
+20
+Overhead (%)
+AArch64 - B
+before regalloc changes
+after regalloc changes
+(a) Unifico ARM binaries with/without the extensions
+affecting register allocation.
+lu
+sp
+02468
+10
+12
+14
+16
+18
+20
+Overhead (%)
+AArch64 - B
+uniﬁco w/ scheduling
+uniﬁco w/o scheduling
+(b) Unifico ARM binaries with/without the
+machine scheduler enabled.
+Fig. 15. Ablation studies for ARM.
+from which the floating-point values are stored. However, after reducing the available registers
+(Figure 14(b)), the compiler needs to rematerialize an address, adding one more instruction, and
+also consume a callee-save register (x19) to avoid spilling, increasing the demand for callee-saved
+registers.
+6.5.2
+Impact of register allocation. We also debug the performance of our ARM applications after
+applying the register allocation category changes. We compare the execution time overhead for the
+most impacted benchmarks before and after applying the register allocation changes in Unifico-
+compiled binaries (Figure 15(a)).4 We observe that these changes constitute a large portion of the
+overhead for cg and sp, and lead to a small speedup in the case of ua.
+Regarding the overhead, we found that the most impactful change is the application of the two-
+address format for integer arithmetic in ARM (Table 2). Despite using similar heuristics with x86 to
+bring back the three-address format whenever possible (e.g., when x86 converts a two-address add
+to a three-address lea), it still causes 4%–8% execution time overhead for these two benchmarks.
+The remaining register allocation changes (e.g., ARM register costs) had far less impact. Overall,
+we conclude that applying the two-address format on integer ARM instructions can cause notable
+overhead in programs with deeply nested loops like sp.
+UA speedup. An outlier we notice in Figure 15(a) and Figure 9(b) is a speedup obtained in ua,
+after applying the changes in the register allocator. This speedup is carried over to the total Unifico
+performance. From the register allocation features, we identified that avoiding the use of wide
+multiply-add instructions in ARM, with 32-bit multiplication operands and a 64-bit destination
+operand, e.g., smaddl, led to better register allocation and execution time improvement. However,
+the speedup did not persist at higher optimization levels, indicating missed optimizations in the
+baseline (compiled with -O1), rather than a performance improvement introduced by Unifico.
+6.6
+Machine Instruction Scheduling
+Lastly, we disable the machine instruction scheduler. Although we keep the post-register-allocation
+scheduler, the scheduling that precedes register allocation can reorder instructions before those
+spill slot locations are finalized (which happens after register allocation). This can cause different
+final layout of spill slots, if there is a reorder mismatch between the architectures.
+From Figure 9(b), we notice that the most impacted benchmarks directly from disabling this
+scheduling pass are lu and sp. We validate the impact on the overall performance, by comparing
+4We omit a TMA analysis in this section due to lack of detailed performance monitoring unit (PMU) core bound events in
+our ThunderX2 ARM CPU.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:22
+Mavrogeorgis et al.
+bt
+cg
+ep
+ft
+is
+lu
+mg
+sp
+ua
+Mean
+−10
+2
+4
+6
+8
+10
+12
+14
+16
+18
+20
+Overhead (%)
+X86 - B
+Input Class
+A
+B
+C
+(a)
+bt
+cg
+ep
+ft
+is
+lu
+mg
+sp
+ua
+Mean
+−6
+−4
+−2
+0
+2
+4
+6
+8
+10
+12
+14
+16
+18
+20
+Overhead (%)
+AArch64 - B
+Input Class
+A
+B
+C
+(b)
+Fig. 16. Comparison of total overhead with unmodified native execution across all classes. Unifico-compiled
+binaries perform within %6 of the baseline in almost all benchmarks and classes for both architectures.
+Unifico with scheduling enabled (default in LLVM -O1) and disabled (Figure 15(b)), observing that
+disabling the scheduler contributes significantly to the overall performance of sp.
+To understand the source of the overhead, we collect some basic event data using perf, which
+we omit for brevity. The results showed that lu and sp became more backend bound, and also
+sp showed almost 9% more branch misses per kilo instructions (MPKI). Other benchmarks were
+not affected. The increase in the backend-bound metric can be attributed to less instruction-level
+parallelism (ILP) being available without the scheduler, while the increase in the branch misses
+for sp likely shows that branch prediction has less context to capitalize on around the conditional
+instructions.
+6.7
+Final overhead
+Figure 16 shows the total overhead after applying the fixes from the previous sections, for the A, B,
+and C classes of NPB. In ARM, sp has the most overhead, where the code region dominating the
+runtime is a kernel with a deep-nested loop, manipulating 4-dimensional global arrays (explained
+in Sections 6.5 and 6.6). In x86, the most noticeable outlier is cg for class B, as mentioned in Sec-
+tion 6.4. Interestingly, for the class C of cg, our investigation concludes that for the much larger
+array sizes the computation dominates again the alignment issues, making the application mostly
+backend bound. Contrary, the simplified addressing, with less available immediates to represent
+global addresses, causes greater impact in this case (and explains also the overhead for ua).
+6.8
+Performance Portability
+We now compare the performance of Unifico-compiled binaries among machines of different
+hardware capabilities and microarchitectures. Figure 17 shows the comparison between three
+x86 machines of different base clock frequencies and three ARM machines including two high-
+end servers and a low-power one. There are three observations we make. First, between the x86
+machines, the Intel i9, shows less impact on all benchmarks than the Intel Xeon counterparts. Second,
+the weaker A53 Cortex, shows significantly more impact than the high-end ThunderX2. Finally, the
+x86 machines overall show less impact than the ARM ones.
+For the x86 case, we conclude that the higher base clock frequency and the larger caches, in the
+case with Intel i9 compared to Xeon machines, diminish the per-architecture impact of the Unifico
+backend extensions. Similarly, features like out-of-order execution and larger issue width (four
+versus two), are able to hide some performance degradation in ThunderX2 compared to the in-order
+Cortex A53 machine. Finally, the ARM architectures exhibit more overhead overall, because only
+for this ISA did we use a reduced register set.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:23
+bt
+cg
+ep
+ft
+is
+lu
+mg
+sp
+ua
+Mean
+−5
+0
+5
+10
+15
+20
+25
+30
+35
+40
+Overhead (%)
+Performance portability
+machine
+intel-i9
+xeon-gold
+xeon-sliver
+arm-thunderx2
+neoverse-v1
+arm-a53
+Fig. 17. Comparison of the overhead introduced by Unifico for different x86 and ARM machines.
+Discussion. Further tuning cross-architectural tradeoffs is left as future work. For example, instead
+of imposing the two-address format for FP instructions in ARM, which was needed because the
+architectures had misaligned spill slots with FP values, we saw that padding the spill slots after
+the register allocation was sufficient, and caused much less overhead for ARM. Nevertheless, we
+envision end-to-end benefits at the system level enabled by finer migration granularity with no
+metadata and state transformation. Finally, if an overhead is not acceptable, techniques like multi-
+variant ELF (MELF) binaries [79] allow the runtime to pick the right compile-time variant of a
+function, exploiting the tradeoff between migration granularity and performance impact.
+6.9
+Comparison with State-of-the-art
+To demonstrate the migration, we conduct an experiment using one ARM and one x86 server,
+starting execution on one server, getting a CRIU image dump, and continuing execution on the
+other server. We repeat the process and move back to the original server for a number of iterations,
+depending on the execution time of each benchmark. We select two representative benchmarks
+used in similar setups by related work [24, 28, 84] and, unlike related work which only shows one
+migration, we perform multiple trips between the two servers and show an analysis of the execution
+time. We compare Unifico with binaries compiled with the Popcorn toolchain, including their
+transformation runtime. Currently, the Popcorn transformation runtime only supports binaries
+compiled at -O0 [77], so we do likewise for this comparison with Unifico-compiled binaries.
+Results are shown in Figure 18, where we also include the standalone executions on each server
+for unmodified binaries, as a reference. There are three observations. First, the cost of transforming
+the CRIU images is reduced with Unifico (shown as Transformation in the plots), with the largest
+increase in class B (up to 45% for IS-B on ARM - Figure 18(b)). Second, there is a baseline cost of
+dumping the images, which is present both in Unifico and Popcorn (shown as Image Dump). Third,
+for execution times up to 101𝑠, the gain of removing the transformation is noticeable (Figures 18(a),
+18(b) and 18(d)), while for time larger than 102𝑠, the benefit appears after a certain number of
+migrations (18 vs 10 migrations in Figure 18(d)). We conclude that avoiding the stack transformation
+can yield modest gains for relatively shorter-lived applications, especially with large input sizes
+(like IS-B), or for larger execution times given enough migrations.
+Discussion. In the above setup, we ignore SSH transfer cost of images, since they are present
+in both compilation toolchains. However, in a true shared-memory system, works like Popcorn
+Linux [29] facilitate transformation through distributed shared memory (DSM), which during
+migration requires page-level handling even for small stacks, introducing additional overheads
+like preloading the transformation metadata in memory or pre-allocating and managing the pages
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:24
+Mavrogeorgis et al.
+IS.Full.X86.A
+IS.Uniﬁco.A
+IS.Popcorn.A
+IS.Full.AArch64.A
+0
+2
+4
+6
+Time (s)
+0.53
+0.09
+0.53
+IS - A - 1 Migration
+Migration Phase
+X86 Full Execution
+X86 Partial Execution
+X86 Transformation
+X86 Image Dump
+AArch64 Partial Execution
+AArch64 Transformation
+AArch64 Image Dump
+AArch64 Full Execution
+(a)
+IS.Full.X86.B
+IS.Uniﬁco.B
+IS.Popcorn.B
+IS.Full.AArch64.B
+0
+5
+10
+15
+20
+25
+Time (s)
+0.53
+0.43
+0.53
+IS - B - 2 Migrations
+(b)
+CG.Full.X86.A
+CG.Uniﬁco.A
+CG.Popcorn.A
+CG.Full.AArch64.A
+0
+2
+4
+6
+8
+10
+Time (s)
+0.50
+0.04
+0.50
+CG - A - 2 Migrations
+(c)
+CG.Full.X86.B
+CG.Uniﬁco.O0.10.B
+CG.Popcorn.O0.10.B
+CG.Uniﬁco.O0.18.B
+CG.Popcorn.O0.18.B
+CG.Full.AArch64.B
+0
+100
+200
+300
+Time (s)
+0.53
+0.35
+0.53
+0.53
+0.35
+0.53
+CG - B - 10 vs 18 Migrations
+(d)
+Fig. 18. Analysis of the execution time for IS and CG, class A and B, and different migration scenarios.
+of the entire stack (8MB) [66]. Hence, avoiding the transformation would further reduce memory
+management overheads, which are hard to model in checkpoint-restore setups. The transformation
+gains become more pronounced in multithreaded contexts, where several worker threads un-
+dergo transformation before migration. This is amplified in NDP scenarios accommodating thread
+migrations, described in our motivation (Section 2), where migrations are more likely to occur
+due to remote memory accesses. As future work, we believe Unifico can enable highly-threaded
+general-purpose NDP architectures of different ISAs, as counterparts to specialized FPGA/ASIC
+implementations[45, 70].
+7
+Related Work
+Dynamic software migration. Migration among heterogeneous-ISA compute nodes during execu-
+tion was initially explored in the context of distributed systems [20, 44, 57, 75]. DeVuyst et al. [41],
+were the first to examine the feasibility of heterogeneous-ISA migration for multicore CPUs, where
+state transformation dominates the migration overhead. Venkat and Tullsen [82] showed that ISA
+heterogeneity offers ∼20% performance and ∼23% power improvements over the homogeneous-ISA
+counterpart. Both works rely on the same compilation techniques, aiming to minimize the state
+transformation by providing a common data layout as much as possible and using a common “fat”
+binary format for the target architectures. The evaluation is done through simulation, but artifacts
+are not publicly available. The Popcorn Linux and compiler toolchain [28, 29], improve upon these
+techniques and provide an open source implementation. The Popcorn compiler toolchain [28]
+avoids “fat” binaries by embedding metadata in them to guide the transformation during migration.
+Later works based on Popcorn Linux, examined migration between heterogeneous-ISA systems
+and FPGAs[52], and at higher granularity among sets of processes in Linux containers [84]. Unifico,
+as a compilation technique, can be integrated in any of the aforementioned approaches.
+Migration granularity. Von Bank et al. [83] provide a formal methodology to identify migration
+points among heterogeneous processes at varied granularity. A large body of work, along with
+Unifico, which operate at the process level, use callsite boundaries as potential migration points [28,
+29, 41, 82]. DeVuyst and Venkat [41, 82] propose to allow migration requests at any machine
+instruction by using dynamic binary translation (DBT) to fulfill them upon reaching a callsite,
+when actual migration occurs. However, DBT introduces excessive overhead [28]. Checkpointing
+relates to process migration [8, 71], though HetCRIU [84] further blurs any distinctions.
+8
+Conclusion
+We propose Unifico, a compilation technique that extends and innovates upon existing compiler
+support for heterogeneous-ISA CPU migration, by removing the need for runtime state transfor-
+mation. Unifico removes state transformation overheads during migration, without creating large
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:25
+binaries and easing programmability, by extending the compiler backend to generate binaries for
+different architectures with a unique address space and stack layout. We show that Unifico does not
+substantially impact program execution, adding on average no more than 6% (10%) execution time
+overhead on high-end (low-end) processors and no more than 10% code size increases, compared
+to the 2𝑥size overhead introduced by related work. We finally analyze the performance of the
+most impactful features for a common stack layout, and suggest performance improvements. In
+future work, we will examine the applicability of our approach to other architectures, the automatic
+extraction of unification rules for the ABI and stack layout, as well their encoding to the high-level
+compiler specifications to ease adoption.
+References
+[1] 2012. APU 101: All about AMD Fusion Accelerated Processing Units. https://developer.amd.com/wordpress/media/
+2012/10/apu101.pdf
+[2] 2014. Cortex-A7 Instruction Cycle Timings. https://hardwarebug.org/2014/05/15/cortex-a7-instruction-cycle-timings/
+[3] 2020. Broadcom Stingray PS225 SmartNIC.
+[4] 2022. Arm Architecture Reference Manual for A-profile Architecture.
+[5] 2022. CCIX. https://www.ccixconsortium.com/
+[6] 2022. CMU-SAFARI/prim-benchmarks/BFS. https://github.com/CMU-SAFARI/prim-benchmarks/tree/main/BFS
+[7] 2022. Compute Express Link. https://www.computeexpresslink.org
+[8] 2022. Criu Homepage. https://criu.org/
+[9] 2022. Gen-Z Consortium: Computer Industry Alliance Revolutionizing Data Access. https://genzconsortium.org/
+[10] 2022. The LLVM Target-Independent Code Generator. https://llvm.org/docs/CodeGenerator.html
+[11] 2022. Procedure Call Standard for the Arm® 64-Bit Architecture (AArch64).
+[12] 2022. SK hynix Introduces Industry’s First CXL-based Computational Memory Solution (CMS) at the OCP Global
+Summit. https://news.skhynix.com/sk-hynix-introduces-industrys-first-cxl-based-cms-at-the-ocp-global-summit/
+[13] 2022. What Is OpenCAPI? https://opencapi.org/about/
+[14] 2023. Checkpoint-Restore/Criu. https://github.com/checkpoint-restore/criu
+[15] 2023. Machine Descriptions. https://gcc.gnu.org/onlinedocs/gccint/Machine-Desc.html
+[16] 2023. Ssrg-vt/Popcorn-Compiler. Systems Software Research Group @ Virginia Tech.
+https://github.com/ssrg-
+vt/popcorn-compiler
+[17] 2023. Stack maps and patch points in LLVM. https://llvm.org/docs/StackMaps.html
+[18] 2023. TableGen Overview. https://llvm.org/docs/TableGen/
+[19] Minseon Ahn, Andrew Chang, Donghun Lee, Jongmin Gim, Jungmin Kim, Jaemin Jung, Oliver Rebholz, Vincent Pham,
+Krishna Malladi, and Yang Seok Ki. 2022. Enabling CXL Memory Expansion for In-Memory Database Management
+Systems. In Data Management on New Hardware (DaMoN’22). Association for Computing Machinery, New York, NY,
+USA, 1–5. https://doi.org/10.1145/3533737.3535090
+[20] G. Attardi, I. Filotti, and J. Marks. 1988. Techniques for Dynamic Software Migration. In In ESPRIT ’88: Proceedings of
+the 5th Annual ESPRIT Conference. NorthHolland, 475–491.
+[21] D. H. Bailey, E. Barszcz, J. T. Barton, D. S. Browning, R. L. Carter, L. Dagum, R. A. Fatoohi, P. O. Frederickson,
+T. A. Lasinski, R. S. Schreiber, H. D. Simon, V. Venkatakrishnan, and S. K. Weeratunga. 1991. The NAS parallel
+benchmarks—summary and preliminary results. In Proceedings of the 1991 ACM/IEEE Conference on Supercomputing
+(Albuquerque, New Mexico, USA) (Supercomputing ’91). Association for Computing Machinery, New York, NY, USA,
+158–165. https://doi.org/10.1145/125826.125925
+[22] Denis Bakhvalov. 2018. Code alignment issues. https://easyperf.net/blog/2018/01/18/Code_alignment_issues. Accessed:
+2024-09-25.
+[23] Jonathan Balkind, Katie Lim, Michael Schaffner, Fei Gao, Grigory Chirkov, Ang Li, Alexey Lavrov, Tri M. Nguyen,
+Yaosheng Fu, Florian Zaruba, Kunal Gulati, Luca Benini, and David Wentzlaff. 2020. BYOC: A "Bring Your Own
+Core" Framework for Heterogeneous-ISA Research. In Proceedings of the Twenty-Fifth International Conference on
+Architectural Support for Programming Languages and Operating Systems. Association for Computing Machinery, New
+York, NY, USA, 699–714. https://doi.org/10.1145/3373376.3378479
+[24] Abhishek Bapat, Jaidev Shastri, Xiaoguang Wang, Abilesh Sundarasamy, and Binoy Ravindran. 2024. Dapper: A
+Lightweight and Extensible Framework for Live Program State Rewriting. In 2024 IEEE 44th International Conference
+on Distributed Computing Systems (ICDCS). IEEE, 738–749.
+[25] Antonio Barbalace and Jaeyoung Do. 2021. Computational Storage: Where Are We Today?. In Conference on Innovative
+Data Systems Research 2020.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:26
+Mavrogeorgis et al.
+[26] Antonio Barbalace, Anthony Iliopoulos, Holm Rauchfuss, and Goetz Brasche. 2017. It’s Time to Think About an
+Operating System for Near Data Processing Architectures. In Proceedings of the 16th Workshop on Hot Topics in
+Operating Systems (Whistler, BC, Canada) (HotOS ’17). Association for Computing Machinery, New York, NY, USA,
+56–61. https://doi.org/10.1145/3102980.3102990
+[27] Antonio Barbalace, Mohamed L. Karaoui, Wei Wang, Tong Xing, Pierre Olivier, and Binoy Ravindran. 2020. Edge
+Computing: The Case for Heterogeneous-ISA Container Migration. In Proceedings of the 16th ACM SIGPLAN/SIGOPS
+International Conference on Virtual Execution Environments (VEE ’20). Association for Computing Machinery, New
+York, NY, USA, 73–87. https://doi.org/10.1145/3381052.3381321
+[28] Antonio Barbalace, Robert Lyerly, Christopher Jelesnianski, Anthony Carno, Ho-Ren Chuang, Vincent Legout, and
+Binoy Ravindran. 2017. Breaking the Boundaries in Heterogeneous-ISA Datacenters. In Proceedings of the Twenty-
+Second International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS
+’17). Association for Computing Machinery, New York, NY, USA, 645–659. https://doi.org/10.1145/3037697.3037738
+[29] Antonio Barbalace, Marina Sadini, Saif Ansary, Christopher Jelesnianski, Akshay Ravichandran, Cagil Kendir, Alastair
+Murray, and Binoy Ravindran. 2015. Popcorn: Bridging the Programmability Gap in Heterogeneous-ISA Platforms. In
+Proceedings of the Tenth European Conference on Computer Systems (EuroSys ’15). Association for Computing Machinery,
+New York, NY, USA, 1–16. https://doi.org/10.1145/2741948.2741962
+[30] Sharath K. Bhat, Ajithchandra Saya, Hemedra K. Rawat, Antonio Barbalace, and Binoy Ravindran. 2015. Harnessing
+Energy Efficiency of Heterogeneous-ISA Platforms. In Proceedings of the Workshop on Power-Aware Computing and
+Systems (HotPower ’15). Association for Computing Machinery, New York, NY, USA, 6–10. https://doi.org/10.1145/
+2818613.2818747
+[31] Christopher Blackburn, Xiaoguang Wang, and Binoy Ravindran. 2022. Rave: A Modular and Extensible Framework for
+Program State Re-Randomization. In Proceedings of the 9th ACM Workshop on Moving Target Defense (Los Angeles, CA,
+USA) (MTD’22). Association for Computing Machinery, New York, NY, USA, 3–10. https://doi.org/10.1145/3560828.
+3564008
+[32] Preston Briggs, Keith D. Cooper, and Linda Torczon. 1992. Rematerialization. In Proceedings of the ACM SIGPLAN 1992
+Conference on Programming Language Design and Implementation (PLDI ’92). Association for Computing Machinery,
+New York, NY, USA, 311–321. https://doi.org/10.1145/143095.143143
+[33] Preston Briggs, Keith D Cooper, and Linda Torczon. 1994. Improvements to graph coloring register allocation. ACM
+Transactions on Programming Languages and Systems (TOPLAS) 16, 3 (1994), 428–455.
+[34] Derek Bruening and Saman Amarasinghe. 2004. Efficient, transparent, and comprehensive runtime code manipulation.
+(2004).
+[35] James Bucek, Klaus-Dieter Lange, and Jóakim v. Kistowski. 2018. SPEC CPU2017: Next-Generation Compute Benchmark.
+In Companion of the 2018 ACM/SPEC International Conference on Performance Engineering (ICPE ’18). ACM, New York,
+NY, USA, 41–42. https://doi.org/10.1145/3185768.3185771
+[36] Gregory J Chaitin, Marc A Auslander, Ashok K Chandra, John Cocke, Martin E Hopkins, and Peter W Markstein. 1981.
+Register allocation via coloring. Computer languages 6, 1 (1981), 47–57.
+[37] Shenghsun Cho, Han Chen, Sergey Madaminov, Michael Ferdman, and Peter Milder. 2020. Flick: Fast and lightweight
+ISA-crossing call for heterogeneous-ISA environments. In 2020 ACM/IEEE 47th Annual International Symposium on
+Computer Architecture (ISCA). IEEE, 187–198. https://doi.org/10.1109/ISCA45697.2020.00026
+[38] Nathan Chong and Samin Ishtiaq. 2008. Reasoning about the ARM weakly consistent memory model. In Proceedings of
+the 2008 ACM SIGPLAN workshop on Memory systems performance and correctness: held in conjunction with the Thirteenth
+International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS’08).
+16–19. https://doi.org/10.1145/1353522.1353528
+[39] Fabrice Devaux. 2019. The true Processing In Memory accelerator. In 2019 IEEE Hot Chips 31 Symposium (HCS). 1–24.
+https://doi.org/10.1109/HOTCHIPS.2019.8875680
+[40] Linux Kernel Developers. 2024. perf: Linux Profiling with Performance Counters. https://perf.wiki.kernel.org.
+[41] Matthew DeVuyst, Ashish Venkat, and Dean M. Tullsen. 2012. Execution Migration in a Heterogeneous-ISA Chip
+Multiprocessor. SIGPLAN Not. 47, 4 (March 2012), 261–272. https://doi.org/10.1145/2248487.2151004
+[42] Salvatore Di Girolamo, Andreas Kurth, Alexandru Calotoiu, Thomas Benz, Timo Schneider, Jakub Beránek, Luca
+Benini, and Torsten Hoefler. 2021. A RISC-V in-network accelerator for flexible high-performance low-power packet
+processing. In 2021 ACM/IEEE 48th Annual International Symposium on Computer Architecture (ISCA). 958–971. https:
+//doi.org/10.1109/ISCA52012.2021.00079
+[43] Kevin Drucker, Dharmesh Jani, Ishwar Agarwal, Gary Miller, Millind Mittal, Robert Wang, and Bapiraju Vinnakota.
+2020. The Open Domain-Specific Architecture. In 2020 IEEE Symposium on High-Performance Interconnects (HOTI).
+IEEE, Piscataway, NJ, USA, 25–32. https://doi.org/10.1109/HOTI51249.2020.00019
+[44] F. B. Dubach and C. M. Shub. 1989. Process-Originated Migration in a Heterogeneous Environment. In Proceedings of
+the 17th Conference on ACM Annual Computer Science Conference (CSC ’89). Association for Computing Machinery,
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:27
+New York, NY, USA, 98–102. https://doi.org/10.1145/75427.75437
+[45] Timothy Dysart, Peter Kogge, Martin Deneroff, Eric Bovell, Preston Briggs, Jay Brockman, Kenneth Jacobsen, Yujen
+Juan, Shannon Kuntz, Richard Lethin, et al. 2016. Highly scalable near memory processing with migrating threads on
+the Emu system architecture. In 2016 6th Workshop on Irregular Applications: Architecture and Algorithms (IA3). IEEE,
+2–9.
+[46] Agner Fog. 2022. Instruction Tables: Lists of Instruction Latencies, Throughputs and Micro-Operation Breakdowns for
+Intel, AMD, and VIA CPUs. https://www.agner.org/optimize/instruction_tables.pdf
+[47] Andrés Goens, Soham Chakraborty, Susmit Sarkar, Sukarn Agarwal, Nicolai Oswald, and Vijay Nagarajan. 2023.
+Compound Memory Models. Proceedings of the ACM on Programming Languages 7, PLDI (2023), 1145–1168. https:
+//doi.org/10.1145/3591267
+[48] Juan Gómez-Luna, Izzat El Hajj, Ivan Fernandez, Christina Giannoula, Geraldo F. Oliveira, and Onur Mutlu. 2022.
+Benchmarking a New Paradigm: An Experimental Analysis of a Real Processing-in-Memory Architecture.
+https:
+//doi.org/10.48550/arXiv.2105.03814 arXiv:arXiv:2105.03814
+[49] Part Guide. 2011. Intel® 64 and ia-32 architectures software developer’s manual. 3A, 3 (2011), 554–556.
+[50] Eric Robert Hein. 2018. Near-data processing for dynamic graph analytics. Ph.D. Dissertation. Georgia Institute of
+Technology. http://hdl.handle.net/1853/60228
+[51] ARM Holdings. 2022. ARM architecture reference manual for A-profile architecture. ARM, Cambridge, UK, White
+Paper (2022).
+[52] Edson Horta, Ho-Ren Chuang, Naarayanan Rao VSathish, Cesar Philippidis, Antonio Barbalace, Pierre Olivier, and
+Binoy Ravindran. 2021. Xar-Trek: Run-Time Execution Migration among FPGAs and Heterogeneous-ISA CPUs. In
+Proceedings of the 22nd International Middleware Conference (Middleware ’21). Association for Computing Machinery,
+New York, NY, USA, 104–118. https://doi.org/10.1145/3464298.3493388
+[53] Dominik Inführ. 2017. Encoding of Immediate Values on AArch64.
+https://dinfuehr.github.io/blog/encoding-of-
+immediate-values-on-aarch64/
+[54] Intel Corporation. 2023. CPU Metrics Reference — Intel VTune Profiler User Guide. https://www.intel.com/content/
+www/us/en/docs/vtune-profiler/user-guide/2023-0/cpu-metrics-reference.html. Accessed: 2024-10-29.
+[55] Intel Corporation. 2024. Top-Down Microarchitecture Analysis Method. https://www.intel.com/content/www/us/en/
+docs/vtune-profiler/cookbook/2024-2/top-down-microarchitecture-analysis-method.html. Accessed: 2024-10-16.
+[56] Norman P. Jouppi, Cliff Young, Nishant Patil, David Patterson, Gaurav Agrawal, Raminder Bajwa, Sarah Bates,
+Suresh Bhatia, Nan Boden, Al Borchers, Rick Boyle, Pierre-luc Cantin, Clifford Chao, Chris Clark, Jeremy Coriell,
+Mike Daley, Matt Dau, Jeffrey Dean, Ben Gelb, Tara Vazir Ghaemmaghami, Rajendra Gottipati, William Gulland,
+Robert Hagmann, C. Richard Ho, Doug Hogberg, John Hu, Robert Hundt, Dan Hurt, Julian Ibarz, Aaron Jaffey, Alek
+Jaworski, Alexander Kaplan, Harshit Khaitan, Daniel Killebrew, Andy Koch, Naveen Kumar, Steve Lacy, James Laudon,
+James Law, Diemthu Le, Chris Leary, Zhuyuan Liu, Kyle Lucke, Alan Lundin, Gordon MacKean, Adriana Maggiore,
+Maire Mahony, Kieran Miller, Rahul Nagarajan, Ravi Narayanaswami, Ray Ni, Kathy Nix, Thomas Norrie, Mark
+Omernick, Narayana Penukonda, Andy Phelps, Jonathan Ross, Matt Ross, Amir Salek, Emad Samadiani, Chris Severn,
+Gregory Sizikov, Matthew Snelham, Jed Souter, Dan Steinberg, Andy Swing, Mercedes Tan, Gregory Thorson, Bo
+Tian, Horia Toma, Erick Tuttle, Vijay Vasudevan, Richard Walter, Walter Wang, Eric Wilcox, and Doe Hyun Yoon.
+2017. In-Datacenter Performance Analysis of a Tensor Processing Unit. In Proceedings of the 44th Annual International
+Symposium on Computer Architecture (ISCA ’17). Association for Computing Machinery, New York, NY, USA, 1–12.
+https://doi.org/10.1145/3079856.3080246
+[57] Eric Jul, Henry Levy, Norman Hutchinson, and Andrew Black. 1988. Fine-Grained Mobility in the Emerald System.
+ACM Trans. Comput. Syst. 6, 1 (Feb. 1988), 109–133. https://doi.org/10.1145/35037.42182
+[58] Nam Sung Kim, Deming Chen, Jinjun Xiong, and Wen-mei W. Hwu. 2017. Heterogeneous Computing Meets Near-
+Memory Acceleration and High-Level Synthesis in the Post-Moore Era. IEEE Micro 37, 4 (2017), 10–18.
+https:
+//doi.org/10.1109/MM.2017.3211105
+[59] Andi Kleen. 2024. pmu-tools. https://github.com/andikleen/pmu-tools.
+[60] R. Kumar, D.M. Tullsen, N.P. Jouppi, and P. Ranganathan. 2005. Heterogeneous Chip Multiprocessors. Computer 38, 11
+(Nov. 2005), 32–38. https://doi.org/10.1109/MC.2005.379
+[61] George Kyriazis. 2012. Heterogeneous System Architecture: A Technical Review. Technical Report 1.0. AMD. 18 pages.
+https://developer.amd.com/wordpress/media/2012/10/hsa10.pdf
+[62] Wooseok Lee, Dam Sunwoo, Christopher D. Emmons, Andreas Gerstlauer, and Lizy K. John. 2017.
+Exploring
+Heterogeneous-ISA Core Architectures for High-Performance and Energy-Efficient Mobile SoCs. In Proceedings
+of the on Great Lakes Symposium on VLSI 2017 (GLSVLSI ’17). Association for Computing Machinery, New York, NY,
+USA, 419–422. https://doi.org/10.1145/3060403.3060408
+[63] Jianshen Liu, Carlos Maltzahn, Craig Ulmer, and Matthew Leon Curry. 2021. Performance Characteristics of the
+BlueField-2 SmartNIC. https://doi.org/10.48550/arXiv.2105.06619 arXiv:arXiv:2105.06619
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+111:28
+Mavrogeorgis et al.
+[64] H.J. Lu, Michael Matz, Milind Girkar, Jan Hubicka, Andreas Jaeger, and Mark Mitchell. 2021. System V Application
+Binary Interface AMD64 Architecture Processor Supplement (With LP64 and ILP32 Programming Models).
+[65] Robert Lyerly, Alastair Murray, Antonio Barbalace, and Binoy Ravindran. 2018. AIRA: A Framework for Flexible
+Compute Kernel Execution in Heterogeneous Platforms. IEEE Transactions on Parallel and Distributed Systems 29, 2
+(2018), 269–282. https://doi.org/10.1109/TPDS.2017.2761748
+[66] Robert Frantz Lyerly. 2019. Popcorn Linux: A Compiler and Runtime for Execution Migration Between Heterogeneous-ISA
+Architectures. Ph.D. Dissertation. Virginia Tech. https://vtechworks.lib.vt.edu/handle/10919/100599
+[67] Nikolaos Mavrogeorgis, Christos Vasiladiotis, Pei Mu, Amir Khordadi, Björn Franke, and Antonio Barbalace. 2024.
+UNIFICO: Thread Migration in Heterogeneous-ISA CPUs without State Transformation. In Proceedings of the 33rd
+ACM SIGPLAN International Conference on Compiler Construction. 86–99.
+[68] Alisdair McDiarmid. 2014. ARM Immediate Value Encoding. https://alisdair.mcdiarmid.org/arm-immediate-value-
+encoding/
+[69] Scott Owens, Susmit Sarkar, and Peter Sewell. 2009. A better x86 memory model: x86-TSO. In Theorem Proving in
+Higher Order Logics: 22nd International Conference, TPHOLs 2009, Munich, Germany, August 17-20, 2009. Proceedings 22.
+Springer, 391–407. https://doi.org/10.1007/978-3-642-03359-9_27
+[70] Brian A Page and Peter Kogge. 2022. The Evolution of a New Model of Computation. In 2022 IEEE/ACM Workshop on
+Irregular Applications: Architectures and Algorithms (IA3). IEEE, 9–18.
+[71] James S. Plank, Micah Beck, Gerry Kingsley, and Kai Li. 1995. Libckpt: Transparent Checkpointing under UNIX. In
+USENIX 1995 Technical Conference (USENIX 1995 Technical Conference). USENIX Association, New Orleans, LA. https:
+//www.usenix.org/conference/usenix-1995-technical-conference/libckpt-transparent-checkpointing-under-unix
+[72] Sangmin Seo, Gangwon Jo, and Jaejin Lee. 2011. Performance Characterization of the NAS Parallel Benchmarks in
+OpenCL. In 2011 IEEE International Symposium on Workload Characterization (IISWC). 137–148. https://doi.org/10.
+1109/IISWC.2011.6114174
+[73] Joonseop Sim, Soohong Ahn, Taeyoung Ahn, Seungyong Lee, Myunghyun Rhee, Jooyoung Kim, Kwangsik Shin, Donguk
+Moon, Euiseok Kim, and Kyoung Park. 2023. Computational CXL-Memory Solution for Accelerating Memory-Intensive
+Applications. IEEE Computer Architecture Letters 22, 1 (2023), 5–8. https://doi.org/10.1109/LCA.2022.3226482
+[74] Sarabjeet Singh and Manu Awasthi. 2019. Memory centric characterization and analysis of spec cpu2017 suite. In
+Proceedings of the 2019 ACM/SPEC International Conference on Performance Engineering. 285–292.
+[75] Peter Smith and Norman C. Hutchinson. 1998. Heterogeneous Process Migration: The Tui System. Software: Practice and
+Experience 28, 6 (1998), 611–639. https://doi.org/10.1002/(SICI)1097-024X(199805)28:6<611::AID-SPE169>3.0.CO;2-F
+[76] Xiaojia Song, Tao Xie, and Stephen Fischer. 2021. Two Reconfigurable NDP Servers: Understanding the Impact
+of Near-Data Processing on Data Center Applications. ACM Trans. Storage 17, 4, Article 31 (oct 2021), 27 pages.
+https://doi.org/10.1145/3460201
+[77] Systems Software Research Group, Virginia Tech. 2024. Popcorn Compiler: Applications. https://github.com/ssrg-
+vt/popcorn-compiler/blob/main/APPLICATIONS. Accessed: 2025-05-04.
+[78] Sajjad Tamimi, Florian Stock, Andreas Koch, Arthur Bernhardt, and Ilia Petrov. 2022. An Evaluation of Using CCIX for
+Cache-Coherent Host-FPGA Interfacing. In 2022 IEEE 30th Annual International Symposium on Field-Programmable
+Custom Computing Machines (FCCM). 1–9. https://doi.org/10.1109/FCCM53951.2022.9786103
+[79] Dominik Töllner, Christian Dietrich, Illia Ostapyshyn, Florian Rommel, and Daniel Lohmann. 2023. MELF: Multivariant
+Executables for a Heterogeneous World. In 2023 USENIX Annual Technical Conference (USENIX ATC 23). 257–273.
+https://www.usenix.org/conference/atc23/presentation/tollner
+[80] Mahdi Torabzadehkashi, Siavash Rezaei, Ali Heydarigorji, Hosein Bobarshad, Vladimir Alves, and Nader Bagherzadeh.
+2019. Catalina: In-Storage Processing Acceleration for Scalable Big Data Analytics. In 2019 27th Euromicro International
+Conference on Parallel, Distributed and Network-Based Processing (PDP). 430–437. https://doi.org/10.1109/EMPDP.2019.
+8671589
+[81] Sid Touati. 2002. Register Pressure in Instruction Level Parallelism. Ph.D. Dissertation. Université de Versailles-Saint
+Quentin en Yvelines.
+[82] Ashish Venkat and Dean M. Tullsen. 2014. Harnessing ISA Diversity: Design of a Heterogeneous-ISA Chip Multipro-
+cessor. SIGARCH Comput. Archit. News 42, 3 (June 2014), 121–132. https://doi.org/10.1145/2678373.2665692
+[83] David G. von Bank, Charles M. Shub, and Robert W. Sebesta. 1994. A Unified Model of Pointwise Equivalence of
+Procedural Computations. ACM Trans. Program. Lang. Syst. 16, 6 (Nov. 1994), 1842–1874. https://doi.org/10.1145/
+197320.197402
+[84] Tong Xing, Antonio Barbalace, Pierre Olivier, Mohamed L. Karaoui, Wei Wang, and Binoy Ravindran. 2022. H-
+Container: Enabling Heterogeneous-ISA Container Migration in Edge Computing. ACM Trans. Comput. Syst. (March
+2022). https://doi.org/10.1145/3524452
+[85] Ahmad Yasin. 2014. A top-down method for performance analysis and counters architecture. In 2014 IEEE International
+Symposium on Performance Analysis of Systems and Software (ISPASS). IEEE, 35–44.
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.
+
+A Magnified View into Heterogeneous-ISA Thread Migration Performance without State Transformation
+111:29
+[86] Chenle Yu, Sara Royuela, and Eduardo Quiñones. 2020. OpenMP to CUDA Graphs: A Compiler-Based Transformation
+to Enhance the Programmability of NVIDIA Devices. In Proceedings of the 23th International Workshop on Software and
+Compilers for Embedded Systems (St. Goar, Germany) (SCOPES ’20). Association for Computing Machinery, New York,
+NY, USA, 42–47. https://doi.org/10.1145/3378678.3391881
+[87] Mohamed Zahran. 2016. Heterogeneous Computing: Here to Stay: Hardware and Software Perspectives. Queue 14, 6
+(Dec. 2016), 31–42. https://doi.org/10.1145/3028687.3038873
+ACM Trans. Arch. Code Optim., Vol. 37, No. 4, Article 111. Publication date: August 2018.

@@ -1,0 +1,1454 @@
+HYBRID MOTION PLANNING WITH DEEP REINFORCEMENT
+LEARNING FOR MOBILE ROBOT NAVIGATION
+Yury Kolomeytsev
+Department of Computational Mathematics and Cybernetics
+Lomonosov Moscow State University
+yury.kolomeytsev@gmail.com
+Dmitry Golembiovsky
+Department of Computational Mathematics and Cybernetics
+Lomonosov Moscow State University
+ABSTRACT
+Autonomous mobile robots operating in complex, dynamic environments face the dual
+challenge of navigating large-scale, structurally diverse spaces with static obstacles while
+safely interacting with various moving agents. Traditional graph-based planners excel at long-
+range pathfinding but lack reactivity, while Deep Reinforcement Learning (DRL) methods
+demonstrate strong collision avoidance but often fail to reach distant goals due to a lack of
+global context. We propose Hybrid Motion Planning with Deep Reinforcement Learning
+(HMP-DRL), a hybrid framework that bridges this gap. Our approach utilizes a graph-based
+global planner to generate a path, which is integrated into a local DRL policy via a sequence
+of checkpoints encoded in both the state space and reward function. To ensure social
+compliance, the local planner employs an entity-aware reward structure that dynamically
+adjusts safety margins and penalties based on the semantic type of surrounding agents. We
+validate the proposed method through extensive testing in a realistic simulation environment
+derived from real-world map data. Comprehensive experiments demonstrate that HMP-DRL
+consistently outperforms other methods, including state-of-the-art approaches, in terms of
+key metrics of robot navigation: success rate, collision rate, and time to reach the goal.
+Overall, these findings confirm that integrating long-term path guidance with semantically-
+aware local control significantly enhances both the safety and reliability of autonomous
+navigation in complex human-centric settings.
+Keywords Robotics · Reinforcement learning · Motion planning · Path planning · Collision avoidance · Deep
+learning · Robot navigation
+1
+Introduction
+Mobile robots are rapidly transitioning from controlled industrial settings to complex, human-centric environ-
+ments. Robots designed to assist humans are increasingly being deployed across a wide range of sectors,
+including manufacturing and industrial automation, agriculture, space exploration, healthcare, domestic
+assistance, logistics and delivery, and facility and public-space services [1–3]. Autonomous mobile robots
+combine a mobile platform, sensors, and onboard intelligence to adapt in real time to dynamic environments,
+rather than depending on fixed infrastructure like automated guided vehicles (AGVs). A central capability
+underlying these systems is autonomous navigation, which allows a robot to operate independently, perceive
+the environment, and act safely to achieve specified goals without operator supervision or control.
+Typical applications of autonomous robots include material handling in warehouses and factories; hospital
+logistics (e.g., transporting laboratory samples, blood components, and medications); service robots in
+arXiv:2512.24651v1 [cs.RO] 31 Dec 2025
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+commercial buildings and hotels for indoor delivery and visitor guidance; autonomous cleaning; security
+patrol and inspection; and last-mile urban delivery of groceries, meals, and parcels [3–5].
+The core challenge in such deployments is twofold: traversing large-scale, structurally complex environ-
+ments (global planning) while safely interacting with diverse dynamic agents (local planning and collisions
+avoidance). Consider a sidewalk delivery robot [6] operating in an urban setting: it must travel up to several
+kilometers, traversing diverse surfaces such as sidewalks and crosswalks, while accounting for static obstacles
+like buildings, bus stops, flowerbeds and curbs. Traditional search-based planners (e.g., A*, Dijkstra) excel at
+finding optimal paths over these long distances using static maps but struggle to react fluidly to unmapped,
+moving entities.
+Conversely, Deep Reinforcement Learning (DRL) methods have demonstrated superior performance in local
+collision avoidance and crowd navigation [7–9]. However, pure DRL approaches typically lack global context.
+When applied to large environments with complex geometry, they often fail to reach distant goals, getting
+trapped in local minima due to the absence of global guidance.
+Furthermore, safe navigation requires more than just treating obstacles as generic geometric shapes. A robot
+must navigate in a socially compliant manner, accounting for the semantic diversity of the environmental
+entities around it. A child, a bicyclist, an adult, and a concrete wall all impose different safety constraints
+and motion patterns. Treating a vulnerable pedestrian with the same safety margin as a static obstacle is
+insufficient for socially compliant navigation.
+To address these challenges, we introduce Hybrid Motion Planning with Deep Reinforcement Learning
+(HMP-DRL), a novel hybrid method that bridges the gap between global path planning and local motion
+planning with entity-aware collision avoidance. Our approach leverages a global path planner to provide
+long-term guidance through complex static environments (handling curbs, walls, and restricted zones), while
+a local DRL policy handles immediate interaction with dynamic agents and static entities. This decomposition
+allows the robot to navigate kilometers without losing its way, while simultaneously exhibiting sophisticated,
+entity-aware collision avoidance to ensure safe navigation.
+Our main contributions are as follows:
+• We propose a hybrid motion planning method that combines graph-based global search with deep
+RL-based local planning. This hybrid structure enables the robot to utilize map information for
+reaching distant goals while maintaining the reactivity required for dynamic obstacle avoidance.
+• We design a reward function that encourages the robot to follow the global path and minimize travel
+time. The function uses semantic awareness by penalizing the robot differently depending on the
+type of agent or obstacle it encounters. Specifically, the required safe distance and collision penalties
+are dynamically adjusted based on the entity type, resulting in safer and more socially compliant
+behavior.
+• We introduce a training and testing environment designed to mimic realistic outdoor settings with
+various static and dynamic obstacles. Our experimental results demonstrate that this new approach
+consistently outperforms standard navigation techniques, including state-of-the-art methods.
+2
+Related Work
+Robot navigation research has evolved from traditional rule-based methods and classical planning algorithms
+to learning-based approaches, with recent work focusing on crowd navigation and hybrid architectures that
+combine global and local planning.
+Classical approaches such as the Social Force Model (SFM) [10] and Optimal Reciprocal Collision Avoidance
+(ORCA) [11] use hand-crafted interaction rules for collision avoidance. SFM applies attractive and repulsive
+forces but is prone to local minima; ORCA uses velocity constraints under reciprocal assumptions, expecting
+all agents to cooperate equally in avoiding collisions—an assumption rarely met in real-world settings with
+unpredictable pedestrians. Both methods can produce short-sighted or unnatural behavior and struggle to
+generalize across diverse social environments.
+2
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Learning-based methods have gained significant attention as alternatives to hand-crafted rules. Imitation
+learning approaches derive navigation strategies from demonstrations of desired behaviors. For example,
+[12] combines behavior cloning with generative adversarial imitation learning (GAIL) to develop a policy
+that operates directly on raw depth images, bypassing explicit pedestrian tracking. [13] applies maximum
+entropy inverse RL to model human navigation as a mixture distribution capturing both discrete decisions
+(e.g., passing left or right) and continuous trajectory variance. However, these methods depend heavily on the
+quality and scale of demonstrations, which can be resource-intensive to collect and may limit generalization
+to novel scenarios.
+Deep reinforcement learning (DRL) offers an alternative approach by treating navigation as a sequential
+decision-making problem. CADRL [7] formulates decentralized multi-agent collision avoidance by training a
+value network that estimates time-to-goal from the joint state of the robot and its neighbors, achieving faster
+navigation than ORCA while remaining real-time implementable. SA-CADRL [14] extends this idea with
+norm-inducing rewards that penalize violations of social conventions (e.g., passing on the wrong side) and a
+symmetric network architecture with weight-sharing and max-pooling to handle variable numbers of agents,
+trading some efficiency for socially compliant behavior. To better scale to dense crowds, LSTM-RL [15]
+uses recurrent networks to encode an arbitrary number of neighboring agents, significantly reducing failure
+rates in crowded scenarios. SARL [8] further improves crowd modeling through an attention-based value
+network that jointly reasons about human-robot and human-human interactions, enhancing anticipation of
+crowd dynamics. More recently, [16] proposes a spatial-temporal value network and a hazard-aware reward
+structure that explicitly reasons about pedestrian speeds and hazardous regions to improve safety and comfort.
+Recently, EB-CADRL [9] introduced entity-type awareness into the state representation and reward function,
+enabling differentiated safety margins for various agent types. The method demonstrated superior safety for
+vulnerable agents in dense crowds and achieved significant training speedups through parallelized experience
+collection.
+A significant limitation of pure DRL methods is that they focus primarily on local collision avoidance and are
+typically trained and evaluated in small, bounded environments. When applied to large-scale maps or long-
+range navigation tasks, these methods fail to reach distant goals, often getting stuck or exhibiting suboptimal
+behavior due to the absence of global path guidance. Furthermore, they neglect static environmental structures
+such as buildings, walls, and terrain boundaries. To bridge this gap, recent research has explored hybrid
+approaches that combine classical path planning with learning-based local control.
+DRL-based hybrid methods integrate global planners with learned local policies. SARL* [17] extends SARL
+by using Dijkstra’s algorithm for dynamic local goal setting and a map-based safe action space; however, it
+rebuilds paths every time step (computationally inefficient) and relies on rule-based action filtering rather
+than learned obstacle avoidance. G2RL [18] incorporates a static A* path as a guidance channel into the
+DRL state space, but the fixed global path becomes problematic when obstacles block the path, and the
+coarse discretization (4-directional actions on 200 × 200 grids) limits real-world applicability. Similarly,
+[19] integrates A* with a DQN agent for automated driving, demonstrating faster convergence, but lacks
+pedestrian awareness and uses discrete actions resulting in jerky control. GDAE [20] combines frontier-based
+waypoint selection with TD3 for unknown environments but does not utilize a global path and lacks dynamic
+obstacle handling. VDPF-TD3 [21] uses TD3 to optimize the balance between modified potential field
+forces, effectively escaping local optima, but relies on geometric obstacle representations and lacks real-world
+validation.
+Classical hybrid planners combine global path planning with reactive local control. Zhong et al. [22] propose
+Safe A* with risk-aware costs combined with an Adaptive Window Approach, while IAB-A* [23] introduces
+bidirectional search with B-spline smoothing integrated with DWA. Both methods achieve computational
+efficiency but depend heavily on manually tuned parameters and do not differentiate between obstacle types.
+The RC-Map approach [24] uses rectangular decomposition for fast topological planning (10ms vs 740ms for
+grid methods) but produces sub-optimal paths and struggles with non-orthogonal environments.
+Sampling-based hybrids improve path search efficiency. RRTstar-RL [25] replaces uniform RRT* sampling
+with a learned probability distribution, achieving 28% shorter paths and 2x speedup, but requires extensive
+training data and lacks mechanisms for dynamic obstacle avoidance.
+3
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Our HMP-DRL approach addresses these limitations by (i) computing a single global path per episode and
+using its checkpoints in both the reward and the network input to provide path guidance at low cost, (ii)
+learning collision avoidance directly through the reward with a fine-grained discrete action space that still
+enables smooth motion, and (iii) encoding entity types in the state and reward to achieve socially compliant
+navigation with type-dependent safety margins.
+3
+Problem Formulation
+We address the problem of autonomous robot navigation towards a goal in dynamic environments populated
+with various entities, including dynamic agents and static obstacles. This problem can be formulated as a
+Markov decision process (MDP). The robot must navigate in a socially compliant manner, avoiding collisions
+while reaching its goal. We define the state of each agent (robot or environmental entity) in terms of observable
+and unobservable components:
+• Observable states: position p = [px, py], velocity v = [vx, vy], and radius r.
+• Unobservable states: goal position g = [gx, gy], preferred speed vpref, and heading angle θ.
+While acting in the environment, the robot knows its observable and unobservable states, as well as the
+observable states of all entities. We use the robot-centric parameterization described in [7] and [15], where
+the robot is positioned at the origin and the x-axis is aligned with the robot’s goal direction. Denote ei as a
+type of entity i. The robot’s state and the i-th entity’s observable state at time t could be represented as:
+sr
+t = [dg, vx, vy, r, vpref, θ],
+sio
+t = [pi
+x, pi
+y, vi
+x, vi
+y, ri, di, ri + r, ei],
+(1)
+where dg = ∥pt −g∥2 is the distance from the robot to the goal, and di = ∥pt −pi
+t∥2 is the distance from
+the robot to the i-th entity.
+The robot can acquire its own state and the observable states of other agents at each time step. The joint state
+at time t is defined by:
+sj
+t = [sr
+t, s1o
+t , s2o
+t , . . . , sno
+t ].
+(2)
+The robot’s velocity vt is determined by the action command at from the navigation policy, i.e., vt = at =
+π(sj
+t).
+The reward function R(sj
+t, at) is defined as a mapping from the current state sj
+t and action at to a scalar
+value, which represents the immediate benefit of taking action at in state sj
+t. Formally:
+R(sj
+t, at) = rt,
+(3)
+where rt is the reward received at time step t.
+Our objective is to find the optimal policy π∗(sj
+t) that maximizes the expected reward.
+The optimal value function is given by [26]:
+V ∗(sj
+t) =
+T
+X
+˜t=t
+γ˜t·vprefR˜t(sj
+˜t, π∗(sj
+˜t)),
+(4)
+where γ ∈(0, 1) is a discount factor and T is the time step at which the episode ends.
+Using value iteration, the optimal policy is derived as:
+π∗
+sj
+t
+
+= arg max
+at∈A
+
+R
+
+sj
+t, at
+
++ γ∆t·vpref ·
+Z
+sj
+t+∆t
+P
+
+sj
+t+∆t | sj
+t, at
+
+V ∗
+sj
+t+∆t
+
+dsj
+t+∆t
+
+,
+(5)
+4
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+where ∆t is time step duration, R(sj
+t, at) is the reward function, A is the action space, and P(sj
+t+∆t | sj
+t, at)
+is the transition probability.
+4
+Proposed Approach
+In this section, we introduce our new approach which we call Hybrid Motion Planning with Deep Rein-
+forcement Learning (HMP-DRL). HMP-DRL combines a global graph-based path planner with a local deep
+reinforcement learning policy, enabling long-range navigation through complex environments with static and
+dynamic obstacles while maintaining entity-aware collision avoidance for safe, socially compliant interaction
+with dynamic agents.
+4.1
+Global Planning
+Global path planning determines an optimal collision-free path from a starting position to a goal within a
+known or partially known environment. The core idea is to construct a graph representation of the navigable
+space and then apply a search algorithm to find the best path through this graph. The global planner considers
+the map and known static obstacles. Dynamic agents and static obstacles not present on the map are unknown
+at global planning time but are detected by the robot’s sensors during navigation and handled by the local
+planner in real time.
+Graph Construction Methods.
+A fundamental aspect of global planning is the construction of a graph
+that captures the connectivity of free space. Different methods can be used to build such graphs, each with
+distinct advantages:
+• Occupancy Grids. The environment is discretized into a regular grid of cells, where each cell is
+marked as occupied or free based on the presence of obstacles. Nodes are placed at the centers of free
+cells, and edges connect adjacent nodes, enabling grid-based pathfinding algorithms. This method is
+straightforward, widely used in 2D environments, and integrates seamlessly with sensor data such as
+occupancy maps.
+• Navigation Meshes. Free space can be partitioned into a set of connected polygons, most commonly
+triangles or quadrangles, using cell decomposition methods [27]. Unlike uniform grids, mesh-based
+representations such as Irregular Triangular Meshes (ITM) and Varying-size ITMs (VITM) can
+better conform to obstacle boundaries. In particular, VITM enables local refinement in narrow
+passages while maintaining coarser cells in open areas, providing a balance between geometric
+fidelity and computational complexity [28]. Quadrangle (QUAD) representations, although less
+flexible in approximating irregular or oblique obstacle boundaries, offer a simple and structured
+topology with predictable neighbor relationships. When an inflation layer is applied to account for
+robot size, QUAD meshes are generally less sensitive than fixed-size triangular meshes, but they
+may fail to preserve connectivity in narrow or cluttered environments unless a fine resolution is
+used. In contrast, varying-size triangular meshes demonstrate greater robustness under inflation,
+particularly in environments with narrow passages, online map updates, or multiple robots with
+differing dimensions, making them more suitable for such scenarios [29].
+• Voronoi Diagrams. Given a vectorized map with polygonal obstacle boundaries, a Generalized
+Voronoi Diagram (GVD) of the free space can be constructed [30, 31]. The GVD edges consist of
+points equidistant to two or more obstacles, forming a sparse skeleton of the navigable space. The
+Voronoi vertices (where edges meet) serve as nodes, and the edges themselves serve as paths in the
+planning graph. Paths computed on Voronoi-based graphs locally maximize clearance from obstacles,
+improving safety in cluttered or narrow environments, albeit often at the cost of increased path length
+compared to shortest-path methods.
+• Visibility Graphs. In environments with polygonal obstacles, nodes can represent the start, goal, and
+obstacle vertices, with edges connecting mutually visible pairs [32, 33]. This yields the shortest path
+in terms of Euclidean distance but may produce trajectories that pass too close to obstacle corners.
+5
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Algorithm 1 A* Algorithm
+Require: occupancy map, start node s, goal node g, neighbor function N(·), edge cost c(·, ·),
+heuristic h(·)
+Ensure: shortest path from s to g, if it exists
+1: openSet ←{s}, closedSet ←∅
+2: cameFrom ←empty map
+3: gScore(s) ←0, fScore(s) ←h(s)
+4: while openSet is not empty do
+5:
+n ←arg minx∈openSet fScore(x)
+6:
+if n = g then
+7:
+return RECONSTRUCTPATH(cameFrom, n)
+8:
+end if
+9:
+remove n from openSet; add n to closedSet
+10:
+for each neighbor m ∈N(n) do
+11:
+if m in closedSet or grid cell m is occupied then
+12:
+continue
+13:
+end if
+14:
+tentative ←gScore(n) + c(n, m)
+15:
+if m not in openSet then
+16:
+add m to openSet
+17:
+else if tentative ≥gScore(m) then
+18:
+continue
+19:
+end if
+20:
+cameFrom(m) ←n
+21:
+gScore(m) ←tentative
+22:
+fScore(m) ←gScore(m) + h(m)
+23:
+end for
+24: end while
+25: return failure
+26: function RECONSTRUCTPATH(cameFrom, n)
+27:
+path ←[n]
+28:
+while cameFrom contains n do
+29:
+n ←cameFrom(n)
+30:
+prepend n to path
+31:
+end while
+32:
+return path
+33: end function
+All four graph construction methods are applicable in our HMP-DRL framework; the choice depends on
+the available map representation and the desired path characteristics. Occupancy grids are often preferred
+when maps originate from SLAM or semantic segmentation pipelines due to their simplicity and direct
+compatibility with sensor data. Navigation meshes provide an efficient representation for large open areas
+with complex obstacle shapes, enabling smooth paths through convex regions while naturally handling
+varying terrain costs. Voronoi-based graphs are advantageous when vector maps with polygon boundaries
+are available and maximum clearance from obstacles is prioritized over path length. Visibility graphs yield
+the shortest Euclidean paths but may require additional safety margins since trajectories can pass close to
+obstacle corners.
+Search Algorithm.
+We employ the A* algorithm [34] as the global planner to compute the shortest
+collision-free path between the start and the goal on the constructed graph. A* combines the exact path cost
+from the start with a heuristic estimate to the goal, and, given an admissible and consistent heuristic (e.g.,
+Euclidean distance), it is both complete and optimal, typically expanding significantly fewer nodes than
+Dijkstra’s algorithm [35]. In contrast, Breadth-First Search (BFS) [36] is optimal only on unweighted graphs
+6
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+and explores many irrelevant states; Dijkstra’s algorithm [35] is optimal with non-negative costs but lacks
+heuristic guidance, making it less efficient; incremental planners like D* [37] efficiently update paths when
+costs change but add unnecessary implementation complexity and computational overhead not required in
+our static global scenario [38].
+The operation of the A* algorithm can be described as follows. An open list is maintained, ordered by priority
+f(n) = g(n) + h(n), where g is the path cost from the start to node n, and h heuristically estimates the cost
+from n to the goal. At each step, the node with the minimum f is expanded, neighbors are relaxed, and the
+process repeats until the goal is selected; the optimal path is then reconstructed using backpointers. On the
+grid, we use occupancy checks to avoid static obstacles and a distance heuristic that preserves optimality. In
+our implementation, we use an 8-connected grid where each cell’s neighbor set N(n) includes all 8 adjacent
+cells (4 orthogonal and 4 diagonal neighbors), enabling diagonal movement paths. For completeness, we
+provide the detailed pseudocode of the A* procedure in Algorithm 1.
+Experimental Setup.
+In our experiments, the robot operates outdoors in an urban street environment (e.g.,
+delivery robots, security patrol robots, and cleaning robots). We use the occupancy grid method: the map
+covers an area of 200 m by 200 m and is discretized into cells of 10 cm by 10 cm. The occupancy grid is
+formed from street semantic layers: areas such as buildings, lawns, vacant lots, sports fields, and other
+non-traversable or restricted zones are marked as occupied (forbidden for movement), while traversable road
+sections and pedestrian paths are marked as free space.
+Examples of paths constructed using the A* algorithm in our experiments are shown in Fig. 1.
+Figure 1: Three examples of global paths constructed by the A* algorithm for different start and goal pairs
+in our experiments. Occupied cells are marked in gray, which in this episode represent residential and
+non-residential buildings of various sizes and shapes in the city.
+7
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+4.2
+Local Planning
+Our local planning is based on the EB-CADRL approach described in [9], but with enhancements to
+incorporate the global path into the model and the reward function. The local planner considers both static
+and dynamic obstacles and aims to follow the global path.
+To link global planning with local decision-making, we place a set of checkpoints along the global path. The
+checkpoints are positioned at a distance D from each other. The first checkpoint is located on the global path
+at a distance D from the start. Checkpoints can have different shapes and sizes. In our experiments, we use
+circular points with a fixed radius. These checkpoints are visible to the local planner and are included in both
+the reward function and the neural network V , encouraging progress along the global path.
+Fig. 2 depicts a snapshot of the simulator during an HMP-DRL simulation. In it, we can see how checkpoints
+(green dashed circles) are positioned along the global path.
+Figure 2: Simulator snapshot during the simulation of the HMP-DRL method. The blue polyline is the global
+path. Green circles are checkpoints. Gray objects are residential and non-residential buildings in the city. The
+remaining objects are the robot and the dynamic agents surrounding it.
+8
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+4.3
+Reward Function
+Our reward function R(t) comprises three additive components: a terminal reward Rterminal(t) for episode-
+ending events (goal reached, collision, or timeout), a checkpoint reward Rcheckpoint(t) for progress along the
+global path, and a discomfort penalty Rdiscomfort(t) for proximity violations.
+Before defining these components, we establish notation for measuring robot-entity distances. Consider an
+environment with N entity types E = {e1, . . . , eN}. Let d(ei, t) denote the minimum distance between the
+robot and any entity of type ei over the interval [t −∆t, t]. We define:
+i∗(t) = arg
+min
+i∈{1,...,N} d(ei, t),
+(6)
+where i∗(t) is the index of the entity type closest to the robot. For brevity, we write i∗instead of i∗(t).
+The minimum distance to any entity is dmin(t) = d(ei∗, t), and ei∗∈E is the corresponding entity type. A
+collision occurs when dmin(t) ≤0.
+The robot receives a checkpoint reward Rcheckpoint(t) when it is inside a previously unvisited checkpoint
+along the A* path. Checkpoints may have different shapes and sizes. For example, we could use circular
+checkpoints, and the robot receives a reward when the Euclidean distance from the robot to the checkpoint’s
+center is less than or equal to the checkpoint radius. Each checkpoint is paid out at most once (no repeated
+payments).
+The function Rtime(t) represents the time reward:
+Rtime(t) =
+
+
+
+
+
+1
+if t < tpref
+tmax−t
+tmax−tpref
+if tpref ≤t ≤tmax
+0
+otherwise
+(7)
+where tpref is the preferred time duration for reaching the goal, tmax is the maximum allowable time to reach
+the goal.
+Let dmax be the maximum distance to the goal, which is the Euclidean distance between the starting position
+of the robot at time t = 0 and the position of the goal. Let dg(t) be the distance to the goal at time t. Then
+proximity reward can be represented as:
+Rprox(t) = 1 −dg(t)
+dmax
+.
+(8)
+Define Rcoll(ei) as the penalty associated with collisions involving an entity of type ei, and Rsuccess as the
+reward for reaching the goal.
+Let ddisc(ei) be the discomfort distance for entity of type ei and pdisc(ei) be the discomfort penalty factor for
+entity of type ei, i = 1, . . . , N.
+Our reward function is defined as a sum of three components:
+R(t) = Rterminal(t) + Rcheckpoint(t) + Rdiscomfort(t).
+(9)
+The terminal reward handles mutually exclusive end-of-episode events and incorporates the proximity reward
+for timeout and collision cases:
+Rterminal(t) =
+
+
+
+
+
+
+
+
+
+Rprox(t)
+if t ≥tmax and ∥pt −g∥2 > r
+Rcoll(ei∗) + Rprox(t)
+else if dmin(t) ≤0
+Rsuccess + Rtime(t)
+else if ∥pt −g∥2 ≤r
+0
+otherwise
+(10)
+where r is the robot’s radius. The proximity reward Rprox(t) is added to timeout and collision cases to
+provide a learning signal proportional to the robot’s progress toward the goal, even when the episode ends
+unsuccessfully.
+9
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+The checkpoint reward encourages progress along the global path:
+Rcheckpoint(t) =
+Rcp
+if pt ∈Ck and k is unvisited
+0
+otherwise
+(11)
+where Ck denotes the region of checkpoint k (e.g., a circle, rectangle, or line segment with a tolerance width),
+and Rcp is the checkpoint reward value. Each checkpoint yields a reward at most once.
+The discomfort reward penalizes proximity to entities:
+Rdiscomfort(t) =
+(d(ei∗, t) −ddisc(ei∗)) · pdisc(ei∗) · ∆t
+if d(ei∗, t) < ddisc(ei∗) and dmin(t) > 0
+0
+otherwise
+(12)
+4.4
+Model
+Our model builds upon the architecture described in [9], extending it to incorporate information from the
+global path. The base architecture uses an attention mechanism to handle varying numbers of dynamic agents,
+while our extension integrates checkpoint features from the A* path to provide global guidance. We first
+describe the checkpoint feature extraction and extended self-state representation, then present the neural
+network architecture.
+Checkpoint Feature Extraction.
+To incorporate global path information, we extract features from K
+upcoming checkpoints along the A* path. At each time step, we must determine which checkpoints to use
+as input features. Let m denote the index of the most recently visited checkpoint (with m = −1 initially).
+We consider two strategies for selecting the starting checkpoint index s. Sequential selection: The simplest
+approach sets s = m + 1, always selecting the K checkpoints immediately following the last visited one.
+This ensures strict progression along the path and provides consistent, deterministic features. Nearest-first
+selection: This adaptive approach searches among all unvisited checkpoints with indices i > m and selects
+the one nearest to the robot’s current position as the starting point: s = arg mini>m ∥ci −p∥2. This strategy
+provides better local guidance when the robot deviates from the planned path, as it focuses on the most
+immediately relevant checkpoint rather than one that may be far ahead on the path.
+The sequential strategy offers simplicity and stability, while the nearest-first strategy improves adaptability at
+a modest computational cost. In both cases, the constraint s > m prevents the robot from receiving features
+for already-visited checkpoints, ensuring forward progress along the global path.
+Let C = {cs, cs+1, . . . , cs+K−1} denote the set of K selected checkpoint positions. For each checkpoint
+ck = (ck
+x, ck
+y), we compute a feature vector in the robot-centric coordinate frame.
+The robot-centric coordinate frame is defined such that the x-axis points from the robot’s current position
+toward the goal. Let ϕ = atan2(gy −py, gx −px) be the rotation angle, where (px, py) is the robot position
+and (gx, gy) is the goal position. For each checkpoint ck, we compute:
+δk
+x = ck
+x −px,
+δk
+y = ck
+y −py,
+˜δk
+x = δk
+x cos ϕ + δk
+y sin ϕ,
+˜δk
+y = δk
+y cos ϕ −δk
+x sin ϕ,
+dk =
+q
+(δkx)2 + (δky)2,
+(13)
+where (˜δk
+x, ˜δk
+y) are the rotated offsets in the robot-centric frame and dk is the Euclidean distance to checkpoint
+k.
+The checkpoint feature vector for each checkpoint is defined as:
+fk = [dk, ˜δk
+x, ˜δk
+y, rcp],
+(14)
+where rcp is the checkpoint radius. The complete checkpoint feature representation is the concatenation of all
+K checkpoint features:
+fcp = [f1, f2, . . . , fK].
+(15)
+10
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Extended Self-State.
+In the base EB-CADRL model, the robot’s self-state in the rotated frame is represented
+as sr = [dg, vpref, θ, r, vx, vy], where dg is the distance to goal, vpref is the preferred speed, θ is the heading
+angle, r is the robot radius, and (vx, vy) is the velocity in the robot-centric frame.
+In our HMP-DRL model, we extend the self-state by incorporating the checkpoint features:
+˜sr = [dg, vpref, θ, r, vx, vy, fcp],
+(16)
+resulting in an extended self-state of dimension 6 + 4K. This extended self-state provides the model with
+explicit information about the global path, enabling it to make decisions that balance local collision avoidance
+with progress toward distant goals.
+Entity State Embedding.
+We embed the extended robot state ˜sr, along with the observable state of each
+entity i, into a fixed-length vector gi using a multi-layer perceptron (MLP):
+gi = ϕg(˜sr, sio; Wg),
+(17)
+where ϕg(·) is an embedding function with rectified linear unit (ReLU) activations, and Wg are the embedding
+weights. To account for different types of entities (e.g., adults, children, bicycles), we use one-hot encoding
+to represent each agent type. These encoded features are concatenated with the primary features of the agents
+and passed into the model.
+The embedding vector gi is then fed into another MLP to obtain the pairwise interaction feature between the
+robot and entity i:
+hi = ψh(gi; Wh),
+(18)
+where ψh(·) is a fully-connected layer with ReLU nonlinearity, and Wh are the network weights.
+Social Attentive Pooling.
+To handle varying numbers of entities, we use a social attentive pooling module
+[8] which learns the relative importance of each neighbor and the collective impact of the crowd in a data-
+driven manner. Let n denote the number of entities in the environment. The interaction embedding gi is
+transformed into an attention score αi as follows:
+gm = 1
+n
+n
+X
+k=1
+gk,
+αi = ψα(gi, gm; Wα),
+(19)
+where gm is a fixed-length embedding vector obtained by mean pooling all individuals, ψα(·) is an MLP with
+ReLU activations, and Wα are the weights.
+Given the pairwise interaction vector hi and the corresponding attention score αi for each neighbor i, the
+final representation of the crowd is a weighted linear combination of all pairs:
+c =
+n
+X
+i=1
+softmax(αi)hi,
+(20)
+where softmax(αi) =
+eαi
+Pn
+j=1 eαj .
+Value Network.
+Using the compact representation of the crowd c and the extended self-state ˜sr, we
+construct a planning module that estimates the state value v for cooperative planning:
+v = fv(˜sr, c; Wv),
+(21)
+where fv(·) is an MLP with ReLU activations, and Wv are the weights. We denote this value network as V .
+In our model checkpoint features are incorporated into the extended self-state ˜sr, which is then used
+throughout the entire network pipeline from the initial pairwise embedding ϕg through to the final value
+estimation fv. This allows the network to learn representations that jointly consider both dynamic obstacle
+avoidance and global path following from the very first layer. During training, the network learns to balance
+following the global path (guided by checkpoint rewards) with avoiding dynamic obstacles (guided by
+collision and discomfort penalties).
+11
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+4.5
+Algorithm HMP-DRL
+The HMP-DRL algorithm integrates global path planning with local reinforcement learning through Parallel
+Deep V-learning. The training procedure runs multiple episodes in parallel, collects experience, and updates
+the value network V using temporal-difference learning with experience replay and a fixed target network ˆV .
+The main training loop is described in Algorithm 2, and the episode execution is described in Algorithm 3.
+Algorithm 2 HMP-DRL Training with Parallel Deep V-learning
+1: Run imitation learning with demonstration D, update value network V with D
+2: Initialize: target value network ˆV ←V , experience replay memory E ←D, parallel processes
+number N
+3: while episode < M do
+4:
+Initialize a multiprocessing Pool of size N
+5:
+for k = episode, episode + N do in parallel:
+6:
+Execute episode k using Algorithm 3
+7:
+end for
+8:
+Sample random minibatch tuples from E
+9:
+Update value network V by gradient descent
+10:
+if episode
+mod UpdateInterval = 0 then
+11:
+Update target value network ˆV ←V
+12:
+end if
+13:
+Update episode ←episode + N
+14: end while
+15: return V
+Algorithm 3 HMP-DRL Episode Execution
+1: Initialize environment with random start p0 and goal g
+2: Compute global path P ←A∗(OccupancyMap, p0, g)
+3: Place checkpoints {c1, . . . , cL} along P at intervals D
+4: Initialize: visited set V ←∅, buffer S ←∅, t ←0
+5: repeat
+6:
+Set last visited checkpoint index: m ←max{i : ci ∈V}
+7:
+Select K checkpoints: CK ←{cm+1, . . . , cmin(m+K,L)}
+8:
+Compute checkpoint features fcp using (13)–(15)
+9:
+Construct extended state ˜sr
+t ←[dg, vpref, θ, r, vx, vy, fcp]
+10:
+Form joint state ˜sj
+t ←[˜sr
+t, s1o
+t , . . . , sno
+t ]
+11:
+at ←
+(
+RandomAction(),
+ϵ
+arg maxa∈A R(˜sj
+t, a) + γ∆t·vprefV (˜sj
+t+∆t),
+1 −ϵ
+12:
+Execute at, observe rt and next state
+13:
+if robot enters unvisited checkpoint ci then
+14:
+V ←V ∪{ci}, add Rcp to rt
+15:
+end if
+16:
+Store (˜sj
+t, at, rt,˜sj
+t+∆t) in S
+17:
+t ←t + ∆t
+18: until terminal state or t ≥tmax
+19: for each (˜sj
+t, at, rt,˜sj
+t+∆t) in S do
+20:
+valuet ←rt + γ∆t·vpref ˆV (˜sj
+t+∆t)
+21:
+Store (˜sj
+t, valuet) in experience memory E
+22: end for
+At the beginning of each episode, we compute the global path P from the robot’s start position to its goal
+using A* on the occupancy grid. We then place checkpoints {c1, . . . , cL} along P at intervals of distance D.
+12
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+At each time step, we select K upcoming checkpoints, transform them into the robot-centric frame using
+(13), and concatenate the resulting features fcp with the base self-state to form ˜sr as defined in (16). The
+extended joint state ˜sj
+t = [˜sr
+t, s1o
+t , . . . , sno
+t ] is then used for action selection and value estimation.
+The global path is computed once per episode, avoiding the computational overhead of replanning at every
+step. Since each episode has a unique start-goal pair, the robot learns to follow diverse paths through the
+environment. The checkpoint features provide the local planner with global context, enabling navigation over
+long distances while the attention-based value network handles dynamic obstacle avoidance.
+4.6
+Implementation Details
+We assume non-holonomic robot kinematics and use a unicycle model. The action space consists of 81
+discrete actions: a stop action (zero velocity) plus combinations of 5 speeds, exponentially distributed in the
+range (0, vpref], and 16 directions, uniformly distributed in [0, 2π).
+For the global path representation, we use K = 2 checkpoints with radius rcp = 5 m and inter-checkpoint
+distance D = 15. Note that K denotes the number of checkpoints fed to the model at each timestep, not the
+total number of checkpoints along the path, which depends on the path length and distance D. This results in
+4K = 8 checkpoint features appended to the base self-state, yielding an extended self-state dimension of
+6 + 8 = 14.
+The neural network architecture consists of four multi-layer perceptrons (MLP). An MLP’s structure is
+denoted by the tuple (din, d1, . . . , dout), which specifies the number of neurons in the input, hidden, and
+output layers, respectively. The dimensions of these MLP components are ϕg: (25, 300, 200), ψh: (200, 200,
+100), ψα: (400, 200, 200, 1), and fv: (114, 350, 250, 200, 1). The input dimension 25 to ϕg represents the joint
+state consisting of the extended robot state (14), agent’s observable state (7), and entity type one-hot encoding
+(4). The 114 input dimensions to fv combine the extended self-state (14) with the attention-weighted feature
+representation of all agents (100).
+We apply batch normalization [39] after each hidden linear layer and before the ReLU activation in all MLPs.
+This technique standardizes the inputs to each layer, which stabilizes training and allows for the use of higher
+learning rates. Additionally, it accelerates convergence and provides a mild regularization effect that can help
+mitigate overfitting. In our experiments, batch normalization proved particularly beneficial for stability in the
+value-based reinforcement learning setting, where target values are non-stationary.
+We implemented the policy in the deep learning framework PyTorch [40] and trained it with a batch size of
+100 (for each episode) using stochastic gradient descent. For imitation learning, we collected 3000 episodes of
+demonstration using ORCA and trained the policy 200 epochs with a learning rate of 0.01. For reinforcement
+learning, the learning rate is 0.001 and the discount factor γ is 0.99. The exploration rate of the ϵ-greedy
+policy decays linearly from 0.5 to 0.05 in the first 25000 episodes and stays at 0.05 for the remaining episodes.
+In our experiments, all input features (robot state, entity states, and entity types) are obtained directly from
+the simulator. On a real robot, these would be provided by standard localization and perception systems [41],
+whose implementation is beyond the scope of this work.
+5
+Experiments
+5.1
+Urban Episode Generation
+We generate a large dataset of robot navigation episodes in a simulator, based on real urban geometry from a
+map, by rasterizing OpenStreetMap (OSM) data for a large European city [42]. The data preparation pipeline
+generates map snapshots, semantically segments each snapshot into land use and infrastructure categories,
+collapses the semantics into a binary occupancy map for global planning, and finally selects start-goal pairs
+between which a path is guaranteed to exist. These maps are subsequently used as static layers, while dynamic
+agents are modeled during training and evaluation using ORCA [11] under the "invisible robot" assumption.
+13
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Map Snapshots from OSM.
+We define a rectangular area centered on the center of the city and uniformly
+discretize it with a dense grid of viewpoints within a 29 km × 38 km region. For each viewpoint, we generate
+a high-zoom square raster snapshot (zoom 20) by stitching 256 px map tiles from a self-hosted OSM tile
+server. Snapshots are rendered without overlay text labels to ensure a stable color palette and are saved as
+square images (2000 px per side). This step follows the standard Web Mercator projection tiling procedure:
+geographic coordinates are converted to tile coordinates at the target zoom level, neighboring tiles covering
+the desired area are retrieved, and the resulting mosaic is cropped to the required size.
+Each snapshot is converted into a semantic raster by matching pixel colors to a fixed palette. We use the
+nearest color rule (Manhattan distance in RGB with a small threshold) to assign each image pixel to one of
+the following classes:
+1. Residential area
+2. Greenfield land
+3. Industrial area
+4. School/University/Hospital
+5. Allotments
+6. Parking
+7. Brownfield land
+8. Park / green zone
+9. Forest / park
+10. Road
+11. Commercial area
+12. Grass / meadow
+13. Sports pitch
+14. Water
+15. Building
+Binary Occupancy Map.
+Next, the semantic raster is collapsed into a binary occupancy map encoding static
+traversability for the global planner. Specifically, classes corresponding to natural obstacles or impassable
+infrastructure (buildings, water, sports pitches, and grass/meadow) are marked as occupied, while all other
+classes (residential areas with sidewalk, soil with sidewalk, industrial areas, schools/universities/hospitals,
+allotments, parking, brownfield sites, parks/green zones, forests/parks, roads, and commercial areas) are
+marked as free.
+In Figs. 3a and 3b, we can see an example of the steps described above: an occupancy map is generated from
+an OSM city map, start and finish points are placed, and a global path is constructed.
+(a) OSM map snapshot.
+(b) Binary occupancy map and global path.
+Figure 3: Example of map processing: (a) an OSM map snapshot from which occupancy maps were formed;
+(b) the corresponding binary occupancy map with a global path constructed using A*.
+14
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Start-Goal Sampling.
+On each binary map, we select between one and three start-goal pairs. The robot’s
+footprint is modeled as a 20 × 20 pixel square; valid start and goal positions are those where the entire
+footprint lies completely within free space. Additionally, we require the goal to be sufficiently far from
+the start to yield non-trivial episodes: we select goals at a Euclidean distance of at least 0.75 of the map’s
+larger dimension. To ensure dynamic feasibility at the global level, we inflate obstacles by half the footprint
+thickness and perform an 8-connected A* search (as described in Section 4) on the inflated grid. Pairs are
+accepted only if a collision-free A* path exists; accepted paths are saved along with the start and goal.
+Resulting Dataset.
+Since we aim to train the robot to drive in sufficiently complex environments, we
+discard maps with no or very few static obstacles by introducing a minimum static occupancy fraction: maps
+with an obstacle percentage below the threshold (5%) are skipped and unused. Maps for which no valid
+start-goal pair satisfies the path existence constraint are also removed.
+After filtering and removing unrealizable cases, we obtain 30,948 distinct maps. Sampling 1–3 start-goal pairs
+per map with a guaranteed path from start to finish yields 77,663 unique navigation episodes. These episodes
+serve as static occupancy maps within our simulator. We randomly split them into training, validation, and
+testing sets: for our main experiments, we use 60,000 episodes for training, 500 for validation, and 1,000 for
+testing. The remaining episodes are reserved for additional experiments as needed.
+5.2
+Reward setup
+In this subsection, we define the reward function for our experiments. The robot navigates in an environment
+with four entity types: adults, bicycles, children, and static obstacles. Each dynamic entity type has 4
+instances, resulting in 12 dynamic agents per scenario. Static obstacles are defined by an occupancy map and
+vary by region.
+Rcheckpoint(t) =
+0.3,
+if ∥pt −ck∥2 < rcheckpoint and k is unvisited checkpoint
+0,
+otherwise
+(22)
+Rsuccess = 3
+(23)
+We denote the entity types as follows: Adult (A), Bicycle (B), Child (C), and Obstacle (O). The penalties for
+collisions are defined as:
+Rcoll(e) =
+
+
+
+
+
+
+
+
+
+−1.0,
+if e = O
+−1.5,
+if e = A
+−2.0,
+if e = B
+−2.5,
+if e = C
+(24)
+We scale collision penalties according to unpredictability and harm potential. Static obstacles receive the
+lowest penalty (-1.0) since their positions are fixed. Adults incur a moderate penalty (-1.5) due to their
+predictable movement patterns. Cyclists warrant a higher penalty (-2.0) given their speed and fall risk.
+Collisions with children receive the maximum penalty (-2.5) as they are both unpredictable and highly
+vulnerable.
+Let ddisc(e) be the discomfort distance (in meters) for entity e:
+ddisc(e) =
+
+
+
+0.1,
+if e = A
+0.2,
+if e = B
+0.2,
+if e = C
+(25)
+15
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Let pdisc(e) be the discomfort penalty factor for entity e:
+pdisc(e) =
+
+
+
+
+
+
+
+
+
+0.0,
+if e = O
+0.5,
+if e = A
+1.0,
+if e = B
+1.0,
+if e = C
+(26)
+We omit ddisc(O) because static obstacles cannot experience discomfort. However, if the robot should
+maintain distance from static obstacles, one can define ddisc(O) and set pdisc(O) > 0.
+5.3
+Simulation Setup
+We conduct experiments using our simulator designed for outdoor mobile robots operating in urban envi-
+ronments, such as sidewalk delivery robots, autonomous cleaners, and security patrol robots. The simulator
+models realistic pedestrian traffic and urban geometry based on the maps described in Section 5.1.
+We compare three navigation methods: SARL [8], EB-CADRL [9], and our HMP-DRL.
+Simulated agents (adults, children, bicyclists) are controlled by Optimal Reciprocal Collision Avoidance
+(ORCA) [11]. To introduce diversity, each agent’s size and speed are drawn from a uniform distribution
+specific to its type. The distributions are designed to overlap, for instance, some children may be faster than
+some adults, making it impossible to determine an agent’s type from its size and speed alone.
+Dynamic agent spawning.
+In our simulator we use new dynamic agents during an episode (“dynamic
+spawn”) to maintain traffic around the robot. In our setup, dynamic spawning is enabled and executed every
+80 simulation steps (with ∆t = 0.25 s, this corresponds to 20 s). At each spawn event, we add 4 adults, 4
+bicyclists, and 4 children, and assign them a lifetime of 80 steps. Agents whose age exceeds the lifetime
+are removed from the scene. New agents are sampled from a square region of width 40 m, positioned and
+oriented relative to the robot: we compute the unit direction vector from the robot to its goal and place the
+square center ahead of the robot by half of the square width along this direction. The square yaw is aligned
+with the same robot-to-goal direction. Start and goal positions for spawned agents are sampled on opposite
+edges of this oriented square (square-crossing), with rejection sampling to avoid immediate collisions with
+the robot, other agents, and static obstacles.
+All evaluations use an “invisible robot” setting, where other agents do not perceive or react to the robot. This
+tests the robot’s collision avoidance capabilities in a worst-case scenario that is also realistic, as small robots
+are often overlooked by people.
+Models are trained for 3000 episodes with imitation learning, followed by 60000 episodes using the algorithm
+"HMP-DRL Training with Parallel Deep V-learning" 2. During training, we validate the models every 1024
+episodes on a 500-episode validation set. For the final comparison, we select the best-performing model
+for each method based on its validation performance using the weighted score metric and evaluate it on a
+1,000-episode test set.
+5.4
+Results
+Figure 4 shows training and validation curves.
+All methods converge within 60,000 RL training episodes (after the imitation learning warm start).
+Across both training and validation, HMP-DRL achieves consistently higher success rate and weighted score
+while maintaining lower collision rates than SARL and EB-CADRL.
+To compare safety in a way that reflects different severity of collisions, we use the Weighted Score (WS)
+metric:
+WS = SR −CR(A) −4.0 · CR(C) −2.0 · CR(B) −0.5 · CR(O).
+(27)
+16
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+0
+10000
+20000
+30000
+40000
+50000
+60000
+0.14
+0.16
+0.18
+0.20
+0.22
+0.24
+Collision Rate
+Train: Collision Rate
+0
+10
+20
+30
+40
+50
+60
+0.05
+0.10
+0.15
+0.20
+Validation: Collision Rate
+0
+10000
+20000
+30000
+40000
+50000
+60000
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+Success Rate
+Train: Success Rate
+0
+10
+20
+30
+40
+50
+60
+0.0
+0.2
+0.4
+0.6
+0.8
+Validation: Success Rate
+0
+10000
+20000
+30000
+40000
+50000
+60000
+1.0
+0.5
+0.0
+0.5
+1.0
+Reward
+Train: Reward
+0
+10
+20
+30
+40
+50
+60
+0.5
+0.0
+0.5
+1.0
+1.5
+2.0
+Validation: Reward
+0
+10000
+20000
+30000
+40000
+50000
+60000
+Episodes
+1.75
+1.50
+1.25
+1.00
+0.75
+0.50
+0.25
+0.00
+Weighted Score
+Train: Weighted Score
+0
+10
+20
+30
+40
+50
+60
+Validation step (each 1024 episodes)
+1.5
+1.0
+0.5
+0.0
+0.5
+Validation: Weighted Score
+SARL
+EB-CADRL
+HMP-DRL (ours)
+Figure 4: Collision rate, success rate, reward, weighted score metrics on the training and validation data. The
+validation step is performed every 1024 episodes.
+17
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Table 1: Metrics on test data with 12 agents.
+Method SARL EB-CADRL HMP-DRL
+SR
+0.524
+0.649
+0.836
+CR
+0.289
+0.128
+0.123
+CR(A)
+0.05
+0.019
+0.019
+CR(B)
+0.155
+0.047
+0.044
+CR(C)
+0.022
+0.015
+0.004
+CR(O)
+0.062
+0.047
+0.056
+Time
+78.36
+93.42
+72.03
+DD(A)
+0.154
+0.147
+0.166
+DD(B)
+0.144
+0.181
+0.183
+DD(C)
+0.153
+0.184
+0.209
+WS
+0.045
+0.4525
+0.685
+Table 2: Metrics on test data with 3 agents (1 adult, 1 bicycle, 1 child).
+Method
+SARL
+EB-CADRL HMP-DRL
+SR
+0.719
+0.712
+0.936
+CR
+0.054
+0.034
+0.017
+CR(A)
+0.009
+0.003
+0.001
+CR(B)
+0.018
+0.015
+0.007
+CR(C)
+0.004
+0.0
+0.0
+CR(O)
+0.023
+0.016
+0.009
+Time
+89.72
+98.89
+72.84
+DD(A)
+0.15
+0.166
+0.182
+DD(B)
+0.151
+0.169
+0.15
+DD(C)
+0.157
+0.249
+0.208
+WS
+0.6465
+0.671
+0.9165
+Here, SR is the success rate and CR(·) is the collision rate with adults (A), children (C), bicycles (B), and
+static obstacles (O). Coefficients are chosen to penalize collisions with more vulnerable entities more heavily
+and can be tuned to match application-specific safety priorities.
+Since each method uses a different reward definition, episode returns are not directly comparable across
+methods and are used only to monitor within-method learning progress.
+Table 1 summarizes evaluation on the 1,000-episode test set. We report: SR (success rate); CR (overall
+collision rate); CR(A), CR(B), CR(C), CR(O) (collision rates with adults, bicycles, children, and static
+obstacles); Time (average time to reach the goal); and DD(A), DD(B), DD(C) (mean robot–agent distance
+during “danger” interactions for adults, bicycles, and children, where danger is defined as distance < 30 cm).
+HMP-DRL achieves a substantially higher success rate (0.836) than EB-CADRL (0.649) and SARL (0.524),
+while also reducing the overall collision rate (0.123 vs. 0.128 and 0.289). The largest safety gain is in
+collisions with children: CR(C) drops to 0.004 for HMP-DRL (vs. 0.015 for EB-CADRL and 0.022 for
+SARL), which strongly improves the weighted score (0.685 vs. 0.4525 and 0.045). HMP-DRL also reaches
+the goal faster on average (72.03 s vs. 93.42 s and 78.36 s).
+Table 2 reports results in a simpler scenario with 3 dynamic agents (1 adult, 1 bicycle, 1 child), which
+reduces the influence of dense surrounding traffic. In this setting, HMP-DRL further improves performance,
+achieving SR = 0.936 and CR = 0.017, with near-zero collisions with vulnerable agents (CR(A) = 0.001,
+CR(C) = 0.0). Consequently, it attains the highest weighted score (0.9165) and the lowest average time to
+reach the goal (72.84 s).
+Overall, HMP-DRL performs best on the main metrics: it achieves the highest success rate (SR) and weighted
+score (WS), and the lowest collision rate (CR), while maintaining comparable safety margins during close
+interactions.
+18
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+5.5
+Ablation Experiments
+Table 3: Ablation study: effect of checkpoint reward shaping (Rcp) on HMP-DRL.
+Method
+With checkpoint reward
+Without checkpoint reward
+(Rcp = 0.3)
+(Rcp = 0.0)
+SR
+0.836
+0.615
+CR
+0.123
+0.13
+CR(A)
+0.019
+0.018
+CR(B)
+0.044
+0.054
+CR(C)
+0.004
+0.008
+CR(O)
+0.056
+0.05
+Time
+72.03
+79.59
+DD(A)
+0.166
+0.153
+DD(B)
+0.183
+0.182
+DD(C)
+0.209
+0.2
+WS
+0.685
+0.432
+We ablate the checkpoint-based reward shaping term (Section 4.3, Eq. (11)), which provides intermediate
+progress feedback along the global A* path via checkpoints. We train two HMP-DRL policies from scratch
+with identical architecture, datasets, and hyperparameters; the only difference is the checkpoint reward
+magnitude Rcp. In the first variant we use the default setting Rcp = 0.3, while in the second we disable
+checkpoint shaping by setting Rcp = 0.0. Both policies are evaluated on the same 1,000-episode test set as in
+Table 1, and we report the same metrics.
+The results are summarized in Table 3. Enabling checkpoint rewards substantially improves navigation
+performance: the success rate increases from 0.615 to 0.836 and the weighted score increases from 0.432
+to 0.685. The policy also reaches the goal faster on average (72.03 s vs. 79.59 s), indicating more efficient
+progress and fewer stalled trajectories. Safety improves primarily for the most challenging dynamic entities:
+collisions with bicycles decrease (0.054 →0.044) and collisions with children are halved (0.008 →0.004).
+We also observe larger mean danger distances DD(·), suggesting the checkpoint-shaped policy maintains
+slightly larger safety margins during close interactions. While CR(A) and CR(O) change only marginally
+(and in opposite directions), the overall effect of checkpoint shaping is strongly positive across the key
+metrics.
+These findings support our design choice: sparse checkpoint feedback aligns the local policy with the global
+plan, improving all main metrics.
+6
+Conclusion
+In this work, we proposed Hybrid Motion Planning with Deep Reinforcement Learning (HMP-DRL), a hybrid
+navigation approach that couples a graph-based global planner with a local DRL policy. The global level
+computes global path and converts it into a sequence of distance-spaced checkpoints. The local level extends
+an attention-based, entity-aware value network with checkpoint features and trains it with reward shaping that
+encourages progress along the route while enforcing type-dependent safety margins and collision penalties
+for different entities.
+Experiments in a large-scale urban simulator derived from OpenStreetMap, with dense ORCA-controlled
+traffic, show that HMP-DRL improves both reliability and safety. On the main test set, it achieves a success
+rate of 0.836 (vs. 0.649 for EB-CADRL and 0.524 for SARL) with a lower overall collision rate of 0.123 and
+faster traversal time (72.03 s on average). The largest gain is for the most vulnerable entity type: collisions
+with children drop to 0.004, yielding the best weighted safety score (0.685). An ablation study further
+confirms the role of route guidance: disabling checkpoint rewards reduces the success rate from 0.836 to
+0.615 and the weighted score from 0.685 to 0.432.
+19
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+Future research directions include integrating dynamic occupancy maps with online graph re-planning, adding
+additional entity types (e.g., cars and motorcycles), training policies for complex scenarios—such as road
+crossings with dynamic vehicles, and real-world testing.
+References
+[1] Roland Siegwart, Illah R. Nourbakhsh, and Davide Scaramuzza. Introduction to Autonomous Mobile
+Robots. The MIT Press, 2nd edition, 2011. ISBN 0262015358.
+[2] Giuseppe Fragapane, René de Koster, Fabio Sgarbossa, and Jan Ola Strandhagen.
+Planning
+and control of autonomous mobile robots for intralogistics:
+Literature review and research
+agenda.
+European Journal of Operational Research, 294(2):405–426, 2021.
+ISSN 0377-2217.
+doi:https://doi.org/10.1016/j.ejor.2021.01.019. URL https://www.sciencedirect.com/science/
+article/pii/S0377221721000217.
+[3] George A. Bekey. Autonomous Robots: From Biological Inspiration to Implementation and Control.
+The MIT Press, 2005. ISBN 0262025787.
+[4] Daniel S Drew. Multi-agent systems for search and rescue applications. Current Robotics Reports, 2:
+189–200, 2021. doi:10.1007/s43154-021-00048-3.
+[5] Thibault Kruse, Amit Kumar Pandey, Rachid Alami, and Alexandra Kirsch. Human-aware robot
+navigation: A survey. Robotics and Autonomous Systems, 61(12):1726–1743, 2013. ISSN 0921-8890.
+[6] Steven R. Gehrke, Christopher D. Phair, Brendan J. Russo, and Edward J. Smaglik. Observed sidewalk
+autonomous delivery robot interactions with pedestrians and bicyclists. Transportation Research
+Interdisciplinary Perspectives, 18:100789, 2023. ISSN 2590-1982.
+[7] Yu Fan Chen, Miao Liu, Michael Everett, and Jonathan P. How. Decentralized non-communicating
+multiagent collision avoidance with deep reinforcement learning. In 2017 IEEE International Conference
+on Robotics and Automation (ICRA), page 285–292, 2017.
+[8] Changan Chen, Yuejiang Liu, Sven Kreiss, and Alexandre Alahi. Crowd-robot interaction: Crowd-aware
+robot navigation with attention-based deep reinforcement learning. In 2019 International Conference
+on Robotics and Automation (ICRA), pages 6015–6022, 2019.
+[9] Yury Kolomeytsev and Dmitry Golembiovsky. Robot navigation with entity-based collision avoidance
+using deep reinforcement learning, 2025. URL https://arxiv.org/abs/2408.14183.
+[10] Dirk Helbing and Péter Molnár. Social force model for pedestrian dynamics. Phys. Rev. E, 51:
+4282–4286, May 1995. doi:10.1103/PhysRevE.51.4282.
+[11] Jur van den Berg, Stephen J. Guy, Ming Lin, and Dinesh Manocha. Reciprocal n-body collision
+avoidance. In Cédric Pradalier, Roland Siegwart, and Gerhard Hirzinger, editors, Robotics Research,
+pages 3–19, Berlin, Heidelberg, 2011. Springer Berlin Heidelberg. ISBN 978-3-642-19457-3.
+[12] Lei Tai, Jingwei Zhang, Ming Liu, and Wolfram Burgard. Socially compliant navigation through raw
+depth inputs with generative adversarial imitation learning, 05 2018.
+[13] Henrik Kretzschmar, Markus Spies, Christoph Sprunk, and Wolfram Burgard. Socially compliant
+mobile robot navigation via inverse reinforcement learning. The International Journal of Robotics
+Research, 35, 01 2016. doi:10.1177/0278364915619772.
+[14] Yu Fan Chen, Michael Everett, Miao Liu, and Jonathan P. How. Socially aware motion planning with
+deep reinforcement learning. In 2017 IEEE/RSJ International Conference on Intelligent Robots and
+Systems (IROS), pages 1343–1350, 2017.
+[15] Michael Everett, Yu Fan Chen, and Jonathan P. How. Motion planning among dynamic, decision-making
+agents with deep reinforcement learning. In 2018 IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), pages 3052–3059, 2018.
+[16] Bingxin Xue et al. Crowd-aware socially compliant robot navigation via deep reinforcement learning.
+International Journal of Social Robotics, 16(1):197–209, 2024. ISSN 1875-4805.
+20
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+[17] Keyu Li, Yangxin Xu, Jiankun Wang, and Max Q.-H. Meng.
+Sarl:
+Deep reinforcement
+learning based human-aware navigation for mobile robot in indoor environments.
+In 2019
+IEEE International Conference on Robotics and Biomimetics (ROBIO), pages 688–694, 2019.
+doi:10.1109/ROBIO49542.2019.8961764.
+[18] Binyu Wang, Zhe Liu, Qingbiao Li, and Amanda Prorok. Mobile robot path planning in dynamic
+environments through globally guided reinforcement learning. IEEE Robotics and Automation Letters,
+5(4):6932–6939, 2020. doi:10.1109/LRA.2020.3026638.
+[19] Ekim Yurtsever, Linda Capito, Keith Redmill, and Umit Ozguner. Integrating deep reinforcement
+learning with model-based path planners for automated driving. In 2020 IEEE Intelligent Vehicles
+Symposium (IV), pages 1311–1316. IEEE, 2020.
+[20] Reinis Cimurs, Il Hong Suh, and Jin Han Lee.
+Goal-driven autonomous exploration through
+deep reinforcement learning.
+IEEE Robotics and Automation Letters, 7(2):730–737, 2022.
+doi:10.1109/LRA.2021.3133591.
+[21] Yunfei Bi and Xi Fang.
+A hybrid path planning framework integrating deep reinforcement
+learning and variable-direction potential fields.
+Mathematics, 13(14), 2025.
+ISSN 2227-7390.
+doi:10.3390/math13142312. URL https://www.mdpi.com/2227-7390/13/14/2312.
+[22] X. Zhong, J. Tian, H. Hu, et al. Hybrid path planning based on safe a* algorithm and adaptive window
+approach for mobile robot in large-scale dynamic environment. Journal of Intelligent & Robotic Systems,
+99:65–77, 2020. doi:10.1007/s10846-019-01112-z.
+[23] Y. Sun, Q. Yuan, Q. Gao, et al. A multiple environment available path planning based on an im-
+proved a* algorithm. International Journal of Computational Intelligence Systems, 17:172, 2024.
+doi:10.1007/s44196-024-00571-z.
+[24] Youngmi Baek and Jung Kyu Park. Fast path generation algorithm for mobile robot navigation using
+hybrid map. Applied Sciences, 15(5), 2025. ISSN 2076-3417. doi:10.3390/app15052414. URL
+https://www.mdpi.com/2076-3417/15/5/2414.
+[25] Hoang-Long Pham, Nhu-Nghia Bui, and Thai-Viet Dang. Hybrid path planning for wheeled mobile
+robot based on rrt-star algorithm and reinforcement learning method. Journal of Robotics and Control
+(JRC), 6(4):2045–2051, 2025. doi:10.18196/jrc.v6i4.27678.
+[26] Richard S. Sutton and Andrew G. Barto. Reinforcement Learning: An Introduction. A Bradford Book,
+Cambridge, MA, USA, 2018. ISBN 0262039249.
+[27] Jean-Claude Latombe. Robot Motion Planning. Kluwer Academic Publishers, Norwell, MA, United
+States, 1991. ISBN 978-0-7923-9129-6.
+[28] Marcelo Kallmann. Path planning in triangulations. In Proceedings of the IJCAI Workshop on Reasoning,
+Representation, and Learning in Computer Games, pages 49–54, 2005.
+[29] Ahmadreza Meysami, Jean-Christophe Cuillière, Vincent François, and Sousso Kelouwani. Investigating
+the impact of triangle and quadrangle mesh representations on agv path planning for various indoor
+environments: With or without inflation. Robotics, 11(2):50, 2022. doi:10.3390/robotics11020050.
+[30] H. Choset and J. Burdick. Sensor based planning. i. the generalized voronoi graph. In Proceedings of
+1995 IEEE International Conference on Robotics and Automation, volume 2, pages 1649–1655 vol.2,
+1995. doi:10.1109/ROBOT.1995.525511.
+[31] Franz Aurenhammer. Voronoi diagrams—a survey of a fundamental geometric data structure. ACM
+Comput. Surv., 23(3):345–405, September 1991. ISSN 0360-0300. doi:10.1145/116873.116880. URL
+https://doi.org/10.1145/116873.116880.
+[32] Tomás Lozano-Pérez and Michael A. Wesley.
+An algorithm for planning collision-free paths
+among polyhedral obstacles. Commun. ACM, 22(10):560–570, October 1979. ISSN 0001-0782.
+doi:10.1145/359156.359164. URL https://doi.org/10.1145/359156.359164.
+[33] Junlin Ou, Seong Hyeon Hong, Ge Song, and Yi Wang. Hybrid path planning based on adaptive visibility
+graph initialization and edge computing for mobile robots. Engineering Applications of Artificial
+Intelligence, 126:107110, 2023. ISSN 0952-1976. doi:https://doi.org/10.1016/j.engappai.2023.107110.
+URL https://www.sciencedirect.com/science/article/pii/S0952197623012940.
+21
+
+Hybrid Motion Planning with Deep Reinforcement Learning
+A PREPRINT
+[34] Peter Hart, Nils Nilsson, and Bertram Raphael. A formal basis for the heuristic determination of
+minimum cost paths. IEEE Transactions on Systems Science and Cybernetics, 4(2):100–107, 1968.
+doi:10.1109/tssc.1968.300136.
+[35] Edsger W Dijkstra. A note on two problems in connexion with graphs. Numerische mathematik, 1(1):
+269–271, 1959.
+[36] Thomas H. Cormen, Charles E. Leiserson, Ronald L. Rivest, and Clifford Stein. Introduction to
+Algorithms, Third Edition. The MIT Press, 3rd edition, 2009. ISBN 0262033844.
+[37] Anthony (Tony) Stentz. The d* algorithm for real-time planning of optimal traverses. Technical Report
+CMU-RI-TR-94-37, Pittsburgh, PA, October 1994.
+[38] Steven M. Lavalle. Planning Algorithms. Cambridge University Press, 2006. ISBN 0521862051.
+[39] Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by
+reducing internal covariate shift. In Francis Bach and David Blei, editors, Proceedings of the 32nd
+International Conference on Machine Learning, volume 37 of Proceedings of Machine Learning
+Research, pages 448–456, Lille, France, 07–09 Jul 2015. PMLR. URL https://proceedings.mlr.
+press/v37/ioffe15.html.
+[40] Adam Paszke et al. Pytorch: an imperative style, high-performance deep learning library. In Proceedings
+of the 33rd International Conference on Neural Information Processing Systems, Red Hook, NY, USA,
+2019. Curran Associates Inc.
+[41] Bruno Siciliano and Oussama Khatib. Springer Handbook of Robotics. Springer Handbooks. Springer,
+2016. ISBN 978-3-319-32550-7. doi:10.1007/978-3-319-32552-1.
+[42] OpenStreetMap contributors. Planet dump retrieved from https://planet.osm.org . https://www.
+openstreetmap.org, 2017.
+22

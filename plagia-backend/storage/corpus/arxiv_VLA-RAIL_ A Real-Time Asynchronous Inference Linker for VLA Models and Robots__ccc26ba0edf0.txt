@@ -1,0 +1,1102 @@
+VLA-RAIL: A Real-Time Asynchronous Inference Linker
+for VLA Models and Robots
+Yongsheng Zhao1, Lei Zhao1, Baoping Cheng1,∗, Gongxin Yao1, Xuanzhang Wen1, Han Gao1
+Abstract— Vision-Language-Action
+(VLA)
+models
+have
+achieved remarkable breakthroughs in robotics, with the
+action chunk playing a dominant role in these advances. Given
+the real-time and continuous nature of robotic motion control,
+the strategies for fusing a queue of successive action chunks
+have a profound impact on the overall performance of VLA
+models. Existing methods suffer from jitter, stalling, or even
+pauses in robotic action execution, which not only limits the
+achievable execution speed but also reduces the overall success
+rate of task completion. This paper introduces VLA-RAIL (A
+Real-Time Asynchronous Inference Linker), a novel framework
+designed to address these issues by conducting model inference
+and robot motion control asynchronously and guaranteeing
+smooth, continuous, and high-speed action execution. The core
+contributions of the paper are two fold: a Trajectory Smoother
+that effectively filters out the noise and jitter in the trajectory
+of one action chunk using polynomial fitting and a Chunk
+Fuser that seamlessly align the current executing trajectory
+and the newly arrived chunk, ensuring position, velocity, and
+acceleration continuity between two successive action chunks.
+We validate the effectiveness of VLA-RAIL on a benchmark of
+dynamic simulation tasks and several real-world manipulation
+tasks.
+Experimental
+results
+demonstrate
+that
+VLA-RAIL
+significantly reduces motion jitter, enhances execution speed,
+and improves task success rates, which will become a key
+infrastructure for the large-scale deployment of VLA models.
+I. INTRODUCTION
+The advent of large, pre-trained models [1], [2] has given
+rise to a new category of general-purpose robotic policies,
+referred to as Vision-Language-Action (VLA) models [3].
+Built on large and diverse datasets, these models enable
+robots to understand natural language commands, extract
+spatial-visual semantics, and produce actions suited to open-
+world manipulation tasks. Despite the conceptual uniformity
+of the VLA paradigm, existing models vary widely in input
+modality, model architecture, output format, and inference
+process. At the same time, robotic platforms [4], [5], [6] also
+exhibit substantial heterogeneity in both hardware composi-
+tion and software interface. Therefore, deploying VLA mod-
+els on physical robots remains closely coupled to particular
+robot types and hardware configurations, which substantially
+limits their scalability and cross-platform portability.
+Based on the generalized multi-modal representations of
+Vision-Language Models [2], [7], VLA models further in-
+tegrate action experts [3] to achieve generalized robotic
+manipulation. To balance the inference latency of these large
+models with real-time motor control, the action chunking
+technique [8] is applied to predict multiple frames of actions
+1These authors are affiliated with China Mobile (Hangzhou) Information
+Technology Co., Ltd., Hangzhou, 310023, China. (Baoping Cheng is the
+corresponding author, email: chengbaoping@cmhi.chinamobile.com)
+…
+…
+…
+…
+VLA models
+VLA models
+VLA-RAIL
+Fig. 1.
+Illustration of current issue in VLA deployment (left) and the
+advantage of VLA-RAIL (right). Deploying VLA models on heterogeneous
+robots involves one-to-one adaptation, while VLA-RAIL provides a unified
+framework that enables plug-and-play deployment across diverse VLA
+models and heterogeneous robots.
+within a single inference cycle. Although this trajectory-level
+prediction has become the dominant paradigm for action
+experts in VLA models [9], [10], [11], [12], [13], a brief
+pause still occurs at the end of each action chunk because
+action inference and execution alternate sequentially.
+Beyond the inherent capabilities of VLA models, the real-
+world performance on physical robots is critically influenced
+by three external factors. 1) In real-world manipulation,
+proprioceptive and visual observations are updated concur-
+rently during action execution, necessitating asynchronous
+and proactive model inference to avoid pause-and-go be-
+havior. However, variable latency [14], [15], [16] introduced
+by cameras, networks, and GPUs makes precise temporal
+alignment across successive action chunks both critical and
+difficult. Such misalignment leads to discontinuities at action
+transitions, degrading control accuracy and motion stability.
+2) VLA models are typically trained on action trajectories
+collected through human teleoperation [17], which inevitably
+contain jitter and introduce noise into prediction. Moreover, a
+generative action model based on Flow Matching [18] or Dif-
+fusion Policy [19] can even exacerbate this phenomenon. 3)
+Action chunks are independently learned by the VLA model
+from proprioceptive and visual observations at different time
+steps, without explicit trajectory constraints on position,
+velocity, or acceleration across successive chunks. Conse-
+quently, even with correct temporal alignment, trajectory dis-
+continuities may still arise at chunk boundaries, resulting in
+non-smooth motion. Therefore, many VLA demonstrations
+slow down the execution of action chunks to reduce the
+impact of jitter, sometimes by a factor of 4 to 8.
+To address the aforementioned problems, we propose
+VLA-RAIL (Real-Time Asynchronous Inference Linker),
+arXiv:2512.24673v1 [cs.RO] 31 Dec 2025
+
+a general and scalable asynchronous inference framework
+that establishes a linker between multiple VLA models and
+heterogeneous robots, as shown in Fig. 1. This plug-and-play
+framework decouples VLA models and robotic hardware
+using a client-server architecture. The client provides a uni-
+fied interface that abstracts heterogeneous robots, receiving
+proprioceptive and visual observations from the robot while
+dispatching motion control commands to the robot. The VLA
+models run on the server, communicating with the client via
+a request–response pattern over the ZMQ [20] protocol.
+In addition, VLA-RAIL incorporates a two-stage post-
+processing strategy for action chunks to effectively eliminate
+motion jitters. Specifically, the intra-chunk stage applies
+trajectory smoothing to effectively eliminate jitter within a
+chunk. The inter-chunk stage utilizes temporal alignment and
+a chunk fusion method to further eliminate the abrupt tran-
+sitions between successive chunks. Moreover, VLA-RAIL
+also employs a real-time data manager to temporally align
+the proprioception state and visual observation, as well as
+a multi-thread architecture to handle perception, inference,
+trajectory post-processing and robot control concurrently.
+Based on this decoupled computation and control pipeline,
+task execution can be accelerated beyond teleoperation speed
+by jointly tuning the action trajectory interpolation and com-
+mand dispatch frequencies. Extensive real-world experiments
+demonstrate that VLA-RAIL can produce smoother action
+trajectories, enabling VLA models to perform more precise
+and efficient robotic manipulation.
+In conclusion, our main contributions are:
+• An
+open-source
+and
+model-agnostic
+asynchronous
+framework for VLA model inference, serving as a plug-
+and-play middleware to seamlessly link diverse VLA
+models and heterogeneous robotic platforms.
+• A two-stage action chunk post-processing strategy con-
+sists of intra-chunk smoothing and inter-chunk fusion,
+which eliminates the motion jitter arising from predic-
+tion noise and asynchronous temporal misalignment,
+thereby improving the overall task success rate.
+• A simple yet efficient action acceleration strategy that
+can speed up execution to reach the hardware limits
+by jointly tuning the action trajectory interpolation and
+command dispatch frequencies.
+II. RELATED WORK
+A. Vision-Language-Action Models
+Vision-Language-Action (VLA) models have emerged as
+a promising paradigm [3] to unify visual perception, natural
+language understanding, and robot control within a single
+policy architecture for embodied AI [21]. Early works at-
+tempted to train action policies from scratch using real robot
+trajectories via imitation learning, with RVT [22] adopting
+a standard vision transformer and Diffusion Policy [23]
+adopting a conditional denoising diffusion transformer. How-
+ever, since the scarcity of robot demonstration data limits
+the generalization of these approaches, recent VLA models
+increasingly build on pretrained vision–language foundations
+[2] rather than training policies from scratch. Examples such
+as OpenVLA [9], RDT [11], GR00T [13], Pi [10], and GO1
+[12] embed large vision–language models directly into their
+architectures, allowing them to transfer rich knowledge from
+internet-scale data and finetune on limited amounts of real
+robot demonstration data. Furthermore, action chunking [8]
+has become the dominant paradigm for VLA models, which
+predicts multi-frame actions in a single inference. It allows
+the models to capture trajectory-level motion intentions,
+alleviating the challenge of learning high-frequency and
+low-level motor control. Nevertheless, deploying existing
+models on heterogeneous robots often requires substantial
+adaptation, highlighting the urgent need for a general tool to
+improve cross-platform portability.
+B. Action Chunk Fusion Methods
+The most straightforward approach is to run VLA models
+in a synchronous loop [16]: the robot first acquires ob-
+servations, infers action chunk, executes actions, and only
+then starts the next inference cycle. In this case, successive
+chunks can transition naturally, yet the necessary wait-
+ing time interval results in halting of motion. Although
+asynchronous inference [16] eliminates idle waiting time
+through parallel execution and inference, it requires ad-
+ditional strategies to fuse temporally overlapping regions
+between successive action chunks. Specifically, some method
+[24] simply switches to the next action chunk, overlooking
+the temporal misalignment that induces sharp discontinuities
+between chunks and leads to unstable robot motion. Real-
+time Chunking (RTC) [14] fuses successive action chunks by
+freezing the first few actions in the new chunk and inpainting
+the remaining actions in the current chunk. A customized
+soft mask strategy applies exponentially decaying guidance
+weights to the overlapping region, but it complicates deploy-
+ment and lacks transferability across different VLA models.
+A2C2 [16] learns a dynamic compensation network to rec-
+tify asynchronous action errors, but it requires architectural
+modifications and training of the additional branch. VLASH
+[25] estimates the future robot proprioception state during
+inference and conditions the VLA models on it to predict
+future-aware actions for smooth chunk fusion. However, the
+requirement for dataset reorganization and model retraining
+significantly hinders plug-and-play deployment.
+III. PRELIMINARIES AND PROBLEM FORMULATION
+In this section, we formally define the action-chunk based
+VLA policy and model the temporal correlation among robot
+observation acquisition, VLA model inference, and motion
+control within a real-time pipeline . Finally, we provide a
+mathematical characterization of intra-chunk trajectory jitter
+and inter-chunk unconstrained discontinuities.
+A. Mathematical Formulation Of VLA Policy
+Generally, an action-chunk based VLA model takes the
+language instruction l, visual observation ot
+∈O and
+proprioception state qt ∈Q as input and outputs a chunk
+of actions AH
+t , where t denotes the time, O denotes the
+
+Fig. 2.
+Temporal Pipeline Of Robotic Manipulation. There are three real-time pipelines happened concurrently during robotic manipulation execution.
+The first one, named eye pipeline, is the state retrieval pipeline that acquires the proprioception data and visual images via hardware drivers at a frequency
+of fstate. The second one, name brain pipeline, is the model inference pipeline that predicts new action chunks using current acquired state data at a
+frequency of finfer. The third one, named hand pipeline, is the motion control pipeline that sends the action command to robot at a frequency of fctrl.
+RGB images, Q denotes the joint and end-effector states and
+H denotes the prediction horizon (chunk size). Therefore, a
+VLA policy πθ can be formulated as:
+AH
+t = πθ(l, qt, ot) = [a0
+t, a1
+t, . . . , aH−1
+t
+]
+(1)
+where ak
+t ∈A represents the k-th predicted target action
+at time t. As we can see, two consecutive action chunks
+AH
+t
+and AH
+t′ are independently inferred from (l, qt, ot) and
+(l, qt′, ot′) without explicit constraints enforcing trajectory
+continuity and consistency of velocity or acceleration.
+B. Temporal Pipeline Of Robotic Manipulation
+As depicted in Fig. 2, generalized robotic manipulation is
+a complex hand–eye–brain coordination process, involving
+three real-time pipelines that operate simultaneously. Given
+the robot’s real-time state data (qt, ot) at time t acquired by
+the eye pipeline, the AH
+t will be predicted by brain pipeline
+at time ˆt.
+ˆt = t + ∆ti + ∆tt
+(2)
+where ∆ti denotes the inference duration of VLA model,
+∆tt denotes the trajectory post-process duration.
+In a synchronous execution mode, the robot has to halt and
+wait for latency ∆tinfer+∆ttraj to get the next action chunk
+to execute. To address the pause issue, an asynchronous
+execution mode is preferred, where the next action chunk
+is predicted asynchronously while executing the current one.
+However, the predicted action chunk should be temporally
+aligned to the current one according to the time when the
+robot’s state happens. The alignment time can be formulated
+as:
+˜ta = ∆ti + ∆tt + ∆to
+(3)
+Where ∆to denotes the time the sensors used to process sig-
+nals and return observations. Generally, it can’t be estimated
+accurately for most robotic platforms.
+The hand pipeline sends actions of the post-processed
+trajectories frame-by-frame to the robot at a frequency of
+fctrl for execution. Note that the policy is typically queried
+at a frequency finfer significantly lower than the robot’s
+low-level control frequency fctrl.
+C. The Analysis Of Trajectory Jitter
+There are two kinds of trajectory jitter in action-chunk-
+based robotic manipulation as follows:
+Inter-Chunk Discontinuity: The trajectory discontinuity
+in the transition between two consecutive action chunks is
+caused by the isolated action chunk modeling and temporal
+misalignment, as illustrated by the preceding subsections.
+Suppose that there are two action chunks AH
+t0 and AH
+t1, where
+t0 and t1 are the time when the robot’s state is acquired.
+Then we can quantize the discontinuity using the following
+equation:
+∆Ats
+=
+Ats
+t0 −Ata
+t1
+(4)
+=
+πθ(l, qt0, ot0)ts −πθ(l, qt1, ot1)ta
+where ts denotes the time we switch to AH
+t1 from AH
+t0, and
+t1 −t0 + ta ≤ts.
+Intra-Chunk Noise: Trajectory noise arises from human
+teleoperation and is introduced into the supervision used for
+training the model. Usually, the loss function of a VLA
+model is based on the Manhattan distance (L1) or the
+Euclidean distance (L2).
+L1 = 1
+H
+H
+X
+i=1
+|˜xi −xi|
+(5)
+L2 = 1
+H
+H
+X
+i=1
+|˜xi −xi|2
+(6)
+Where H denotes the size of action chunk, ˜xi denotes the
+i −th predicted value of one joint and xi denotes the i −th
+ground truth value. Let ∆xi be a real positive value denoting
+the i−th predicted error of one joint, the L1 or L2 loss will
+
+Receive Thread
+Data Processing ThreadPool
+Inference ThreadPool
+Unified 
+Model 
+Interface
+ZMQ Server
+VLA Model
+Observation Thread
+Action Thread
+Control Thread
+ZMQ Client
+Configuration System
+Real-Time Data Manager
+Thread-safe buffers
+Timestamp sync
+Trajectory Generator
+Polynomial fitting
+Multi-thread execution
+Velocity computation
+Robot Hardware
+A2D
+G1
+Sim
+R1
+。。。
+ RAIL Client
+ RAIL Server
+Unified 
+Robot
+Interface
+Visualization
+Data Record
+Tools
+VLA-RAIL: A  Real-Time Asynchronous Inference Linker for VLA
+Action Expert
+Encoder
+● Visual   ● Language  ● State
+Robot Observation
+● Camera Data   ● Joint States 
+Action Command
+● Action Chunk   ● Task Progress 
+ACT
+GR00T
+RDT
+PI0
+。。。
+DexVLA
+DP
+* Industry mainstream models
+* Industry renowned robots
+Fig. 3.
+Overview of VLA-RAIL. The asynchronous framework decouples VLA model inference with robotic motion control using a client-server
+architecture, with request–response communication implemented via ZMQ protocol. By exposing unified interfaces on both the server and client sides, VLA-
+RAIL supports plug-and-play deployment across multiple VLA models and heterogeneous robotic platforms. Functionally, the server hosts computationally
+intensive VLA model inference on GPU devices, while the client employs a multi-threaded design to concurrently handle proprioceptive and visual
+observation acquisition, model inference requests, trajectory post-processing, and real-time robot motion control.
+be the same in the following scenario:
+(
+˜xi = xi + ∆xi
+˜xi+1 = xi+1 −∆xi+1
+(7)
+However, the trajectory jitter is amplified by ∆xi + ∆xi+1.
+As we can see, the loss functions used in the training
+scheme of VLA model do not effectively address the issue
+of trajectory jitter.
+IV. THE VLA-RAIL FRAMEWORK
+A. Overview
+We propose VLA-RAIL, a general framework addressing
+the issues formulated in Section III. As illustrated in Fig. 3,
+it adopts a client-server architecture that decouples VLA
+model inference from robotic motion control. VLA-RAIL
+enables parallel action computation and robot control via
+sophisticated data and process orchestration, thereby elimi-
+nating idle latency during VLA model inference. Specifically,
+the client maintains three concurrent processes for real-
+time robotic manipulation: 1) an eye process managing real-
+time proprioceptive and visual observations from robot at
+frequency fobs; 2) a brain process asynchronously com-
+municating with the server to query and post-process new
+action chunk; and 3) a hand process dispatching commands
+at frequency fctrl. To eliminate the motion jitter arising from
+prediction noise and asynchronous temporal misalignment,
+we introduce a trajectory post-processing pipeline as the core
+algorithmic contribution. This pipeline consists of two stages:
+intra-chunk smoothing, which filters trajectory noise within
+each chunk, and inter-chunk fusion, which ensures seamless
+transitions between successive chunks.
+B. Intra-Chunk Trajectory Smoothing
+Action chunks predicted by VLA often exhibit high-
+frequency oscillations due to teleoperation noise in training
+data, stochastic sampling in generative models, and dis-
+cretization artifacts. We effectively address this issue using
+a time-parameterized continuous model to represent the
+trajectories in action chunk, such as multi-order polynomials
+or Fourier series. Constrained by maximum velocity and
+acceleration limits, the trajectories could be well represented
+by three- or higher-order polynomials.
+For each joint j, let {(tk, ak
+t )}H−1
+k=0 denote the H trajectory
+waypoints. We parameterize the action trajectory using a d-th
+order polynomial as:
+Pj(t; c) =
+d
+X
+i=0
+citi
+(8)
+The optimal coefficients are identified via least squares
+estimation to minimize the Euclidean distance between the
+waypoints and polynomial. Given the Vandermonde matrix
+V ∈RH×(d+1) with entries Vki = ti
+k and the waypoints
+y = [a0
+t, . . . , aH−1
+t
+]⊤, the closed-form solution is:
+c∗= (V⊤V)−1V⊤y
+(9)
+The order d of the polynomial controls the smooth-
+ness–fidelity trade-off: higher degrees preserve more detail
+but retain noise, while lower degrees act as low-pass filters.
+Taking into account both computational efficiency and tra-
+jectory smoothness, we employ cubic polynomials (d = 3).
+The matrix V⊤V ∈R4×4 can be solved in sub-millisecond
+latency, allowing real-time response.
+
+C. Inter-Chunk Seamless Fusion
+As illustrated in Section III, the key to seamless inter-
+chunk fusion lies in two aspects: precise temporal alignment
+and trajectory smoothing optimization.
+Temporal Alignment: The two action chunks must be
+aligned based on the timing of event occurrences, as com-
+puted in Equation 3. Since ∆to cannot be accurately esti-
+mated, we reformulate this problem as an optimization task
+subject to motion consistency constraints.
+max
+ta
+m
+X
+i=0
+sign((Ata
+t1[i] −Ats
+t0[i])∂Ats
+t0[i]
+∂t
+)
+s.t.
+ta ∈(0, tw),
+sign(x) =
+(
+1
+x ≥0
+−1
+x < 0
+(10)
+where tw denotes the time window for temporal alignment
+and m denotes the dimension of action.
+Trajectory Smoothing: Quintic spline interpolation is
+commonly used for smooth trajectory generation under po-
+sition, velocity, and acceleration constraints at the start and
+end points, which guaranties minimum jerk over the whole
+trajectory smoothness. However, it has overshoot problem
+due to Runge’s Phenomenon of high-order polynomials,
+which results in shaking motion of robot execution. We
+propose a dual-quintic spline interpolation method to ef-
+fectively address this issue. Let Qt
+l[i] = P5
+j=0 bl
+jτ j and
+Qt
+r[i] = P5
+j=0 br
+jτ j denotes two quintic splines, the dual-
+quintic spline interpolation can be formulated as follows.
+
+
+
+
+
+
+
+
+
+Q0
+l [i] = Ats
+t0[i],
+Q
+tq
+2
+l [i] =
+Ats
+t0[i]+A
+ta+tq
+t1
+[i]
+2
+˙Ql
+0[i] = ˙Ats
+t0[i],
+˙Q↕
+tq
+2 [i] =
+˙Ats
+t0[i]+ ˙A
+ta+tq
+t1
+[i]
+2
+¨
+Ql
+0[i] = ¨Ats
+t0[i],
+¨
+Ql
+tq
+2 [i] = 0
+(11)
+
+
+
+
+
+
+
+
+
+Q0
+r[i] =
+Ats
+t0[i]+A
+ta+tq
+t1
+[i]
+2
+,
+Q
+tq
+2
+r [i] = Ata+tq
+t1
+[i]
+˙Qr
+0[i] =
+˙Ats
+t0[i]+ ˙A
+ta+tq
+t1
+[i]
+2
+,
+˙Qr
+tq
+2 [i] = ˙Ata+tq
+t1
+[i]
+¨
+Qr
+0[i] = 0,
+¨
+Qr
+tq
+2 [i] = ¨Ata+tq
+t1
+[i]
+(12)
+Where tq denotes the time window for interpolation. The
+coefficients of Qt
+l[i] and Qt
+r[i] are obtained by solving a 6×6
+linear system.
+The composite trajectory is thus:
+At[i] =
+
+
+
+
+
+
+
+
+
+
+
+At
+t0[i]
+t < ts
+Qt−ts
+l
+[i]
+ts ≤t < ts + tq
+2
+Q
+t−ts−
+tq
+2
+r
+[i]
+ts + tq
+2 ≤t < ts + tq
+At−ts+ta
+t1
+[i]
+t ≥ts + tq
+(13)
+D. Execution Acceleration
+One advantage of VLA-RAIL is the ability to accelerate
+robotic execution speed without retraining the VLA model.
+Usually, the frequency fact of action chunk predicted by
+VLA model is the same as the frequency fobs (typically
+30Hz) of demonstration dataset collected via teleoperation.
+The frequency fact is far lower than the required frequency
+Algorithm 1 VLA-RAIL Trajectory Control
+Require: Control frequency fctrl, blend duration Tblend
+1: Initialize Tactive ←null
+2: while system active do
+3:
+t ←GetCurrentTime()
+4:
+if NewChunkAvailable(Anew, tobs) then
+5:
+k∗←⌊(t −tobs) · fctrl⌋
+▷Temporal alignment
+6:
+Pnew ←FitCubic(Anew[k∗:])
+▷Intra-chunk
+smoothing
+7:
+if Tactive ̸= null then
+8:
+Q ←SolveQuintic(Tactive, Pnew, t, Tblend)
+9:
+Tactive ←Compose(Q, Pnew)
+10:
+else
+11:
+Tactive ←Pnew
+12:
+end if
+13:
+end if
+14:
+SendToRobot(Tactive(t))
+15: end while
+fctrl (typically ≥100Hz) of robotic motion control. There-
+fore, waypoints must be interpolated at a higher frequency
+finterp.
+We can finely control the robot’s execution speed by
+adjusting the frequency of finterp and fctrl. The acceleration
+ratio α is defined by:
+α =
+fctrl
+finterp
+(14)
+If α > 1, the action execution speed is faster than the
+teleoperation speed. The interpolation frequency finterp can
+be any value because the policy after inter-chunk fusion is a
+continuous model of variable t. The control frequency fctrl
+is limited by hardware capabilities, such as communication
+bandwidth and low level motor control policy.
+E. Algorithm Summary
+Algorithm 1 presents the complete VLA-RAIL control
+pipeline. The algorithm operates as a real-time control loop
+running at frequency fctrl. At each iteration, it checks for
+newly arrived action chunks from the inference server. When
+a new chunk arrives, the algorithm first performs temporal
+alignment by computing the latency-compensated index k∗,
+discarding stale actions that correspond to past robot states.
+It then applies intra-chunk smoothing via cubic polynomial
+fitting. If a previous trajectory exists, a quintic blending
+polynomial is constructed to ensure C2 continuity during the
+transition; otherwise, the new trajectory is directly activated.
+Finally, the active trajectory is evaluated at the current time
+and the resulting command is dispatched to the robot.
+V. EXPERIMENTS
+We have conducted extensive experiments on real-world
+manipulation tasks to systematically validate four key advan-
+tages of VLA-RAIL: 1) improved trajectory smoothness over
+existing methods; 2) increased task success rates resulting
+from smoother trajectories; 3) broad compatibility across
+
+diverse VLA models; and 4) accelerated execution achieved
+without policy retraining.
+A. Experimental Setup
+Hardware. The experiments are conducted on an AgiBot
+G1 robot [26], which consists of dual arms with 14-DoF
+joints and 2 parallel-jaw grippers. Both the VLA-RAIL
+server and client are deployed on a computer equipped with
+NVIDIA RTX 4080 GPU (Laptop version, 12 GB VRAM).
+This computer is connected to the real robot, ensuring that
+all computation and execution sides are on the same local
+area network to minimize communication latency.
+VLA Models. VLA-RAIL is model-agnostic and cur-
+rently compatible with the following VLA models: GO1
+[12], SmolVLA [24], π0 [10], π0.5 [10], GR00T [13], and
+others. In our experiments, all models are trained on the
+same teleoperated demonstration dataset collected at 30Hz.
+Subsequently, they are employed to drive robot operations
+through our VLA-RAIL framework.
+Baselines. To demonstrate the advantages of VLA-RAIL,
+we compare against two other inference–execution strategies:
+1) direct execution of raw VLA model outputs without any
+additional post-processing (denoted as w/o post-processing),
+and 2) direct switching between consecutive action chunks
+with temporal alignment (denoted as naive switching). Un-
+like previous work [24] similar to naive switching, polyno-
+mial fitting is applied within each action chunk. Notably,
+both baselines adopt an asynchronous inference–execution
+paradigm. It is widely acknowledged that synchronous strat-
+egy [14], [25] often results in lower execution efficiency as
+well as robot idling and motion jitter. Therefore, it is not
+included in our experiments.
+Evaluation Metrics. Performance is evaluated using the
+following metrics: 1) the task success rate over 20 real-robot
+trials; 2) the average completion time for successful trials,
+with complex tasks further decomposed by several stages;
+and 3) the trajectory smoothness metrics, including the stan-
+dard deviation of joint angles, velocities, and accelerations
+computed at 1-second intervals.
+B. Trajectory Smoothness Analysis
+We first assess the kinematic quality of the action trajec-
+tories by analyzing the joint angle, velocity, and acceleration
+profiles. Fig. 4 shows three representative trajectories ob-
+tained by repeatedly performing the same robotic grasping
+task under three different inference–execution strategies.
+Joint Angle Trajectory: The top-left panel illustrates the
+joint angle trajectories over time. Without post-processing,
+trajectory-1 exhibits noticeable high-frequency fluctuations
+throughout the motion, particularly evident in the zoomed-
+in view of the trajectory segment from 0 to 10 seconds.
+The naive switching strategy (Trajectory-2) reduces some
+fluctuations through intra-chunk polynomial fitting but still
+shows abrupt transitions at action chunk boundaries. In
+contrast, VLA-RAIL (Trajectory-3) produces a smooth, con-
+tinuous curve that closely follows the intended motion pro-
+file while filtering out prediction noise. Specifically, the
+zoomed-in view of the trajectory segment from 14 to 20
+seconds directly compares the original VLA model output
+(Trajectory-3 [Original]) with the VLA-RAIL post-processed
+result (Trajectory-3 [VLA-RAIL]), demonstrating the effec-
+tiveness of our smoothing algorithm in preserving the overall
+trajectory shape while eliminating prediction noise.
+Velocity Profile: The middle-left panel shows the velocity
+profiles of the three strategies. The trajectory without post-
+processing demonstrates severe velocity fluctuations, with
+frequent sign reversals that indicate jerky, unstable motion.
+Naive switching strategy improves upon this but exhibits
+sharp velocity discontinuities at action chunk boundaries.
+VLA-RAIL maintains a smooth velocity profile with gradual
+transitions, achieving C1 continuity throughout the trajectory.
+Acceleration Analysis: The bottom-left panel reveals
+the
+most
+striking
+differences
+among
+the
+three
+infer-
+ence–execution strategies. The raw trajectory without post-
+processing exhibits sharp acceleration spikes, which may
+violate safety constraints and impose significant mechanical
+stress on the robot. The naive switching strategy signifi-
+cantly reduces the frequency of acceleration peaks. However,
+similar to the corresponding velocity profile, it still poses
+risks at the action chunk boundaries. In contrast, VLA-RAIL
+exhibits bounded and smooth accelerations, remaining within
+a narrow range and approaching C2 continuity, which is
+crucial for safe and efficient robot operation.
+Standard Deviation Analysis: The right column of Fig. 4
+displays the standard deviation (std) of joint angle, velocity,
+and acceleration computed at 1-second intervals. Across all
+three metrics, VLA-RAIL consistently achieves the lowest
+standard deviation values. In particular, the acceleration stan-
+dard deviation for VLA-RAIL remains near zero throughout
+the entire trajectory, whereas the other strategies exhibit
+significantly higher fluctuations. This quantitative analysis
+confirms that VLA-RAIL effectively eliminates both intra-
+chunk noise and inter-chunk discontinuities, resulting in
+smoother real-robot motions.
+C. Task Completion Time
+VLA-RAIL can accelerate the execution of action chunks
+by jointly adjusting the trajectory interpolation and motor
+control frequencies. This allows VLA-driven robots to op-
+erate faster than human teleoperation, without the need to
+recollect high-frequency data and retrain the models. Fig. 5
+shows two representative manipulation tasks, with each task
+divided into three consecutive stages, allowing a comparison
+of the completion times for different strategies.
+Bottle-Grasping Task: The top portion of Fig. 5 illus-
+trates a human-robot handover scenario. In Stage-1 (recog-
+nition and grasping), VLA-RAIL completes in 2.43s com-
+pared to 5.20s for Naive Switching and 6.97s for without
+post-processing, representing a 53% and 65% reduction
+respectively. Stage-2 (delivering to human) shows similar
+trends with VLA-RAIL requiring only 3.26s versus 6.17s
+(Naive Switching) and 5.40s (without post-processing). In
+Stage-3 (returning to initial pose), VLA-RAIL maintains its
+advantage with 3.37s compared to 6.03s and 6.57s for the
+
+Joint Angle (rad)
+Velocity (rad/s)
+Time (s)
+Time (s)
+Acceleration (rad/�2)
+Time (s)
+Time (s)
+std (Joint Angle)
+Time (s)
+std (Velocity)
+std (Acceleration)
+Time (s)
+Fig. 4. Trajectory smoothness comparison under three inference-execution strategies: without post-processing (Trajectory-1), naive switching (Trajectory-2),
+and VLA-RAIL (Trajectory-3). Left column: time-series plots of joint angle (top), velocity (middle), and acceleration (bottom). The zoomed insets highlight
+trajectory details, with the right inset directly comparing the original VLA output and VLA-RAIL post-processed result. Right column: standard deviation
+(std) of each metric computed at 1-second intervals, where lower values indicate smoother motion.
+Stage-1 Start
+Stage-1 End
+Stage-2 Start
+Stage-2 End
+Stage-3 Start
+Stage-3 End
+6.97s
+5.20s
+2.43s
+5.40s
+6.17s
+3.26s
+6.57s
+6.03s
+3.37s
+17.40s
+18.93s
+9.07s
+Stage-1 Start
+Stage-1 End
+Stage-2 Start
+Stage-2 End
+Stage-3 Start
+Stage-3 End
+×Failed
+7.79s
+4.93s
+4.96s
+3.87s
+6.65s
+5.87s
+19.38s
+14.66s
+w/o post-processing
+Naive Switching
+VLA-RAIL (Ours)
+×Failed
+×Failed
+×Failed
+w/o post-processing
+Naive Switching
+VLA-RAIL (Ours)
+Fig. 5.
+Illustrations of the task completion speed under different infer-
+ence–execution strategies. The bottle-grasping task (top) includes 3 stage:
+1) a human points to a bottle while the robot recognizes and grasps it; 2) the
+robot delivers the bottle to the human; and 3) the human takes the bottle and
+the robot returns to its initial pose. The tea-pouring task (bottom) includes
+3 stages: 1) recognizing and grasping the teapot handle; 2) adjusting the
+teapot pose above the cup; and 3) pouring tea and returning the teapot to its
+original position. The horizontal bars shows the average time spent in each
+stage and the total task duration. Here, VLA-RAIL achieves up to 2.09×
+speedup compared to the strategy without any post-processing.
+other methods. The total task completion time demonstrates
+that VLA-RAIL finishes in 9.07s, compared to 17.40s for
+Naive Switching and 18.93s for without post-processing,
+achieving approximately 2.09× speedup.
+Tea-Pouring Task: The bottom portion presents a more
+challenging precision manipulation task. Notably, the strat-
+egy without post-processing fails to complete Stage-1 and
+Stage-2, as indicated by the “Failed” markers, highlighting
+that jerky motion not only slows down execution but can also
+cause task failures. Naive Switching successfully completes
+TABLE I
+SUCCESS RATE ACROSS VLA ARCHITECTURES. ∆DENOTES THE
+ABSOLUTE IMPROVEMENT FROM APPLYING VLA-RAIL.
+Model
+w/o post-processing
+VLA-RAIL
+∆
+GO1
+0.20
+0.30
++0.10
+SmolVLA
+0.15
+0.45
++0.30
+π0
+0.30
+0.95
++0.65
+π0.5
+0.225
+0.95
++0.725
+GR00T
+0.50
+0.95
++0.45
+all stages with times of 4.93s, 3.87s, and 6.65s for Stage-
+1, Stage-2, and Stage-3 respectively, totaling 14.66s. VLA-
+RAIL achieves the fastest completion with 5.87s for Stage-3
+and a total time significantly lower than both baseline meth-
+ods. The failures observed in the without post-processing
+strategy underscore that trajectory smoothness is not merely
+a comfort metric but a critical factor for task success in
+precision manipulation.
+D. Compatibility across Multiple VLA Models
+VLA-RAIL is designed to be model-agnostic and therefore
+compatible with a wide range of VLA models. To validate
+this property, we evaluate five VLA models based on dif-
+ferent generative paradigms on the same manipulation task,
+where the robot needs to pick up a bottle and place it into a
+basket. Table I summarizes the overall success rates without
+any post-processing and with VLA-RAIL.
+The results show that VLA-RAIL consistently improves
+success rates across all evaluated models, with absolute gains
+ranging from +0.10 to +0.725. After applying VLA-RAIL,
+the models can be grouped into two distinct performance
+tiers: 1) High-performing models (π0, π0.5, and GR00T)
+all reach a success rate of 0.95 with VLA-RAIL, despite
+exhibiting substantially different baseline performance (0.30,
+
+w/o post-processing
+VLA-RAIL (ours)
+Fig. 6.
+Qualitative comparison on the tea-pouring task. The top row displays robot executions driven by the raw VLA model outputs (w/o post-processing),
+whereas the bottom row displays executions with VLA-RAIL (ours). Motion jitter causes the liquid surface inside the teapot to oscillate and results in a
+discontinuous, splashing water stream during pouring. In contrast, smooth robot motion leads to more stable and continuous fluid motion.
+0.225, and 0.50, respectively). This indicates that these mod-
+els generate fundamentally correct action sequences, whose
+execution quality is primarily degraded by trajectory-level
+noise, which VLA-RAIL effectively suppresses. 2) Lower-
+performing models (GO1 and SmolVLA) also benefit from
+VLA-RAIL, with SmolVLA improving from 0.15 to 0.45
+and GO1 from 0.20 to 0.30. However, the more limited gains
+suggest that their failures are likely dominated by semantic-
+level errors rather than trajectory noise alone.
+Notably, π0.5 exhibits the largest improvement (∆=
++0.725), suggesting that its generative process introduces
+significant stochastic noise that VLA-RAIL is particularly
+effective at filtering. These results confirm that VLA-RAIL
+serves as a general-purpose enhancement layer applicable
+across diverse VLA architectures without requiring model-
+specific tuning.
+E. Qualitative Results
+Fig. 6 presents a qualitative comparison of a fine-grained
+robotic manipulation task, showing consecutive frames from
+the tea-pouring task. When the robot is driven by the raw
+outputs of the VLA model, the liquid surface inside the
+teapot exhibits pronounced oscillations, and the water stream
+pouring into the cup suffers from severe discontinuities,
+splashing, and instability. In contrast, VLA-RAIL produces
+smooth and stable fluid motion, clearly demonstrating the
+advantages of our framework.
+VI. DISCUSSION AND CONCLUSION
+In this work, we present VLA-RAIL, a robust framework
+to bridge high-latency VLA models and real-time robot con-
+trol. By decoupling inference from execution and employing
+a novel quintic polynomial blending strategy, we achieved
+smooth, continuous motion that masks inference delays. Our
+experiments demonstrated significant improvements in task
+success rates and motion smoothness compared to standard
+synchronous and naive asynchronous baselines.
+Limitations: One limitation of our current approach is the
+fixed parameterization of the transition duration. In highly
+dynamic scenarios, a fixed transition time may not be opti-
+mal. Precise alignment between observations and actions can
+only be achieved if VLA-RAIL and the robot hardware are
+tightly clock-synchronized. Moreover, although VLA-RAIL
+is already compatible with different robots, this advantage
+has not yet been validated due to cost constraints.
+Future Work: Future research will focus on adaptive
+transition strategies that dynamically adjust the blending
+horizon based on the robot’s velocity and the confidence of
+the VLA model. We also plan to integrate Model Predictive
+Control (MPC) at the client side to enforce safety constraints
+more explicitly during the transition phase.
+REFERENCES
+[1] X. Zhu, J. Li, Y. Liu, C. Ma, and W. Wang, “A survey on model com-
+pression for large language models,” Transactions of the Association
+for Computational Linguistics, vol. 12, pp. 1556–1577, 2024.
+[2] J. Zhang, J. Huang, S. Jin, and S. Lu, “Vision-language models for
+vision tasks: A survey,” IEEE transactions on pattern analysis and
+machine intelligence, vol. 46, no. 8, pp. 5625–5644, 2024.
+[3] R. Sapkota, Y. Cao, K. I. Roumeliotis, and M. Karkee, “Vision-
+language-action models: Concepts, progress, applications and chal-
+lenges,” arXiv preprint arXiv:2505.04769, 2025.
+[4] Q. Zhu, X. Guan, B. Yu, J. Zhang, K. Ba, X. Li, M. Xu, and X. Kong,
+“Overview of structure and drive for wheel-legged robots,” Robotics
+and Autonomous Systems, vol. 181, p. 104777, 2024.
+[5] Y. Fan, Z. Pei, C. Wang, M. Li, Z. Tang, and Q. Liu, “A review
+of quadruped robots: Structure, control, and autonomous motion,”
+Advanced Intelligent Systems, vol. 6, no. 6, p. 2300783, 2024.
+[6] Y. Tong, H. Liu, and Z. Zhang, “Advancements in humanoid robots:
+A comprehensive review and future prospects,” IEEE/CAA Journal of
+Automatica Sinica, vol. 11, no. 2, pp. 301–328, 2024.
+[7] D. Liu, M. Yang, X. Qu, P. Zhou, Y. Cheng, and W. Hu, “A survey
+of attacks on large vision–language models: Resources, advances, and
+future trends,” IEEE Transactions on Neural Networks and Learning
+Systems, 2025.
+[8] T. Zhao, V. Kumar, S. Levine, and C. Finn, “Learning fine-grained
+bimanual manipulation with low-cost hardware,” Robotics: Science
+and Systems XIX, 2023.
+
+[9] M. J. Kim, K. Pertsch, S. Karamcheti, T. Xiao, A. Balakrishna,
+S. Nair, R. Rafailov, E. Foster, G. Lam, P. Sanketi, et al., “Open-
+vla: An open-source vision-language-action model,” arXiv preprint
+arXiv:2406.09246, 2024.
+[10] K. Black, N. Brown, D. Driess, A. Esmail, M. Equi, C. Finn,
+N. Fusai, L. Groom, K. Hausman, B. Ichter, et al., “pi 0: A vision-
+language-action flow model for general robot control,” arXiv preprint
+arXiv:2410.24164, 2024.
+[11] S. Liu, L. Wu, B. Li, H. Tan, H. Chen, Z. Wang, K. Xu, H. Su,
+and J. Zhu, “Rdt-1b: a diffusion foundation model for bimanual ma-
+nipulation,” in The Thirteenth International Conference on Learning
+Representations, 2025.
+[12] Q. Bu, J. Cai, L. Chen, X. Cui, Y. Ding, S. Feng, X. He, X. Huang,
+et al., “Agibot world colosseo: A large-scale manipulation platform
+for scalable and intelligent embodied systems,” in 2025 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS),
+IEEE, 2025.
+[13] J. Bjorck, F. Casta˜neda, N. Cherniadev, X. Da, R. Ding, L. Fan,
+Y. Fang, D. Fox, F. Hu, S. Huang, et al., “Gr00t n1: An open
+foundation model for generalist humanoid robots,” arXiv preprint
+arXiv:2503.14734, 2025.
+[14] K. Black, M. Y. Galliker, and S. Levine, “Real-time execution of action
+chunking flow policies,” arXiv preprint arXiv:2506.07339, 2025.
+[15] Y. Ma, Y. Zhou, Y. Yang, T. Wang, and H. Fan, “Running vlas at
+real-time speed,” arXiv preprint arXiv:2510.26742, 2025.
+[16] K. Sendai, M. Alvarez, T. Matsushima, Y. Matsuo, and Y. Iwasawa,
+“Leave no observation behind: Real-time correction for vla action
+chunks,” arXiv preprint arXiv:2509.23224, 2025.
+[17] K. Darvish, L. Penco, J. Ramos, R. Cisneros, J. Pratt, E. Yoshida,
+S. Ivaldi, and D. Pucci, “Teleoperation of humanoid robots: A survey,”
+IEEE Transactions on Robotics, vol. 39, no. 3, pp. 1706–1727, 2023.
+[18] Y. Lipman, R. T. Chen, H. Ben-Hamu, M. Nickel, and M. Le, “Flow
+matching for generative modeling,” in 11th International Conference
+on Learning Representations, ICLR 2023, 2023.
+[19] C. Chi, Z. Xu, S. Feng, E. Cousineau, Y. Du, B. Burchfiel, R. Tedrake,
+and S. Song, “Diffusion policy: Visuomotor policy learning via action
+diffusion,” The International Journal of Robotics Research, vol. 44,
+no. 10-11, pp. 1684–1704, 2025.
+[20] P. Hintjens, ZeroMQ: messaging for many applications. ” O’Reilly
+Media, Inc.”, 2013.
+[21] Y. Liu, W. Chen, Y. Bai, X. Liang, G. Li, W. Gao, and L. Lin,
+“Aligning cyber space with physical world: A comprehensive survey
+on embodied ai,” IEEE/ASME Transactions on Mechatronics, 2025.
+[22] A. Goyal, J. Xu, Y. Guo, V. Blukis, Y.-W. Chao, and D. Fox, “Rvt:
+Robotic view transformer for 3d object manipulation,” in Conference
+on Robot Learning, pp. 694–710, PMLR, 2023.
+[23] C. Chi, S. Feng, Y. Du, Z. Xu, E. Cousineau, B. Burchfiel, and S. Song,
+“Diffusion policy: Visuomotor policy learning via action diffusion,” in
+Robotics: Science and Systems, 2023.
+[24] M. Shukor, D. Aubakirova, F. Capuano, P. Kooijmans, S. Palma,
+A. Zouitine, M. Aractingi, C. Pascal, M. Russi, A. Marafioti, et al.,
+“Smolvla: A vision-language-action model for affordable and efficient
+robotics,” arXiv preprint arXiv:2506.01844, 2025.
+[25] J. Tang, Y. Sun, Y. Zhao, S. Yang, Y. Lin, Z. Zhang, J. Hou, Y. Lu,
+Z. Liu, and S. Han, “Vlash: Real-time vlas via future-state-aware
+asynchronous inference,” arXiv preprint arXiv:2512.01031, 2025.
+[26] Zhiyuan Robotics (AgiBot), “Agibot g1 general purpose robot.”
+https://www.agibot.com/products/G1.
+Accessed: 2025-
+12-29.

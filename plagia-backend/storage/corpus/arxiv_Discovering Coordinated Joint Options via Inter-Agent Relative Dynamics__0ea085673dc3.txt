@@ -1,0 +1,1386 @@
+DISCOVERING COORDINATED JOINT OPTIONS VIA INTER-AGENT
+RELATIVE DYNAMICS
+Raul D. Steleac
+University of Edinburgh
+raul.steleac@ed.ac.uk
+Mohan Sridharan
+University of Edinburgh
+m.sridharan@ed.ac.uk
+David Abel
+Google DeepMind
+david.abel@ed.ac.uk
+ABSTRACT
+Temporally extended actions improve the ability to explore and plan in single-agent settings. In
+multi-agent settings, the exponential growth of the joint state space with the number of agents
+makes coordinated behaviours even more valuable. Yet, this same exponential growth renders
+the design of multi-agent options particularly challenging. Existing multi-agent option discovery
+methods often sacrifice coordination by producing loosely coupled or fully independent behaviours.
+Toward addressing these limitations, we describe a novel approach for multi-agent option discovery.
+Specifically, we propose a joint-state abstraction that compresses the state space while preserving
+the information necessary to discover strongly coordinated behaviours. Our approach builds on the
+inductive bias that synchronisation over agent states provides a natural foundation for coordination
+in the absence of explicit objectives. We first approximate a fictitious state of maximal alignment
+with the team, the Fermat state, and use it to define a measure of spreadness, capturing team-level
+misalignment on each individual state dimension. Building on this representation, we then employ a
+neural graph Laplacian estimator to derive options that capture state synchronisation patterns between
+agents. We evaluate the resulting options across multiple scenarios in two multi-agent domains,
+showing that they yield stronger downstream coordination capabilities compared to alternative option
+discovery methods.
+Keywords Option Discovery · Multi-agent Reinforcement Learning
+1
+Introduction
+Effective cooperation in complex domains requires agents to coordinate intentions, synchronise actions, share informa-
+tion, and make decisions that impact others under partial observability. Humans seeking to achieve such cooperation
+often adapt previously learned cooperation patterns to new tasks, inventing novel strategies by reasoning about the
+structure and rules of the task (see Appendix A.1 for extended discussion and examples). When learning a new ball
+game, basic cooperation patterns like passing or positioning relative to teammates or opponents surface instinctively
+and are then adapted to the new setting. This ability to identify and reuse cooperation patterns allows us to bypass
+relearning basic skills and instead focus on discovering more abstract (high-level) strategies. In this work, we study
+how to enable AI agents to discover such basic cooperation patterns and use them to explore and identify more useful
+cooperation strategies at a higher level than that allowed by primitive actions.
+In single-agent reinforcement learning (RL), the options framework [Sutton et al., 1999] is a widely used mechanism
+for formulating temporally extended actions. That is, options can act as shortcuts between distant regions of the state
+space during exploration [McGovern and Barto, 2001]. Yet, as noted in prior work [Jong et al., 2008], the effectiveness
+of options is sensitive to many factors, and poorly designed and excessively large sets of options can hinder learning.
+This makes option discovery, i.e., the automated design of useful options, a challenging problem. Methods based on
+the eigen-decomposition of the graph Laplacian, such as Eigenoptions [Machado et al., 2017a], have gained traction
+due to their task-agnostic discovery of options and exploration guarantees [Jinnai et al., 2019a]. However, the reliance
+on the eigenvectors of the state-transition graph Laplacian leads to an excessive number of options being discovered
+(twice the state count), a problem that is more pronounced in multi-agent systems because the joint state space grows
+exponentially with the number of agents. Moreover, current Laplacian eigenvector approximators are most effective in
+arXiv:2512.24827v1 [cs.LG] 31 Dec 2025
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+estimating small numbers of eigenvectors [Wang et al., 2021, Gomez et al., 2024], risking not identifying many useful
+options, particularly those that facilitate exploration at various timescales.
+We address option discovery for multi-agent systems through a novel inter-agent relative state abstraction. This new
+state abstraction compresses the joint state space of a group of agents into a compact latent representation centred
+around the state of maximal alignment among agents we call the Fermat state. Through this abstraction of the joint
+state, we drastically reduce the number of discovered options while also focusing the discovery process on inter-agent
+relational dynamics. We then empirically show how this transformation encourages the emergence of highly coordinated
+behaviours. Our approach builds on the intuition that in the absence of an explicit objective, synchronisation over
+state features represents a natural basis for coordination. Returning to the ball game example, both the passing and
+positioning skills can be understood as forms of multi-agent state synchronisation: determining who holds the ball
+and how agents align relative to one another along each spatial dimension. This intuition is consistent with insights
+into position alignment in animal collective movement [Herbert-Read, 2016] and emergent coordination in human
+psychology [Knoblich et al., 2011]. The key contributions of our paper are:
+• A novel abstract joint state representation that estimates inter-agent relations by transitioning to a multi-dimensional
+N-metric space;
+• The use of the abstract state representations for the discovery of highly coordinated joint options, due to their ability
+to compress and reorient eigenoption discovery toward inter-agent relations;
+• Adapting the MacDec-POMDP framework [Amato et al., 2019] to support joint-option execution;
+We illustrate and experimentally evaluate the capabilities of our approach in two benchmark multi-agent collaboration
+domains: Level-Based Foraging [Papoudakis et al., 2021] and Overcooked [Ruhdorfer et al., 2024]. Beyond assessing
+the benefits of relative options over standard, non-option-enhanced baselines, we test the hypothesis that the proposed
+state abstraction facilitates the discovery of a more diverse and generalisable set of coordination behaviours, better
+suited to support teams of agents in downstream tasks compared with other multi-agent option discovery methods.
+2
+Background
+We begin by describing the basic concepts of Dec-POMDPs, the options framework, and n-metrics.
+2.1
+Decentralised Partially-Observable Markov Decision Processes
+A Dec-POMDP [Bernstein et al., 2009] is defined as a tuple ⟨I, S, {Ai}, T , R, {Ωi}, O, γ⟩, where I = {1, . . . , N} is a
+finite set of agents’ indices, S the state space and A = A1 ×· · ·×AN the joint action space. At every time-step t, agent
+i receives its local observation oi
+t ∈Ωi, where Ω= Ω1 × · · · × ΩN is the joint set of observations that was generated
+according to the observation function O : S × A × Ω→[0, 1]. Agent i then selects an action ai
+t ∈Ai according to a
+policy πi(ai
+t|hi
+t), that is conditioned on the history of its local observations and actions hi
+t = (oi
+1, ai
+1, . . . , oi
+t−1, ai
+t−1, oi
+t).
+Given the joint set of actions at t, at = {a1
+t, . . . , aN
+t }, the environment transitions to a new state st+1 ∈S according to
+the state transition function T : S × A × S →[0, 1] and induces a global reward received by all agents rt = R(s, a),
+where R : S × A →R. The goal is to learn a joint policy π = (π1, . . . , πN) that maximises the expected cumulative
+discounted return G = PT
+t=1 γt−1rt.
+Amato et al. [2019] extended Dec-POMDPs by integrating single-agent macro-actions (options) within an asynchronous
+execution scheme. They defined a MacDec-POMDP as the tuple ⟨I, S, A, {Mi}, T , R, {Zi}, {Ωi}, {ζi}, O⟩, where
+⟨I, S, A, T , R, {Ωi}, O⟩are the same as in a Dec-POMDP. The primitive action set of each agent i ∈I, Ai, is replaced
+with a finite set of macro-actions Mi, and M = M1 × · · · × MN is the joint macro-action set. They also introduced a
+joint set of macro-observation ζ = ζ1 × · · · × ζN, with Zi : Mi × S × ζi →[0, 1] specifying the macro-observation
+probability function for each agent i. To formalise macro-actions, separate histories are maintained for the two execution
+levels: Hi
+A is the primitive action–observation history, and Hi
+M is the macro-action–macro-observation history. The
+joint primitive history is HA = (H1
+A, . . . , HN
+A ), and the joint macro history is HM = (H1
+M, . . . , HN
+M).
+2.2
+Options
+Sutton et al. [1999] define an option as a tuple w = ⟨Iw, πw, βw⟩, where Iw ⊆S is the initiation set, πw is the option
+policy, and βw : S →[0, 1] is the termination condition. If these components depend only on the current state, the
+option is referred to as a Markov option. This notion is generalised to semi-Markov options, in which the policy and
+termination condition may depend on additional information (e.g., state–action–reward histories), or termination may
+be triggered by external factors such as a fixed k-step horizon.
+2
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Eigen-option discovery [Machado et al., 2017b] estimates the eigenvectors of the combinatorial graph Laplacian
+corresponding to a state–transition graph, typically via random walks. The eigenvectors of the graph Laplacian,
+L = D −A (where D and A are the degree and adjacency matrices, respectively), captures long-term temporal
+relationships between states and the overall geometry of an MDP [Mahadevan and Maggioni, 2007]. Given an
+eigenvector e, the intrinsic reward function for transitioning from state s to s′ can be computed as re(s, s′) =
+ei[s′] −ei[s]. Subsequent work [Wu et al., 2018, Jinnai et al., 2020, Wang et al., 2021] extends this framework to
+non-tabular domains by approximating the eigenvectors through neural networks trained to minimise objectives derived
+from graph-drawing theory [Koren, 2005]. The ALLO method introduced by Gomez et al. [2024] further improves
+robustness to hyperparameters and eigenvector rotations.
+2.3
+n-metrics & n-distances
+n-metric. Given a set X and an integer n ≥2, an n-(hemi)metric [Deza and Rosenberg, 2000, Deza and Deza, 2009] is
+a function d : Xn →R, that respects the following conditions:
+(M1) (Non-negativity) d(x1, . . . , xn) ≥0 for all x1, . . . , xn ∈X.
+(M2) (Total symmetry) d(x1, . . . , xn) = d(xπ(1), . . . , xπ(n)), for all x1, . . . , xn ∈X and for any permutation π of
+{1, . . . , n}.
+(M3) (Definiteness) d(x1, . . . , xn) = 0, if and only if x1, . . . , xn are not pairwise distinct.
+(M4) (Simplex inequality) d(x1, . . . , xn) ≤Pn
+i=1 d(x1, . . . , xn)z
+i , for all x1, . . . , xn, z ∈X.
+This definition uses n, to replace m + 1 in the original definition of an m-hemimetric [Deza and Deza, 2009] and
+d(x1, . . . , xn)z
+i to represent functions on n elements, where element i is replaced z.
+n-distance. n-distances [Martín and Mayor, 2011, Kiss et al., 2018] relax (M3) by setting d(x1, . . . , xn) = 0 only
+when x1 = . . . = xn, providing a direct way of comparing the dissimilarity or separateness for sets with more than two
+elements.
+Fermat n-distance. Given a metric space (X, d) and an integer n ≥2, a Fermat set Fx for a list of n elements
+(x1, . . . , xn) is a set that minimises the sum of distances to each element in the list:
+FX =
+(
+x ∈X :
+n
+X
+i=1
+d(xi, x) ≤
+n
+X
+i=1
+d(xi, x′), ∀x′ ∈X
+)
+.
+(1)
+The elements of Fx are then named the Fermat points for the respective list. Based on these definitions, Kiss et al.
+[2018] introduce Fermat n-distances as functions dF : Xn →R of the form:
+dF (x1, . . . , xn) = min
+x∈X
+n
+X
+i=1
+d(xi, x).
+(2)
+3
+Multi-Agent Option-Discovery
+We next describe our framework for multi-agent option discovery, starting with the method for approximating the
+spread of a group of agents through n-distance estimation.
+3.1
+n-distances for multi-agent dissimilarity estimation
+In the absence of a reward signal, one key strategy for coordination among a group of agents is through the alignment
+of their states. An important step to generate such collaborative behaviours is to define a measure of spreadness for the
+group of agents at any given time. We begin by introducing a notion of distance between the states of two agents. To
+this end, we assume that the joint state-space, S, can be factored into N single-agent state spaces Si, with N = |I| and
+i ∈I, by ignoring the presence of others and including information corresponding solely to each individual agent 1.
+We denote si ∈Si to be a single agent-state, and d(si, sj) as a distance metric capable of comparing the similarity
+between the states of two agents, i, j ∈I. For simplicity, we focus our notation and definitions on homogeneous
+agent state spaces, i.e., S∗= S1 = . . . = SN. However, Appendix A.8 describes how this model can be extended to
+heterogeneous settings, and presents empirical evaluation in two toy scenarios.
+Inspired by Fermat n-distances (Equation 2), we define an n-distance metric for a group of agents.
+1Single agent states can contain general environmental information. Because it is shared by all agents, it will be naturally ignored
+by the state distance measure.
+3
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+𝑑𝜃
+𝑠𝑡 
+𝑔
+𝑠𝑡𝑁 
+𝑠𝑡1 
+𝑠𝑡0 
+ 
+ 
+𝜙
+𝜙( 𝑠𝑡
+ )
+𝑑𝜃
+∑
+𝑑ℱ,𝑡
+ 
+𝐹𝑒𝑟𝑚𝑎𝑡 𝑠𝑡𝑎𝑡𝑒
+𝐽𝑜𝑖𝑛𝑡 𝑠𝑡𝑎𝑡𝑒
+𝑛 𝑑𝑖𝑠𝑡𝑎𝑛𝑐𝑒
+𝜇
+𝑒𝑖𝑔𝑒𝑛𝑣𝑒𝑐𝑡𝑜𝑟
+Figure 1: Option discovery on inter-agent relative representations for a state factorisation function g, Fermat encoder ϕ,
+state distance encoder dθ and a graph Laplacian eigenvector approximator µ.
+Definition 1. For a metric space (S∗, d), where S∗is a single-agent state space, d is a state distance metric and N
+≥2, we define the Fermat inter-agent state distance as a map dF : S →R such that:
+dF(s1, . . . , sN) = min
+s∈S∗
+N
+X
+i=1
+d(si, s).
+(3)
+Computing the minimization operation from Definition 1. becomes intractable in large or continuous state spaces. To
+alleviate this problem, we propose approximating the Fermat state, the state of minimum summed distance to each
+agent, through a parameterised function, ϕ : S →S∗, which we call the Fermat encoder and train by minimizing the
+following objective:
+LF(ϕ, d) =
+E
+τ∼ρπ
+"
+1
+N
+N
+X
+i=1
+d(si
+t, ϕ(st))2
+#
+.
+(4)
+where τ ≜(s0, . . . , sT −1) ∼ρπ is a history of states under the trajectory distribution ρπ of joint policy π, T is the time
+horizon of an episode, st is the joint state, and si
+t is the ith element of the factorised joint state, corresponding to agent i.
+This objective depends on a pre-defined state distance metric d. While any valid state distance metric would suffice,
+we employ temporal distances due to their invariance to feature semantics and close alignment with environmental
+dynamics (see Section 5). Temporal distances are typically formulated as quasimetrics that are obtained by relaxing the
+symmetry requirement to account for the arrow of time (e.g., ascending a mountain takes more time than descending
+it). Although a quasimetric function can be symmetrised, e.g. dm(x, y) = dq(x, y) + dq(y, x), such transformations
+remove a key advantage of temporal distances and reduce the expressivity of the resulting measure. Thus, we enforce a
+consistent input order by fixing the Fermat state as the second input in Equation 4, yielding a directed function that can
+be interpreted as the expected number of steps needed for the agents to achieve full alignment.
+We adopt the successor distances method [Myers et al., 2024] for approximating temporal distances and denote the
+parameterised state distance as dθ : S∗× S∗→R. The Fermat encoder ϕ and the distance approximator dθ are trained
+concomitantly by enforcing a stop-gradient operator on the distance estimator’s parameters (θ) when integrating it in
+the Fermat encoder objective (Equation 4).
+3.2
+Multi-agent option discovery on relative states
+Eigen-option discovery, introduced in Section 2.2, consists of two main steps: (i) estimating the state-transition graph
+and (ii) performing the eigen-decomposition of the graph Laplacian to generate a set of eigenvectors for option training.
+An important observation is that this process is completely dependent on the state representation used to construct
+the transition graph. We propose to intentionally leverage this observation by embedding the joint state space into an
+inter-agent relative representation prior to performing the graph Laplacian eigen-decomposition.
+Intuitively, one could replace each joint state in the transition graph with the corresponding n-distance estimation.
+However, such a compression may limit the behavioural expressivity captured in the eigenvectors. Using a singular
+scalar value to describe the dissimilarity on all feature dimensions can obscure their individual effect. For instance, two
+agents reported as being k units apart may differ primarily along one dimension defining the space, or some subset
+of these dimensions, but the scalar provides no insight into which dimension drives the misalignment. Furthermore,
+mapping joint states to scalar values has drastic effects on the topology of the state-transition graph, further limiting the
+diversity of the alignment behaviour discovered. To address this issue, we compute the n-distance along each feature
+dimension of the single-agent state space and encode the nodes in the state-transition graph as their concatenation. The
+distance module is thus modified to predict F outputs dF : S∗× S∗→RF , where F = dim(S∗). We then use a linear
+4
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+projection layer to approximate the overall state-distance when training dF
+θ . Figure 1 provides an overview of our joint
+option discovery framework, which uses multi-dimensional n-distances as state representations.
+In practice, however, this unconstrained decomposition can lead to degenerate solutions, as dF
+θ can output identical
+distance estimates on all dimensions or revert to only using one of the output dimensions. To mitigate this issue,
+we impose a Mutual Information (MI) objective that encourages each state feature to dominate the information flow
+leading to its corresponding distance prediction. Formally, let Si,j = (Si, Sj) be the random pair of single-agent
+states corresponding to agents i, j ∈I, with i ̸= j, obtained by factorizing states of joint trajectories from ρπ. For
+each feature index f ∈{1, . . . , F}, we denote Si,j
+f
+= (Si
+f, Sj
+f) as the pair of their f-th feature dimension. Given
+that dF : S∗× S∗→RF is a deterministic map, we define a random vector Zi,j = dF (Si, Sj) ∈RF and its f-th
+component Zi,j
+f . We require that the MI between each feature distance Zi,j
+f
+and the rest of the state-feature pairs Si,j
+−f,
+i.e. I(Si,j
+−f, Zi,j
+f ), does not exceed the MI between the feature pairs themselves, I(Si,j
+−f, Si,j
+f ). This implies that each
+distance prediction should not carry more information about the value of other features than is already captured in the
+correlations between the inherent features. We next establish that through simple manipulations of the chain rule of
+information, we can upper bound the information between Zi,j
+f
+and the rest of the state features Si,j
+−f by the information
+already explained by feature Si,j
+f
+about Si,j
+−f plus a residual conditional term.
+Proposition 1. For any two agent indexes i, j ∈I, with i ̸= j, and feature index f ∈{1, . . . , F}:
+I(Si,j
+−f; Zi,j
+f ) ≤I(Si,j
+−f; Si,j
+f ) + I(Si,j
+−f; Zi,j
+f
+| Si,j
+f ).
+(5)
+A proof of this proposition is deferred to Appendix A.2. To reduce information overflow in the distance predictions,
+we thus minimise the following Conditional Mutual Information (CMI), measuring the excess information that Zi,j
+f
+conveys about Si,j
+−f beyond what is already captured in Si,j
+f :
+I(Si,j
+−f; Zi,j
+f
+| Si,j
+f ) = DKL
+h
+p(Si,j
+−f; Si,j
+f ; Zi,j
+f )
+
+ p(Si,j
+−f | Si,j
+f )p(Zi,j
+f
+| Si,j
+f )
+i
+(6)
+Minimizing CMI.
+We adopt the approach of Dunion et al. [2023] and introduce a discriminator network Dψ trained
+to directly detect the information excess. Specifically, the discriminator is trained to distinguishing between real triplets
+{si,j
+−f,t; si,j
+f,t; zi,j
+f,t} obtained by pairing factorised single-agent states from a history of joint states τ ≜(s0, . . . , sT ) ∼ρπ,
+and fake triplets obtained by permuting si,j
+−f,t while keeping {si,j
+f,t; zi,j
+f,t} fixed. As in Dunion et al. [2023], we use the
+discriminator’s predictions to define a disentanglement penalty when training dF
+θ . We defer a description of the CMI
+minimization algorithm to Appendix A.3. A visual comparison of scalar and the multi-dimensional n-distances is in
+Appendix A.5.
+We follow the representation-driven option discovery (ROD) cycle from Machado et al. [2023] 2 to generate the
+desired set of options, but precede the eigenvector estimation by first representing the joint states as their disentangled
+multi-dimensional n-distance representation. Both the n-distance encoder training and joint option discovery are done
+offline, prior to the generic training. By converting raw joint states into relative representations, we produce options that
+reflect a range of complex multi-agent alignment behaviours, enabling agents to synchronise along various subsets of
+their state features. Figure 2 (right) illustrates the resulting eigenvectors in a grid-world setting with coordinate-based
+states; Appendix A.6 provides a more detailed analysis. For ease of understanding, we fix the positions of N −1 agents
+and visualise the eigenvector from the remaining agent’s perspective. We emphasise that these relative eigenvectors
+are highly responsive to changes in the joint state due to the re-centering effect around the Fermat state, a property
+that is much less evident in the eigenvectors discovered on raw joint-states. In this simple domain, the first eigenvector
+aligns agents along one coordinate axis, while its negation (also a valid eigenvector) aligns them along the other. The
+subsequent eigenvector promotes alignment across both axes simultaneously, followed by eigenvectors that capture
+more complex state synchronisation patterns.
+Following the procedure introduced in Section 2.2, we use these eigenvectors as intrinsic reward signals for option-policy
+training. Figure 3 shows a visualisation of the multi-agent options trained to follow the positive and negative versions
+of the first two eigenvectors for a team of four agents. With each grid, we report the feature-wise distance values for
+the corresponding final states, highlighting the distinct alignment patterns achieved by the learned option policies.
+Furthermore, the first two eigenvectors induce the same behaviours for four agents as they did for three in Figure 2,
+illustrating the consistency of the alignment patterns with respect to team size.
+2We use the ALLO method from Gomez et al. [2024] to approximate the eigenvectors of the graph Laplacian and follow the
+original eigenoptions approach from Machado et al. [2017b], where we use a single ROD cycle to generate the whole set of
+eigenvectors. A motivation for these design choices is in Appendix A.9.
+5
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+(1,4), (1,7)
+(7,7), (7,8)
+(7,7), (7,8)
+(1,4), (1,7)
+Joint
+Single
+Relative
+Figure 2: The first three non-trivial eigenvectors of the graph Laplacian for an 15x15 grid environment with three
+agents, as the only entities in the grid, under varying state representations: single agent state spaces (left), raw joint
+state spaces (center) and inter-agent relative state representations (right). For visibility, we fix the position of two agents
+for the multi-agent scenarios (at [(1,4), (1,7)] and [(7,7), (7,8)]), and display the values when varying the position of the
+remaining agent.
+3.3
+Adding Joint Options to Dec-POMPDs
+We adapt the MacDec-POMDP framework [Amato et al., 2019] described in Section 2.1 to support multi-agent macro-
+actions (joint options). To ensure the correct selection, execution, and termination of joint options in decentralised
+settings, we impose the following two modeling assumptions:
+Assumption 1. There is an information-sharing mechanism between all agents.
+This assumption yields a more permissive model than the standard MacDec-POMDP framework. However, it still
+withholds access to the true underlying state. The information sharing mechanism is motivated by the collective nature
+of the options discovered, where effective option selection often depends on team-level information. In a scenario
+where agents must search for resources in an environment, a good strategy might be to spread out, locate a resource, and
+then trigger an option to gather around it. Without knowing if a teammate has found the resource, however, triggering
+the option prematurely can hinder performance and destabilise exploration.
+Assumption 2. There is a synchronisation mechanism that ensures the minimum number of agents required for the
+correct execution of joint options.
+In the same way that passing in a ball game cannot be defined without a receiving partner, this design choice synchronises
+joint option selection, asserting that enough agents agree on following an option at a given time for that option to be
+activated and executed correctly.
+Inspired by the work on local options [Amato et al., 2019], we define joint options through a hierarchical view on
+agent histories. A joint option is then a tuple W = ⟨IW, πW, βW, PI
+W⟩, where the initiation set IW ⊆HM and
+the termination condition βW : HM →[0, 1] are specified in terms of joint macro histories, and the joint option
+policy πW = (π1
+W, . . . , πN
+W) is a map from HA to primitive actions. The multi-agent nature of these options requires
+additionally specifying the subsets of agents for which an option is defined, PI
+W, where different join-options might
+include distinct subsets of agents. For homogeneous teams, PI
+W can solely be specified by the number of agents
+required to initiate the option, i.e., PI
+W = {J ⊆I | |J| = nW}. This formulation generalises local options, which
+correspond to the special case where nW = 1.
+To adapt the MacDec-POMDP framework to support the integration of joint options, we first redefine the macro-actions
+set Mi in terms of joint options, and restrict ourselves to full team consensus, nW = N, while treating primitive actions
+as joint options with nW = 1 and immediate termination. When agent i selects an option Mi at time step t, this counts
+as a vote toward the threshold for initiation, nW; if this value is reached, the option is executed and control is transferred
+6
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Option 1
+Option 2
+Option 3
+Option 4
+Figure 3: Policy roll-outs visualisation of the first four relative options in the 15×15 grid environment with four agents.
+Arrows indicate the actions taken by each agent’s policy, coloured circles mark the final states (before the termination
+action is triggered), and the white circle denotes the estimated Fermat state corresponding to these final states. The bars
+on the right of each figure show the Fermat n-distance estimates for each feature. Please see Appendix A.7 for other
+state initializations.
+to the option policy until termination, otherwise control is returned at t + 1. Next, we redefine macro-observations ζi to
+incorporate information shared by teammates. Dec-POMDP-Com [Oliehoek and Amato, 2016] extends the standard
+framework with an explicit communication protocol. Since communication is not our focus, we mimic this step by
+allowing agents to share their observations directly and defer a more general treatment of communication to future
+work.
+4
+Empirical evaluation
+We structured our empirical evaluation around three hypotheses: (H1) Joint options provide advantages in downstream
+tasks compared with not using them. (H2) Joint options discovered via inter-agent relative representations (IARO)
+yield better downstream performance than those derived from other methods. (H3) The multi-dimensional n-distance
+representation enables a more robust option discovery process that its scalar-value variant in domains with more complex
+state spaces. Additionally, we investigate how increasing or decreasing the number of relative options discovered by our
+framework affects overall performance in our experimental domains.
+Experimental Setup. We evaluated our approach in two multi-agent domains: Level-Based Foraging [Papoudakis
+et al., 2021] and Overcooked [Ruhdorfer et al., 2024], using their JAX re-implementations from jum [2024] and
+Rutherford et al. [2024], respectively. We focused on two scenarios in each domain: for LBF, these are 15x15-4p-3f and
+15x15-4p-5f and for Overcooked, they are Forced Coordination and Counter Circuit. In LBF, we introduced stronger
+coordination requirements by setting each apple’s level equal to the sum of all agents’ levels, the forced cooperation
+configuration from [Papoudakis et al., 2021]. Our choice of domains reflects a trade-off between interpretability and
+feature diversity. LBF enables straightforward visualisation of eigenvectors and relative representations through its
+X, Y -coordinate state space. Overcooked involves richer feature semantics, combining X, Y -coordinates, orientations,
+and a categorical variable for item inventory. While information sharing is implicit in the Overcooked task, in LBF, we
+allowed agents to always observe the relative distances to their teammates (rather than only when they enter their field
+of view) and add a flag to their observations indicating when each teammate is in the vicinity of an apple. Our approach
+and all baselines operated under the same level of observability in our analysis.
+To train the n-distance encoder and the graph Laplacian eigenvector approximator (ALLO [Gomez et al., 2024]), we
+used a dataset of 500,000 transitions sampled from a random joint policy in each domain. In LBF, we approximated the
+first 10 eigenvectors, yielding 20 options, while in Overcooked we approximated 20 eigenvectors, yielding 40 options.
+Once estimated, we trained joint option policies based on these eigenvectors for one million steps, equivalent to 5% and
+10% of the total training time in each task. We employed IQL to train the option policies and incorporated an action,
+A′
+i = Ai ∪{⊥}, as the termination condition [Machado et al., 2017b]. All agents involved had to all choose this action
+for an option to be terminated. In addition, we enforced a hard stop after 50 steps. The initiation set was defined as the
+entire joint state space, allowing options to be started anywhere, provided that the required number of agents, nW = N,
+was met.
+Evaluation against generic baselines. To evaluate H1, we compared the performance of IQL equipped with inter-
+agent relative options (IQL+IARO) against four option-free baselines: MAPPO [Yu et al., 2022], IPPO, IQL, and
+VDN [Sunehag et al., 2018]. Following Rutherford et al. [2024], we left MAPPO out of our analysis for Overcooked.
+Figure 4 presents IQM scores with 95% confidence intervals (CI) computed across 10 seeds. The addition of joint
+options (IQL+IARO) led to consistent performance gains over the vanilla IQL, achieving higher percentages of apples
+7
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Figure 4: Downstream task performance analysis for both environments (LBF on the left, Overcooked on the right).
+The top row compares IQL+IARO against option-free baseline algorithms, while the bottom row compares it against
+IQL augmented with other option discovery methods.
+eaten per episode in LBF and more successful deliveries per episode in Overcooked; see top row of Figure 4. This
+improvement was especially visible in Overcooked, where IQL tends to remain stuck in suboptimal solutions. The joint
+options equipped agents with coordination skills that systematically explored the state space and enabled them to swiftly
+parse through various coordination patterns in search of better strategies. Additionally, IQL+IARO outperformed
+the other baselines across the set of experiments, except the Forced Coordination scenario where VDN is known to
+perform well [Rutherford et al., 2024]. These results highlight the benefits of joint options in overcoming the limitations
+of independent policy learning in multi-agent tasks by encouraging cooperation through the set of pre-computed
+coordination behaviours; note that our method does not rely on centralization (MAPPO) or value decomposition (VDN)
+to support it. However, we did observe a slower convergence at the start of training, which we attribute to known
+challenges of training with options under global initiation sets [Jong et al., 2008, Machado et al., 2023].
+Evaluation against other option frameworks. Next, to evaluate hypothesis H2, we compared the downstream benefits
+of the options discovered with our framework against those discovered through an existing Kronecker graph product
+method from Chen et al. [2022] (IQL+Kron), and an ablation where discovery was performed directly on raw joint
+states (IQL+RJS). For IQL+Kron, we closely followed the original implementation, apart from two main adaptations to
+match our framework: (i) we employed ALLO [Gomez et al., 2024] to approximate both eigenvectors and eigenvalues
+directly; and (ii) we used a single ROD cycle to estimate multiple eigenvectors. Figure 4 compares the resulting
+options across both domains and shows that the options discovered by our method better equip teams of agents with the
+cooperative skills necessary to solve these downstream tasks. We noticed that, particularly in LBF, options discovered
+via raw joint states and Kronecker products can degrade performance. We believe that this is due to their first non-trivial
+eigenvectors mainly capturing behaviours that drive agents to the edges of the state space (also see Appendix A.6),
+which is counterproductive for the apple-picking task.
+We then explored H3 by evaluating the utility of the multi-dimensional n-distance representation (IQL+IARO-MultiDim)
+against its scalar-value variant (IQL+IARO-Scalar). While in LBF, the domain with simpler state definitions, both
+methods performed similarly, in Overcooked, the multi-distance method proved more effective, as agent states consist
+of multiple features of diverse semantics, highlighting the benefits of the disentangled n-distance representation. By
+decomposing n-distance estimation across features, agents can align on specific subsets of state dimensions, yielding
+a richer set of cooperative behaviours. It is then up to the acting policy to decide, via exploration, which alignment
+strategies are beneficial for the task at hand.
+A complementary episodic reward analysis for a larger set of domains is provided in Appendix A.4, while other
+implementation details and the list of hyperparameters can be found in Appendix A.10.
+Option count analysis. We examined how the number of joint options used during training influences downstream
+task performance. Our goal was to identify the threshold at which a subset of options yields substantial performance
+8
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Figure 5: Downstream task performance for the most complex scenario in LBF and Overcooked, evaluated using
+different numbers of options. We report IQM scores over 15 seeds and 64 evaluation episodes at the end of training for
+each configuration, with standard deviations shown as error bars.
+gains, as well as to understand how further increasing the number of options affects results. Figure 5 reports the
+aggregated scores for the most complex scenario in both environments. We observed that both tasks benefit even from
+a relatively small option set. In LBF, the largest boost in apples collected appears with as few as two options, while
+notable improvements in successful deliveries emerge with the first ten options in Overcooked. This is consistent
+with eigen-option theory, which suggests that the first eigenvectors connect distant nodes in the state-transition graph,
+yielding powerful exploration behaviours. Later eigenvectors encode shorter time-scale behaviours, whose usefulness
+may vary in each task. We also note that more complex state spaces generally imply a larger threshold, reflecting
+the greater diversity of long-horizon alignment patterns that emerge through different feature combinations. Finally,
+although larger option sets can sometimes further improve performance (e.g., six options for LBF and twenty for
+Overcooked), these gains eventually saturate. Larger option sets can introduce increased training instability, resulting in
+reduced performance or higher variance. In our previous evaluations we utilised the maximum number of options for
+both environments to enable a fair comparison with the other option discovery methods.
+5
+Related Work
+We discuss related work on similar metrics, state representations, and temporally-extended actions.
+State similarity metrics. Estimating state similarity measures is a fundamental challenge in RL. Even in simple
+domains, standard distances such as Euclidean, fail to capture true state proximity in the presence of obstacles, as they
+ignore environmental dynamics. In contrast, bisimulation metrics [Ferns et al., 2004] measure state similarity through
+differences in rewards and transition dynamics, and have been widely applied in optimality preserving state aggregation
+methods [Li et al., 2006]. However, these approaches struggle in sparse-rewards settings, leaving them susceptible
+to representation collapse [Kemertas and Aumentado-Armstrong, 2021, Chen et al., 2024]. Temporal or successor
+distances define state similarity as the expected number of actions required by a policy to travel between two states
+[Venkattaramanujam et al., 2019]. This class of state distances is invariant to state representations and closely reflects
+environmental dynamics, making it a popular solution for goal-conditioned RL [Hartikainen et al., 2020, Durugkar
+et al., 2021, Myers et al., 2024], intrinsic reward composition [Bae et al., 2024, Jiang et al., 2025] and unsupervised
+skill discovery [Park et al., 2024]. Notably, METRA [Park et al., 2024] is particularly relevant to our work, as it aims to
+learn skills that explore a latent space connected to the ground state space via a temporal metric. Besides performing
+skill discovery in single-agent settings, a main distinction is that we leverage temporal distances to approximate a latent
+representation for the eigenoption discovery of joint options that achieve exploration at different time-scales, rather than
+only at its extremes.
+State representations in MARL. State representations in MARL have been mostly used for the aggregation of agents’
+local observations into a compact global representation, often through graph neural networks (GNNs). GNNs are
+invariant to the number of entities, here agent observation embeddings, and can weight the information passed between
+vertices differently through edge features [Jiang et al., 2020, Liu et al., 2019, 2021, Nayak et al., 2023]. Utke et al.
+[2025] emphasise the importance of relative information for estimating inter-agent relations, and embed this inductive
+bias into GNN edge features based on hand-crafted spatial relations. In contrast, our method learns inter-agent relations
+automatically, without any restrictions on feature semantics.
+Temporally extended actions for multi-agent systems.
+Makar et al. [2001] extend semi-Markov decision pro-
+cesses to cooperative multi-agent settings, introducing two execution schemes: synchronous (macro-actions terminate
+9
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+simultaneously) and asynchronous (macro-actions terminate independently). Asynchronous schemes gained recent
+popularity due to their innate generality [Amato et al., 2019, Xiao et al., 2021, 2022], but typically rely on single-agent
+(local) options that do not express cooperative behaviours. Therefore, coordination occurs only at the option selection
+level, but not within the option policies themselves. This approach drastically limits the expressiveness of the options
+used in multi-agent scenarios. To address this, Chen et al. [2022] integrates option discovery techniques based on
+covering options [Jinnai et al., 2019b] that construct joint behaviours via Kronecker products of single-agent transition
+graphs. However, the resulting joint options mainly synchronise independent behaviours, failing to capture strong
+inter-agent dependencies or correlations, a limitation noted by the authors. This leaves the problem of discovering
+strongly coordinated behaviours still open, which is precisely what we aim to address with our method.
+6
+Conclusion
+In this work, we introduced a novel inter-agent relative representation for joint states, designed to address the key
+challenges of multi-agent option discovery. This representation compresses the joint state space and re-centers it around
+the point of maximum alignment for the team. We define this point as the Fermat state and propose a method that
+estimates it explicitly. Using the relative representation, we then produce joint options that are strongly coordinated and
+well-suited to capture inter-agent relational dynamics. Moreover, by disentangling the representation across individual
+state features, our approach further enriches the behavioural diversity expressed in the discovered joint options. We
+demonstrated the effectiveness of the proposed method across multiple benchmark domains and scenarios, confirming
+its ability to support agent teams in achieving stronger solutions on downstream tasks. Our work opens up multiple
+directions for further research in the discovery and use of options for multi-agent collaboration. In particular, we will
+relax the assumption of homogeneity among agent states, the assumption of sharing observations in lieu of a proper
+communication protocol, and the restriction that joint option initiation requires full team consensus.
+References
+Richard S. Sutton, Doina Precup, and Satinder Singh. Between mdps and semi-mdps: a framework for temporal abstrac-
+tion in reinforcement learning. Artif. Intell., 112(1–2):181–211, August 1999. ISSN 0004-3702. doi:10.1016/S0004-
+3702(99)00052-1. URL https://doi.org/10.1016/S0004-3702(99)00052-1.
+Amy McGovern and Andrew G. Barto. Automatic discovery of subgoals in reinforcement learning using diverse density.
+In Proceedings of the Eighteenth International Conference on Machine Learning, ICML ’01, page 361–368, San
+Francisco, CA, USA, 2001. Morgan Kaufmann Publishers Inc. ISBN 1558607781.
+Nicholas K. Jong, Todd Hester, and Peter Stone. The utility of temporal abstraction in reinforcement learning.
+In Adaptive Agents and Multi-Agent Systems, 2008. URL https://api.semanticscholar.org/CorpusID:
+5973935.
+Marlos C. Machado, Marc G. Bellemare, and Michael Bowling. A laplacian framework for option discovery in
+reinforcement learning. In Proceedings of the 34th International Conference on Machine Learning - Volume 70,
+ICML’17, page 2295–2304. JMLR.org, 2017a.
+Yuu Jinnai, Jee Won Park, David Abel, and George Konidaris. Discovering options for exploration by minimizing cover
+time. In Proceedings of the International Conference on Machine Learning, 2019a.
+Kaixin Wang, Kuangqi Zhou, Qixin Zhang, Jie Shao, Bryan Hooi, and Jiashi Feng. Towards better laplacian repre-
+sentation in reinforcement learning with generalized graph drawing, 2021. URL https://arxiv.org/abs/2107.
+05545.
+Diego Gomez, Michael Bowling, and Marlos C. Machado. Proper laplacian representation learning, 2024. URL
+https://arxiv.org/abs/2310.10833.
+J. E. Herbert-Read. Understanding how animal groups achieve coordinated movement. Journal of Experimental Biology,
+219(19):2971–2983, 10 2016. ISSN 0022-0949. doi:10.1242/jeb.129411. URL https://doi.org/10.1242/jeb.
+129411.
+Günther Knoblich, Stephen Butterfill, and Natalie Sebanz. Psychological research on joint action. theory and data. Psy-
+chology of Learning and Motivation - PSYCH LEARN MOTIV-ADV RES TH, 54:59–101, 12 2011. doi:10.1016/B978-
+0-12-385527-5.00003-6.
+Christopher Amato, George Konidaris, Leslie P. Kaelbling, and Jonathan P. How. Modeling and planning with
+macro-actions in decentralized pomdps.
+J. Artif. Int. Res., 64(1):817–859, January 2019.
+ISSN 1076-9757.
+doi:10.1613/jair.1.11418. URL https://doi.org/10.1613/jair.1.11418.
+10
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Georgios Papoudakis, Filippos Christianos, Lukas Schäfer, and Stefano V. Albrecht. Benchmarking multi-agent deep
+reinforcement learning algorithms in cooperative tasks. In Proceedings of the Neural Information Processing Systems
+Track on Datasets and Benchmarks (NeurIPS), 2021.
+Constantin Ruhdorfer, Matteo Bortoletto, Anna Penzkofer, and Andreas Bulling. The overcooked generalisation
+challenge. arXiv preprint arXiv:2406.17949, 2024.
+Daniel S Bernstein, Christopher Amato, Eric A Hansen, and Shlomo Zilberstein. Policy iteration for decentralized
+control of markov decision processes. Journal of Artificial Intelligence Research, 34:89–132, 2009.
+Marlos C. Machado, Marc G. Bellemare, and Michael Bowling. A laplacian framework for option discovery in
+reinforcement learning. In Proceedings of the 34th International Conference on Machine Learning - Volume 70,
+ICML’17, page 2295–2304. JMLR.org, 2017b.
+Sridhar Mahadevan and Mauro Maggioni. Proto-value functions: A laplacian framework for learning representation
+and control in markov decision processes. Journal of Machine Learning Research, 8(74):2169–2231, 2007. URL
+http://jmlr.org/papers/v8/mahadevan07a.html.
+Yifan Wu, George Tucker, and Ofir Nachum. The laplacian in rl: Learning representations with efficient approximations,
+2018. URL https://arxiv.org/abs/1810.04586.
+Yuu Jinnai, Jee Won Park, Marlos C. Machado, and George Dimitri Konidaris. Exploration in reinforcement learning
+with deep covering options. In International Conference on Learning Representations, 2020. URL https://api.
+semanticscholar.org/CorpusID:211266513.
+Y. Koren. Drawing graphs by eigenvectors: theory and practice. Comput. Math. Appl., 49(11–12):1867–1888, June 2005.
+ISSN 0898-1221. doi:10.1016/j.camwa.2004.08.015. URL https://doi.org/10.1016/j.camwa.2004.08.015.
+M.-M. Deza and I.G. Rosenberg. n-semimetrics. Eur. J. Comb., 21(6):797–806, August 2000. ISSN 0195-6698.
+doi:10.1006/eujc.1999.0384. URL https://doi.org/10.1006/eujc.1999.0384.
+Michel Marie Deza and Elena Deza. Encyclopedia of Distances, pages 1–583. Springer Berlin Heidelberg, Berlin,
+Heidelberg, 2009. ISBN 978-3-642-00234-2. doi:10.1007/978-3-642-00234-2_1. URL https://doi.org/10.
+1007/978-3-642-00234-2_1.
+J. Martín and G. Mayor. Multi-argument distances. Fuzzy Sets Syst., 167(1):92–100, March 2011. ISSN 0165-0114.
+doi:10.1016/j.fss.2010.10.018. URL https://doi.org/10.1016/j.fss.2010.10.018.
+Gergely Kiss, Jean-Luc Marichal, and Bruno Teheux. A generalization of the concept of distance based on the simplex in-
+equality. Beiträge zur Algebra und Geometrie / Contributions to Algebra and Geometry, 59(2):247–266, January 2018.
+ISSN 2191-0383. doi:10.1007/s13366-018-0379-5. URL http://dx.doi.org/10.1007/s13366-018-0379-5.
+Vivek Myers, Chongyi Zheng, Anca Dragan, Sergey Levine, and Benjamin Eysenbach. Learning temporal distances:
+contrastive successor features can provide a metric structure for decision-making. In Proceedings of the 41st
+International Conference on Machine Learning, ICML’24. JMLR.org, 2024.
+Mhairi Dunion, Trevor McInroe, Kevin Luck, Josiah Hanna, and Stefano Albrecht. Conditional mutual information
+for disentangled representations in reinforcement learning. Advances in neural information processing Systems, 36:
+80111–80129, 2023.
+Marlos C. Machado, André Barreto, Doina Precup, and Michael Bowling. Temporal abstraction in reinforcement
+learning with the successor representation. J. Mach. Learn. Res., 24(1), January 2023. ISSN 1532-4435.
+Frans A. Oliehoek and Christopher Amato. A Concise Introduction to Decentralized POMDPs. Springer Publishing
+Company, Incorporated, 1st edition, 2016. ISBN 3319289276.
+Jumanji: a diverse suite of scalable reinforcement learning environments in jax, 2024. URL https://arxiv.org/
+abs/2306.09884.
+Alexander Rutherford, Benjamin Ellis, Matteo Gallici, Jonathan Cook, Andrei Lupu, Garðar Ingvarsson, Timon
+Willi, Ravi Hammond, Akbir Khan, Christian Schroeder de Witt, Alexandra Souly, Saptarashmi Bandyopadhyay,
+Mikayel Samvelyan, Minqi Jiang, Robert Tjarko Lange, Shimon Whiteson, Bruno Lacerda, Nick Hawes, Tim
+Rocktäschel, Chris Lu, and Jakob Nicolaus Foerster. Jaxmarl: Multi-agent rl environments and algorithms in jax. In
+The Thirty-eight Conference on Neural Information Processing Systems Datasets and Benchmarks Track, 2024.
+Chao Yu, Akash Velu, Eugene Vinitsky, Jiaxuan Gao, Yu Wang, Alexandre Bayen, and Yi Wu. The surprising
+effectiveness of ppo in cooperative multi-agent games. In Proceedings of the 36th International Conference on
+Neural Information Processing Systems, NIPS ’22, Red Hook, NY, USA, 2022. Curran Associates Inc. ISBN
+9781713871088.
+11
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Peter Sunehag, Guy Lever, Audrunas Gruslys, Wojciech Marian Czarnecki, Vinicius Zambaldi, Max Jaderberg, Marc
+Lanctot, Nicolas Sonnerat, Joel Z. Leibo, Karl Tuyls, and Thore Graepel. Value-decomposition networks for
+cooperative multi-agent learning based on team reward. In Proceedings of the 17th International Conference on
+Autonomous Agents and MultiAgent Systems, AAMAS ’18, page 2085–2087, Richland, SC, 2018. International
+Foundation for Autonomous Agents and Multiagent Systems.
+Jiayu Chen, Jingdi Chen, Tian Lan, and Vaneet Aggarwal. Scalable multi-agent covering option discovery based on
+kronecker graphs. In Proceedings of the 36th International Conference on Neural Information Processing Systems,
+NIPS ’22, Red Hook, NY, USA, 2022. Curran Associates Inc. ISBN 9781713871088.
+Norm Ferns, Prakash Panangaden, and Doina Precup. Metrics for finite markov decision processes. In Proceedings of
+the 20th Conference on Uncertainty in Artificial Intelligence, UAI ’04, page 162–169, Arlington, Virginia, USA,
+2004. AUAI Press. ISBN 0974903906.
+Lihong Li, Thomas J. Walsh, and Michael L. Littman. Towards a unified theory of state abstraction for mdps. In AI&M,
+2006. URL https://api.semanticscholar.org/CorpusID:245037.
+Mete Kemertas and Tristan Aumentado-Armstrong. Towards robust bisimulation metric learning. In Proceedings of the
+35th International Conference on Neural Information Processing Systems, NIPS ’21, Red Hook, NY, USA, 2021.
+Curran Associates Inc. ISBN 9781713845393.
+Jianda Chen, Wen Zheng Terence Ng, Zichen Chen, Sinno Jialin Pan, and Tianwei Zhang. State chrono representation
+for enhancing generalization in reinforcement learning, 2024. URL https://arxiv.org/abs/2411.06174.
+Srinivas Venkattaramanujam, Eric Crawford, Thang Doan, and Doina Precup. Self-supervised learning of distance
+functions for goal-conditioned reinforcement learning. arXiv preprint arXiv:1907.02998, 2019.
+Kristian Hartikainen, Xinyang Geng, Tuomas Haarnoja, and Sergey Levine. Dynamical distance learning for semi-
+supervised and unsupervised skill discovery, 2020. URL https://arxiv.org/abs/1907.08225.
+Ishan Durugkar, Mauricio Tec, Scott Niekum, and Peter Stone. Adversarial intrinsic motivation for reinforcement
+learning, 2021. URL https://arxiv.org/abs/2105.13345.
+Junik Bae, Kwanyoung Park, and Youngwoon Lee. Tldr: Unsupervised goal-conditioned rl via temporal distance-aware
+representations, 2024. URL https://arxiv.org/abs/2407.08464.
+Yuhua Jiang, Qihan Liu, Yiqin Yang, Xiaoteng Ma, Dianyu Zhong, Hao Hu, Jun Yang, Bin Liang, Bo Xu, Chongjie
+Zhang, and Qianchuan Zhao. Episodic novelty through temporal distance, 2025. URL https://arxiv.org/abs/
+2501.15418.
+Seohong Park, Oleh Rybkin, and Sergey Levine. Metra: Scalable unsupervised rl with metric-aware abstraction, 2024.
+URL https://arxiv.org/abs/2310.08887.
+Jiechuan Jiang, Chen Dun, Tiejun Huang, and Zongqing Lu. Graph convolutional reinforcement learning, 2020. URL
+https://arxiv.org/abs/1810.09202.
+Yong Liu, Weixun Wang, Yujing Hu, Jianye Hao, Xingguo Chen, and Yang Gao. Multi-agent game abstraction via
+graph attention neural network, 2019. URL https://arxiv.org/abs/1911.10715.
+Iou-Jen Liu, Zhongzheng Ren, Raymond A. Yeh, and Alexander G. Schwing. Semantic tracklets: An object-centric
+representation for visual multi-agent reinforcement learning, 2021. URL https://arxiv.org/abs/2108.03319.
+Siddharth Nayak, Kenneth Choi, Wenqi Ding, Sydney Dolan, Karthik Gopalakrishnan, and Hamsa Balakrishnan.
+Scalable multi-agent reinforcement learning through intelligent information aggregation. In Proceedings of the 40th
+International Conference on Machine Learning, ICML’23. JMLR.org, 2023.
+Sharlin Utke, Jeremie Houssineau, and Giovanni Montana. Investigating relational state abstraction in collaborative
+marl. In Proceedings of the Thirty-Ninth AAAI Conference on Artificial Intelligence and Thirty-Seventh Conference on
+Innovative Applications of Artificial Intelligence and Fifteenth Symposium on Educational Advances in Artificial Intel-
+ligence, AAAI’25/IAAI’25/EAAI’25. AAAI Press, 2025. ISBN 978-1-57735-897-8. doi:10.1609/aaai.v39i20.35390.
+URL https://doi.org/10.1609/aaai.v39i20.35390.
+Rajbala Makar, Sridhar Mahadevan, and Mohammad Ghavamzadeh. Hierarchical multi-agent reinforcement learning.
+In Proceedings of the Fifth International Conference on Autonomous Agents, AGENTS ’01, page 246–253, New
+York, NY, USA, 2001. Association for Computing Machinery. ISBN 158113326X. doi:10.1145/375735.376302.
+URL https://doi.org/10.1145/375735.376302.
+Yuchen Xiao, Joshua Hoffman, and Christopher Amato. Macro-action-based deep multi-agent reinforcement learning,
+2021. URL https://arxiv.org/abs/2004.08646.
+12
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Yuchen Xiao, Weihao Tan, and Christopher Amato. Asynchronous actor-critic for multi-agent reinforcement learning.
+In Proceedings of the 36th International Conference on Neural Information Processing Systems, NIPS ’22, Red
+Hook, NY, USA, 2022. Curran Associates Inc. ISBN 9781713871088.
+Yuu Jinnai, Jee Won Park, David Abel, and George Konidaris. Discovering options for exploration by minimizing cover
+time, 2019b. URL https://arxiv.org/abs/1903.00606.
+Neil Rabinowitz, Frank Perbet, Francis Song, Chiyuan Zhang, S. M. Ali Eslami, and Matthew Botvinick. Machine
+theory of mind. In Jennifer Dy and Andreas Krause, editors, Proceedings of the 35th International Conference on
+Machine Learning, volume 80 of Proceedings of Machine Learning Research, pages 4218–4227. PMLR, 10–15 Jul
+2018.
+Bo Liu, Yihao Feng, Qiang Liu, and Peter Stone. Metric residual networks for sample efficient goal-conditioned
+reinforcement learning. In Proceedings of the Thirty-Seventh AAAI Conference on Artificial Intelligence and Thirty-
+Fifth Conference on Innovative Applications of Artificial Intelligence and Thirteenth Symposium on Educational
+Advances in Artificial Intelligence, AAAI’23/IAAI’23/EAAI’23. AAAI Press, 2023. ISBN 978-1-57735-880-0.
+doi:10.1609/aaai.v37i7.26058. URL https://doi.org/10.1609/aaai.v37i7.26058.
+Aaron van den Oord, Yazhe Li, and Oriol Vinyals. Representation learning with contrastive predictive coding, 2019.
+URL https://arxiv.org/abs/1807.03748.
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization, 2017. URL https://arxiv.org/
+abs/1412.6980.
+R.S. Sutton and A.G. Barto. Reinforcement learning: An introduction. IEEE Transactions on Neural Networks, 9(5):
+1054–1054, 1998. doi:10.1109/TNN.1998.712192.
+13
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+A
+Appendix
+A.1
+Practical examples in realistic scenarios
+We present two example scenarios where identifying coordination strategies can drastically accelerate the computation
+of effective solutions in downstream tasks: a search-and-rescue team operation and the dynamics of a professional
+restaurant kitchen.
+As the first example, consider a team of AI agents assisting humans in a search and rescue operation. The appropriate
+strategy for the team depends on multiple factors, such as the type of terrain to be explored (e.g., open fields versus
+dense forest), the capabilities of the agents involved (e.g., bipedal robots or drones), and the level of effort required
+to assist each individual in need (e.g., assist in extracting the human from rubble, or arranging for an ambulance). In
+dense forests, teams may need to form tight lines or sweep formations to ensure perfect coverage, whereas open fields
+can often be searched more efficiently by dispersion. Moreover, when victims require substantial assistance, teams
+may need to alternate between broad search patterns and swift regrouping around targets to deliver help quickly and
+effectively.
+As another example of multi-agent collaboration, consider a professional kitchen with multiple AI agents coordinating
+their activities, operating with maximum efficiency and precision to prepare and serve high-quality dishes as quickly as
+possible. The complex dynamics of the scenario require both division of labour and synchronisation, with different
+subsets of the agents pursuing coordinating patterns for preparing ingredients and cooking the dishes while synchronising
+their activities at specific steps in the recipe, and delivering the dishes to provide a good experience for the customers.
+Humans often draw on their rich contextual understanding to identify and apply the correct strategy for these (and
+other such) tasks, although even humans will undergo specialised training to acquire this contextual understanding. On
+the other hand, learning complex, temporally-extended, and varied coordination strategies from scratch is extremely
+challenging for teams of AI agents. Sparse reward (i.e., feedback) signals, non-stationarities in the dynamics of the
+domain and the agents, and credit assignment are among multiple reasons that make this learning particularly challenging.
+The discovery of intermediate coordination patterns (options) that aid in the reliable and efficient completion of such
+tasks by AI agents is central to our efforts; our objective (in this paper) is to develop a method capable of identifying
+these patterns from a limited number of interactions with the environment. Such a method enables the team of agents to
+focus solely on learning when and where to deploy each strategy, a substantially easier task in complex downstream
+scenarios. The domains we use for experimental evaluation are simplified versions of the complex scenarios described
+above.
+A.2
+Mutual Information Objective Proof
+Proposition 2. For any two agent indexes i, j ∈I, with i ̸= j, and feature index f ∈{1, . . . , F}:
+I(Si,j
+−f; Zi,j
+f ) ≤I(Si,j
+−f; Si,j
+f ) + I(Si,j
+−f; Zi,j
+f
+| Si,j
+f ).
+Proof. Let A, B, and C be three random variables such that A, B, C ∼p(a, b, c), where p(a, b, c) is the joint distribution,
+and let I(A; B, C) be the Multivariate Mutual Information (MI) estimate for these variables. Then, from the chain rule
+of MI:
+I(A; B, C) = I(A; C) + I(A; B|C)
+I(A; B, C) = I(A; B) + I(A; C|B)
+and therefore:
+I(A; C) + (A; B|C) = I(A; B) + I(A; C|B)
+Given that an MI estimate is always positive, i.e. I(A, B|C) ≥0:
+−I(A; B|C) ≤0
+I(A; C) −I(A; B) −I(A; C|B) ≤0
+I(A; C) ≤I(A; B) + I(A; C|B)
+Replacing A = Si,j
+−f, B = Si,j
+f
+and C = Zi,j
+f , we obtained the inequality in Equation 5.
+A.3
+CMI minimisation algorithm
+Algorithm 1 follows the framework of Dunion et al. [2023] to minimise the CMI estimator defined in Equation 6.
+14
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Algorithm 1 CMI minimisation step
+Require: Transitions τ = {s0, . . . , sT } ∼ρπ, joint-state factorisation function g : S →QN
+i=1 S∗.
+Require: Parameters for the distance estimator θ and the discriminator ψ.
+1: Factorise each joint state into N single-agent states {s0
+t, . . . , sN
+t } = g(st), with t ∈{0, . . . , T}.
+2: Create single agent state pairs bi,j
+t
+= {(s0
+t, s1
+t), (s0
+t, s2
+t), . . . (sN−1
+t
+, sN
+t )}.
+3: Concatenate the single agent state pairs into the final batch for CMI minimisation:
+Bi,j = {(s0
+0, s1
+0), . . . (sN−1
+0
+, sN
+0 ), (s0
+1, s1
+1), . . . (sN−1
+T
+, sN
+T )}
+4: Initialise LD ←0 and LA ←0.
+5: Forward pass through multi-feature distance encoder zn = dF
+θ (si,j
+n ), where si,j
+n is the n-th pair in the single agent
+dataset Bi,j.
+6: for n ∈(1, . . . , |Bi,j|) do
+7:
+for f ∈(1, . . . , F) do
+8:
+Create conditioning set cf,n = (si,j
+f,n, zf,n).
+9:
+Find k nearest neighbours (kNN) of cf,n in the batch:
+qP
+i
+ (cf,n)i −(cf,n′)i2.
+10:
+Create sperm
+−f,n = {sperm
+0
+, . . . , sperm
+f−1, sperm
+f+1, . . . , sperm
+F
+} by shuffling the kNNs.
+11:
+Calculate discriminator loss:
+LD ←LD + log σ(Dϕ(si,j
+n , zf,n) + log
+ 1 −σ(Dϕ(sperm
+−f,n, si,j
+f,n, zf,n)
+
+12:
+end for
+13: end for
+14: Update discriminator parameters to minimise LD.
+15: for n ∈(1, . . . , N) do
+16:
+for f ∈(1, . . . , F) do
+17:
+Calculate adversarial loss: LA ←LA + log
+ 1 −σ(Dϕ(si,j
+n , zf,n)
+
+.
+18:
+end for
+19: end for
+20: Update encoder parameters to minimise LA.
+A.4
+Episodic Reward analysis & Additional results
+Figure 6 presents an extended analysis of our method using episodic returns as the evaluation measure. Beyond the
+four scenarios discussed in Section 4, we add one additional setting for each domain: 15x15-3p-5f in Level-Based
+Foraging (LBF) and Asymmetric Advantages in Overcooked. These scenarios, together with the original four, were
+selected because the IQL baseline finds it difficult to compute solutions for these scenarios [Papoudakis et al., 2021,
+Rutherford et al., 2024], thereby highlighting the improvements achieved by our approach. Similar to Figure4, we
+report the IQM scores with 95% CI for 10 seeds.
+Figure 6: Episodic reward IQM results for the entire suite of environments (including 15x15-3p-5f for LBF and
+Asymmetric Advantages for Overcooked).
+15
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Relative - Scalar
+Relative - MultiDim
+(7,13), (13,7)
+(7,7), (7,8)
+(1,4), (1,7)
+Figure 7: A visualisation of the n-distance approximator outputs for the scalar and multi-dimensional disentangled
+variants in a 15×15 grid environment with three agents, where we fix the positions of two agents and show the
+n-distance values as the position of the third agent varies.
+A.5
+n-distance representation comparison
+Figure 7 compares the outputs of the trained n-distance estimator, conditioning on the positions of two agents, for
+the scalar and multi-dimensional variants. Since the two state features, X and Y coordinates, are independent and
+no obstacles are present, the multi-agent temporal distance approximates a measure similar to a standard spatial
+distance. The scalar estimator computes the n-distance jointly across both axes, whereas the multi-dimensional variant
+disentangles them by applying the proposed MI penalty. At the centre of these representations lies the Fermat state, as a
+point of minimal distance from the fixed coordinates of the teammates.
+A.6
+Eigenvector comparison
+In this section, we offer a more detailed explanation of the differences between eigenvectors computed on the inter-agent
+relative representation of the joint state space, and those obtained by applying eigenoption discovery directly on the raw
+states. We also extend the visualisation in Figure 2 to incorporate the Kronecker eigenvector approximations, and the
+eigenvectors obtained from both the scalar and multi-dimensional n-distance representations presented in Figure 7, not
+just the latter.
+To this end, we fix two agents at specific positions and examine the values of each eigenvector from the perspective
+of the remaining agent. Under the assumption of agent homogeneity, agents are interchangeable, and examining the
+perspective of one agent yields meaningful insight into the team-level subgoals captured by the eigenvectors. This
+statement holds in particular for eigenvectors that encode coordinated behaviours, whereas the choice of conditioning
+order can lead to different results for more independent behaviours. We found this to be evident in the Kronecker
+product approximation, where joint eigenvectors are formed as products of multiple single-agent eigenvectors.
+Figures 8-10 provide a more extensive analysis of the first five non-trivial eigenvectors for each of the four frameworks:
+Eigenoption discovery on raw joint states (Joint), Kronecker product-based joint option discovery (Kronecker Product),
+and the two proposed inter-agent relative options (Relative-Scalar and Relative-MultiDim). We also extend the analysis
+to three distinct conditioning pairs for the positions of the first two agents: [(1,4),(1,7)], [(7,7),(7,8)], and [(7,13),(13,7)].
+Please note the negated version of each eigenvector, as the eigenvectors produce two options with opposite effects.
+16
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+(1,4), (1,7)
+Krnoecker Product
+Relative - Scalar
+Relative - MultiDim
+Joint
+Figure 8: The first five non-trivial eigenvectors resulted from eigenoption discovery on raw joint states, through the
+Kronecker product of single agent eigenvectors, and the two proposed inter-agent relative representation-based methods.
+The conditioning states for the first two agents in the team are the coordinates (1,4) and (1,7).
+17
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+(7,7), (7,8)
+Krnoecker Product
+Relative - Scalar
+Relative - MultiDim
+Joint
+Figure 9: The first five non-trivial eigenvectors resulted from eigenoption discovery on raw joint states, through the
+Kronecker product of single agent eigenvectors, and the two proposed inter-agent relative representation-based methods.
+The conditioning states for the first two agents in the team are the coordinates (7,7) and (7,8).
+18
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+(7,13), (13,7)
+Krnoecker Product
+Relative - Scalar
+Relative - MultiDim
+Joint
+Figure 10: The first five non-trivial eigenvectors resulted from eigenoption discovery on raw joint states, through the
+Kronecker product of single agent eigenvectors, and the two proposed inter-agent relative representation-based methods.
+The conditioning states for the first two agents in the team are the coordinates (7,13) and (13,7).
+The key difference between eigenvectors derived from the non-relative and relative representations is the lack of
+responsiveness of the Joint and Kronecker product eigenvectors to different conditioning pairs. This effect is pronounced
+for the Kronecker product eigenvectors, which remain completely unaffected by teammate positions, further validating
+the absence of interdependence or coupling in the behaviours captured by this method. This effect arises because
+both the raw joint state and Kronecker product methods emphasise exploration of the state space rather than inter-
+agent relations. In contrast, by centring the representation around the Fermat state, the relative representation yields
+behaviours that adapt to diverse team configurations and produce various patterns of agent alignment. While the
+scalar representation yields behaviours that align the agents at different distances to each other (on both axes), the
+multi-dimensional representation enables various in-phase and off-phase behaviours to be discovered with different
+combinations of features. In addition, as we move deeper into the set of estimated graph Laplacian eigenvectors, they
+19
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+capture progressively shorter time scales. This is a consequence of the orthogonality constraint imposed by estimating
+multiple eigenvectors per cycle while using graph-drawing–based objectives, ALLO [Gomez et al., 2024].
+A.7
+Option Policy Visualisation
+Option 1
+Option 2
+Option 3
+Option 4
+Figure 11: Visualisation of the policy roll-outs for the first four learned options in the 15×15 grid environment with four
+agents, illustrating four distinct state-alignment patterns for multiple initial states. Arrows indicate the actions taken by
+each agent’s policy, colored circles mark the final states (before termination action is triggered), and the white circle
+denotes the estimated Fermat state corresponding to these final states. The bars on the right of each figure show the
+Fermat n-distance estimates for each feature.
+20
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+A.8
+Heterogeneous state spaces
+In this section, we present our extension of the homogeneous state space framework (Section 3) to heterogeneous state
+spaces. Due to the need for meaningful state-space alignment, we focus on scenarios in which each agent shares a
+subset of its state features with one or more teammates. Without such shared features, state synchronisation is not a
+valid strategy for coordination. Furthermore, we expect each agent to be able to infer its teammates’ types from its
+observations, either explicitly, when the observations contain type information, or implicitly, for example by enforcing
+a clear ordering of features or by using fixed positions in the observation vector. We believe these expectations are
+representative of practical multi-agent collaboration domains, and point to agent modelling techniques [Rabinowitz
+et al., 2018] as a potential way to relax the latter requirement.
+Note that only two modules in our approach operate directly on state information, the pairwise state-distance function
+dF : S∗× S∗→RF and the Fermat encoder ϕ : S →S∗. In the homogeneous setting, we had S∗= S1 = . . . = SN,
+but this assumption does not hold in heterogeneous domains, thereby invalidating the original formulations of these two
+modules. To address this issue, we introduce the unified feature space F∗= SN
+i=1 Fi, where Fi denotes the feature
+set underlying agent i’s individual state space Si, indicating which components of the factorised joint state space it
+includes. For each feature f ∈F∗, let Ff denote its domain, defined as the union of all values that feature can take
+across the state spaces of all agents. We then redefine the shared state space as the Cartesian product over all feature
+domains in the unified feature space, i.e., S∗= ×f∈F∗Ff. This definition of S∗can represent each individual state
+space Si by padding the features that appear in F∗but not in Fi with default values, e.g. zeros. Given the unified
+single agent state-space S∗, we can retain our original definition of dF and ϕ; as long as dF can identify the common
+features between two heterogeneous agent states and compute their similarity while ignoring any padded values, the rest
+of our proposed framework can remain unchanged. While a full treatment of heterogeneous state distance metrics is
+beyond the scope of this work, we outline (below) a set of guidelines for adapting the temporal state distance approach
+used throughout this paper to heterogeneous state spaces.
+In Section 3, we rely on the temporal successor distance method of Myers et al. [2024] for computing pairwise state
+distances. We now outline how this method can be extended to heterogeneous state spaces through two main changes:
+1. The MRN distance module is provided the source agent’s type as an additional input.
+2. We modify the sampling of goal states to include randomly shuffled values from states of other agent types,
+therefore achieving conditional independence to these features, given the source agent’s type.
+In the original MRN architecture [Liu et al., 2023], the distance encoder is computed as a sum of symmetric and
+asymmetric parts: dθ(x, y) = ∆(hθ(x) −hθ(y)) + ∥gθ(x) −gθ(y)∥, where ∆(x) = maxd
+i=1[max(0, xi)] and hθ
+and gθ represent the two halves of the outputs of a encoder network parameterised by θ. In our adaptation, we
+extend this expression to include the agent type as follows. Let si
+t and gi
+t be the source and goal state for agent i at
+time step t, and li the indexed type of this agent. Then, we modify the above expression for heterogeneous states as:
+dθ(si
+t, gi
+t, li) = ∆
+ hθ(si
+t, li) −hθ(gi
+t, li)
+
++
+
+gθ(si
+t, li) −gθ(gi
+t, li)
+
+. When si
+t and gi
+t correspond to the same state type,
+li is redundant. However, as stated in our second proposed change, the padded features of gi
+t, {f|f ∈F∗∧f /∈Fi},
+are randomly sampled from the goal states of agents of different types to i, resulting in the conditional invariance
+discussed above.
+Empirical analysis.
+To demonstrate the effectiveness of this extension, we constructed two heterogeneous toy
+scenarios by adapting the LBF environment to include two agent types: Type 1 (X axis only) agents and Type 2 (X & Y
+axes) agents. Type 1 agents’ states only contain the X-axis coordinate, and their action space no longer includes the
+"Left" and "Right" horizontal movement actions. Type 2 agents have full (x, y) state representations and can move
+along both axes, akin to the agents in the original environment.
+Our experiments use two domain configurations. The first is a 10x10 grid containing one Type 1 and one Type 2 agent.
+The second is a 15x15 grid with three agents, where one agent is Type 1 and the remaining two are Type 2. The first
+configuration aims to analyse whether agents of different types can successfully identify and synchronise solely on
+their common features, while the second configuration examines whether selective alignment can be achieved between
+multiple agents that share different numbers of features.
+Figure 12 illustrates the eigenvectors learned using our proposed heterogeneous extension for the two distinct agent
+types in the first configuration (10x10 grid). Since the two agents share only a single feature, the eigenvectors are
+identical from both perspectives, resulting in behaviours that align the agents solely along that feature. The lower part
+of the figure shows roll-outs from the first three option policies derived from the eigenvectors. The first option perfectly
+aligns the agents along the shared X-axis coordinate while completely disregarding the Y-axis. Conversely, the second
+21
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+(1,0)
+(4,0)
+Type 1
+Type 2
+(7,0)
+(1,7)
+Option 1
+Option 2
+Option 3
+(4,13)
+(7,4)
+Figure 12: The first three eigenvectors, along with the first three options obtained using the proposed heterogeneous
+approach for a 10x10 grid with two agents of distinctive types: Type 1 and Type 2. The top part of the figure illustrates
+the eigenvectors, conditioned on the teammate’s position at different coordinates, while the bottom part shows the
+roll-outs for the first three options generated. With padding, the Y-coordinate of the Type 1 agent is replaced with the
+value 0. We use diagonal stripes to identify the Type-1 agent in the grid.
+option aligns them along the Y-axis, ignoring the X-axis. The third policy positions the agents at a specific distance
+along the same axis, demonstrating the capture of behaviours at different time scales.
+Figure 13 presents a similar analysis for the second configuration (15x15 grid). With the addition of another agent of
+Type 2, the eigenvectors enable these two agents to align along both axes of movement, while considering the third
+agent only with respect to the shared feature. This demonstrates the ability of the state alignment to occur selectively
+based on agent types. Specifically, the second eigenvector aligns an agent precisely with the Y-axis coordinate of its
+same-type teammate, while the third eigenvector captures behaviours that align all agents along the X-axis but only
+the corresponding ones (Type 2) along the Y-axis. We further support this observation by showing roll-outs from the
+trained option policies, which clearly exhibit these behaviours.
+A.9
+ROD cycle discussion
+We adopt the original ROD cycle of Machado et al. [2017a] to approximate eigenoptions, estimating multiple eigen-
+vectors within a single cycle. This design ensures orthogonality among eigenvectors, a property that enables options
+22
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Option 1
+Option 2
+Option 3
+(1,0), (1,7)
+(7,0), (7,8)
+Type 2
+(4,0), (7,1)
+(1,4), (1,7)
+(7,7), (7,8)
+(4,7), (7,1)
+Type 1
+Figure 13: The first three eigenvectors, along with the first three options obtained using the proposed heterogeneous
+approach for a 15x15 grid with three agents of distinctive types: one agent of Type 1 and two agents Type 2. The top
+part of the figure illustrates the eigenvectors, conditioned on the teammate’s position at different coordinates, while the
+bottom part shows the roll-outs for the first three options generated. With padding, the Y-coordinate of the Type 1 agent
+is replaced with the value 0.We use diagonal stripes to identify the Type-1 agent in the grid.
+to function at different time scales. By contrast, other frameworks extract only one eigenvector per cycle, requiring
+multiple cycles to generate a full set of options, as in covering options [Jinnai et al., 2019b, Chen et al., 2022] and
+covering eigenoptions (CEO) [Machado et al., 2023]. Covering options provide exploration guarantees by leveraging
+the Fiedler eigenvector to produce policies that connect the farthest points in the state-transition graph, an objective
+where orthogonality plays little role [Jinnai et al., 2019b]. Our focus, however, is on discovering sets of cooperative
+behaviours that express diverse alignment patterns. In our experiments with CEO, the most recent framework, we found
+the resulting eigenvectors to exhibit limited diversity, see Figure 14, reinforcing our decision to return to the original
+approach.
+23
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+(7,7), (7,8)
+(1,4), (1,7)
+Cycle:1 
+Cycle: 2 
+Cycle: 3
+ 
+Cycle: 4
+ 
+Cycle: 5 
+Figure 14: The eigenvectors generated by five consecutive CEO cycles, where once discovered, the option is introduced
+in the action space of the agents for exploration in the next phase.
+A.10
+Implementation Details & Hyperparameters
+n-distance training. We followed the publicly available implementation of successor distances from Myers et al.
+[2024] when integrating the CMD-1 architecture into our codebase. The temporal distance encoder dθ is trained using
+the symmetrised InfoNCE contrastive loss (without resubstitution) [van den Oord et al., 2019], as suggested in the
+original work. We jointly train this encoder with the Fermat encoder ϕ using joint states sampled from a random
+joint policy and factorised as described in Section 3. Positive pairs for the InfoNCE loss are constructed by pairing
+current and future states from each agent’s trajectory individually, without cross-agent mixing, while negatives are
+generated through in-batch shuffling, allowing combinations of states from different agents. To train the Fermat encoder,
+we incorporate dθ into the objective in Equation 4 using a stop-gradient operator. When using a multi-dimensional
+n-distance dF
+θ , we insert a lightweight linear projection to map outputs to a scalar for contrastive loss computation. This
+projection is discarded after training, restoring the full multi-dimensional relative states. For Fermat encoder training,
+we instead sum the distance dimensions, since the errors on each dimension are weighted equally for this step.
+In some scenarios, e.g., Overcooked Forced-coord and Asymmetric Advantages, agents cannot access the same states,
+as they are separated by walls. This violates the homogeneous state space assumption, which causes the temporal
+distance estimator to encounter single-agent state combinations not present in training, resulting in noisy predictions.
+To mitigate this, we omit the feature causing the heterogeneity (the Y coordinate) during state factorization. We note
+that this issue is tied to the temporal distance model itself, and our framework would operate successfully with any
+distance function not affected by this problem. We present the full list of hyperparameters for n-distance estimation
+training in Table 1.
+Hyperparameter
+LBF
+Overcooked
+Distance encoder learning rate
+0.001
+0.00005
+Fermat encoder learning rate
+0.001
+0.00005
+Optimizer
+Adam [Kingma and Ba, 2017] r
+Adam [Kingma and Ba, 2017]
+Distance encoder hidden layers
+[256, 256]
+[256, 256]
+Distance encoder dimension (per feature)
+8
+12
+Fermat encoder hidden layers
+[256, 256]
+[256, 256]
+Minibatch size
+100
+100
+# of epochs
+10
+10
+Discriminator (CMI) learning rate
+0.0003
+0.0001
+Discriminator hidden layers
+[256, 256]
+[256, 256]
+# kNNs
+15
+15
+Penalty weight
+0.003
+0.0003
+Table 1: Hyperparameters for training the n-distance estimator, for the scalar variant (up to the horizontal line) and the
+multi-dimensional variant (the entire set).
+24
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+ALLO training (Eigenvector approximator). We used the same dataset to train the eigenvector encoder ALLO as for
+n-distance training. We followed the publicly available implementation referenced in Gomez et al. [2024], with similar
+hyperparameter configurations: two layers of 256 dimensions and barrier coefficient initiation value 2.
+Joint option policy training. For joint option policy training, we used separate IQL architectures for each eigenvector
+sign (positive and negative), without parameter sharing, to accommodate potentially distinct agent behaviours. The
+environmental reward is thus replaced with re(s, s′) = e[s′] −e[s], for each eigenvector e and two subsequent states
+s, s′. Table 2 lists the hyperparameters used for option policy training.
+Hyperparameter
+LBF
+Overcooked
+Learning rate
+0.001
+0.001
+Anneal learning rate
+False
+False
+Optimizer
+Adam [Kingma and Ba, 2017] r
+Adam [Kingma and Ba, 2017]
+Hidden layers
+[64, 64]
+[32,32]
+CNN features
+-
+[16,16,16]
+CNN Kernel dims
+-
+[[5,5], [3,3], [3,3]]
+Parallel environments
+32
+16
+Rollout steps
+10
+10
+γ
+0.99
+0.99
+Buffer size
+5000
+105
+Buffer batch size
+32
+128
+Target update interval
+10
+10
+Maximum gradient norm
+1
+10
+ϵ start
+1.0
+1.0
+ϵ decay
+0.1
+0.1
+ϵ finish
+0.05
+0.05
+ϵ evaluation
+0.05
+0.05
+Learning starts at timestep
+5000
+1000
+# of epochs
+4
+4
+# training steps
+106
+106
+Table 2: Hyperparameters used for training the joint opinion policies.
+MacDec-POMDP training. We integrated the discovered set of options as additional actions in the original action space
+of each individual agent. For the backbone IQL implementation, we used an RNN decentralised architecture, trained
+with the set of hyperparameters presented in Table 3. We used the same list of hyperparameters when training IQL
+enhanced with options generated from each option discovery framework. To support the training of the decentralised
+policy over options, we additionally integrated previous SMDP training techniques like training primitive actions on
+option policy steps, intra-option learning and option interruption [Sutton et al., 1999]. When integrating intra-option
+learning, we only reused the experiences of the executing joint option to train others when there was an exact match for
+the actions of each individual agent. For option interruption, we follow the termination-improvement theorem from
+Sutton and Barto [1998] and enable an option w to be interrupted if Qi(Hi
+M, W) < V (Hi
+M), for any agent i currently
+following that option.
+25
+
+Discovering Coordinated Joint Options via Inter-Agent Relative Dynamics
+Hyperparameter
+LBF
+Overcooked
+Learning rate
+0.0005
+0.0005
+Anneal learning rate
+True
+True
+Optimizer
+Adam [Kingma and Ba, 2017] r
+Adam [Kingma and Ba, 2017]
+Hidden layers
+[128, 128]
+[128, 128]
+CNN features
+-
+[32,32,32]
+CNN Kernel dims
+-
+[[5,5], [3,3], [3,3]]
+Parallel environments
+32
+16
+Rollout steps
+20
+10
+γ
+0.99
+0.99
+Buffer size
+5000
+105
+Buffer batch size
+128
+128
+Target update interval
+10
+100
+Maximum gradient norm
+1
+10
+ϵ start
+1.0
+1.0
+ϵ decay
+0.1
+0.1
+ϵ finish
+0.05
+0.05
+ϵ evaluation
+0.05
+0
+Learning starts at timestep
+5000
+1000
+# of epochs
+4
+4
+# training steps
+2 × 107
+107
+# step limit for option execution
+50
+50
+Table 3: Hyperparameters used for training the joint opinion policies.
+26

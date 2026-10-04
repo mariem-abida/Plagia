@@ -1,0 +1,976 @@
+Control of Microrobots with Reinforcement
+Learning under On-Device Compute Constraints
+Yichen Liu∗, Kesava Viswanadha∗, Zhongyu Li, Nelson Lojo, Kristofer S. J. Pister
+Electrical Engineering and Computer Science Dept., University of California, Berkeley, USA
+Email: lyichen@eecs.berkeley.edu
+Abstract—An important function of autonomous microrobots
+is the ability to perform robust movement over terrain. This
+paper explores an edge ML approach to microrobot locomotion,
+allowing for on-device, lower latency control under compute,
+memory, and power constraints. This paper explores the lo-
+comotion of a sub-centimeter quadrupedal microrobot via re-
+inforcement learning (RL) and deploys the resulting controller
+on an ultra-small system-on-chip (SoC), SCµM-3C, featuring an
+ARM Cortex-M0 microcontroller running at 5 MHz. We train
+a compact FP32 multilayer perceptron (MLP) policy with two
+hidden layers ([128, 64]) in a massively parallel GPU simulation
+and enhance robustness by utilizing domain randomization over
+simulation parameters. We then study integer (Int8) quantization
+(per-tensor and per-feature) to allow for higher inference update
+rates on our resource-limited hardware, and we connect hard-
+ware power budgets to achievable update frequency via a cycles-
+per-update model for inference on our Cortex-M0. We propose a
+resource-aware gait scheduling viewpoint: given a device power
+budget, we can select the gait mode (trot/intermediate/gallop)
+that maximizes expected RL reward at a corresponding feasible
+update frequency. Finally, we deploy our MLP policy on a real-
+world large-scale robot on uneven terrain, qualitatively noting
+that domain-randomized training can improve out-of-distribution
+stability. We do not claim real-world large-robot empirical zero-
+shot transfer in this work.
+Index Terms—micro-robotics, robot locomotion, reinforcement
+learning, simulation-to-reality, domain randomization, edge ML,
+TinyML, quantization, silicon-on-insulator, electrostatic actuation
+I. INTRODUCTION
+Intelligent crawling microrobots based on biomimetic mech-
+anisms have received increasing attention in recent years. Due
+to their small size and versatility, microrobots have been pro-
+posed for applications ranging from planetary exploration [1]
+to minimally invasive surgery [2]. While significant progress
+has been made in hardware development, including actuation,
+fabrication, and power efficiency, reliable locomotion control
+for sub-centimeter terrestrial microrobots remains challenging,
+particularly on complex terrain. Physical experimentation is
+constrained by the difficulty of constructing representative test
+environments and the high cost of iterative testing. Therefore,
+simulation-based approaches provide a scalable and cost-
+effective framework for accelerating controller development
+and experimental iteration.
+A major challenge regarding microrobot control is the on-
+device autonomy. Sophisticated control algorithms for larger
+walking robots can be implemented on high-performance
+*Both authors contributed equally to this paper.
+CPUs with lower concern for power constraints [31]. In
+contrast, the control algorithm for micro-scale walking robots
+is limited by the size, computing performance, and power
+efficiency of the controller hardware. Microrobots must often
+rely on off-board computation or open-loop gait patterns
+triggered by external stimulation. Recent work has moved
+towards microrobot autonomy by performing computation on-
+device (e.g., on-board digital control for microscopic and
+millimeter systems [20]–[23]), but on-device, low-latency, RL-
+based locomotion for terrestrial microrobots remains under-
+explored relative to macro-scale quadrupeds.
+Deploying a gait controller approach on a micro-scale
+robot is restrictive, aside from the challenges of training and
+optimizing the controller. This has typically driven researchers
+towards off-board processing [4] [5] or embedding gait in
+hardware that is activated using external stimulation [6]. Yet,
+on-board control remains more responsive and versatile. A
+truly autonomous micro-robot will be able to maneuver across
+complex terrain independently without the restriction of a
+wireless connection. Our group has designed the single-chip
+micro mote, SCµM, a compact microrobot control system as
+shown in Figure 1 [9]. Our group has also analyzed a cen-
+tral pattern generator (CPG)-based algorithm for micro-scale
+crawlers, which has shown promising results in simulation [3].
+Fig. 1: Single-Chip Micro Mote, SCµM (left) and SOI-based
+microrobots (right).
+Reinforcement learning (RL) has demonstrated strong
+results for robust locomotion and Sim2Real transfer on
+quadrupeds [10] [11]. This paper explores RL-based loco-
+motion for sub-centimeter quadrupedal microrobots trained in
+simulation and executed under strict on-device constraints on
+the SCµM microchip [7] [9]. We focus not on whether micro-
+robots can perform sufficient on-board computation (evidenced
+by [20]–[23]), but on connecting the learned locomotion
+reward and policy robustness, the update-frequency dependent
+arXiv:2512.24740v1 [cs.RO] 31 Dec 2025
+
+reward of gaits, and device-level power and computation
+constraints into a gait-selection methodology that supports
+deployment decisions.
+Our paper focuses on the following:
+1) Training an MLP policy for sub-centimeter quadrupedal
+microrobot locomotion in massively parallel GPU simu-
+lation, improving robustness via domain randomization.
+2) Analyzing reward trends under changes in inference
+update frequency and quantization while validating on-
+device feasibility with SCµM-3C.
+3) Deriving cycle and power models for Int8 inference on
+a Cortex-M0-class core and proposing a resource-aware
+gait-selection method that selects the gait maximizing
+expected reward under given hardware constraints.
+II. RELATED WORK
+A. Microscale Terrestrial Walkers and Controller Design
+Walking silicon microrobots and MEMS-based terrestrial
+microrobots have a long history (e.g. early silicon walking
+microrobots [12]). In many insect-scale legged microrobots,
+locomotion has often been demonstrated in tethered settings
+using off-device power and control electronics, but high-
+fidelity wireless locomotion has also recently been demon-
+strated [24]. Our group has previously demonstrated the use
+of multi-objective optimization of the locomotion controller
+on a hexapod microrobot [3]. However, the presented works
+either don’t use fully on-device control or utilize open-loop
+controls, making the system vulnerable to interference and
+noise in practice.
+B. Learning-Based Control for Microrobot Locomotion
+Learning-based gait design has been studied for microrobot-
+inspired platforms [3] [25] [26]. Yang et al. [3] formulate
+microrobot locomotion as a data-efficient controller-search
+problem, using contextual optimization to learn reusable loco-
+motion primitives for a silicon microrobot and then using these
+primitives for higher-level behaviors like maze navigation.
+Complementary to this work, Lambert et al. [26] propose av-
+enues for improving model-based RL control for microrobots
+by clustering and filtering out redundant data, improving data
+and power efficiency. Lambert et al. also propose MicroBot-
+Net, a < 106 MAC network that provides visual Simultaneous
+Localization and Mapping (SLAM) for navigation. Together,
+these works motivate learning-based locomotion at microrobot
+scales while highlighting hardware constraints as a primary
+design consideration.
+C. Sim2Real and Domain Randomization for Legged Locomo-
+tion
+Simulation-based optimization has proven to be effective in
+generating training data for locomotion control on macro-scale
+legged robots. The degradation in solution performance be-
+tween simulation and reality has also been well-characterized
+[27]. Despite the success in macro-scale Sim2Real control,
+it is difficult to accurately adapt simulation to reality on
+the sub-centimeter scale. At these length scales, the error in
+empirical model approximations of quantities like dry friction
+is amplified due to the complicated mechanics of contact
+at such a small scale. Physically accurate simulation at this
+scale is very computationally expensive. To address the issues
+of error and noise, researchers often resort to analyzing and
+simulating simplified robot configurations or using scaled-up
+models to enhance robustness. These approaches are typically
+not adequate for more intricate small-scale mechanisms, as this
+oversimplification creates disparity between simulation and
+real-world performance. We consider the technique of domain
+randomization [13] to overcome the reality gap challenge in
+an RL-based robot controller. While domain randomization for
+the locomotion of HAMR, a 4.5 cm long, 1.43 g quadruped,
+has been explored [28], to our knowledge domain randomiza-
+tion for sub-centimeter scale microrobot locomotion has not
+been well-explored.
+D. On-Board Control and Computation at Micro/Milli Scales
+Recent work has pushed autonomy at very small scales.
+Bandari et al. present ≤1 mm edge length ambient light
+power-harvesting microrobots that include an on-board mi-
+crocontroller and sensors, and show locomotion steered by
+sensory feedback from environmental stimuli [23]. This work
+establishes meaningful autonomy at milli scales, but does not
+focus on RL-trained terrestrial locomotion policies.
+E. Edge ML / TinyML and Quantized Inference
+TinyML deployments commonly use Int8 quantization and
+optimized kernels (e.g. CMSIS-NN) to execute neural net-
+works efficiently on Cortex-M class microcontrollers [15].
+With improved space efficiency due to quantization, we can
+have on-device model storage. Important advantages of local
+computation are reliability and latency reduction. Robot loco-
+motion requires high update frequency between sensing and
+actuation, especially across complex terrain, as latency and
+packet loss would result in poor locomotive performance.
+III. METHODOLOGY
+The objective of our experiment is two-fold: (i) optimize
+a locomotion controller for a sub-centimeter terrestrial mi-
+crorobot in simulation using reinforcement learning, and (ii)
+evaluate deployment feasibility under on-device compute con-
+straints by running the learned policy on-device in a higher-
+fidelity closed-loop model.
+A. Physical Model and Robot Configuration
+The physical configuration of the quadruped microrobot is
+adapted from a hexapod walker architecture fabricated in an
+SOI MEMS process described in [29]. Each leg is composed
+of electrostatically driven gap-closing actuators (GCAs), which
+move a shuttle back and forth to form linear inchworm motors.
+These in turn actuate a pin-and-joint leg linkage (Fig. 2). Each
+leg is driven by two orthogonal prismatic actuators (“x” and
+“y” motors) that produce in-plane motion with two degrees of
+freedom (DoFs).
+
+Fig. 2: SOI MEMS Hexapod Walker: legs, inchworm motor,
+and actuator configuration.
+The above robot system is constructed from three joined
+chips: two vertical chips housing actuators and legs mechan-
+ically and electrically connected to a third chip for com-
+putation, energy harvesting, and power storage. A represen-
+tative fabricated hexapod has dimensions of approximately
+13 mm×9.6 mm×7 mm and mass ∼200 mg. A quadrupedal
+version is under development with similar specifications and
+actuation primitives.
+Designing dynamic models for the legged robot presents
+unique challenges due to the prismatic motors and mechanical
+linkages. The prismatic motors require consideration of inter-
+faces between electrostatic forces and mechanical interactions,
+while the mechanical linkages have complex rotational friction
+effects that are not well studied. To capture the intended
+dynamics at evaluation time, we use a Simulink Multibody
+model of an ’H’-shaped torso with two legs on each side
+(Fig. 3). Each leg is modeled with two prismatic joints with
+positional inputs and two linkages connected by rotary joints in
+a closed-loop configuration, with a joint/actuator model based
+on electrostatic forces between inchworm motors [30]. This
+configuration is used for evaluation/inferencing whereas an
+open-loop configuration is used for training.
+Fig. 3: Quadruped configuration in Simulink Multibody.
+B. Network Training and Structure (PhysX / Isaac Gym)
+We train the locomotion controller using Nvidia Isaac Gym
+[16] with PhysX simulation and proximal policy optimization
+[17]. Isaac Gym enables massively parallel rollout collection
+as well as GPU-accelerated policy updates. This training style
+is commonly used to increase simulation throughput for legged
+locomotion [10]. In our setup, 4096 agents are trained in
+parallel at ftrain = 120 Hz with episode length 10 s. We use a
+rollout length of 64 steps per update (approximately 0.5 s of
+simulated time).
+There are two input commands for the agents: forward speed
+along the torso and angular velocity for turning. Observations
+include torso linear and angular velocity, the gravity vector
+expressed with respect to the base, joint positions and veloc-
+ities, and the previous action selected by the policy. All of
+these described quantities compose the input to our policy.
+No additional sensor information is provided to compensate
+for the limited sensing on our microrobots.
+The total reward is a sum of five terms listed in Table II.
+The reward parameters themselves are listed in Table I. Two
+rewards are given for following the provided linear and angular
+velocity commands. An additional airtime reward is given
+to encourage natural motion by measuring the time between
+instances of microrobot feet contacting the ground. Lastly,
+two punishments are given to undesirable linear and angular
+velocity on the base to discourage jitter and other unnatural
+motion patterns.
+TABLE I: Reward parameter symbols.
+Parameter Names
+Symbols
+Joint positions
+qj
+Joint velocity
+˙qj
+Target joint positions
+q∗
+j
+Base linear velocities
+vb
+Base angular velocity
+ωb
+Base pitch and roll
+ab
+Commanded base velocity
+v∗
+b
+Commanded angular velocities
+ω∗
+b
+Environment time step
+dt
+TABLE II: Reward terms and weights used in training.
+Parameters
+Definition
+Weight
+Linear velocity tracking
+Φ(v∗
+b,x −vb,x)
+1 · dt
+Angular velocity tracking
+Φ(ω∗
+b,z −ωb,z)
+0.5 · dt
+Linear velocity penalty
+−v2
+b,y
+0.5 · dt
+Angular velocity penalty
+−ω2
+b,xy
+0.05 · dt
+Feet air time
+P
+f(tair,f −0.5)
+1 · dt
+The policy is a multilayer perceptron (MLP) with 24 × 1
+input dimension, 8×1 output dimension, and two hidden layers
+of sizes 128 and 64. We use the Exponential Linear Unit (ELU)
+activation function:
+ELUα(x) =
+(
+x,
+x ≥0,
+α (ex −1) ,
+x < 0,
+(1)
+The output of the MLP returns the action, an 8 × 1 vector
+containing θx and θy for each of four legs and is interpreted
+as target angles for the training surrogate’s joints. These are
+tracked using a fixed PD controller in the simulator. Similar
+reset handling for time-out and falling is used as in the Anymal
+locomotion setup [31], but we omit termination from stalling
+to encourage motion.
+PhysX training is carried out on an open-loop leg con-
+figuration model because closed-loop kinematics are difficult
+
+to represent reliably through standard URDF-based pipelines
+used for PhysX training. The surrogate leg dimensions and
+action range are chosen to match the intended quadruped leg
+workspace as closely as possible, with the goal of reducing
+distortion when transferring the learned policy to the higher-
+fidelity Simulink inferencing configuration.
+Fig. 4: Training pipeline: PhysX rollouts in Isaac Gym →PPO
+update →compact MLP policy.
+C. Domain Randomization
+To improve robustness to the simulation-to-reality gap in
+modeling, we apply domain randomization during training.
+Table III lists the randomized parameters and distributions. We
+randomize additive observation/action noise, gravity perturba-
+tions, and joint-limit perturbations. We also randomly scale
+mass, friction, restitution, damping, and stiffness.
+TABLE III: Domain randomization parameters used during
+training.
+Parameter
+Range
+Operation
+Distribution
+Observation
+[0, 0.002]
+additive
+Gaussian
+Action
+[0, 0.02]
+additive
+Gaussian
+Gravity
+[0, 0.4]
+additive
+Gaussian
+Mass
+[0.05, 0.15]
+scaling
+Uniform
+Friction
+[0.07, 0.13]
+scaling
+Uniform
+Restitution
+[0, 0.7]
+scaling
+Uniform
+Damping
+[0.5, 1.5]
+scaling
+Uniform
+Stiffness
+[0.5, 1.5]
+scaling
+Uniform
+DoF lower range
+[0, 0.01]
+additive
+Gaussian
+DoF upper range
+[0, 0.01]
+additive
+Gaussian
+D. On SCµM Setup and Inference Simulation
+We evaluate the learned MLP policy in a higher-fidelity
+closed-loop Simulink Multibody simulation (Fig. 3) and are
+able to execute policy inference on SCµM-3C to study
+compute-limited update rates. As the “brain” of our full
+autonomous microrobot, SCµM-3C is a 2 × 3 × 0.3mm3
+SoC [8] featuring an ARM Cortex-M0 microprocessor and
+an IEEE 802.15.4 transceiver [9]. Importantly, SCµM-3C also
+features SRAM and DMEM sizes of 64 kB with a 256 kB
+SRAM size in more recent versions of the chip, capable of
+storing our [128, 64] MLP policy. To support hardware-friendly
+computation, we replace the ELU activation function with
+Leaky ReLU:
+ϕ(x) =
+(
+x,
+x ≥0,
+αx,
+x < 0,
+(2)
+Network inference and simulation tasks are distributed
+between SCµM and a host PC as shown in Fig. 5. The de-
+vices communicate over the universal asynchronous receiver-
+transmitter (UART) protocol. At each step, the host reads the
+current observation from the Simulink model and takes in a
+command, then encodes and transmits these to SCµM. Once
+the full packet is received, SCµM runs inference, computing
+the action. The simulation on the PC pauses while waiting for
+an action from SCµM to ensure synchronization. The action
+is sent back to the PC as the target position for the joints.
+The joint-level command returned by SCµM is converted into
+target positions for the x and y prismatic motors of the closed-
+loop linkage via inverse-kinematic (IK) equations computed
+on the PC. Using end-effector targets (xend, yend), motor
+reference locations, and linkage lengths (lx, ly), we use the
+following equations:
+θy = sin−1
+xend −xmotor,x
+ly
+
+(3)
+θx = sin−1
+yend + (0.5ly cos(θy) −ymotor,x)
+lx
+
+(4)
+xmotor = xend −0.5ly sin(θy) −lx cos(θx)
+(5)
+ymotor = yend + ly cos(θy)
+(6)
+Once the PC receives the command, it will produce the next
+timestep observation to send to SCµM, completing the loop.
+When analyzing full-loop latency, we mainly consider neural
+network inference delay since IK computation is relatively
+lightweight. The Cortex-M0 runs at a 5 MHz clock in our case,
+constraining the frequency at which we can perform our MLP
+inference. This frequency corresponds to our update frequency
+(how fast we can provide updates to our model on PC).
+Fig. 5: Evaluation/inference pipeline: Simulink plant on host
+PC ↔UART ↔SCµM (inference).
+IV. RESULTS
+A. Learned Gait Behaviors and Stability Trends
+Across the observation of gaits for the numerous agents we
+trained, we qualitatively note a distinct trend of gait selection
+with respect to command velocity. We estimate that under
+a command velocity of ≈0.025 m/s, the quadruped will
+
+assume a ”trot” gait. Between the command velocities of
+≈0.025 m/s and ≈0.075 m/s, the quadruped will assume an
+”intermediate” gait. When command velocity exceeds ≈0.075
+m/s, the quadruped will assume a ”gallop” gait. We use these
+three command ranges to group results by gait regime in the
+remainder of this section.
+Fig. 6: FP32 MLP model inference at different command
+velocities. Blue graph →command velocity = 0.08 m/s,
+”gallop” gait. Green graph →command velocity = 0.035 m/s,
+”intermediate” gait. Red graph →command velocity = 0.01
+m/s, ”trot” gait.
+B. Quantization: Per-Tensor vs. Per-Feature Int8
+To allow for a higher update frequency on our 5 MHz
+SCµM-3C chip, we explore two types of inference speed-up:
+per-feature Int8 quantization and per-tensor Int8 quantization.
+To benchmark performance, we observe the gait stability of
+our unquantized, per-feature, and per-tensor models for differ-
+ent gait velocity commands (0.1 m/s, 0.075 m/s, 0.05 m/s).
+We evaluate Int8 quantization under two common schemes:
+• Per-tensor Int8: one scale/zero-point per tensor.
+• Per-feature Int8: separate scales/zero-points per output
+channel.
+(a) v⋆= 0.10 m/s
+(b) v⋆= 0.075 m/s
+(c) v⋆= 0.05 m/s
+Fig. 7: Microrobot forward velocity tracking vs. simulation
+time for three commanded speeds, comparing FP32 MLP at
+120 Hz, per-feature Int8, and per-tensor Int8.
+Empirically, per-feature Int8 improves gait quality at a given
+update rate by reducing effective quantization distortion at a
+small extra compute cost. A representative velocity tracking
+plot is shown in Fig. 7. We compare Int8 quantization perfor-
+mance on SCµM against our FP32 MLP at 120 Hz (fupdate
+that we trained with). We test at higher command velocities
+because we observe greater performance degradation for less
+expressive models on faster gait patterns. Experimentally, we
+were able to deduce that floating point MLPs on our hardware
+achieved ≤5 Hz update frequency, resulting in ≈10× boost
+in fupdate due to quantization.
+We compile metrics from our velocity tracking experiment
+into the table below.
+
+TABLE IV: Quantization error and achievable update fre-
+quency for different quantization schemes used in Fig. 7
+Quantization Type
+SQNR
+Error (m/s)
+fupdate (Hz)
+Baseline
+–
+0.001278
+120
+Per-feature
+46.57
+0.004522
+47.62
+Per-tensor
+29.89
+0.0048453
+52.63
+We select a per-feature Int8 quantized network to balance
+between inference speed-up and theoretical quantization error.
+We compare our unquantized and per-feature Int8 neural
+networks at different gaits with a linear Int8 (1-layer) network
+as a control.
+Fig. 8: Microrobot velocity vs. time under command velocities
+of 0.08 m/s, 0.035 m/s, and 0.01 m/s.
+We note differences in model size in the table below. We
+observe that Int8 quantization is able to achieve acceptable
+performance on all gait tasks comparable to the unquantized
+FP32 MLP performance from Fig. 6.
+TABLE V: Model size comparison for different network
+precisions/architectures.
+Network
+Size (kB)
+FP32 (unquantized) MLP
+204.54
+Int8-quantized MLP
+51.136
+Linear baseline
+1.184
+C. Update Frequency Sensitivity and Reward Trends
+A core empirical observation is that gait quality depends
+on inference update frequency: for some gaits (e.g. faster
+gallop-like behaviors), reduced update frequency causes larger
+reward degradation than for slower gaits. We summarize this
+effect using reward ratios (inference reward divided by training
+reward) as a function of fupdate across gait regimes.
+Fig. 9: Reward ratio vs. command update frequency for
+multiple gait regimes (trot/intermediate/gallop), averaged over
+100 agents.
+D. Real-World Deployment on Macro-Scale Robot
+We were unable to complete the full Sim2Real pipeline for
+SCµM-3C because we didn’t have a fabricated quadruped mi-
+crorobot. Instead, we deployed our per-feature Int8 quantized
+model onto an Arduino with an 8-bit ATmega4809 micro-
+controller unit and mounted this on a macro-scale quadruped
+robot. We qualitatively note the acceptable locomotion capa-
+bilities of this robot on uneven terrain.
+Fig. 10: Real-world locomotion of macro-scale quadruped on
+uneven terrain where fupdate = 60 Hz.
+V. DISCUSSION
+A. Effects of Quantization on Performance
+Our results indicate that update frequency and model pa-
+rameter quantization-level are critical levers for locomoting
+quadrupedal, severely resource-limited microcontroller units.
+Despite a 4x reduction in model size, our Int8 per-feature
+policy was able to achieve mm/s-level velocity deviations
+across all tested microrobot velocity commands with a 10x
+boost in update frequency. With our closed-loop locomotion,
+we are able to mitigate our SQNR through quicker updates,
+keeping our error bounded reasonably.
+
+B. Real-World Macro-Scale Robot Locomotion
+We qualitatively observed that our macro-scale quadruped
+was able to maintain forward locomotion over uneven terrain
+without catastrophic instability. This suggests that the per-
+feature Int8 quantization for our policy preserves enough
+structure to remain functional under real-world disturbances.
+We reason that our domain-randomized training had improved
+our tolerance to out-of-distribution perturbations relative to
+a strictly nominal simulation policy. However, we empha-
+size that this experiment does not validate true microrobot
+Sim2Real transfer. Rather, it validates the practicality of
+the quantized inference and control loop on resource-limited
+hardware and motivates repeating the same pipeline on the
+intended microrobot quadruped once fabrication is successful.
+C. Accounting for MACs and Activation Functions for the
+MLP
+In the following sections, we will approximate a model for
+the number of cycles/update and use this model to discuss gait
+selection. For a fully-connected layer mapping nℓ−1 →nℓ,
+the dominant multiply-accumulate (MAC) count is nℓ−1nℓ.
+Our network has an input and output layer that accepts and
+outputs a 24 × 1 and 8 × 1 vector, respectively, through two
+hidden layers (n1, n2) = (128, 64). For n0 = 24 and n3 = 8,
+NMAC =
+X
+l
+nl−1nl
+= n0n1 + n1n2 + n2n3
+= 24 · 128 + 128 · 64 + 64 · 8
+= 11776 MACs/update.
+(7)
+Now, we will compute the total parameter count:
+Nparam = NMAC + NBIAS
+= (n0n1 + n1n2 + n2n3) + (n1 + n2 + n3)
+= NMAC + 200
+= 11976 parameters.
+(8)
+Bias operations contribute n1+n2+n3 = 200 additional scalar
+adds per update, which is small relative to (7).
+On Cortex-M0/M0+ class cores, inference with Int8 would
+typically be implemented as scalar dot-product loops. Int8
+weights/activations would be loaded and multiply-accumulated
+into an Int32 accumulator. To our knowledge, these cores do
+not provide SIMD MAC instructions, so throughput would
+depend heavily on the specific memory system, loop over-
+head, and multiplier implementation. Thus, any constant cy-
+cles/MAC figure we derive should be interpreted only as an
+optimistic, idealized lower bound.
+We recognize that non-MAC costs like memory overhead,
+requantization, and activation functions contribute to overall
+cycle cost. Therefore, we report the measured end-to-end
+inference cost in cycles per update. If SCµM-3C runs at clock
+fclk and achieves an observed update rate fupdate, then the
+measured cycles/update are
+C(meas)
+infer
+≈
+fclk
+fupdate
+.
+(9)
+Since this equation captures end-to-end overheads, we use
+C(meas)
+infer
+directly when mapping clock/power budgets to feasible
+update rates. However, it may be useful to decompose Cinfer
+into constituent sources of overhead computation. So far, we
+have identified the contribution from MAC operations to this
+variable. Now, we will examine the impact of our activation
+function on Cinfer. Replacing ELU with the deployed Leaky
+ReLU function
+ϕ(x) =
+(
+x,
+x ≥0,
+αx,
+x < 0,
+(10)
+reduces activation cost and simplifies inference for our
+resource-constrained hardware. In our MLP, the number of
+nonlinear activations evaluated per update is the number of
+hidden units,
+Nϕ = n1 + n2 = 192.
+(11)
+To concretize our earlier expression for Cinfer and deter-
+mine our fupdate with greater accuracy, we decompose cy-
+cles/update as
+Cinfer ≈cMACNMAC + cϕNϕ + Crq + C0,
+(12)
+where cMACNMAC captures cycles needed due to multiply-
+accumulate operations, cϕNϕ determines cycles needed for
+evaluations of our activation function, Crq finds requantiza-
+tion/clipping costs, and C0 relates to further software/I-O
+overhead. Under this equation, changing ELU to LeakyReLU
+primarily changes cϕ, producing an additive shift in cycles per
+update.
+D. Modeling Per-Tensor vs. Per-Feature Overhead
+Both per-tensor and per-feature quantization share the same
+dot-product MAC count NMAC, but differ in how requantiza-
+tion parameters are applied to each layer output. A generic
+requantization form can be
+yi = clipInt8((αi · ai + r) ≫si) + zi,
+(13)
+where ai is the Int32 accumulator for output neuron i, and
+αi, si, and zi are multiplier, shift, and zero-point parameters,
+respectively. Per-tensor quantization shares parameters across
+a tensor, while per-feature quantization uses parameters that
+vary per feature in the output.
+The total number of neuron outputs across all layers is
+Nneurons = n1 + n2 + n3 = 200.
+(14)
+We model the cycle costs per update as
+C(per-tensor)
+infer
+≈cMACNMAC + cqNneurons + cϕNϕ + C0,
+(15)
+C(per-feature)
+infer
+≈cMACNMAC + (cq + cload)Nneurons + cϕNϕ + C0,
+(16)
+where cq is the requantization compute per output and
+cload captures the additional loads per output parameter in
+per-feature quantization. Although Nout,tot and Nϕ are ≪
+NMAC, the runtime impact still depends on cycles per oper-
+ation. Requantization and evaluation of activation functions
+
+can have much higher per-element costs than a MAC on
+Cortex-M0/M0+, so their contributions can be comparable
+in cycles/update despite smaller counts. However, we antic-
+ipate these terms to be dominated, in our specific case, by
+cMACNMAC.
+E. Determining Feasible Update Frequency Based on Power
+Budget
+We now express total inference cost in cycles per update. If
+SCµM-3C runs at clock fclk and achieves an observed update
+rate fupdate, then
+C(meas)
+infer
+≈
+fclk
+fupdate
+.
+(17)
+We use C(meas)
+infer
+directly when mapping hardware budgets
+to feasible update rates since it includes all overhead. The
+maximum feasible update rate is
+fupdate,max ≈
+fclk
+C(meas)
+infer
+.
+(18)
+We can model active power as approximately linear in clock:
+Pcpu(fclk) ≈V · IMHz ·
+fclk
+106
+
+,
+(19)
+where IMHz is the active current per MHz at voltage V . For a
+power budget Pmax, the maximum sustainable clock is
+fclk,max ≈106 · Pmax
+V IMHz
+,
+(20)
+and the corresponding maximum feasible update frequency
+becomes
+fupdate,max(Pmax) ≈fclk,max
+C(meas)
+infer
+.
+(21)
+F. Resource-Aware Gait Selection
+Let g ∈{trot, intermediate, gallop} denote a gait regime.
+Let Rg(fupdate) denote the expected reward or reward ratio
+relative to training reward when executing gait g at inference
+update frequency fupdate (Fig. 9). For a given update fre-
+quency fupdate, we select
+g⋆= arg max
+g
+Rg(fupdate) .
+(22)
+where g⋆denotes the optimal gait choice. Consequently,
+given a power budget Pmax, we determine fupdate,max(Pmax)
+from (21) and select
+g⋆(Pmax) = arg max
+g
+Rg(fupdate,max(Pmax)) .
+(23)
+G. Gait Selection for SCµM-3C
+For our SCµM-3C configuration at fclk = 5 MHz, Ta-
+ble IV reports fupdate ≈47.62 Hz (per-feature Int8). Eval-
+uating Fig. 9 near fupdate
+≈48 Hz yields the ordering
+Rtrot(fupdate)
+>
+Rintermediate(fupdate)
+>
+Rgallop(fupdate).
+Thus, the trot regime would be selected under this com-
+pute/power envelope. Now, we will examine cases where an
+intermediate or galloping gait is optimal.
+Let f (int)
+update and f (gal)
+update denote the minimum update fre-
+quencies at which the intermediate and gallop regimes achieve
+a maximal reward ratio (e.g., Rg ≥Rmin). From Fig. 9,
+f (int)
+update ≈60 Hz and f (gal)
+update ≈85 Hz. Using (18), the clock
+required to reach a target update rate f target
+update is
+fclk,req ≈C(meas)
+infer
+f target
+update.
+(24)
+With an increase in fclk to around 6.25 MHz and 8.85
+MHz, we would expect optimality for the intermediate and
+galloping gaits, respectively. Additionally, we could focus on
+the reduction of c{MAC,q,ϕ,0} through modifications such as
+optimized algorithms or varying MLP size. This highlights
+two concrete routes to enabling optimality for different gaits
+on-device: varying available power/clock, or changing C(meas)
+infer
+via policy modification or a more optimized kernel.
+As shown in Fig. 9, controllers exhibiting different gait char-
+acteristics perform markedly differently under limited update-
+frequency constraints. These results motivate the design of
+dedicated, gait-specific controllers tailored to distinct update-
+frequency regimes. When the achievable update rate is low,
+controllers optimized for reduced feedback bandwidth natu-
+rally favor statically stable gaits such as trot, whereas higher
+update rates enable controllers that exploit faster, dynamically
+demanding gaits such as intermediate or gallop. Rather than
+relying on a single policy spanning all operating regimes,
+separate controllers trained for specific ranges of fupdate can
+improve both performance and computational efficiency by
+matching policy complexity, temporal dynamics, and feedback
+bandwidth to the available compute and power envelope. In
+addition, for each update-frequency regime, the controller can
+derive an appropriate command velocity that is consistent
+with the achievable control bandwidth for the particular gait,
+thereby avoiding aggressive commands that cannot be reliably
+executed at lower update rates. This specialization enables
+deliberate co-design of control policy and hardware operating
+point, allowing gait and velocity selection to emerge from
+system-level constraints while minimizing unnecessary com-
+putational overhead.
+VI. CONCLUSION
+In this paper, we explored RL-based locomotion for a
+quadrupedal microrobot under on-device compute constraints.
+A compact MLP policy trained at 120Hz in massively paral-
+lel PhysX-based simulation with domain randomization pro-
+duced stable locomotion in simulation, developed distinct
+gait patterns for different ranges of command speeds, and
+exhibited predictable gait degradation trends under reduced
+inference update frequency and quantization. We analyzed Int8
+quantization (per-tensor, per-feature) and derived cycle/power
+models for inference on Cortex-M0 class microcontrollers,
+which led to the formulation of a resource-aware gait selection
+process that maps device budgets to optimal gait choices.
+We also deployed our policy onto a macro-scale quadruped
+and qualitatively observed acceptable locomotion over uneven
+terrain.
+
+A. Limitations
+This study explores a limited set of hardware-oriented
+optimizations, focused primarily on Int8 quantization. We
+acknowledge that we only determined the reward ratio vs.
+fupdate curve for our one trained [128, 64] MLP policy and
+did not sweep over network size or explore alternative policy
+architectures. In addition, while we evaluate our policy in
+a closed-loop Simulink-based pipeline while conducting on-
+device inference, we do not present a complete Sim2Real
+experiment on a fabricated quadrupedal microrobot platform.
+As a result, our proposed gait-selection framework is validated
+through simulation trends and calculations rather than real-
+world physical microrobot trials.
+B. Future Work
+Future work includes: (i) full, real-world closed-loop de-
+ployment on a fabricated quadruped microrobot, (ii) the ex-
+ploration of different policy architectures for Sim2Sim or
+Sim2Real evaluation of quadruped microrobot locomotion, and
+(iii) extending our gait-selection analysis across policy sizes,
+architectures, and variations in reward functions.
+ACKNOWLEDGMENT
+We thank members of the Berkeley Sensor & Actuator
+Center (BSAC) and collaborators on the SCµM project. We
+extend special thanks to Dr. Roberto Calandra for his support.
+REFERENCES
+[1] Corradi, Paolo et al. Space Applications of Micro-Robotics: A Prelimi-
+nary Investigation of Technological Challenges and Scenarios. 2005.
+[2] O. Dolghi, K. W. Strabala, T. D. Wortman, M. R. Goede, S. M. Farritor,
+and D. Oleynikov, “Miniature in vivo robot for laparoendoscopic single-
+site surgery,” Surgical Endoscopy, vol. 25, no. 10, pp. 3453–3458, 2011.
+[3] B. Yang, G. Wang, R. Calandra, D. Contreras, S. Levine, and K. S. J. Pis-
+ter, “Learning Flexible and Reusable Locomotion Primitives for a
+Microrobot,” IEEE Robotics and Automation Letters (RA-L), 2018,
+doi:10.1109/LRA.2018.2806083. https://arxiv.org/abs/1803.00196
+[4] H. Kabutz and K. Jayaram, “Design of CLARI: A miniature modu-
+lar origami passive shape-morphing robot,” arXiv:2307.10482, 2023.
+doi:10.48550/arXiv.2307.10482.
+[5] T. Ozturk, C. K. Ong, W. Win, and E. S. Jafferis, “A tethered flapping-
+wing robot that learns to play ‘Have You Ever Seen the Rain?’ by
+Creedence Clearwater Revival,” arXiv preprint arXiv:2507.00032, 2025.
+[6] Pierre, Ryan St. and Sarah Bergbreiter. “Gait Exploration of Sub-2 g
+Robots Using Magnetic Actuation.” IEEE Robotics and Automation
+Letters 2 (2017): 34-40.
+[7] T.
+Chang
+et
+al.,
+“Industrial
+IoT
+with
+Crystal-Free
+Mote-on-
+Chip,” 2020. https://people.eecs.berkeley.edu/∼pister/publications/2020/
+ChangIndustrial IoT Crystal-Free2020.pdf
+[8] D. Lovell et al., ”SCµM-V23: Towards A Crystal-Free System-On-Chip
+For IoT In 16nm,” 2024 IEEE Workshop on Crystal-Free/-Less Radio
+and System-Based Research for IoT (CrystalFreeIoT), Hong Kong, Hong
+Kong, 2024, pp. 18-23, doi: 10.1109/CrystalFreeIoT62484.2024.00008.
+[9] F. Maksimovic et al., ”A Crystal-Free Single-Chip Micro Mote with Inte-
+grated 802.15.4 Compatible Transceiver, sub-mW BLE Compatible Bea-
+con Transmitter, and Cortex M0,” 2019 Symposium on VLSI Circuits,
+Kyoto, Japan, 2019, pp. C88-C89, doi: 10.23919/VLSIC.2019.8777971.
+[10] Rudin, Nikita, et al. ”Learning to walk in minutes using massively
+parallel deep reinforcement learning.” Conference on robot learning.
+PMLR, 2022.
+[11] J. Tan et al., “Sim-to-Real: Learning Agile Locomotion For Quadruped
+Robots,” in Robotics: Science and Systems (RSS), 2018.
+[12] Ebefors, Thorbj¨orn et al. “A WALKING SILICON MICRO-ROBOT.”
+(1999).
+[13] J. Tobin et al., “Domain Randomization for Transferring Deep Neural
+Networks from Simulation to the Real World,” 2017. https://arxiv.org/
+abs/1703.06907
+[14] ARM-software, “CMSIS-NN: Efficient neural network kernels for Arm
+Cortex-M CPUs,” GitHub repository. https://github.com/ARM-software/
+CMSIS-NN
+[15] L. Lai et al., “CMSIS-NN: Efficient Neural Network Kernels for Arm
+Cortex-M CPUs,” 2018. https://arxiv.org/abs/1801.06601
+[16] V. Makoviychuk et al., “Isaac Gym: High Performance GPU-Based
+Physics Simulation For Robot Learning,” 2021. https://arxiv.org/abs/
+2108.10470
+[17] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov,
+“Proximal Policy Optimization Algorithms,” 2017. https://arxiv.org/abs/
+1707.06347
+[18] ARM, ARMv6-M Architecture Reference Manual. (Instruction set ref-
+erence for ARMv6-M / Cortex-M0 class.) https://developer.arm.com/
+documentation/ddi0419/latest
+[19] ARM, Cortex-M0 Technical Reference Manual, DDI0432. (Multi-
+plier timing can be implementation-dependent.) https://github.com/adsr/
+ARM/blob/master/DDI0432C cortex m0 r0p0 trm.pdf
+[20] M. F. Reynolds et al., “Microscopic robots with onboard digital control,”
+Science Robotics, vol. 7, 2022, doi:10.1126/scirobotics.abn0602. https:
+//www.science.org/doi/10.1126/scirobotics.abq2296
+[21] D. Jeong et al., “Si chiplet-controlled 3D micro-robotic systems with
+smart functions,” Science Robotics, 2025. https://www.science.org/doi/
+abs/10.1126/scirobotics.adu6007?af=R
+[22] N. K. Bhandari et al., “MicroRoboScope: Real-Time Simulation and
+Closed-Loop Control for Microrobots,” arXiv:2504.12945, 2025. https:
+//arxiv.org/pdf/2510.10392
+[23] V. K. Bandari et al., “Modular electronic microrobots with on-board
+sensor-program steered locomotion,” arXiv:2508.17390, 2025. https://
+arxiv.org/abs/2508.17390
+[24] Liu, Z., Zhan, W., Liu, X. et al. A wireless controlled robotic insect
+with ultrafast untethered running speeds. Nat Commun 15, 3815 (2024).
+https://doi.org/10.1038/s41467-024-47812-5
+[25] A. von Rohr, S. Trimpe, A. Marco, P. Fischer and S. Palagi, ”Gait Learn-
+ing for Soft Microrobots Controlled by Light Fields,” 2018 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS),
+Madrid, Spain, 2018, pp. 6199-6206, doi: 10.1109/IROS.2018.8594092.
+[26] N. O. Lambert, F. Toddywala, B. Liao, E. Zhu, L. Lee and K. S. J.
+Pister, ”Learning for Microrobot Exploration: Model-based Locomotion,
+Sparse-robust Navigation, and Low-power Deep Classification,” 2020
+International Conference on Manipulation, Automation and Robotics
+at Small Scales (MARSS), Toronto, ON, Canada, 2020, pp. 1-6, doi:
+10.1109/MARSS49294.2020.9307921.
+[27] Collins, John James et al. “Quantifying the Reality Gap in Robotic
+Manipulation Tasks.” 2019 International Conference on Robotics and
+Automation (ICRA) (2018): 6706-6712.
+[28] Gruenstein, Joshua, et al. ”Residual model learning for microrobot con-
+trol.” 2021 IEEE International Conference on Robotics and Automation
+(ICRA). IEEE, 2021
+[29] D.
+Contreras,
+Walking
+Silicon:
+Actuators
+and
+Legs
+for
+Small-
+Scale
+Terrestrial
+Robots,
+Ph.D.
+dissertation,
+EECS
+Dept.,
+Univ.
+of
+California,
+Berkeley,
+May
+2019.
+[Online].
+Available:
+http://www2.eecs.berkeley.edu/Pubs/TechRpts/2019/EECS-2019-
+18.html (Tech. Rep. UCB/EECS-2019-18).
+[30] Contreras, D.S.; Pister, K.S.J. Dynamics of electrostatic inchworm
+motors for silicon microrobots. In Proceedings of the International
+Conference on Manipulation, Automation and Robotics at Small Scales,
+Montreal, QC, Canada, 17–21 July 2017.
+[31] Hwangbo, Jemin, et al. ”Learning agile and dynamic motor skills for
+legged robots.” Science Robotics 4.26 (2019).

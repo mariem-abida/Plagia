@@ -1,0 +1,2794 @@
+MDiffFR: Modality-Guided Diffusion Generation for
+Cold-start Items in Federated Recommendation
+KANG FU∗, Key Laboratory of Big Data & Artificial Intelligence in Transportation, Ministry of Education,
+China and School of Computer Science and Technology, Beijing Jiaotong University, China
+HONGLEI ZHANG∗, Key Laboratory of Big Data & Artificial Intelligence in Transportation, Ministry of
+Education, China and School of Computer Science and Technology, Beijing Jiaotong University, China
+XUECHAO ZOU, School of Computer Science and Technology, Beijing Jiaotong University, China
+YIDONG LI†, Key Laboratory of Big Data & Artificial Intelligence in Transportation, Ministry of Education,
+China and School of Computer Science and Technology, Beijing Jiaotong University, China
+Federated recommendations (FRs) provide personalized services while preserving user privacy by keeping
+user data on local clients, which has attracted significant attention in recent years. However, due to the strict
+privacy constraints inherent in FRs, access to user-item interaction data and user profiles across clients is
+highly restricted, making it difficult to learn globally effective representations for new (cold-start) items.
+Consequently, the item cold-start problem becomes even more challenging in FRs. Existing solutions typically
+predict embeddings for new items through the attribute-to-embedding mapping paradigm, which establishes
+a fixed one-to-one correspondence between item attributes and their embeddings. However, this one-to-one
+mapping paradigm often fails to model varying data distributions and tends to cause embedding misalignment,
+as verified by our empirical studies. To this end, we propose MDiffFR, a novel generation-based modality-
+guided diffusion method for cold-start items in FRs. In this framework, we employ a tailored diffusion model on
+the server to generate embeddings for new items, which are then distributed to clients for cold-start inference.
+To align item semantics, we deploy a pre-trained modality encoder to extract modality features as conditional
+signals to guide the reverse denoising process. Furthermore, our theoretical analysis verifies that the proposed
+method achieves stronger privacy guarantees compared to existing mapping-based approaches. Extensive
+experiments on four real datasets demonstrate that our method consistently outperforms all baselines in FRs.
+Additional Key Words and Phrases: Federated Recommendation, Item Cold-Start, Diffusion Model, Privacy
+Guarantee
+1
+Introduction
+Recommender Systems (RSs) aim to identify items of potential interest to users from massive data
+collections, which require accurately modeling user preferences and item characteristics based
+on historical interaction data. However, this becomes particularly challenging when new (cold-
+start) items arrive without any historical interactions. Item cold-start problem is a persistent and
+widely recognized challenge in RSs, frequently encountered in practical applications across various
+domains [32], such as e-commerce platforms [33], social recommendation scenarios [8], and online
+content services [27]. In centralized settings, recommender models typically leverage item modality
+data, along with the interaction history of items sharing similar modal characteristics, as auxiliary
+signals to compensate for the lack of interaction history for cold-start items, effectively alleviating
+∗Both authors contributed equally to this research.
+†Corresponding author. Email: ydli@bjtu.edu.cn
+Authors’ Contact Information: Kang Fu, kangfu@bjtu.edu.cn, Key Laboratory of Big Data & Artificial Intelligence in
+Transportation, Ministry of Education, Beijing, China and School of Computer Science and Technology, Beijing Jiaotong
+University, Beijing, China; Honglei Zhang, honglei.zhang@bjtu.edu.cn, Key Laboratory of Big Data & Artificial Intelligence
+in Transportation, Ministry of Education, Beijing, China and School of Computer Science and Technology, Beijing Jiaotong
+University, Beijing, China; Xuechao Zou, xuechaozou@bjtu.edu.cn, School of Computer Science and Technology, Beijing
+Jiaotong University, Beijing, China; Yidong Li, ydli@bjtu.edu.cn, Key Laboratory of Big Data & Artificial Intelligence in
+Transportation, Ministry of Education, Beijing, China and School of Computer Science and Technology, Beijing Jiaotong
+University, Beijing, China.
+arXiv:2512.24715v1 [cs.IR] 31 Dec 2025
+
+Kang Fu et al.
+this challenge to a significant extent [16, 45]. However, centralized approaches require collecting
+all user data to the server for model training, which raises privacy concerns and potential risks of
+data leakage, especially after the implementation of regulations like the General Data Protection
+Regulation [40]. To address this challenge, Federated Recommendations (FRs) have emerged as a
+promising distributed collaborative training architecture [1, 11].
+̂𝑒𝑒0
+…
+̂𝑒𝑒𝑡𝑡
+𝑝𝑝𝜃𝜃( ̂𝑒𝑒𝑡𝑡−1| ̂𝑒𝑒𝑡𝑡)
+̂𝑒𝑒0
+MLP
+Cold Item Modality
+Cold Item Modality
+Server
+Server
+(a) Mapping-based paradigm
+(b) Generation-based paradigm (Ours)
+Generation 
+Mapping
+…
+Input
+Output
+Output
+Input
+~𝒩𝒩(0, 𝜤𝜤)
+Mapping
+Generation
+?
+Privacy Leakage
+Privacy Guarantee
+Input
+Output
+Input
+Output
+Client optimization 
+Client optimization 
+̂𝑒𝑒0
+̂𝑒𝑒0
+Global update
+Client personalized update
+Actual client update
+Global optimum
+Local optimum
+𝐐𝐐𝑢𝑢
+(𝑡𝑡)
+Optimization Start 𝐐𝐐𝑢𝑢
+(𝑡𝑡−1)
+Ideal optimum
+Ideal collaborative update
+𝐠𝐠(𝑡𝑡−1)
+𝐐𝐐𝑖𝑖
+(𝑡𝑡)
+𝐐𝐐𝑎𝑎
+(𝑡𝑡)
+Fig. 1. Comparison between our generation-based and conventional mapping-based cold-start methods
+in federated settings. ˆ𝑒0 and ˆ𝑒𝑡denote predicted embeddings and noise samples, respectively. 𝑝𝜃(ˆ𝑒𝑡−1|ˆ𝑒𝑡)
+represents the reverse denoising for reconstructing the data. Our method expands the solution space against
+inversion attacks, achieving enhanced privacy guarantees. On the client side, it ensures that the local
+optimization direction remains consistent with the ideal optimization trajectory.
+Specifically, FRs enable multiple clients to jointly train a global model without sharing their
+raw interaction data. Each client updates its local model using private data on the device side and
+uploads model parameters to a central server, where a global model is aggregated. The distributed
+learning framework ensures that raw user data never leaves local devices during training, effectively
+preserving user privacy [29, 53]. Nevertheless, this privacy constraint makes the cold-start issue
+more challenging in FRs, since the server is unable to access all historical interactions to analyze the
+patterns in similar items, while the inherent sparsity of client-side data also limits the model’s ability
+to learn effective representations. IFedRec [50] is an early attempt to address the item cold-start
+problem in FRs by deploying a multilayer perceptron (MLP) on the server to map item textual
+modalities (attributes) to item embeddings, as shown in Fig. 1(a). The mapping function achieved
+by MLP is trained on the server using the global warm item embeddings as target representations
+to learn the relationship from item modalities to embeddings. Meanwhile, a regularization term is
+introduced on the client side to enforce the locally item embeddings to conform to the embeddings
+predicted by the server-side mapping function and distributed to clients, thereby ensuring that client-
+side models remain compatible with the embeddings of cold-start items. This design effectively
+alleviates the item cold-start problem under federated settings.
+However, the mapping-based paradigm, which employs an MLP to map item modalities to their
+corresponding embeddings [50], has three main limitations: (1) the deterministic nature of
+the mapping makes the output highly sensitive to the input, exposing it to significant risks from
+inversion attacks. As illustrated in Fig. 1(a), because the mapping is deterministic, an adversary
+can train a shadow model to infer the original input from the output, which poses a significant
+risk of privacy leakage; (2) in federated settings, IFedRec introduces a regularization term on
+the client side to enforce the locally learned item embeddings to conform to the distributed item
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+60
+40
+20
+0
+20
+40
+60
+Dimension 1
+40
+20
+0
+20
+40
+Dimension 2
+Warm Items
+Cold Items
+(a) Mapping-based method
+4
+2
+0
+2
+4
+6
+Dimension 1
+6
+4
+2
+0
+2
+4
+6
+Dimension 2
+Warm Items
+Cold Items
+(b) Generation-based method
+Fig. 2. Comparison of the embedding distributions generated by the Mapping-based and Generation-based
+methods. Warm items denote those with user interactions, while Cold items have no user interactions.
+embeddings predicted by the MLP on the server during the training phase, which ensures that the
+locally learned item embeddings remain compatible with the global predicted embedding space.
+However, this regularization term introduces a non-local objective into the loss function, causing
+the parameter update direction to deviate from the original optimization trajectory driven by each
+client’s local data and global collaborative information [9, 17]. As shown in Fig. 1(a), the local
+optimization direction 𝑸(𝒕)
+𝒂
+should be determined jointly by the local data optimization 𝑸(𝒕)
+𝒖
+and
+the global collaborative direction 𝒈(𝒕−1). Yet, the regularization term forces the local updates to lean
+excessively toward the global optimal direction, thereby severely undermining local personalized
+information and disrupting the model’s inherent optimization trajectory; (3) this approach merely
+learns a one-to-one static mapping function from modality features to item embeddings, and thus
+fails to capture the underlying data distribution. We conduct a preliminary experiment to examine
+the distribution of embeddings for items in the Food dataset [54] (experimental settings are provided
+in Section 6). We visualize the distributions of warm and cold-start item embeddings obtained
+by the mapping-based and generation-based methods in the final training round. As shown in
+Fig. 2(a), the mapping-based method leads to embedding misalignment, resulting in the generated
+embeddings for cold-start items to cluster around limited regions and fail to capture the diversity
+of the embedding space.
+Motivated by these limitations, we consider leveraging a generation-based diffusion model to
+tackle the item cold-start problem. Unlike mapping-based methods, diffusion models can capture
+the underlying data distribution[23], thereby enabling a more effective modeling of user preferences.
+Existing diffusion-based recommendation methods in centralized settings typically directly generate
+items by modeling users’ historical interaction distributions to learn their preferences [42]. However,
+in federated settings, the inherent sparsity and decentralized nature of client-side data make it
+infeasible for diffusion models to learn reliable preference distributions solely from local interactions.
+Consequently, directly deploying diffusion models on the client side to generate cold-start items is
+impractical in FRs.
+Based on the above analysis, we propose a Modality-guided Diffusion-based Federated Recomm-
+endation model (MDiffFR) for the item cold-start problem in FRs, as illustrated in Fig. 1(b). Our
+method deploys the model on the server to learn the distribution of global item embeddings,
+which implicitly reflects the users’ preference distribution[3]. During the training phase, modality
+features of items are incorporated as conditional guidance, enabling the diffusion model to not
+only capture the global preference distribution but also align the generated embeddings with the
+
+Kang Fu et al.
+semantic features of items. During the inference phase, we sample noise from a prior distribution
+and progressively generate embeddings for cold-start items via the reverse denoising process. The
+generated item embeddings are then distributed to each client for personalized recommendations.
+Compared to traditional mapping-based approaches, the MDiffFR possesses three key advan-
+tages: (1) it introduces stochasticity into the generation process by sampling noise at each step of
+the reverse denoising, thereby providing stronger privacy guarantees. As shown in Fig. 1(b), the
+inherent stochasticity in the generation process leads to an extremely large solution space for any
+inverse mapping, making it practically infeasible for an adversary to recover the original input
+from the model’s output; (2) since the diffusion-based generation process is trained solely on the
+globally aggregated item embeddings to ensure that the learned distribution approximates the
+distribution of item embeddings on the server, it does not impose any modifications or constraints
+on client-side training. As a result, the optimization of item embeddings on each client remains fully
+independent and is not influenced by the globally learned distribution. As shown in Fig. 1(b), the
+local optimization direction 𝑸(𝒕)
+𝒂
+is determined solely by the locally interactive data 𝑸(𝒕−1)
+𝒖
+and the
+global collaborative information 𝒈(𝒕−1), thereby preserving the ideal local optimization direction.
+In contrast to Fig. 1(a), where the optimization direction of the local item embeddings is forced to
+bias toward the distributed item predicted by the MLP on the server, our method enables the learned
+distribution to progressively approach the global item embeddings, thereby preserving the inherent
+optimization directions of the local items; (3) it can capture the underlying data distribution of item
+embeddings by iteratively reconstructing the original data from noise, rather than merely learning
+a simple deterministic mapping. As illustrated in Fig. 2(b), our generation-based method captures
+a more meaningful embedding distribution compared to the mapping-based method, generating
+embeddings that better align with the true distribution. Our main contributions are as follows:
+• We propose MDiffFR, the first generation-based framework for cold-start items in FRs,
+leveraging iterative denoising to model the underlying distribution of item embeddings
+while preserving the optimization direction of client-side models.
+• To ensure semantic alignment of the generated item embeddings, we introduce modality
+features as conditional guidance for the model’s reverse generation process.
+• We discuss the inherent privacy limitations of existing mapping-based methods and theoreti-
+cally analyze the strong privacy protection capability of MDiffFR.
+• Extensive experiments on four real-world datasets show that our method achieves superior
+performance for item cold-start recommendation and stronger privacy guarantees.
+The rest of the paper is structured as follows. Section 2 reviews the existing studies related to
+federated recommendation and clarifies the position of our work within this research landscape.
+Section 3 introduces the preliminary knowledge required to understand MDiffFR. Section 4 presents
+the overall framework of MDiffFR and provides detailed descriptions of each component. Section 5
+analyzes the privacy guarantees of MDiffFR under the inversion attack. Section 6 reports experi-
+mental results on four real-world datasets to validate the effectiveness of MDiffFR in terms of both
+recommendation performance and privacy protection. Finally, Section 7 concludes this paper.
+2
+Related work
+In this section, we will briefly review the related work and outline the position of our work within
+the research landscape.
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+2.1
+Cold-start Recommendation
+Cold-start recommendation is prevalent in real-world applications and can be broadly categorized
+into item cold-start [2, 14, 31, 44, 55], user cold-start [4, 6, 36], user-item cold-start [18], and system-
+level cold-start scenarios [46]. Item cold-start is a critical component of the cold-start problem
+and significantly impacts the overall performance of recommendation systems. In centralized
+recommendation systems, item cold-start is primarily addressed through collaborative filtering
+and content-based recommendation [32, 37]. Collaborative filtering methods construct similarities
+between users to facilitate recommendations for new items [10]. Content-based approaches describe
+cold-start items using their modality and establish similarity relationships with existing items
+[16, 50]. However, in such centralized recommendation scenarios, all user information must be
+uploaded to the server, including sensitive data such as interaction histories, which poses serious
+privacy risks [1, 29].
+2.2
+Federated Recommendation
+FRs train models locally on client devices and aggregate the updates on a central server, ensuring
+that users’ private data never leaves their local devices and thereby effectively preserving user
+privacy [1, 29, 35, 41, 51]. FedMF [5] employs a matrix factorization approach under the feder-
+ated setting to enable secure recommendations. FedNCF [34] introduces neural networks as the
+scoring function to capture nonlinear collaborative relationships. FedPA [48] adopts a dual-tower
+architecture consisting of user-level and user-group-level models on the client side to achieve
+more personalized recommendation performance. FedRAP [20] utilizes additive personalization
+embeddings to preserve client-specific information and employs sparsity-constrained global item
+embeddings to retain non-personalized information, thereby improving both personalization and
+communication efficiency. HeteFedRec [47] proposes a heterogeneous federated recommendation
+framework that supports personalized model size assignment for participants. It further introduces
+a heterogeneous aggregation strategy to effectively integrate recommendation models of varying
+sizes, thereby improving overall recommendation performance. Despite these advances, existing
+FRs primarily focus on personalized recommendation [20, 48, 49], efficient model aggregation [30],
+communication efficiency [24], and model heterogeneity [47], while the cold-start problem has
+been relatively underexplored.
+New items without interaction history can substantially degrade overall recommendation per-
+formance, making it crucial to address this problem. IFedRec [50] is the first to address the item
+cold-start problem in FRs by deploying an attribute network on the server to predict embeddings
+for new items. Subsequently, FR-CSU [19] extends this line of research by investigating the user
+cold-start problem. In this paper, we further explore the item cold-start problem in FRs by addressing
+two critical issues in existing methods: embedding misalignment and privacy leakage.
+2.3
+Diffusion-based Recommendation
+Diffusion models have achieved remarkable success in various domains such as image synthesis and
+text generation, owing to their strong ability to capture complex data distributions and generate
+high-quality samples [13, 38]. Motivated by this, DiffRec [42] first introduced a diffusion-based
+recommendation paradigm. Specifically, it leverages an encoder and the sequential information
+of user–item interactions to derive two variants, L-DiffRec and T-DiffRec, which further enhance
+the model’s performance. To address the limitation of existing sequential recommendation meth-
+ods that represent items with fixed vectors, DiffuRec [21] pioneers the use of diffusion models
+in sequential recommendation. By modeling item representations as probability distributions, it
+achieves remarkable recommendation performance. In contrast to DiffuRec, DiffuASR [25] explores
+
+Kang Fu et al.
+diffusion models from the perspective of sequence augmentation, generating pseudo interaction
+sequences to improve recommendation performance. Furthermore, MCDRec [28] employs diffusion
+models to model and fuse multi-modal information, proposing a multi-conditioned representation
+diffusion module and a diffusion-guided graph denoising module to integrate multi-modal fea-
+tures into item representations while filtering noise from user interaction histories. DiffMM [15]
+adopts a modality-aware graph diffusion framework to achieve more effective alignment between
+multimodal features and collaborative information. RecDiff [22] proposes a diffusion-based social
+recommendation model that exploits the denoising capability of diffusion models to effectively
+mitigate noise contamination in social recommendation.
+Moreover, diffusion models have also been utilized in centralized settings to tackle the cold-start
+problem in multi-scenario recommendation and click-through rate prediction tasks, demonstrating
+strong effectiveness [43, 56]. In our work, we leverage the uncertainty generation and feature
+distribution capturing capabilities of diffusion models to explore the privacy-preserving cold-start
+recommendation, and mitigate the embedding misalignment between warm and cold items as well
+as between the server and clients under the federated setting.
+3
+Preliminary
+In this section, we introduce the workflow and architecture of FRs, and subsequently present the
+research problem of federated item cold-start recommendation explored in this work.
+3.1
+Federated Recommendation
+Federated Recommendation is a distributed collaborative learning framework consisting of a central
+server and multiple clients. The clients are responsible for training local models using their own
+data, while the server coordinates the aggregation of these local models to enable collaborative
+learning across clients. Typically, the local model on client 𝑢includes three main components: the
+user embedding e𝑢, the item embedding e𝑖, and a scoring function 𝑓(·). Among them, the user
+embeddings e𝑢and the scoring function 𝑓(·) are stored locally on the client side since they involve
+sensitive user information, whereas the item embeddings e𝑖are uploaded to the central server for
+aggregation, enabling global model optimization and collaborative training among multiple clients.
+Let U and I denote the sets of users and items, respectively. Each user in U corresponds to an
+individual client. On each client, the local model is trained using its own historical interaction data.
+Assume that the historical interaction data of client 𝑢is denoted as D𝑢= {𝑖1,𝑖2, . . . ,𝑖𝑚}. where
+each 𝑖∈I represents an item that user 𝑢has interacted with. For each interacted item 𝑖, we define
+𝑦𝑖= 1, indicating the existence of an interaction between the user 𝑢and the item 𝑖. Accordingly,
+the local optimization objective of client 𝑢can be formulated as:
+L𝑢= −
+∑︁
+𝑖∈D𝑢
+(𝑦𝑖log ˆ𝑦𝑢𝑖+ (1 −𝑦𝑖) log(1 −ˆ𝑦𝑢𝑖)) ,
+(1)
+where ˆ𝑦𝑢𝑖= 𝑓(e𝑢, e𝑖) denotes the predicted interaction score computed by the scoring function
+𝑓(·) based on the user embedding e𝑢and item embedding e𝑖.
+Afterwards, the clients upload the updated item embedding parameters or gradients to the central
+server, which performs model aggregation and redistributes the aggregated model back to the
+clients for the next training and recommendation round. Throughout this process, private data
+such as user historical interaction data and profiles remain on the client side, ensuring privacy
+preservation, while the server-side aggregation facilitates the sharing of common parameters and
+collaborative learning among clients.
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+3.2
+Federated Item Cold-start Recommendation
+In federated item cold-start recommendation, the user set U remains fixed, while new items are
+continuously added to the item set I. Since these new items have no interaction history with any
+user in U, traditional federated recommendation models fail to accurately represent them in the
+embedding space, thereby limiting their recommendation performance. Given a cold-start item
+𝑖𝑐𝑜𝑙𝑑, the predicted rating score of user 𝑢for this item can be formulated as:
+ˆ𝑦𝑖𝑐𝑜𝑙𝑑= 𝑓(𝑒𝑢,𝑒𝑖𝑐𝑜𝑙𝑑),
+(2)
+where 𝑒𝑖𝑐𝑜𝑙𝑑represents the embedding of new item 𝑖𝑐𝑜𝑙𝑑. The quality of 𝑒𝑖𝑐𝑜𝑙𝑑directly determines
+the accuracy of the predicted score. Therefore, federated item cold-start recommendation aims
+to enhance the model’s capability to handle new items by effectively generating and aligning
+representations for new items without compromising user privacy.
+4
+Methodology
+In this section, we provide a detailed description of the proposed method and summarize its
+workflow through pseudocode for clearer exposition.
+4.1
+Framework Overview
+Fig. 3 presents the overall framework of the Modality-guided Diffusion-based Federated Recommen-
+dation (MDiffFR), which comprises two phases: training and inference. During the training phase,
+each client trains its local model and uploads the updated item embeddings to the server. The server
+aggregates these embeddings as global item embeddings, which are then redistributed to all clients
+for the next training round. Meanwhile, the diffusion model on the server learns the distribution
+of global item embeddings by performing a forward process to gradually add noise and a reverse
+process to iteratively denoise. To align the generated embeddings with the semantic information of
+items, we employ a modality encoder on the server to encode item modalities, enabling the modality
+features to serve as conditional guidance during the reverse denoising process. During the inference
+phase, the model initially samples noise from a prior distribution and extracts modality features for
+cold-start items through the modality encoder. These modality features serve as conditions to guide
+the diffusion model to progressively reconstruct the embeddings for cold-start items from the noise.
+The generated embeddings are then distributed to clients to facilitate cold-start recommendations.
+4.2
+Modality-Guided Diffusion Processes
+During the training phase, the diffusion process on the server consists of two primary steps: the
+forward diffusion process injects noise into the embeddings, and the reverse denoising process
+leverages modality features as conditions to progressively reconstruct the original data.
+4.2.1
+Forward Diffusion Process. Given the global item embeddings E ∈R𝑚×𝑑, we set 𝒆0 = E as
+the initial state, and iteratively add noise to 𝒆0 through the forward diffusion process. Under the
+Markov assumption, the state 𝒆𝑡at time step 𝑡satisfies:
+𝑞(𝒆𝑡|𝒆𝑡−1) = N (𝒆𝑡;
+√︁
+1 −𝛽𝑡𝒆𝑡−1, 𝛽𝑡𝑰),
+(3)
+here, 𝑡∈{1, 2, . . . ,𝑇}, and 𝛽𝑡denotes the variance of the Gaussian noise added at the 𝑡-th diffusion
+step. Leveraging the reparameterization trick and the additivity property of independent Gaussian
+distributions, the state 𝒆𝑡at any time step 𝑡can be directly obtained from 𝒆0 as:
+𝑞(𝒆𝑡|𝒆0) = N (𝒆𝑡; √¯𝛼𝑡𝒆0, (1 −¯𝛼𝑡)𝑰),
+(4)
+
+Kang Fu et al.
+Item1: The last video 
+on the card point has a 
+lot of people …
+Item2: we don't …
+…
+Modality Condition Encoder (Frozen)
+Time Embedding
+…
+…
+Avg
+Score 
+Function
+Item Embedding
+User Embedding
+Compute 
+Loss
+Cold Item1: This is embarrassing #Racer Folk Comedian …
+Cold Item2: I am Cupid, the next task is you ~ …
+Modality Condition Encoder (Frozen)
+Time Embedding
+Server
+Client
+Phase1: Training
+Phase2: Inference
+𝑒0
+𝑒1
+𝑒𝑡
+Ƹ𝑒1
+Ƹ𝑒0
+Ƹ𝑒0
+𝑞
+ȁ
+𝑒𝑡𝑒𝑡−1
+𝑞(𝑒1ȁ𝑒0)
+Score 
+Function
+Cold Item Embedding
+User Embedding
+Client
+Ƹ𝑒0
+Upload Item Embedding
+Distribute Global Item Embedding
+Global Item 
+Embedding
+Distribute Cold Item Embedding
+𝑒0
+Ƹ𝑒0
+Diffusion Process
+Warm Item Embedding
+Cold Item Embedding
+…
+Sinusoidal Time Encoder
+𝑡
+Sinusoidal Time Encoder
+𝑡
+…
+Ƹ𝑒𝑡
+Ƹ𝑒𝑡−1
+𝑒0
+Modality Guidance Embedding
+Modality Guidance Embedding
+Gaussian Sampling
+𝑝𝜃( Ƹ𝑒𝑡−1ȁ𝑒𝑡)
+…
+𝑝𝜃( Ƹ𝑒0ȁ Ƹ𝑒1)
+𝑝𝜃( Ƹ𝑒𝑡−1ȁ Ƹ𝑒𝑡)
+𝑝𝜃( Ƹ𝑒𝑡−2ȁ Ƹ𝑒𝑡−1)
+…
+𝑝𝜃( Ƹ𝑒0ȁ Ƹ𝑒1)
+𝑝𝜃( Ƹ𝑒1ȁ Ƹ𝑒2)
+𝑞(𝑒2ȁ𝑒1)
+Ƹ𝑟
+𝑟
+Ƹ𝑟
+Forward process
+Reverse process
+Fig. 3. The overall framework of MDiffFR. We employ a modality encoder and a diffusion model on the server
+to extract modality features and learn the distribution of item embeddings, respectively. During the training
+phase, the aggregated global item embeddings are first distributed to each client for the next training round.
+Then, we add an iterative prior noise to the global item embeddings and encode modalities as conditions to
+guide the reverse denoising process of the diffusion model, ensuring alignment between the item embeddings
+and their semantics on the server. During the inference phase, we sample noise from a prior distribution and
+leverage encoded modality features to guide the reverse denoising process to generate semantically aligned
+item embeddings.
+where 𝛼𝑡= 1 −𝛽𝑡, and ¯𝛼𝑡= Î𝑡
+𝑠=1 𝛼𝑠. Using the reparameterization trick [13], we can express 𝒆𝑡as:
+𝒆𝑡= √¯𝛼𝑡𝒆0 + √1 −¯𝛼𝑡𝝐,
+(5)
+where 𝝐∼N (0, 𝑰). To control the amount of noise added at each step, we adopt the linear noise
+scheduler [42] to regulate the noise scale:
+1 −¯𝛼𝑡= 𝑠·
+
+𝛼min + 𝑡−1
+𝑇−1 (𝛼max −𝛼min)
+
+,
+(6)
+where 𝑠denotes the noise scale factor, while 𝛼max and 𝛼min represent the maximum and minimum
+values of the noise scale, respectively.
+4.2.2
+Reverse Denoising Process. After obtaining 𝑒𝑡through the forward diffusion process, the
+reverse denoising process starts from 𝑒𝑡and iteratively reconstructs the original data by sampling
+the learned distributions. To enhance semantic alignment, MDiffFR leverages modality features to
+guide the reverse process, which is modeled as:
+𝑝𝜃(𝒆𝑡−1|𝒆𝑡, 𝒎) = N (𝒆𝑡−1; 𝜇𝜃(𝒆𝑡,𝑡, 𝒎) , Σ𝜃(𝒆𝑡,𝑡, 𝒎)) ,
+(7)
+where 𝜇𝜃(𝒆𝑡,𝑡, 𝒎) and Σ𝜃(𝒆𝑡,𝑡, 𝒎) denotes the mean the variance of the Gaussian distribution
+predicted by a neural network parameterized by 𝜃, which takes as input the noisy embedding 𝒆𝑡,
+time step 𝑡, and modality condition 𝒎. Accordingly, MDiffFR is trained by maximizing the marginal
+log-likelihood log𝑝(𝒆0|𝒎) of the target data, which is approximated by maximizing its evidence
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+lower bound (ELBO):
+log𝑝(𝒆0|𝒎) = log
+∫
+𝑝(𝒆0:𝑇|𝒎) 𝑑𝒆1:𝑇
+≥E𝑞(𝒆1|𝒆0) [log𝑝𝜃(𝒆0|𝒆1, 𝒎)]
+| {z }
+reconstruction term
+−
+𝑇
+∑︁
+𝑡=2
+E𝑞(𝒆𝑡|𝒆0) [𝐷KL (𝑞(𝒆𝑡−1|𝒆𝑡, 𝒆0) ∥𝑝𝜃(𝒆𝑡−1|𝒆𝑡, 𝒎))]
+| {z }
+denoising matching term
+.
+(8)
+Here, the reconstruction term corresponds to the negative reconstruction error of recovering during
+the reverse denoising process. It measures how well the diffusion model can recover the embedding
+𝒆0 from its noisy counterpart 𝒆1 under the conditional guidance of modality features 𝒎. The
+denoising matching term reflects the iterative fitting of the true transition posterior 𝑞(𝒆𝑡−1|𝒆𝑡, 𝒆0) at
+each step from 𝑡= 2 to𝑇by the network parameterized by 𝜃[26]. It captures the gradual refinement
+of noisy embeddings across timesteps, leading to a smooth and stable generation process that
+produces semantically meaningful representations.
+4.3
+Denoising Model Training
+The formulation of Eq. (8) shows that the training objective is primarily driven by two loss compo-
+nents: the denoising matching term Ldmt and the reconstruction term Lrt.
+Estimation of denoising matching term. The form of the denoising matching term reveals
+that it encourages the distribution 𝑝𝜃(𝒆𝑡−1|𝒆𝑡, 𝒎) to approximate the true posterior 𝑞(𝒆𝑡−1|𝒆𝑡, 𝒆0)
+via KL divergence. However, since directly modeling the true posterior 𝑞(𝒆𝑡−1|𝒆𝑡, 𝒆0) is intractable,
+we reformulate the training objective using Bayes’ rule to obtain a tractable solution:
+𝑞(𝒆𝑡−1|𝒆𝑡, 𝒆0) ∝N  𝒆𝑡−1; ˜𝜇(𝒆𝑡, 𝒆0,𝑡) , 𝜎2(𝑡)𝑰 ,
+(9)
+here, ˜𝜇(𝒆𝑡, 𝒆0,𝑡) and 𝜎2(𝑡)𝑰represent the mean and standard deviation of the posterior distribution
+𝑞(𝒆𝑡−1|𝒆𝑡, 𝒆0), respectively, which can be further expressed as:
+
+
+˜𝜇(𝒆𝑡, 𝒆0,𝑡) =
+√𝛼𝑡(1 −¯𝛼𝑡−1)
+1 −¯𝛼𝑡
+𝒆𝑡+
+√¯𝛼𝑡−1(1 −𝛼𝑡)
+1 −¯𝛼𝑡
+𝒆0,
+𝜎2(𝑡) = (1 −𝛼𝑡)(1 −¯𝛼𝑡−1)
+1 −¯𝛼𝑡
+.
+(10)
+To further simplify the training process, we set Σ𝜃(𝒆𝑡,𝑡) = 𝜎2(𝑡)𝑰directly [13]. Meanwhile, based
+on Eq. (10), the posterior mean can be factorized as:
+𝜇𝜃(𝒆𝑡,𝑡, 𝒎) =
+√𝛼𝑡(1 −¯𝛼𝑡−1)
+1 −¯𝛼𝑡
+𝒆𝑡+
+√¯𝛼𝑡−1𝛽𝑡
+1 −¯𝛼𝑡
+ˆ𝒆𝜃(𝒆𝑡,𝑡, 𝒎) .
+(11)
+By combining Eq. (8), Eq. (10), and Eq. (11), the denoising matching term Ldmt is computed as:
+Ldmt = 𝐷KL (𝑞(𝒆𝑡−1|𝒆𝑡, 𝒆0) ∥𝑝𝜃(𝒆𝑡−1|𝒆𝑡, 𝒎))
+= 1
+2
+
+¯𝛼𝑡−1
+1 −¯𝛼𝑡−1
+−
+¯𝛼𝑡
+1 −¯𝛼𝑡
+
+∥ˆ𝒆𝜃(𝒆𝑡,𝑡, 𝒎) −𝒆0∥2
+2 ,
+(12)
+where ¯𝛼𝑡denotes a predefined noise scheduling parameter, 𝒆0 is the target embedding, and ˆ𝒆𝜃(𝒆𝑡,𝑡)
+represents the predicted embedding generated from the noisy input 𝒆𝑡at timestep 𝑡.
+
+Kang Fu et al.
+Estimation of the reconstruction term. To simplify the optimization objective, we take the
+negative of the reconstruction term as follows Lrt:
+Lrt = −E𝑞(𝒆1|𝒆0) [log𝑝𝜃(𝒆0|𝒆1, 𝒎)]
+= 𝐸𝑞(𝒆1|𝒆0)
+
+∥ˆ𝒆𝜃(𝒆1, 1, 𝒎) −𝒆0∥2
+2
+
+.
+(13)
+By combining Eq. (8), Eq. (12), and Eq. (13), we obtain the final optimization objective, denoted as:
+Lelbo = −Lrt −Σ𝑇
+𝑡=2Ldmt
+= E𝑡∼U(1,𝑇)E𝑞(𝒆0)
+
+∥ˆ𝒆𝜃(𝒆𝑡,𝑡, 𝒎) −𝒆0∥2
+2
+
+.
+(14)
+4.4
+Modality-Guided Strategy
+In the reverse denoising processes described above, we introduce a modality guidance condition
+𝒎to ensure that the model not only captures the overall embedding distribution but also aligns
+the generated embeddings with the semantic information of items. Without such alignment, the
+generated embeddings fail to effectively represent cold-start items.
+Modality feature encoding. To enable modality features to serve as conditional guidance in the
+generative process, we deploy a modality condition encoder on the server to encode the modality
+information of items. In this work, we take textual modality as an example and adopt a pre-trained
+BERT model to extract modality features. Assuming that the textual modality of item 𝑖consists of
+tokens 𝑡𝑖
+1,𝑡𝑖
+2, ...,𝑡𝑖
+𝑘, we obtain its modality feature representation as follows:
+𝒎𝑖= E  
+[CLS];𝑡𝑖
+1,𝑡𝑖
+2, ...,𝑡𝑖
+𝑘
+  ,
+(15)
+where E denotes the modality condition encoder implemented by a BERT model. The special token
+[CLS] is prepended to the token sequence, and its representation is used as the textual modality
+feature 𝒎𝑖of item 𝑖.
+Conditional dynamic fusion During the reverse denoising process, the importance of temporal
+and modality guidance conditions varies across different timesteps. In the early stage of reverse
+generation, the model needs to rapidly capture the overall embedding distribution from noise,
+making temporal information more crucial at this phase. As the generation progresses, the primary
+embedding distribution has already been captured, and the focus shifts toward achieving finer-
+grained semantic alignment between the embeddings and the corresponding items. Therefore, to
+dynamically capture the varying influence of guidance conditions during the reverse denoising
+process, we introduce a multi-head attention mechanism that adaptively fuses the guiding conditions
+across different timesteps. [39].
+K = V = Stack [P𝑡(T𝐸(𝑡)), P𝑚(𝒎)]
+(16)
+where the T𝐸(𝑡) denotes a sinusoidal time encoding module; Its output is projected by a projection
+layer P𝑡to match the dimensionality of the guidance condition 𝒎, which is processed by another
+projection layer P𝑚. The projected representations are then stacked to construct the K and V.
+Taking 𝒆𝑡as input to reconstruct 𝒆𝑡−1, we have ℎ𝑒𝑎𝑑= softmax
+
+QK⊤/
+√︁
+𝑑/ℎ
+
+, where Q = 𝑾𝑞· 𝒆𝑡
+and 𝑾𝑞represent learnable parameters, 𝑑is the dimensionality of the projected features, and ℎ
+represents the number of attention heads. The outputs from all attention heads are concatenated
+and projected to obtain the final fused representation, as shown in Eq. (17).
+𝒉fused = Concat(ℎ𝑒𝑎𝑑1, ...,ℎ𝑒𝑎𝑑ℎ) · 𝑾𝑜,
+(17)
+where 𝑾𝑜represents a learnable parameter matrix, and 𝒉fuse denotes the fused representation,
+which serves as the final guidance signal for the reverse denoising process.
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+4.5
+Algorithm
+To better illustrate MDiffFR, we summarize the training and inference procedures procedures in
+Algorithm 1 and 2.
+As shown in Algorithm 1, we first utilize the modality encoder E to extract feature representations
+as conditional guidance during the training phase. Subsequently, the global item embeddings E are
+used as the initial state 𝒆0 to perform the forward and reverse diffusion processes, generating the
+predicted embedding ˆ𝒆0. The loss L𝑡is then computed and used to update the model parameters 𝜃.
+Algorithm 1 MDiffFR Training
+Input: participating clients U; global rounds 𝑅; modality encoder E; global parameters 𝜃;
+global item embedding E;
+Server executes:
+1: Initial global embedding as E1;
+2: Extract modality features C with Eq. (15);
+3: for each round 𝑟= 1, 2, ..., 𝑅do
+4:
+if 𝑟> 1 then
+5:
+E𝑟←Average(Í𝑛
+𝑢=1 E𝑟−1
+𝑢
+);
+6:
+end if
+7:
+for 𝑖in server epoch do
+8:
+Initial 𝒆0 = E𝑟;
+9:
+Sample 𝑡∼Uniform(1,𝑇);
+10:
+Compute 𝒆𝑡given 𝒆0,𝑡with Eq. (5);
+11:
+Compute Lelbo by Eq. (14);
+12:
+Update 𝜃based on ∇𝜃L𝑡;
+13:
+end for
+14:
+Send E𝑟
+𝑢to each client 𝑢;
+15:
+for each client 𝑢∈U𝑝in parallel do
+16:
+E𝑟+1
+𝑢
+←LocalTraining  E𝑟
+𝑢,𝑢 ;
+17:
+end for
+18: end for
+During the inference phase, we first sample the data ˆ𝒆𝑡from a prior distribution, as illustrated
+in Algorithm 2. Meanwhile, the cold-start item modality is encoded as a guidance condition for
+the generative process. MDiffFR then progressively reconstructs the data from noise through a
+denoising trajectory ˆ𝒆𝑡→ˆ𝒆𝑡−1 →. . . →ˆ𝒆0. After obtaining the generated embedding ˆ𝒆0 for the
+new item, it is distributed to each client. Client 𝑢then utilizes its local model to predict the rating
+score based on Eq. (2) and make recommendation decisions accordingly. The detailed procedure is
+provided in Algorithm 2.
+4.6
+Light-MDiffFR
+To improve training efficiency, we reduce the number of training iterations by updating MDiffFR
+once every two rounds instead of training it in every round. This design provides a lightweight
+optimization that significantly improves the training efficiency of the model.
+5
+Privacy Guarantee Analysis
+In this section, we provide a theoretical comparison between mapping-based and generation-based
+models in terms of privacy leakage under adversarial inversion.
+
+Kang Fu et al.
+Algorithm 2 MDiffFR Inference
+Input: item modality.
+1: Compute C via Eq. (15)
+2: Sample ˆe𝒕∼N (0, I)
+3: for 𝑡= 𝑇, . . . , 1 do
+4:
+ˆ𝒆𝑡−1 = 𝜇𝜃(ˆ𝒆𝑡,𝑡) calculated from ˆ𝒆𝑡via Eq. (11)
+5: end for
+6: Sends ˆ𝒆0 to each client 𝑢;
+In the presence of adversarial inversion attacks, we assume that an attacker can access a limited
+set of paired samples {(𝒙𝑖,𝒚𝑖)}, where 𝒙𝑖denotes the original modality feature and 𝒚𝑖is the
+corresponding item embedding. Using these pairs, the attacker can train a shadow model to
+approximate the inverse mapping from embeddings 𝒚𝑖to modality features 𝒙𝑖. Once the attacker
+obtains additional item embeddings from the system, the shadow model can be exploited to
+reconstruct the corresponding modality features, thereby recovering sensitive information from
+the embedding space. [12]. For private modalities, such as expert-annotated commercial attributes,
+inversion attacks may lead to substantial commercial data leakage [50]. For public modalities, the
+corresponding item embeddings often encode rich user–item interaction patterns across the entire
+system. As a result, unauthorized access to these embeddings can still reveal sensitive behavioral
+information, leading to significant privacy leakage [5, 52]. Therefore, safeguarding the modality
+features is critical to preserving user privacy and preventing the risk of sensitive system-level
+information leakage.
+Lemma 5.1 (Inversion Risk Lower Bound via Mutual Information). Let X be a discrete
+random variable taking 𝑀possible values, and let Y denote its released embedding observed by
+an adversary. The adversary constructs an estimator ˆX(Y) to infer the original input X, and the
+corresponding reconstruction error probability is defined as:
+𝑃𝑒= Pr( ˆX ≠X).
+(18)
+Then, the reconstruction error 𝑃𝑒is lower-bounded by the mutual information 𝐼(X; Y) as follows:
+𝑃𝑒⪆1 −𝐼(X; Y) + log 2
+log 𝑀
+.
+(19)
+Proof. Let X be a discrete random variable supported on 𝑀categories. Given the embedding Y,
+the adversary attempts to reconstruct X through an estimator ˆX(Y). The probability of reconstruc-
+tion error is:
+𝑃𝑒= Pr( ˆX ≠X).
+(20)
+By Fano’s inequality, the conditional entropy of X given Y satisfies:
+𝐻(X | Y) ≤𝐻𝑏(𝑃𝑒) + 𝑃𝑒log(𝑀−1),
+(21)
+where 𝐻𝑏(𝑝) denotes the binary entropy function. From the definition of mutual information,
+𝐼(X; Y) = 𝐻(X) −𝐻(X | Y),
+(22)
+which can be substituted into (21) yields:
+𝐼(X; Y) ≥𝐻(X) −𝐻𝑏(𝑃𝑒) −𝑃𝑒log(𝑀−1).
+(23)
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+Rearranging terms gives an implicit lower bound on 𝑃𝑒:
+𝑃𝑒≥
+𝐻(X)
+log(𝑀−1) −𝐻𝑏(𝑃𝑒) + 𝐼(X; Y)
+log(𝑀−1)
+.
+(24)
+Since 𝐻𝑏(𝑃𝑒) ≤log 2, and assuming X follows a near-uniform distribution (𝐻(X) ≈log 𝑀), we
+obtain the explicit form:
+𝑃𝑒≥
+log 𝑀
+log(𝑀−1) −𝐼(X; Y) + log 2
+log(𝑀−1)
+.
+(25)
+For large 𝑀, we can approximate log(𝑀−1) ≈log 𝑀, leading to:
+𝑃𝑒⪆1 −𝐼(X; Y) + log 2
+log 𝑀
+.
+(26)
+This result quantitatively connects the inversion risk with the mutual information between
+the original data 𝑋and the corresponding output 𝑌: lower 𝐼(X; Y) implies higher theoretical
+reconstruction error, thus indicating stronger privacy preservation.
+□
+Lemma 5.2 (Decomposition of Reverse Diffusion Process). The reverse diffusion process can
+be approximated as the sum of a deterministic function of the modality input and an aggregated
+stochastic noise term, that is:
+Ediff = 𝑠𝑇(x𝑇, M) + N.
+(27)
+where 𝑠𝑇(x𝑇, M) represents the deterministic generation trajectory conditioned on both modality M and
+the initial input x𝑇, and N denotes the accumulated Gaussian noise induced by the reverse diffusion
+process.
+Proof. Consider the reverse diffusion process starting from an initial Gaussian noise sample x𝑇∼
+N (0, I). At each step 𝑡= 𝑇, . . . , 1, a denoising network 𝝐𝜃(x𝑡,𝑡, M) predicts the noise component
+conditioned on the current state x𝑡and the auxiliary input M. The transition from x𝑡to x𝑡−1 is
+given by:
+x𝑡−1 = 1
+𝛼𝑡
+
+x𝑡−1 −𝛼𝑡
+√1 −¯𝛼𝑡
+𝝐𝜃(x𝑡,𝑡, M)
+
++ 𝜎𝑡z𝑡,
+z𝑡∼N (0, I),
+(28)
+where 𝛼𝑡, ¯𝛼𝑡, and 𝜎𝑡are diffusion coefficients defined by the noise schedule.
+Then, the reverse process can be decomposed into a deterministic component and a stochastic
+noise component:
+x𝑡−1 = 𝑠𝑡(x𝑡, M) + 𝜎𝑡z𝑡,
+(29)
+where 𝑠𝑡(x𝑡, M) denotes the deterministic mapping defined as:
+𝑠𝑡(x𝑡, M) = 1
+𝛼𝑡
+
+x𝑡−1 −𝛼𝑡
+√1 −¯𝛼𝑡
+𝝐𝜃(x𝑡,𝑡, M)
+
+.
+(30)
+By recursively applying (29) from 𝑡= 𝑇down to 𝑡= 1, the final generated sample x0 can be
+expressed as:
+x0 = 𝑠𝑇(x𝑇, M) +
+𝑇∑︁
+𝑡=1
+𝜎𝑡z𝑡.
+(31)
+Here, 𝑠𝑇(x𝑇, M) represents the deterministic component of the initial input x𝑇and the modality M,
+and Í𝑇
+𝑡=1 𝜎𝑡z𝑡represents the accumulated stochastic noise.
+Thus, the diffusion-generated embedding Ediff can be approximated as:
+Ediff = 𝑠𝑇(x𝑇, M) + N,
+(32)
+where N = Í𝑇
+𝑡=1 𝜎𝑡z𝑡is the accumulated stochastic noise component.
+□
+
+Kang Fu et al.
+Lemma 5.3 (Mutual Information of Mapping-based Models). Let F𝜃: X →E be a mapping-
+based model and denote Emap := F𝜃(X) on the training domain Xtrain. Then, for any X ∈Xtrain, the
+mutual information between the input and the corresponding embedding satisfies:
+𝐼(X; Emap) = 𝐻(Emap).
+(33)
+Proof. By assumption, the mapping F𝜃is approximately injective over the training domain, i.e.,
+for any distinct inputs 𝒙1, 𝒙2 ∈Xtrain,
+∥F𝜃(𝒙1) −F𝜃(𝒙2)∥≥𝛿,
+𝛿> 0.
+(34)
+This implies that the mapping produces nearly unique embeddings for each training input.
+Therefore, there exists an approximate inverse F −1
+𝜃
+such that:
+F −1
+𝜃
+(F𝜃(𝒙)) ≈𝒙,
+∀𝒙∈Xtrain.
+(35)
+Consequently, the conditional entropy of the input given the embedding is:
+𝐻(F𝜃(X) | X) = 0,
+(36)
+because the injective nature of the mapping ensures that each embedding uniquely determines its
+corresponding input. For simplicity of notation, we denote the model output F𝜃(X) as Emap. By
+the definition of mutual information, we have:
+𝐼(X; F𝜃(X)) = 𝐼(X; Emap) = 𝐻(Emap) −𝐻(Emap | X) = 𝐻(Emap).
+(37)
+Note that in this Lemma, the input X refers to the modality representation M of items. For
+consistency with the notations used in other Lemmas, we denote the model input as X.
+□
+Lemma 5.4 (Mutual Information of Diffusion-based Models). Let M denote the modality
+input, 𝑝represents the dimension of item embeddings, and let Ediff be the embedding generated by a
+diffusion model. Then, we have:
+𝐼(M; Ediff) ≤𝐻(Ediff) −ℎmin,
+where ℎmin = 𝑝
+2 log(2𝜋𝑒𝜎2
+min) > 0.
+(38)
+Proof. Due to the Gaussian noise injected at each reverse diffusion step (as shown in Lemma 5.2),
+the final embedding can be written as:
+Ediff = 𝑠𝑇(𝑥𝑇, M) + N,
+N ∼N (0, 𝚺),
+𝚺⪰𝜎2
+minI,
+(39)
+where 𝑠𝑇(𝑥𝑇, M) is the deterministic component of the reverse process, and N represents the noise
+component. Therefore, the conditional entropy of the diffusion embedding given M is:
+𝐻(Ediff | M) = 𝐻(N),
+(40)
+and since N follows a Gaussian distribution with covariance 𝚺⪰𝜎2
+minI, it is well-known from the
+maximum entropy property of Gaussian distributions that:
+𝐻(N) ≥ℎmin := 𝑝
+2 log(2𝜋𝑒𝜎2
+min) > 0,
+(41)
+where ℎmin represents the lower bound on the conditional entropy of Ediff given M, and 𝑝is the
+embedding dimension.
+Substituting this lower bound into the definition of mutual information, we obtain:
+𝐼(M; Ediff) = 𝐻(Ediff) −𝐻(Ediff | M) ≤𝐻(Ediff) −ℎmin.
+(42)
+Thus, the mutual information between the input M and the diffusion-generated embedding Ediff
+is upper-bounded by 𝐻(Ediff) −ℎmin.
+□
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+Table 1. The statistics of the used datasets.
+Dataset
+Users
+Items
+Interactions
+Modality
+KU
+2,034
+5,370
+18,519
+5,370
+Food
+6,549
+1,579
+39,740
+1,579
+Dance
+10,715
+2,307
+83,392
+2,307
+Movie
+16,525
+3,509
+115,576
+3,509
+Remark 1 (Privacy Advantage of Diffusion-based Models over Deterministic Mapping). To isolate
+the impact of stochasticity, we assume comparable marginal entropies between the two embeddings,
+i.e., 𝐻(Ediff) ≈𝐻(Emap). By combining Lemma 5.3–5.4, we obtain the comparative privacy property
+between deterministic mapping models and diffusion-based generative models:
+𝐼(M; Ediff) ≤𝐼(M; Emap) −ℎmin.
+(43)
+According to Lemma 5.1, a smaller mutual information implies a lower inversion risk and thus
+stronger privacy preservation. Therefore, diffusion-based generative models inherently achieve
+better privacy protection than deterministic mapping models, as the stochastic diffusion process
+introduces irreducible uncertainty into the generated embeddings.
+6
+Experiments
+In this section, we conduct extensive experiments on four real-world datasets to answer the
+following research questions.
+(1) Does MDiffFR achieve superior performance compared to state-of-the-art baselines?
+(2) Can the generation-based diffusion method effectively alleviate the embedding misalignment
+between cold-start and warm items?
+(3) Does modality guidance enhance the generative capability of the model?
+(4) Does MDiffFR provide stronger privacy guarantees under practical attack scenarios?
+(5) How does the key parameter affect the performance of the model?
+6.1
+Datasets
+In this paper, we conduct experiments on four real-world datasets collected from two online video
+platforms, KuaiShou and Bilibili, namely KU, Food, Dance, and Movie [54]. Table 1 shows the detailed
+statistics of these datasets. Here, Users correspond to different clients, Items represent different
+videos, and Interactions denote the number of interactions between users and items. Modality
+represents the number of modalities associated with the items. The datasets differ significantly in
+scale, with the number of users ranging from 2,034 to 16,525. In addition, to adapt to item cold-start
+scenarios and ensure a fair comparison, we partition these datasets into training, validation, and
+test sets using a 6:1:3 ratio, following the approaches outlined in [50, 57].
+6.2
+Baselines
+For more fair comparison, we select four baselines in both federated and centralized recommendation
+settings, respectively. For federated recommendations (FRs), we choose pioneering works IFedRec
+addressing the item cold-start problem in FRs, including IPFedRec and IFedNCF. Additionally, we
+adapt two typical federated methods, FCF and FedNCF, to address the item cold-start problem,
+which are referred to as CS_FCF and CS_FedNCF. For centralized recommendations (CRs), we
+select three representative methods that address the cold-start problem: Heater, GAR, and ALDI.
+
+Kang Fu et al.
+Table 2. Performance comparison on four datasets with baselines in federated recommendation. The best
+performance is highlighted in bold, and the second is underlined.
+Model
+Metric
+KU
+Food
+Dance
+Movie
+@20
+@50 @100 @20 @50 @100 @20
+@50 @100 @20 @50 @100
+CS_FedNCF
+Recall
+1.12
+3.92
+8.12
+4.96 16.08 29.61
+4.26
+12.63 24.75 2.53
+8.20
+15.00
+Precision 0.18
+0.22
+0.21
+0.42
+0.55
+0.52
+0.45
+0.53
+0.50
+0.25
+0.30
+0.28
+NDCG
+0.88
+1.82
+2.97
+2.00
+5.67
+8.29
+2.42
+5.23
+8.32
+1.41
+3.19
+4.82
+CS_FCF
+Recall
+1.32
+3.88
+8.41
+6.77 16.70 32.51
+4.66
+11.92 23.24 3.11
+8.29
+15.99
+Precision 0.19
+0.19
+0.21
+0.59
+0.58
+0.57
+0.47
+0.48
+0.47
+0.29
+0.30
+0.29
+NDCG
+1.04
+1.89
+3.18
+3.49
+6.20
+9.59
+2.69
+5.03
+8.11
+1.75
+3.33
+5.20
+IPFedRec
+Recall
+7.05
+14.51 22.84 5.76 14.28 30.29
+8.57
+17.69 31.73 4.28 10.31 19.81
+Precision 0.72
+0.58
+0.48
+0.45
+0.45
+0.47
+0.83
+0.70
+0.63
+0.39
+0.38
+0.37
+NDCG
+3.48
+5.38
+7.49
+3.15
+5.62
+9.48
+4.89
+7.36
+10.56 2.27
+4.15
+6.31
+IFedNCF
+Recall
+3.77
+8.39
+14.78 6.47 16.18 32.25
+5.95
+15.18 28.50 3.54
+8.45
+16.73
+Precision 0.44
+0.42
+0.38
+0.50
+0.51
+0.51
+0.61
+0.61
+0.57
+0.33
+0.31
+0.31
+NDCG
+2.29
+4.08
+6.01
+3.55
+6.59
+10.48
+3.71
+6.51
+9.84
+1.89
+3.34
+5.32
+MDiffFR
+Recall
+10.04 19.46 30.18 7.50 19.23 35.92 10.29 21.37 35.19 4.67 11.05 20.87
+Precision 1.08
+0.85
+0.67
+0.60
+0.62
+0.57
+1.05
+0.87
+0.71 0.44 0.42
+0.39
+NDCG
+4.37
+7.07
+9.24
+4.00
+8.08 11.76 5.94
+8.74 11.76 2.60 4.49
+6.82
+Light-MDiffFR
+Recall
+8.24
+18.24 22.21 8.78 19.11 34.16
+6.30
+18.98 34.98 4.80 10.59 19.15
+Precision 0.91
+0.83
+0.51
+0.69
+0.60
+0.54
+0.67
+0.78
+0.71
+0.41
+0.38
+0.35
+NDCG
+3.35
+6.94
+6.97
+4.27
+7.26
+10.27
+4.17
+8.38
+11.85 2.34
+4.29
+6.11
+In addition, we include a diffusion-based model, DiffRec, which we adapt to the item cold-start
+scenario, referred to as CS_DiffRec.
+• CS_FCF. [1] It is a first study in recommendation under federated settings, where the model is
+trained locally on clients and the parameters are uploaded to a central server for aggregation.
+In our experiment, we adapt it to address the item cold-start problem.
+• CS_FedNCF. [34] It employs neural networks to capture the non-linear relationships be-
+tween users and items on the client, effectively improving model performance in federated
+recommendation. In our experiments, we also adapt this approach to the item cold-start
+scenario.
+• IFedNCF. [50] It is the first solution to the item cold-start problem in federated recommen-
+dation, which integrates IFedRec into the FedNCF to address this challenge.
+• IPFedRec. [50] It is another variant of IFedRec designed to address the item cold-start
+problem in federated recommendation.
+• Heater. [57] It leverages a mixture-of-experts transformation mechanism and a randomized
+training strategy to enhance the effectiveness and accuracy of the model for cold-start
+recommendation.
+• GAR. [7] It is a generative model based on a generative adversarial network, which solves
+the cold-start problem by training a generator in an adversarial manner.
+• ALDI. [14] It treats warm items as “teachers” and transfers their behavioral information to
+cold-start items, acting as “students”.
+• CS_DiffRec. [42] It is one of the pioneering studies that employs a diffusion model to
+generate data for recommendations. We adapt it to address the item cold-start problem.
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+Table 3. Performance comparison on four datasets with baselines in centralized recommendation.
+Model
+Metric
+KU
+Food
+Dance
+Movie
+@20
+@50 @100 @20 @50 @100 @20
+@50 @100 @20 @50 @100
+Heater
+Recall
+2.22
+4.53
+8.98
+6.89 12.08 32.72
+8.62
+15.66 29.19 3.42 10.69 23.99
+Precision 0.28
+0.23
+0.23
+0.56
+0.48
+0.52
+0.91
+0.64
+0.60
+0.34
+0.41
+0.45
+NDCG
+1.14
+1.70
+2.59
+2.51
+4.34
+7.48
+3.17
+4.73
+7.38
+1.45
+3.12
+5.64
+GAR
+Recall
+0.30
+1.48
+2.82
+2.68
+9.27
+17.77
+3.42
+6.11
+12.59 1.42
+3.36
+8.74
+Precision 0.05
+0.09
+0.08
+0.20
+0.27
+0.26
+0.36
+0.26
+0.28
+0.14
+0.13
+0.16
+NDCG
+0.14
+0.45
+0.71
+0.92
+2.32
+3.88
+1.14
+1.78
+3.06
+0.42
+0.86
+1.86
+ALDI
+Recall
+0.74
+8.64
+10.25 2.21
+6.32
+11.75
+3.43
+6.02
+11.29 1.21
+5.93
+11.97
+Precision 0.10
+0.38
+0.23
+0.17
+0.19
+0.17
+0.37
+0.26
+0.25
+0.11
+0.23
+0.23
+NDCG
+0.54
+2.69
+3.00
+0.78
+1.66
+2.60
+1.10
+1.69
+2.72
+0.51
+1.57
+2.75
+CS_DiffRec
+Recall
+0.03
+0.15
+0.46
+0.07
+0.53
+1.74
+0.16
+0.32
+0.96
+0.21
+0.59
+1.25
+Precision 0.01
+0.02
+0.02
+0.01
+0.02
+0.03
+0.02
+0.02
+0.02
+0.02
+0.02
+0.02
+NDCG
+0.02
+0.05
+0.12
+0.02
+0.12
+0.33
+0.07
+0.11
+0.24
+0.08
+0.17
+0.29
+MDiffFR
+Recall
+10.04 19.46 30.18 7.50 19.23 35.92 10.29 21.37 35.19 4.67 11.05 20.87
+Precision 1.08
+0.85
+0.67
+0.60
+0.62
+0.57
+1.05
+0.87
+0.71 0.44 0.42
+0.39
+NDCG
+4.37
+7.07
+9.24
+4.00
+8.08 11.76 5.94
+8.74
+11.76 2.60 4.49
+6.82
+Light-MDiffFR
+Recall
+8.24
+18.24 22.21 8.78 19.11 34.16
+6.30
+18.98 34.98 4.80 10.59 19.15
+Precision 0.91
+0.83
+0.51
+0.69
+0.60
+0.54
+0.67
+0.78
+0.71
+0.41
+0.38
+0.35
+NDCG
+3.35
+6.94
+6.97
+4.27
+7.26
+10.27
+4.17
+8.38 11.85 2.34
+4.29
+6.11
+6.3
+Implementation Details
+We conduct all experiments on four NVIDIA RTX A5000 GPUs using Python 3.8 and PyTorch
+v2.4.1 with CUDA 12.1. We set the maximum sequence length to 512 for BERT, truncating longer
+inputs and padding shorter ones with [PAD] tokens. For both MDiffFR and all baseline models,
+we fix the embedding dimension to 64 and use a batch size of 256. During training, five negative
+items are sampled per interaction to evaluate model performance. In the federated setting, to
+ensure a fair comparison, we set the local learning rate to 0.1 for all models so that the global
+item embeddings remain consistent. For server learning, we use each method’s default value.
+Additionally, we configure the number of server epochs and the server batch size to 1 and 256,
+respectively. The client sampling ratio is set to 1.0, and the number of federated training rounds is
+fixed at 100. In addition, we evaluate model performance using three metrics commonly used in
+FRs: Recall, Precision, and NDCG. In all tables and figures, we report values using 1e-2 as the unit
+unless otherwise specified.
+6.4
+Overall Performance (RQ1)
+Compared to FRs. Table 2 presents a comparison of MDiffFR with baselines in FRs, and the results
+demonstrate that MDiffFR outperforms all baselines across all metrics. This validates the effec-
+tiveness of diffusion-based methods in capturing the underlying distribution of item embeddings,
+enabling the generation of higher-quality representations for cold-start items. Additionally, our
+method effectively mitigates the embedding misalignment issue, as detailed in the next section.
+Furthermore, Light-MDiffFR shows performance comparable to MDiffFR, outperforming most base-
+lines and even surpassing MDiffFR in some cases, which further supports the potential applicability
+of our model in practical scenarios.
+
+Kang Fu et al.
+2
+1
+0
+1
+2
+3
+4
+Dimension 1
+4
+2
+0
+2
+4
+Dimension 2
+Warm Item
+Cold Item
+(a) Round 0
+4
+3
+2
+1
+0
+1
+2
+3
+4
+Dimension 1
+4
+2
+0
+2
+4
+Dimension 2
+Warm Item
+Cold Item
+(b) Round 10
+4
+2
+0
+2
+4
+6
+Dimension 1
+4
+2
+0
+2
+4
+Dimension 2
+Warm Item
+Cold Item
+(c) Round 20
+4
+2
+0
+2
+4
+Dimension 1
+6
+4
+2
+0
+2
+4
+6
+Dimension 2
+Warm Item
+Cold Item
+(d) Round 30
+4
+2
+0
+2
+4
+Dimension 1
+4
+2
+0
+2
+4
+6
+Dimension 2
+Warm Item
+Cold Item
+(e) Round 40
+4
+2
+0
+2
+4
+6
+8
+Dimension 1
+6
+4
+2
+0
+2
+4
+6
+Dimension 2
+Warm Item
+Cold Item
+(f) Round 50
+4
+2
+0
+2
+4
+6
+Dimension 1
+6
+4
+2
+0
+2
+4
+6
+8
+Dimension 2
+Warm Item
+Cold Item
+(g) Round 60
+6
+4
+2
+0
+2
+4
+6
+Dimension 1
+6
+4
+2
+0
+2
+4
+6
+Dimension 2
+Warm Item
+Cold Item
+(h) Round 70
+6
+4
+2
+0
+2
+4
+6
+Dimension 1
+6
+4
+2
+0
+2
+4
+6
+Dimension 2
+Warm Item
+Cold Item
+(i) Round 80
+6
+4
+2
+0
+2
+4
+6
+Dimension 1
+6
+4
+2
+0
+2
+4
+6
+Dimension 2
+Warm Item
+Cold Item
+(j) Round 90
+Fig. 4. The evolution of cold-start item embeddings during training in the Food dataset. Early in training,
+these embeddings deviate from the warm item distribution, but progressively shift toward and eventually
+align with the overall warm item embedding distribution.
+Compared to CRs. As shown in Table 3, our method outperforms the baselines in CRs for most
+cases, while ensuring privacy guarantees through federated settings. The only exception occurs
+in Recall@100 and Precision@100 of the Movie dataset, where the performance of MDiffFR is
+marginally lower than the Heater. We attribute this to Heater’s centralized design that leverages
+user personal information as auxiliary data for cold-start recommendations. However, such per-
+sonal information constitutes protected privacy under federated learning frameworks, making it
+inherently inaccessible in our method. Notably, CS_DiffRec, which directly generates cold-start
+item interactions, exhibits the worst performance. This demonstrates that such direct interaction
+generation is infeasible.
+6.5
+Embedding Distribution (RQ2)
+As illustrated in Fig. 4, we visualize the distribution of embeddings for warm and cold-start items
+across training rounds. Initially, the embeddings generated by MDiffFR for cold-start items deviate
+significantly from the distribution center of warm items. As training progresses, these embeddings
+gradually approach the warm item distribution. By round 30, the generated embeddings are centered
+around the true distribution, and from round 40 onward, the cold-start embeddings increasingly
+align with the overall distribution of warm items. By round 60, the generated cold-start embeddings
+effectively capture the underlying distribution represented by the warm item embeddings, thereby
+alleviating the embedding misalignment issue observed in mapping-based methods.
+6.6
+Ablation Study (RQ3)
+We conducted ablation experiments to explore the effectiveness of modality-guided learning. As
+shown in Table 4, the absence of guidance conditions results in a substantial decline in perfor-
+mance (e.g., Recall@20 drops by 79% on the KU dataset), highlighting the importance of semantic
+alignment in embedding generation. Additionally, removing the attention-based dynamic fusion
+mechanism also results in a significant performance degradation, which empirically establishes
+that the integration of adaptive modality guidance is critical for achieving semantically consistent
+embedding generation. Furthermore, using non-informative conditions as guidance (e.g., zero or
+random vectors) degrades model performance, demonstrating that the quality of modality guidance
+directly impacts the effectiveness of the diffusion-based embedding reconstruction.
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+Table 4. Ablation study evaluating the effectiveness of modality guidance in MDiffFR. w/o Guidance and
+w/o Attention denote removing the guidance condition and attention-based dynamic fusion mechanism,
+respectively, while w/ Zero and w/ Rand indicate substituting the guidance condition with zero and random
+vectors, respectively.
+Model
+Metric
+KU
+Food
+Dance
+Movie
+@20
+@50 @100 @20 @50 @100 @20
+@50 @100 @20 @50 @100
+w/o Guidance
+Recall
+2.13
+4.78
+8.54
+5.26 14.55 30.75
+4.90
+11.25 28.57 3.82
+9.88
+19.38
+Precision 0.26
+0.24
+0.22
+0.41
+0.46
+0.49
+0.50
+0.48
+0.59
+0.38 0.38 l
+0.37
+NDCG
+1.42
+2.30
+3.31
+2.89
+5.68
+9.50
+2.59
+4.85
+9.79
+2.20
+4.06
+6.37
+w/o Attention
+Recall
+1.38
+10.09 13.20 6.57 16.35 33.56
+8.25
+15.41 28.37 2.94
+8.12
+17.22
+Precision 0.20
+0.49
+0.34
+0.53
+0.52
+0.53
+0.80
+0.61
+0.58
+0.28
+0.31
+0.32
+NDCG
+0.88
+3.68
+4.37
+4.42
+6.90
+10.89
+4.48
+6.02
+9.15
+1.74
+3.31
+5.60
+w/ Zero
+Recall
+8.44
+10.71 16.81 7.08 17.24 34.27
+6.22
+14.46 27.20 4.48 10.02 18.61
+Precision 0.94
+0.50
+0.42
+0.58
+0.56
+0.55
+0.65
+0.61
+0.56
+0.42
+0.37
+0.35
+NDCG
+4.53
+4.51
+6.33
+3.61
+6.83
+10.61
+3.44
+6.09
+9.03
+2.42
+4.08
+6.01
+w/ Rand
+Recall
+1.54
+12.30 29.95 6.81 17.49 34.69
+8.12
+19.15 33.31 3.55
+9.47
+18.80
+Precision 0.24
+0.58
+0.67
+0.55
+0.56
+0.56
+0.80
+0.76
+0.67
+0.34
+0.36
+0.35
+NDCG
+1.08
+4.43
+8.95
+3.45
+6.81
+11.11
+4.79
+8.00
+11.16 1.70
+3.47
+5.74
+MDiffFR
+Recall
+10.04 19.46 30.18 7.50 19.23 35.92 10.29 21.37 35.19 4.67 11.05 20.87
+Precision 1.08
+0.85
+0.67 0.60 0.62
+0.57
+1.05
+0.87
+0.71 0.44 0.42
+0.39
+NDCG
+4.37
+7.07
+9.24 4.00 8.08 11.76 5.94
+8.74 11.76 2.60 4.49
+6.82
+6.7
+Privacy Analysis (RQ4)
+To evaluate the privacy guarantee of MDiffFR, we design an inversion attack experiment to recon-
+struct the original modality embeddings. Consistent with the privacy analysis setting, we assume
+that the attacker has access to partial original modality information as well as all distributed
+embeddings of cold-start items. In our experiment, we assume that 20% of the original modality
+embeddings are leaked, and we construct a multilayer neural network as the attack function 𝑓−1
+𝜃
+(𝑦),
+where 𝑦= 𝑓𝜃(𝑥) and 𝑥denotes the embedding of the input modality. The attacker aims to recon-
+struct an approximation ˆ𝒙of the original input 𝒙by minimizing the reconstruction error between
+the estimated and true inputs. The corresponding optimization objective is formulated as:
+arg min
+𝜃
+∥𝑓−1
+𝜃
+(𝒚) −𝒙∥2,
+(44)
+We adopt Mean Squared Error (MSE), Mean Absolute Error (MAE), Cosine Similarity (Cosine),
+and Pearson Correlation Coefficient (Pearson) as evaluation metrics to assess the effectiveness
+of the privacy guarantee. Specifically, MSE and MAE measure the reconstruction error between
+the recovered embeddings and the original modality information, where higher values indicate
+stronger privacy protection. In contrast, Cosine and Pearson quantify the similarity between the
+reconstructed and original embeddings, where larger values reflect higher privacy leakage. As
+shown in Fig. 5, MDiffFR consistently achieves nearly zero Pearson and Cosine similarities across
+all four datasets, suggesting that the vectors generated by inversion attacks are almost uncorrelated
+with the true modality features. Only the KU dataset shows a marginally positive Cosine similarity,
+but it remains considerably lower than that of IPFedRec. In terms of MSE and MAE, MDiffFR yields
+higher values than IPFedRec, indicating greater discrepancy between the reconstructed vectors and
+the original inputs. These results demonstrate that MDiffFR offers significantly stronger privacy
+protection and effectively mitigates information leakage under inversion attacks.
+
+Kang Fu et al.
+MSE
+MAE
+Cosine
+Pearson
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+IPFedRec
+MDiffFR
+(a) KU
+MSE
+MAE
+Cosine
+Pearson
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+IPFedRec
+MDiffFR
+(b) Food
+MSE
+MAE
+Cosine
+Pearson
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+IPFedRec
+MDiffFR
+(c) Dance
+MSE
+MAE
+Cosine
+Pearson
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+IPFedRec
+MDiffFR
+(d) Movie
+Fig. 5. Radar chart of different methods’ performance against inversion attacks over four metrics.
+To further evaluate the privacy-preserving capability of MDiffFR, we analyze the structural
+similarity difference. Specifically, we first compute the pairwise similarities among items based on
+both the original modality embeddings and the reconstructed embeddings. We then measure the
+difference between the two similarity matrices. A value closer to zero indicates that the attacker can
+better reconstruct the original similarity distribution of items, implying weaker privacy protection.
+As shown in Fig. 6, we randomly visualize the structural similarity differences of 20 items. The
+differences for IFedRec are much closer to zero, indicating poorer privacy protection. In contrast,
+MDiffFR exhibits more pronounced deviations, suggesting that the attacker fails to accurately
+reconstruct the original similarity distribution.
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(a) KU-IPFedRec
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(b) KU-MDiffFR
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(c) Food-IPFedRec
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(d) Food-MDiffFR
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(e) Dance-IPFedRec
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(f) Dance-MDiffFR
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(g) Movie-IPFedRec
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(h) Movie-MDiffFR
+Fig. 6. Structural similarity differences of generated embeddings for cold-start items.
+In addition, to further enhance the differential privacy guarantees of MDiffFR, we incorporate
+Local Differential Privacy (LDP) into the framework to perturb the data uploaded to the server.
+Specifically, we add zero-mean Laplace noise 𝜖∼Laplace (0,𝛿) to the item embeddings 𝒆𝑢of
+client 𝑢, where 𝛿denotes the noise intensity. A larger 𝛿represents stronger perturbations to the
+embeddings, thereby providing higher privacy protection. Unlike traditional approaches, our model
+generates embeddings based on noise sampled from a prior distribution, which makes it more
+robust to noise. Therefore, we set a higher noise intensity 𝛿= [1, 10, 20, 30, 40, 50]. As shown
+in Table 5, the experimental results indicate that as the noise intensity increases, the model’s
+performance experiences only a slight decrease, demonstrating that differential privacy can be
+maintained without substantially compromising performance.
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+Table 5. Impact of the noise intensity 𝛿for MDiffFR.
+Metric
+Intensity 𝛿
+0
+1
+10
+20
+30
+40
+50
+Recall
+19.23
+18.06
+15.36
+16.09
+15.63
+18.48
+17.24
+Precision
+0.62
+0.56
+0.48
+0.51
+0.50
+0.59
+0.55
+NDCG
+8.08
+6.34
+5.81
+5.88
+5.93
+7.16
+6.23
+6.8
+Hyper-parameter Analysis (RQ5)
+MDiffFR captures the distribution of item representations to generate embeddings for cold-start
+items. Therefore, the embedding dimension plays a crucial role in determining its ability to accu-
+rately capture such distributions. As shown in Fig. 7, we investigate the impact of item embedding
+dimensionality on model performance. When the embedding dimension is set to 16 or 32, the model
+exhibits inferior performance across all four datasets, suggesting that excessively low-dimensional
+embeddings are insufficient to capture the intrinsic distribution of the item representations. The
+model achieves its optimal or near-optimal performance on all four datasets when the embedding
+dimension is increased to 64. Although a minor improvement is still observed on the Food and Movie
+datasets with higher dimensions, further increasing the dimension to 128 leads to a twofold rise in
+computational and storage costs, while yielding only negligible performance gains. Consequently,
+such a configuration presents a suboptimal balance between efficiency and effectiveness in practical
+scenarios. Hence, we adopt 64-dimensional embeddings as the default configuration.
+0
+3
+6
+9
+12
+0
+5
+10
+15
+20
+25
+16
+32
+64
+128
+NDCG@50
+Recall@50
+Embedding Size
+NDCG@20
+Recall@20
+(a) KU
+0
+3
+6
+9
+12
+0
+5
+10
+15
+20
+25
+16
+32
+64
+128
+NDCG@50
+Recall@50
+Embedding Size
+NDCG@20
+Recall@20
+(b) Food
+0
+3
+6
+9
+12
+0
+5
+10
+15
+20
+25
+16
+32
+64
+128
+NDCG@50
+Recall@50
+Embedding Size
+NDCG@20
+Recall@20
+(c) Dance
+0
+2
+4
+6
+8
+0
+4
+8
+12
+16
+32
+64
+128
+NDCG@50
+Recall@50
+Embedding Size
+NDCG@20
+Recall@20
+(d) Movie
+Fig. 7. Effect of embedding size.
+7
+Conclusion
+In this paper, we empirically find that existing FR methods based on the mapping paradigm tend to
+cause embedding misalignment when tackling the item cold-start problem, and may pose potential
+privacy risks due to their reliance on one-to-one mappings of item attributes. To address these
+issues, we propose MDiffFR, a novel generation-based method that learns the distribution of global
+item embeddings to generate embeddings for cold-start items. Extensive experiments show that
+MDiffFR not only outperforms state-of-the-art baselines and alleviates embedding misalignment,
+but also exhibits stronger privacy protection under adversarial inversion attacks. Meanwhile, our
+generation-based approach offers a promising new perspective for effectively addressing the item
+cold-start problem in FRs.
+References
+[1] Muhammad Ammad-Ud-Din, Elena Ivannikova, Suleiman A Khan, Were Oyomno, Qiang Fu, Kuan Eeik Tan, and
+Adrian Flanagan. 2019. Federated collaborative filtering for privacy-preserving personalized recommendation system.
+arXiv:1901.09888
+
+Kang Fu et al.
+[2] Fahad Anwaar, Naima Iltaf, Hammad Afzal, and Raheel Nawaz. 2018. HRS-CE: A hybrid framework to integrate
+content embeddings in recommender systems for cold start items. Journal of computational science 29 (2018), 9–18.
+[3] Oren Barkan and Noam Koenigstein. 2016. Item2vec: neural item embedding for collaborative filtering. In MLSP. 1–6.
+[4] JesúS Bobadilla, Fernando Ortega, Antonio Hernando, and Jesús Bernal. 2012. A collaborative filtering approach to
+mitigate the new user cold start problem. KBS 26 (2012), 225–238.
+[5] Di Chai, Leye Wang, Kai Chen, and Qiang Yang. 2020. Secure federated matrix factorization. IEEE Intelligent Systems
+36 (2020), 11–20.
+[6] Chien Chin Chen, Yu-Hao Wan, Meng-Chieh Chung, and Yu-Chun Sun. 2013. An effective recommendation method
+for cold start new users using trust and distrust networks. Information Sciences 224 (2013), 19–36.
+[7] Hao Chen, Zefan Wang, Feiran Huang, Xiao Huang, Yue Xu, Yishi Lin, Peng He, and Zhoujun Li. 2022. Generative
+adversarial framework for cold-start item recommendation. In SIGIR. 2565–2571.
+[8] Jing Du, Zesheng Ye, Lina Yao, Bin Guo, and Zhiwen Yu. 2022. Socially-aware dual contrastive learning for cold-start
+recommendation. In SIGIR. 1927–1932.
+[9] Liang Gao, Huazhu Fu, Li Li, Yingwen Chen, Ming Xu, and Cheng-Zhong Xu. 2022. FedDC: Federated Learning with
+Non-IID Data via Local Drift Decoupling and Correction. In CVPR. 10102–10111.
+[10] Jiewen Guan, Bilian Chen, and Shenbao Yu. 2024. A hybrid similarity model for mitigating the cold-start problem of
+collaborative filtering in sparse data. ESWA 249 (2024), 123700.
+[11] Xianjie Guo, Kui Yu, Lizhen Cui, Han Yu, and Xiaoxiao Li. 2025. Federated Causally Invariant Feature Learning. In
+AAAI. 16978–16986.
+[12] Zecheng He, Tianwei Zhang, and Ruby B Lee. 2019. Model inversion attacks against collaborative inference. In ACSAC.
+148–162.
+[13] Jonathan Ho, Ajay Jain, and Pieter Abbeel. 2020. Denoising diffusion probabilistic models. In NeurIPS. 6840–6851.
+[14] Feiran Huang, Zefan Wang, Xiao Huang, Yufeng Qian, Zhetao Li, and Hao Chen. 2023. Aligning distillation for
+cold-start item recommendation. In SIGIR. 1147–1157.
+[15] Yangqin Jiang, Lianghao Xia, Wei Wei, Da Luo, Kangyi Lin, and Chao Huang. 2024. Diffmm: Multi-modal diffusion
+model for recommendation. In MM. 7591–7599.
+[16] Jinri Kim, Eungi Kim, Kwangeun Yeo, Yujin Jeon, Chanwoo Kim, Sewon Lee, and Joonseok Lee. 2024. Content-based
+graph reconstruction for cold-start item recommendation. In SIGIR. 1263–1273.
+[17] Gihun Lee, Minchan Jeong, Sangmook Kim, Jaehoon Oh, and Se-Young Yun. 2024. Fedsol: Stabilized orthogonal
+learning with proximal restrictions in federated learning. In CVPR. 12512–12522.
+[18] Hoyeop Lee, Jinbae Im, Seongwon Jang, Hyunsouk Cho, and Sehee Chung. 2019. Melu: Meta-learned user preference
+estimator for cold-start recommendation. In SIGKDD. 1073–1082.
+[19] Yichen Li, Yijing Shan, Yi Liu, Haozhao Wang, Wei Wang, Yi Wang, and Ruixuan Li. 2025. Personalized Federated
+Recommendation for Cold-Start Users via Adaptive Knowledge Fusion. In WWW. 2700–2709.
+[20] Zhiwei Li, Guodong Long, and Tianyi Zhou. 2024. Federated Recommendation with Additive Personalization. In ICLR.
+11770–11787.
+[21] Zihao Li, Aixin Sun, and Chenliang Li. 2023. Diffurec: A diffusion model for sequential recommendation. ACM TOIS
+42 (2023), 1–28.
+[22] Zongwei Li, Lianghao Xia, and Chao Huang. 2024. Recdiff: Diffusion model for social recommendation. In CIKM.
+1346–1355.
+[23] Jianghao Lin, Jiaqi Liu, Jiachen Zhu, Yunjia Xi, Chengkai Liu, Yangtian Zhang, Yong Yu, and Weinan Zhang. 2024. A
+Survey on Diffusion Models for Recommender Systems. arXiv:2409.05033
+[24] Langming Liu, Wanyu Wang, Xiangyu Zhao, Zijian Zhang, Chunxu Zhang, Shanru Lin, Yiqi Wang, Lixin Zou, Zitao
+Liu, Xuetao Wei, et al. 2024. Efficient and robust regularized federated recommendation. In CIKM. 1452–1461.
+[25] Qidong Liu, Fan Yan, Xiangyu Zhao, Zhaocheng Du, Huifeng Guo, Ruiming Tang, and Feng Tian. 2023. Diffusion
+augmentation for sequential recommendation. In CIKM. 1576–1586.
+[26] Calvin Luo. 2022. Understanding diffusion models: A unified perspective. arXiv:2208.11970
+[27] Yunze Luo, Yuezihan Jiang, Yinjie Jiang, Gaode Chen, Jingchi Wang, Kaigui Bian, Peiyi Li, and Qi Zhang. 2025. Online
+item cold-start recommendation with popularity-aware meta-learning. In SIGKDD. 927–937.
+[28] Haokai Ma, Yimeng Yang, Lei Meng, Ruobing Xie, and Xiangxu Meng. 2024. Multimodal conditioned diffusion model
+for recommendation. In WWW. 1733–1740.
+[29] Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, and Blaise Aguera y Arcas. 2017. Communication-
+efficient learning of deep networks from decentralized data. In AISTATS. 1273–1282.
+[30] Khalil Muhammad, Qinqin Wang, Diarmuid O’Reilly-Morgan, Elias Tragos, Barry Smyth, Neil Hurley, James Geraci,
+and Aonghus Lawlor. 2020. Fedfast: Going beyond average for faster training of federated recommender systems. In
+SIGKDD. 1234–1242.
+
+MDiffFR: Modality-Guided Diffusion Generation for Cold-start Items in Federated Recommendation
+[31] Wentao Ouyang, Xiuwu Zhang, Shukui Ren, Li Li, Kun Zhang, Jinmei Luo, Zhaojie Liu, and Yanlong Du. 2021. Learning
+graph meta embeddings for cold-start ads in click-through rate prediction. In SIGIR. 1157–1166.
+[32] Deepak Kumar Panda and Sanjog Ray. 2022. Approaches and algorithms to mitigate cold start problems in recommender
+systems: a systematic literature review. JIIS 59 (2022), 341–366.
+[33] S Gopal Krishna Patro, Brojo Kishore Mishra, Sanjaya Kumar Panda, Raghvendra Kumar, Hoang Viet Long, and David
+Taniar. 2023. Cold start aware hybrid recommender system approach for E-commerce users. Soft Computing (2023),
+2071–2091.
+[34] Vasileios Perifanis and Pavlos S Efraimidis. 2022. Federated neural collaborative filtering. KBS 242 (2022), 108441.
+[35] Liang Qu, Wei Yuan, Ruiqi Zheng, Lizhen Cui, Yuhui Shi, and Hongzhi Yin. 2024. Towards Personalized Privacy:
+User-Governed Data Contribution for Federated Recommendation. In WWW. 3910–3918.
+[36] Al Mamunur Rashid, Istvan Albert, Dan Cosley, Shyong K Lam, Sean M McNee, Joseph A Konstan, and John Riedl.
+2002. Getting to know you: learning new user preferences in recommender systems. In IUI. 127–134.
+[37] Yue Shi, Martha Larson, and Alan Hanjalic. 2014. Collaborative filtering beyond the user-item matrix: A survey of the
+state of the art and future challenges. ACM CSUR 47 (2014), 1–45.
+[38] Jiaming Song, Chenlin Meng, and Stefano Ermon. 2020. Denoising diffusion implicit models. arXiv:2010.02502
+[39] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia
+Polosukhin. 2017. Attention is all you need. In NeurIPS. 6000–6010.
+[40] Paul Voigt and Axel Von dem Bussche. 2017. The eu general data protection regulation (gdpr). A practical guide, 1st
+ed., Cham: Springer International Publishing 10 (2017), 10–5555.
+[41] Hao Wang, Zhichao Chen, Honglei Zhang, Zhengnan Li, Licheng Pan, Haoxuan Li, and Mingming Gong. 2025. Debiased
+Recommendation via Wasserstein Causal Balancing. ACM TOIS (2025).
+[42] Wenjie Wang, Yiyan Xu, Fuli Feng, Xinyu Lin, Xiangnan He, and Tat-Seng Chua. 2023. Diffusion recommender model.
+In SIGIR. 832–841.
+[43] Yuhao Wang, Ziru Liu, Yichao Wang, Xiangyu Zhao, Bo Chen, Huifeng Guo, and Ruiming Tang. 2024. Diff-MSR: A
+diffusion model enhanced paradigm for cold-start multi-scenario recommendation. In WSDM. 779–787.
+[44] Jian Wei, Jianhua He, Kai Chen, Yi Zhou, and Zuoyin Tang. 2017. Collaborative filtering and deep learning based
+recommendation system for cold start items. ESWA 69 (2017), 29–39.
+[45] Yinwei Wei, Xiang Wang, Qi Li, Liqiang Nie, Yan Li, Xuanping Li, and Tat-Seng Chua. 2021. Contrastive learning for
+cold-start recommendation. In MM. 5382–5390.
+[46] Xuansheng Wu, Huachi Zhou, Yucheng Shi, Wenlin Yao, Xiao Huang, and Ninghao Liu. 2024. Could small language
+models serve as recommenders? towards data-centric cold-start recommendation. In WWW. 3566–3575.
+[47] Wei Yuan, Liang Qu, Lizhen Cui, Yongxin Tong, Xiaofang Zhou, and Hongzhi Yin. 2024. HeteFedRec: Federated
+Recommender Systems with Model Heterogeneity. In ICDE. 1324–1337.
+[48] Chunxu Zhang, Guodong Long, Hongkuan Guo, Xiao Fang, Yang Song, Zhaojie Liu, Guorui Zhou, Zijian Zhang, Yang
+Liu, and Bo Yang. 2024. Federated adaptation for foundation model-based recommendations. In IJCAI. 5453–5461.
+[49] Chunxu Zhang, Guodong Long, Tianyi Zhou, Peng Yan, Zijian Zhang, Chengqi Zhang, and Bo Yang. 2023. Dual
+Personalization on Federated Recommendation. In IJCAI. 4558–4566.
+[50] Chunxu Zhang, Guodong Long, Tianyi Zhou, Zijian Zhang, Peng Yan, and Bo Yang. 2024. When federated recommen-
+dation meets cold-start problem: Separating item attributes and user interactions. In WWW. 3632–3642.
+[51] Honglei Zhang, Haoxuan Li, Jundong Chen, Sen Cui, Kunda Yan, Abudukelimu Wuerkaixi, Xin Zhou, Zhiqi Shen, and
+Yidong Li. 2025. Beyond Similarity: Personalized Federated Recommendation with Composite Aggregation. ACM TOIS
+(2025), Just Accepted.
+[52] Honglei Zhang, He Liu, Haoxuan Li, and Yidong Li. 2024. Transfr: Transferable federated recommendation with
+pre-trained language models. arXiv:2402.01124
+[53] Honglei Zhang, Fangyuan Luo, Jun Wu, Xiangnan He, and Yidong Li. 2023. LightFR: Lightweight federated recommen-
+dation with privacy-preserving matrix factorization. ACM TOIS 41 (2023), 1–28.
+[54] Jiaqi Zhang, Yu Cheng, Yongxin Ni, Yunzhu Pan, Zheng Yuan, Junchen Fu, Youhua Li, Jie Wang, and Fajie Yuan. 2024.
+Ninerec: A benchmark dataset suite for evaluating transferable recommendation. IEEE TPAMI 47 (2024), 5256–5267.
+[55] Zhipeng Zhang, Yao Zhang, and Yonggong Ren. 2020. Employing neighborhood reduction for alleviating sparsity and
+cold start problems in user-based collaborative filtering. IR 23 (2020), 449–472.
+[56] Wenqiao Zhu, Lulu Wang, and Jun Wu. 2025. Addressing Cold-Start Problem in Click-Through Rate Prediction via
+Supervised Diffusion Modeling. In AAAI. 13455–13463.
+[57] Ziwei Zhu, Shahin Sefati, Parsa Saadatpanah, and James Caverlee. 2020. Recommendation for new users and new
+items via randomized training and mixture-of-experts transformation. In SIGIR. 1121–1130.

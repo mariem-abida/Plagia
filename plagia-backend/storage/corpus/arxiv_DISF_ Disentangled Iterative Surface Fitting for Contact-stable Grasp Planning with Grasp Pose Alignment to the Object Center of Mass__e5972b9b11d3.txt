@@ -1,0 +1,2094 @@
+DISF: Disentangled Iterative Surface Fitting for
+Contact-stable Grasp Planning with Grasp Pose
+Alignment to the Object Center of Mass
+Tomoya Yamanokuchi
+a,∗, Alberto Bacchin
+b, Emilio Olivastri
+b,
+Ryotaro Arifuku
+a, Takamitsu Matsubara
+a, Emanuele Menegatti
+b
+a Division of Information Science, Graduate School of Science and Technology, Nara
+Institute of Science and Technology , 8916-5 Takayama, Ikoma, Nara, 630-0192, Japan
+b Department of Information Engineering, University of Padua ,
+Via Gradenigo 6/b, Padua, 35131, Italy
+Abstract
+In this work, we address the limitation of surface fitting-based grasp plan-
+ning algorithm, which primarily focuses on geometric alignment between the
+gripper and object surface while overlooking the stability of contact point
+distribution, often resulting in unstable grasps due to inadequate contact
+configurations. To overcome this limitation, we propose a novel surface fit-
+ting algorithm that integrates contact stability while preserving geometric
+compatibility. Inspired by human grasping behavior, our method disentan-
+gles the grasp pose optimization into three sequential steps: (1) rotation
+optimization to align contact normals, (2) translation refinement to improve
+the alignment between the gripper frame origin and the object Center of Mass
+(CoM), and (3) gripper aperture adjustment to optimize contact point distri-
+bution. We validate our approach in simulation across 15 objects under both
+Known-shape (with clean CAD-derived dataset) and Observed-shape (with
+YCB object dataset) settings, including cross-platform grasp execution on
+three robot–gripper platforms. We further validate the method in real-world
+∗Corresponding author.
+Email addresses: yamanokuchi.tomoya@naist.ac.jp (Tomoya Yamanokuchi ),
+bacchinalb@dei.unipd.it (Alberto Bacchin ), emilio.olivastri@phd.unipd.it
+(Emilio Olivastri ), arifuku.ryotaro.au2@naist.ac.jp (
+Ryotaro Arifuku ), takam-m@is.naist.jp (Takamitsu Matsubara ),
+emg@dei.unipd.it (Emanuele Menegatti )
+arXiv:2512.24550v1 [cs.RO] 31 Dec 2025
+
+grasp experiments on a UR3e robot. Overall, DISF reduces CoM misalign-
+ment while maintaining geometric compatibility, translating into higher grasp
+success in both simulation and real-world execution compared to baselines.
+Additional videos and supplementary results are available on our project
+page: https://tomoya-yamanokuchi.github.io/disf-ras-project-page/
+Keywords:
+grasp planning, point cloud, iterative surface fitting
+1. Introduction
+Observations of human grasping behavior suggest that aligning the Cen-
+ter of Mass (CoM) of the hand closer with that of the object improves grasp
+stability [1, 2, 3]. This is because CoM misalignment induces large rotational
+moment, which can destabilize the grasp [4]. Following this principle, numer-
+ous bio-inspired algorithms have been proposed to determine optimal grasp
+configuration [5, 6]. However, while these algorithms achieve high accuracy
+in predicting human grasping behavior, they are fundamentally limited by
+the assumption that objects can be represented using simple geometric mod-
+els, such as cylinders [7, 8] or spheres [9], making them unable to generalize
+to complex geometries.
+To overcome these limitations, grasp planning algorithms that do not
+rely on mathematical models of object shapes have been proposed in recent
+years, utilizing point cloud data [10]. This approach builds upon the frame-
+work of 3D point cloud registration, which has been well established in the
+field of Computer Vision [11, 12, 13, 14, 15, 16]. By representing both the
+object and the robot hand’s gripper surface as point cloud data, and di-
+rectly optimizing their geometric compatibility as an evaluation metric, this
+method determines an appropriate grasp pose. A series of studies by Fan
+et al. have demonstrated the effectiveness of this geometric compatibility-
+based optimization approach for grasp planning across a wide range of object
+shapes [17, 18, 19, 20].
+While surface fitting algorithms based on geometric compatibility opti-
+mization offer high flexibility, they do not sufficiently account for whether
+the aligned surfaces actually lead to a stable grasp. Specifically, achieving
+a stable grasp requires the ability to generate contact forces that can fully
+counteract external forces and torques (known as force-closure property [21]).
+However, by focusing solely on geometric alignment, these methods fail to
+consider fundamental factors necessary for generating contact forces, such as
+2
+
+Grasp Planning Space
+Geometrically Aligned Space
+Spatially Aligned Space 
+Gripper Surface
+Object Surface
+distant
+distant
+close
+(w/o potential contact)
+(w/ potential contact)
+Figure 1: The relationship between the grasp planning space, geometrically aligned space,
+and spatially aligned space.
+the appropriate spatial relationship between the hand and the object. As a
+result, even if the surfaces are geometrically well-aligned, a spatial gap can
+form between the hand and the object, preventing actual contact from being
+established, or leading to an unstable distribution of contact points.
+To address this issue, it is essential not only to align surfaces based on
+geometric compatibility but also to ensure that the robotic hand (or grip-
+per) and object surfaces are spatially well-aligned, allowing contact to be
+potentially established. We refer to this spatial alignment, which facilitates
+contact, as contact stability (Fig. 1).
+In this study, we propose a novel surface fitting-based grasp planning
+algorithm that incorporates contact stability alongside geometric compati-
+bility, which we call Disentangled Iterative Surface Fitting (DISF). From the
+perspective of contact stability, we explicitly integrate CoM alignment into
+the optimization process, drawing inspiration from the observation that, as
+mentioned earlier, humans naturally align their hand’s CoM with that of the
+object to enhance grasp stability [1, 2, 3]. To achieve this, we leverage another
+key insight from human grasping behavior-that different pose parameters are
+optimized sequentially rather than simultaneously [22]-and disentangle the
+overall grasp pose optimization into the following three sequential stages: (1)
+rotation optimization to align contact normals, (2) translation refinement
+3
+
+Translation
+Gripper
+Aperture
+plan
+Object
+Planned Grasp
+Rotation
+Contact Normal Alignment
+Center of Mass (CoM) 
+Alignment
+Contact Point Distribution 
+Grasp Quality Measures
+(1) update
+(2) update
+Gripper Transformation
+X
+Y
+Z
+X
+Y
+Z
+Surface Update Process
+Object Surface
+Gripper Surface
+X
+Y
+Z
+①
+②
+③
+(3) update
+Robot Hand
+update
+Figure 2: Overview of the proposed DISF optimization process. The grasp pose optimiza-
+tion is disentangled into three sequential steps: (1) rotation optimization to align contact
+normals, (2) translation refinement for Center of Mass (CoM) alignment, and (3) gripper
+aperture adjustment to optimize contact point distribution. Each step iteratively updates
+the gripper transformation parameters to ensure both geometric compatibility and contact
+stability. The arrows indicate the optimization flow, illustrating how the gripper adapts
+to the object surface through iterative surface fitting.
+for CoM alignment, and (3) gripper aperture adjustment to optimize con-
+tact point distribution. Our disentangled optimization framework preserves
+the advantages of flexible geometric compatibility evaluation while system-
+atically enhancing contact stability through CoM alignment. The overview
+of our DISF framework is shown in Fig. 2.
+To evaluate the effectiveness of DISF, we conducted a comprehensive
+study in both simulation and the real world. In simulation, we first quantified
+grasp quality on 15 objects spanning Known-shape and Observed-shape set-
+tings using two complementary criteria: geometric compatibility (geometric
+misalignment) and contact stability (CoM misalignment). We then assessed
+physical feasibility by executing the planned grasps in a physics simulator
+across three robot–gripper platforms, and reported grasp success rates for
+each setting. Finally, we evaluated real-world grasp execution using observed
+4
+
+object geometry reconstructed from two depth sensors, demonstrating the
+practical benefit of CoM alignment in surface-fitting-based grasp planning.
+This paper substantially extends our preliminary conference paper [23]
+by (i) expanding the simulation study to cover both Known-shape (clean
+CAD-derived point clouds) and Observed-shape (YCB-derived point clouds
+with sensor/reconstruction artifacts) settings, (ii) evaluating grasp execu-
+tions across multiple robot–gripper platforms to assess cross-platform gener-
+alization, and (iii) adding real-world grasp experiments on a UR3e robotic
+platform using observed point cloud data.
+Our main contributions were summarized as follows:
+• We proposed DISF, a surface fitting-based grasp planner that inte-
+grated contact stability with geometric compatibility via a disentan-
+gled, sequential optimization over rotation, translation (CoM align-
+ment), and gripper aperture.
+• We formalized contact stability in the surface fitting context and intro-
+duced CoM misalignment as a complementary grasp quality measure
+alongside geometric misalignment.
+• We evaluated the proposed method through (i) grasp quality analysis
+on 15 objects under both Known-shape and Observed-shape settings,
+(ii) cross-platform grasp success rates on three robot–gripper platforms
+in simulation, and (iii) real-world grasp success rates on a UR3e robot
+with observed object shapes reconstructed from two depth sensors.
+2. Related Works
+2.1.
+Center of Mass influence on Human Grasping Behavior
+A stable human grasp is often achieved by bringing the hand’s CoM close
+to the object’s CoM, as this tends to increase the contact area, regularize the
+distribution of forces at contact, and mitigate rotational moments. Previous
+work suggests that humans can predict the CoM of an object and adapt the
+hand’s grasping pose accordingly. For example, Lukos et al. examined the
+selection of contact-points in 12 participants under conditions where the CoM
+of the object was provided or unknown, and found that participants system-
+atically shifted their grasp contacts when the CoM could be predicted [1].
+Desanghere and Marotta further examined CoM estimation from visual cues
+5
+
+and reported that gaze fixation is sensitive to CoM location, influencing sub-
+sequent grasp placement [2]. These results underscore the central importance
+of CoM alignment in human grasping. Building on this insight, we investigate
+how to incorporate CoM alignment in a principled way into computational
+grasp planning, with a particular focus on our surface-fitting-based method.
+After highlighting the importance of CoM alignment in human grasp se-
+lection and stability, an open question remains: how should this principle be
+encoded in computational grasp models? Biomechanical evidence suggests
+that CoM alignment can emerge implicitly from the optimization of joint con-
+figurations and contact locations. In the model proposed by Lee et al. [6],
+stable contacts arise as the finger joints conform to the object surface, and
+CoM alignment is achieved as a by-product of this optimization, reducing net
+moments acting on the object. In parallel, computational approaches have
+introduced CoM-aware grasp prediction models that enforce CoM alignment
+more explicitly. For example, Klein et al. showed that shifting an object’s
+CoM leads to systematic changes in predicted grasp locations, supporting
+the hypothesis that CoM-sensitive optimization can explain key aspects of
+human grasping behavior [3]. Building on these insights, we integrate CoM
+alignment into a surface-fitting-based grasp planning framework for robotic
+grasping, enabling the planner to account not only for geometric compatibil-
+ity with the object surface, but also for contact stability.
+2.2.
+Iterative Surface Fitting in Grasp Planning
+Surface fitting methods in robotic grasp planning are based on the idea
+that a good grasp pose brings the hand’s fingertip surfaces into a geometric
+alignment with the object surface [6, 24, 25]. This alignment tends to in-
+crease the effective contact area, improving force transmission and reducing
+the likelihood of slip. As a result, surface alignment provides a practical cri-
+terion for generating stable grasps in robotic manipulation. Building on these
+assumptions, grasp planning can be cast as a point-cloud alignment problem,
+as shown in recent work [10]. In this setting, the objective is to optimize the
+alignment between the gripper surface and a point cloud representing the
+object, avoiding the need for an explicit mathematical model of the object
+geometry, a relevant limitation of many traditional biomechanics-based grasp
+prediction approaches. Consequently, surface fitting provides a flexible grasp
+planning framework that is not restricted to predefined geometric primitives
+and can, in principle, be applied to objects of arbitrary shape [17, 18, 19].
+6
+
+However, most existing surface-fitting-based methods primarily address
+geometric compatibility and often omit additional stability-related constraints,
+such as the configuration of contact points with respect to the object CoM.
+As a result, the planned grasps may be geometrically valid yet mechanically
+unstable. In this work, we incorporate CoM alignment into surface-fitting-
+based grasp planning, enabling the optimization to account for both surface
+alignment and contact stability, and thereby promoting more robust grasp
+configurations.
+3. Preliminaries
+3.1. Contact Surface Optimization
+The grasp planning problem with antipodal grippers can be modeled as
+a contact surface optimization problem which maximizes the grasp quality
+Q by optimizing the rotation and translation parameter (R, t) as well as
+the fingertip displacement δd from the original gripper aperture d, given a
+specific set of contact surfaces between the fingertip and object:
+max
+R,t,δd Q(Sf, So)
+(1a)
+s.t.
+Sf
+j ⊂T (∂Fj, R, t, δd),
+j = 1, 2
+(1b)
+So
+j = H∂O(Sf
+j ),
+j = 1, 2
+(1c)
+Sf
+j ∈W(d0 + δd)
+j = 1, 2
+(1d)
+d0 + δd ∈[dmin, dmax]
+(1e)
+where j ∈{1, 2} is the finger index, Sf
+j and So
+j are the finger and object
+contact surfaces. The Sf = [Sf
+1 , Sf
+2 ] is the set of contact surfaces across the
+multiple fingers and the So = [So
+1, So
+2] is the corresponding set of contact
+surfaces for the object. The finger contact surface lies on its canonical sur-
+face ∂Fj projected by the transformation function T . The object contact
+surface So
+j is determined by a correspondence matching algorithm H∂O given
+the object canonical surface ∂O and its query Sf
+j .
+The contact surfaces
+are constrained by the gripper’s working range [dmin, dmax], defined by the
+robot’s kinematics. The optimization aims to determine the optimal gripper
+transformation (R∗, t∗, δd∗). This concept of contact surface optimization is
+illustrated in Fig. 3.
+7
+
+Figure 3: Contact surface optimization formulation for antipodal grasp planning. Given
+the canonical fingertip surfaces, we define finger contact surface patches Sf
+1 and Sf
+2 and
+transform them by T (·; R, t, δd), where (R, t) and the fingertip displacement δd are the
+optimization variables.
+For each transformed patch, the corresponding object contact
+surface So
+j is obtained by the correspondence function H∂O(Sf
+j ) on the object surface.
+Surface samples and normals {pij, np
+ij} and {qij, nq
+ij} are used to evaluate the grasp quality
+Q(Sf, So), which is maximized under the gripper workspace and aperture constraints.
+3.2. Iterative Surface Fitting
+This section instantiates the contact surface optimization in Eq. (1) with
+an iterative surface fitting procedure. As illustrated in Fig. 3, we optimize the
+gripper transformation parameters by iteratively aligning fingertip surface
+samples to their corresponding object samples.
+3.2.1. Gripper Transformation
+Given a specific contact point-normal pair (pij, np
+ij) ∈Sf
+j , where i =
+1, . . . , N and N is the number of the pair for fingertip contact surfaces, the
+transformation function T for the gripper is defined as follows:
+T ((pij, np
+ij), R(ω), t, δd) = (R(ω)pij + t + 0.5(−1)jR(ω)vδd, R(ω)np
+ij)
+(2)
+where R(ω) is the rotation matrix parameterized with the axis-angle vector
+ω ∈so(3), v ∈R3 is the unit vector pointing from Sf
+1 to Sf
+2 .
+3.2.2. Grasp Quality Measures
+The geometric compatibility of point cloud data is generally evaluated
+using surface distance, called point-to-plane distance [12]. Therefore, grasp
+8
+
+quality in surface fitting-based grasp planning is also assessed based on this
+criterion [10, 17, 18], which is defined as the distance between each point on
+the gripper surface and the tangent plane of the object surface:
+Ep(ω, t, δd; Sf, So) =
+N
+X
+i=1
+2
+X
+j=1
+
+(p′
+ij −qij)⊤nq
+ij
+2
+,
+(3)
+where qij and nq
+ij are the point and normal vector on the object contact
+surface So.
+In the context of grasp planning, normal misalignment is also an im-
+portant criterion, as it directly affects the ability to achieve force-closure
+properties [21]. Stable contact requires the normals of the gripper and object
+surfaces to be oriented in opposite directions; thus, misalignment is measured
+by evaluating the deviation between these two normal vectors.
+En(ω; Sf, So) =
+N
+X
+i=1
+
+(R(ω)np
+i )⊤nq
+i + 1
+2
+.
+(4)
+Additionally, approach direction misalignment [20], is also often used.
+In this study, we adopt this concept with modifications to better suit our
+formulation:
+Ea(ω; Sf, So) =
+N
+X
+i=1
+
+(R(ω)nz)⊤napp −1
+2
+,
+(5)
+where nz is the z-axis direction of the gripper defined by the hand plane, and
+napp is the approach direction of the gripper. This metric plays a crucial role
+in avoiding collisions and achieving a natural grasping posture.
+3.2.3. Gradient-based Optimization with Iterative Least-squares Method
+Direct optimization of the rotation matrix is challenging due to its con-
+straint on the special orthogonal group SO(3). To address this, we approxi-
+mate it as a small rotation around each axis [26], allowing the rotation matrix
+to be expressed as:
+R(ω) ≈I + [ω]×
+(6)
+where I is 3×3 identity matrix, [·]× means skew-symmetric matrix, and [ω]×
+is skew-symmetric matrix with the small rotation vector ω = [ωx, ωy, ωz]⊤:
+[ω]× =
+
+
+0
+ωz
+ωy
+ωz
+0
+−ωx
+−ωy
+ωx
+0
+
+.
+(7)
+9
+
+This linearization simplifies the optimization process by reducing the com-
+plexity of handling the full rotation matrix R. By applying the small rotation
+approximation to the grasp quality measures, the rotational component can
+be linearized into a form that is compatible with least-squares optimization,
+as follows:
+min
+x ∥Ax −b∥2.
+(8)
+where x contains the unknown parameters, e.g. ω, t, or δd, A is the co-
+efficient matrix derived from the Jacobians of the grasp quality measures
+with respect to the parameters in x, and b is the residual vector.
+Tak-
+ing the derivative of the squared error with respect to x and setting it to
+zero yields the normal equation A⊤Ax = A⊤b whose solution is given by
+x = (A⊤A)−1A⊤b. This equation is solved iteratively to maximize the grasp
+quality measures.
+4. Proposed Methods
+Starting from the surface fitting formulation in Section 3, our goal is
+to improve the optimization process introducing contact-stability awareness.
+Incorporating such a term directly into the joint surface-fitting objective,
+however, is non-trivial. Motivated by evidence that key posture parameters
+(i.e., rotation, translation, and aperture) are optimized sequentially rather
+than jointly in human grasping [22], we propose to disentangle grasp-pose
+optimization into three stages instead of solving for all parameters simulta-
+neously: (1) rotation optimization to align contact normals, (2) translation
+refinement to promote CoM alignment, and (3) gripper-aperture adjustment
+to improve the distribution of contact points. This staged formulation enables
+us to introduce additional constraints that would be difficult to incorporate
+in a single entangled optimization problem.
+In the following, we detail each disentangled optimization stage and then
+present the complete Disentangled Iterative Surface Fitting (DISF) algo-
+rithm.
+4.1. Rotation Optimization for Contact Normal Misalignment (RotOpt)
+The first stage optimizes the rotation parameter ω to improve contact-
+normal alignment, thereby promoting force-closure properties [21]. We treat
+this step separately from surface-distance minimization, which has been the
+primary focus of prior surface-fitting approaches [10, 17, 18]. This staged de-
+sign is also consistent with human behavior, where hand orientation is often
+10
+
+Algorithm 1: Rotation Optimization for Contact Normal Misalign-
+ment (RotOpt)
+1: Input: ∂F, Sf, So, Rv, v
+2: ω∗←min
+ω Ena
+ ω; Sf, So
+3: Rv ←Rrod(ω∗)Rv
+4: v ←Rvv
+5: Sf
+j ←T (Sf
+j , Rrod(ω∗), t = 0, δd = 0),
+j = 1, 2
+6: ∂Fj ←T (∂Fj, Rrod(ω∗), t = 0, δd = 0),
+j = 1, 2
+7: return (∂F, Sf, ω∗, Rv, v)
+adjusted before translating toward the object. Since rotation additionally
+influences the approach direction, we define a rotation objective that jointly
+accounts for contact-normal misalignment and approach-direction misalign-
+ment, weighted by a factor β ∈R:
+Ena(ω; Sf, So) = En(ω; Sf, So) + β2Ea(ω; Sf, So).
+(9)
+The resulting procedure for optimizing the rotation parameters is summa-
+rized in Algorithm 1.
+Palm rotation optimization can be expressed as a least-squares prob-
+lem analogous to Eq. (8), using an augmented matrix ˜A = [A⊤
+n , A⊤
+a ]⊤,
+an augmented residual ˜b = [bn, ba]⊤, and the unknown x = ω.
+Here,
+An = [a⊤
+n,1, . . . , a⊤
+n,N]⊤and bn = [bn,1, . . . , bn,N]⊤correspond to the normal-
+misalignment term En, while Aa = aa and ba = b⊤
+a are derived from the
+approach-direction misalignment:
+an,i = (np
+i × nq
+i)⊤,
+(10a)
+bn,i = −
+ (np
+i )⊤nq
+i + 1
+
+,
+(10b)
+aa = β(nz × napp)⊤,
+(10c)
+ba = −β
+ (nz)⊤napp −1
+
+.
+(10d)
+Once the optimum ω∗is obtained, it is mapped to the rotation matrix
+Rrod(ω∗) via Rodrigues’ formula:
+Rrod(ω) = I + sin θ[u]× + (1 −cos θ)[u]2
+×,
+(11)
+where I denotes the 3 × 3 identity matrix, u = ω/∥ω∥is the rotation axis,
+and θ = ∥ω∥is the rotation angle.
+The resulting rotation is then used
+11
+
+Algorithm 2: Translation Refinement for CoM Alignment (Tran-
+sRefine)
+1: Input: ∂F, Sf, So, v
+2: cf ←centroid(Sf)
+3: co ←centroid(So)
+4: tc = co −cf
+5: Sf
+j ←T (Sf
+j , R = I, t = tc, δd = 0),
+j = 1, 2
+6: ∂Fj ←T (∂Fj, R = I, t = tc, δd = 0),
+j = 1, 2
+7: return (∂F, Sf, tc)
+to update the current fingertip pointing vector v (Lines 3–4), the fingertip
+contact surfaces Sf (Line 5), and the corresponding canonical surfaces ∂F
+(Line 6). Finally, the updated parameters are forwarded to the subsequent
+translation-refinement stage (Line 7).
+4.2. Translation Refinement for CoM Alignment (TransRefine)
+The second stage refines the translation parameter t by promoting align-
+ment between the gripper and object CoMs. The overall procedure is sum-
+marized in Algorithm 2.
+Because the true CoMs of the object cannot be recovered from surface
+geometry alone, we approximate them using the centroids of the correspond-
+ing surfaces. Note that this correspond to assume that the mass distribution
+is constant over the object. We compute the centroid of an input surface ∂
+via the centroid() operator:
+centroid(∂) = 1
+K
+K
+X
+k=1
+yk,
+yk ∈∂,
+(12)
+where K denotes the number of points representing the surface (Lines 2–3).
+The resulting translation update tc (Line 4) is then applied to the current
+gripper surfaces Sf and ∂F (Lines 5–6), and the updated parameters are
+passed to the subsequent fingertip-displacement optimization stage (Line 7).
+4.3. Fingertip Displacement Optimization for Stable Contact Distribution
+(FingerOpt)
+Given an estimated grasp pose (R(ω∗), t∗), the final stage optimizes the
+fingertip displacement δd. The complete procedure is summarized in Algo-
+rithm 3. The objective of this step is to refine the gripper aperture so as to
+12
+
+Algorithm 3: Fingertip Displacement Optimization for Stable Con-
+tact Distribution (FingerOpt)
+1: Input: ∂F, Sf, So, v, d
+2: δd∗←min
+δd Ep
+ δd, d; Sf, So
+3: Sf
+j ←T (Sf
+j , R = I, t = 0, δd∗),
+j = 1, 2
+4: ∂Fj ←T (∂Fj, R = I, t = 0, δd∗),
+j = 1, 2
+5: return (∂F, Sf, δd∗)
+reduce the gripper-object surface distance (Eq. (3)) and, in turn, promote a
+stable and well-distributed set of contact points. To this end, we solve the
+following one-dimensional constrained least-squares problem over δd:
+min
+δd
+N
+X
+i=1
+2
+X
+j=1
+(bij −aijδd)2,
+s.t.
+δd + d0 ∈[dmin, dmax].
+(13)
+The coefficients are given by
+aij = 0.5(−1)j−1v⊤nq
+ij,
+(14a)
+bij =
+ pij −qij
+⊤nq
+ij.
+(14b)
+For a two-finger parallel gripper, the optimal relative fingertip motion
+admits a closed-form solution:
+δd∗=
+
+
+
+
+
+dmin −d,
+if δ ˆd + d < dmin,
+δ ˆd,
+if dmin ≤δ ˆd + d ≤dmax,
+dmax −d,
+if δ ˆd + d > dmax,
+δ ˆd =
+Pm
+i=1
+P2
+j=1 aijbij
+Pm
+i=1
+P2
+j=1 a2
+ij
+.
+(15)
+4.4. Disentangled Iterative Surface Fitting
+This section introduces the unified surface fitting procedure. The pro-
+posed Disentangled Iterative Surface Fitting (DISF) alternates the three
+optimization stages to iteratively produce feasible grasps that satisfy both
+geometric compatibility and contact stability. The overall workflow is sum-
+marized in Algorithm 4.
+DISF begins by initializing the rotation matrix, translation vector, and
+gripper aperture. Then it repeatedly executes the three stages: (1) RotOpt,
+13
+
+Algorithm 4: DISF: Disentangled Iterative Surface Fitting
+Input: ∂F, ∂O, R0, t0, d0, dmin, dmax, v0, ∆e
+Init: ∂F0 ←T (∂F, R0, t0, d0), RΣ ←I, tΣ ←0, δdΣ = 0, d = d0,
+ω∗= 0, t∗= 0, δd∗= 0, ep = ∞, e ←E
+ Sf, So
+, v = v0
+while ep −e ≥∆e do
+ep ←E
+ Sf, So
+;
+(∂F, Sf, ω∗, Rv, v) ←RotOpt(∂F, Sf, So, Rv, v);
+(∂F, Sf, t∗) ←TransRefine(∂F, Sf, So, v);
+(∂F, Sf, δd∗) ←FingerOpt(∂F, Sf, So, v, d);
+d ←d + δd∗;
+e ←E
+ Sf, So
+;
+RΣ ←Rrod(ω∗)RΣ;
+tΣ ←t∗+ tΣ;
+δdΣ ←δd∗+ δdΣ;
+R∗= RΣR0;
+t∗= tΣ + t0;
+δd∗= δdΣ;
+return (R∗, t∗, δd∗);
+(2) TransRefine, and (3) FingerOpt. Among these, only RotOpt relies on the
+small-rotation approximation, which yields a locally convergent update. By
+contrast, TransRefine and FingerOpt do not require such approximations and
+admit closed-form solutions. After each iteration, the updated parameters—
+namely cumulative rotation RΣ, translation tΣ, and fingertip displacement
+δdΣ—are assessed. The iteration continues until the change in the surface
+update, quantified as |e −ep|, drops below a predefined threshold ∆e, at
+which point the algorithm terminates.
+5. Simulation Experiments
+We evaluated the proposed grasp planner in simulation under two shape-
+availability settings: Known-shape, where clean object point clouds were
+sampled from CAD meshes, and Observed-shape, where noisy partial recon-
+structions were used.
+Across both settings, we assessed (i) grasp quality
+in terms of geometric compatibility and CoM alignment, (ii) physical fea-
+sibility via grasp execution in physics simulator, and (iii) generality across
+robot–gripper platforms, with a particular emphasis on gripper variability.
+14
+
+Franka Emika: Panda 
++ Franka Hand
+Universal Robots: UR5e
++ Robotiq HAND-E gripper
+KUKA: iiwa
++ UMI gripper
+Gripper 
+Zoom
+Point Cloud 
+Representation
+Platform
+Figure 4: Robot–gripper platforms used in simulation for cross-platform evaluation. We
+evaluate grasp execution across three parallel-jaw grippers with different fingertip geome-
+tries and aperture ranges: (left) Franka Emika Panda with the Franka Hand, (middle)
+Universal Robots UR5e with the Robotiq HAND-E gripper, and (right) KUKA iiwa with
+the UMI gripper [27]. The Gripper Zoom row highlights the end-effector designs to
+emphasize that our evaluation focuses on gripper variability rather than the robot model.
+The Point Cloud Representation row visualizes the corresponding canonical fingertip
+surfaces used in our surface-fitting optimization. In the simulator, the left fingertip is
+rendered as a green geom and the right fingertip as a red geom; the canonical fingertip
+point clouds are shown with the same color coding for consistent interpretation.
+15
+
+Table 1: Gripper geometry specifications used in the cross robot–gripper platform evalua-
+tion (Fig. 4). The Wfinger and Hfinger denote the fingertip width and height, respectively.
+All values are shown in millimeters and rounded to integers for consistent formatting.
+Gripper
+Wfinger [mm]
+Hfinger [mm]
+dmin [mm]
+dmax [mm]
+Franka Hand
+18
+18
+11
+91
+Robotiq HAND-E
+20
+21
+0
+50
+UMI gripper
+119
+26
+0
+80
+5.1. Common Setup
+All simulation experiments were conducted in MuJoCo [28]. Unless oth-
+erwise noted, grasp planning and execution were evaluated on the Panda
+platform equipped with the Franka Hand. For cross-platform evaluation, we
+additionally executed the planned grasps on two other robot–gripper plat-
+forms to test robustness to gripper variability, including fingertip-geometry
+and aperture-range differences. The evaluated robot–gripper platforms are
+illustrated in Fig. 4, and the corresponding gripper geometry specifications
+are summarized in Table 1.
+5.1.1. Object Point Clouds
+We used 15 objects in total: 5 Known-shape objects from internet data
+and 10 Observed-shape objects from YCB dataset.
+Known-shape objects. For the Known-shape setting, we downloaded CAD
+meshes for the five objects and generated clean object point clouds by sam-
+pling from the mesh surface using Poisson-disk sampling (Open3D function
+of sample_points_poisson_disk) with 3000 points. The five CAD models
+used in this setting are shown in Fig. 5.
+Observed-shape objects. For the Observed-shape setting, we selected 10
+objects from the YCB dataset [29] and constructed object point clouds by
+voxel downsampling with voxel size 5 [mm], which yielded noisier and less
+complete geometry compared to the Known-shape setting. To avoid confu-
+sion, we emphasize that our Observed-shape setting does not assume access
+to a clean CAD model. Instead, we use object geometry that is reconstructed
+from real RGB-D observations provided by the Yale–CMU–Berkeley (YCB)
+object and model set [29], which includes RGB-D scans, point-cloud data,
+and reconstructed meshes of physical objects. As a result, the observed point
+16
+
+(a)
+(b)
+(c)
+(d)
+(e)
+Figure 5:
+Known-shape objects used in simulation,
+visualized in MeshLab:
+(a)
+T-shape_Block, (b) Rubber_Duck, (c) Hammer, (d) Wine_Glass, and (e) Old_Camera.
+clouds can exhibit measurement noise, occlusions, missing depth, and surface
+reconstruction artifacts (e.g., depth failure on transparent/reflective regions),
+as described in [29], making them different from the idealized CAD-derived
+geometry used in the Known-shape setting.
+5.1.2. Surface Normal Estimation
+Since the point clouds did not include normals, we estimated surface nor-
+mals using Open3D (estimate_normals) [30]. The normal directions were
+oriented consistently to point outward by flipping normals whose direction
+was inconsistent with the vector from the object CoM to each point.
+5.1.3. Initialization of Grasp Pose
+The grasp translation t0 was initialized using k-means clustering on the
+object point cloud: the cluster centroids were treated as candidate grasp
+positions, and one centroid was selected as the initial grasp position for op-
+timization. Figure 6 illustrates this procedure. The initial grasp orientation
+R0 was manually designed for each object–robot pair to define a feasible
+approach direction consistent with the gripper geometry and workspace con-
+straints. The initial gripper aperture d0 was set to the maximum opening
+width of the gripper.
+5.1.4. Comparative Methods
+We compared three planners: (i) CMA-ES [31], a sampling-based op-
+timizer, (ii) VISF [10], an iterative surface fitting baseline without CoM
+alignment, and (iii) DISF (ours), which integrates CoM alignment into dis-
+entangled iterative surface fitting.
+17
+
+T-shape_Block
+Rubber_Duck
+Wine_Glass
+Hammer
+Old_Camera
+Figure 6: Initialization of grasp translation via k-means clustering. For each object, we
+cluster the object point cloud into k regions and treat the cluster centroids as candidate
+grasp positions. The selected initial grasp position t0 is indicated by the red marker.
+5.2. Grasp Quality Evaluation
+5.2.1. Settings
+We first evaluated grasp quality on the final optimized grasp pose using
+two metrics: the conventional geometric compatibility error and the CoM
+alignment error introduced in this study. This evaluation did not involve
+physics simulation or robot execution; instead, grasp poses were evaluated
+purely based on the object point cloud and a gripper surface model. Specifi-
+cally, we used the Franka Hand1 gripper surface model to define the gripper
+surface and ran grasp planning for all 15 objects (5 Known-shape and 10
+Observed-shape), reporting the resulting errors for each method.
+As an evaluation metric for geometric compatibility, we used the following
+1Franka Hand: https://franka.de/accessories
+18
+
+weighted measure, which combines the surface distance defined in Eq. (3) and
+the contact normal misalignment defined in Eq. (4) with a scaling factor α:
+Egeom(ω, t, δd; Sf, So) = Ep(ω, t, δd; Sf, So) + α2En(ω; Sf, So).
+(16)
+The CoM misalignment was computed using the norm of the CoM difference
+between the gripper’s and the object’s canonical surfaces:
+ECoM(ω, t, δd; Sf, So) = ∥centroid(∂O) −centroid(∂F∗)∥,
+(17)
+where ∂F∗is the canonical gripper surface transformed by the optimal grasp-
+ing parameter (R(ω∗), t∗, δd∗).
+In the experiments, we set the parameter α = 0.1, β = 0.85, d0 = 0.091,
+dmin = 0.011, dmax = 0.091, v0 = [0, 1, 0], nz0 = [0, 0, 1], ∆e = 1e−4.
+The weight parameters such as α and β were selected empirically based on
+preliminary experiments that yielded stable performance across the tested
+objects. We also used the predefined approach direction napp for each object.
+5.2.2. Results
+The results are shown in Fig. 7. The top row reports the geometric com-
+patibility error Egeom, and the bottom row reports the CoM alignment error
+ECoM. For each metric, we evaluated two shape-availability settings: the
+Known-shape setting (CAD-derived clean point clouds) and the Observed-
+shape setting (sensor-derived reconstructions).
+Regarding Egeom, VISF did not consistently achieve the lowest error de-
+spite explicitly optimizing geometric compatibility. A plausible explanation
+is that VISF simultaneously updates multiple pose parameters within a cou-
+pled optimization problem, where kinematic constraints prevent independent
+motion of the gripper contact surfaces. This coupling can increase sensitivity
+to local minima, especially when the object geometry is incomplete or noisy.
+In contrast, DISF maintained low Egeom while consistently achieving the
+lowest ECoM across both settings. The improvement in ECoM was more pro-
+nounced in the Observed-shape setting, where noise and missing surfaces
+made it harder for the baselines to maintain CoM-consistent contact config-
+urations.
+Overall, DISF preserved geometric compatibility while improving CoM
+alignment, which was expected to promote a more stable contact configura-
+tion and, consequently, higher grasp success in physics-based execution.
+19
+
+Figure 7: Grasp quality evaluation in simulation across the Known-shape and Observed-
+shape settings. The top figures report the geometric compatibility error Egeom, and the
+bottom figures report the CoM alignment error ECoM, for the optimized grasp pose of
+each method. All values are shown on a logarithmic scale.
+20
+
+(1) home
+(2) pre-grasp
+(3) grasp
+(4) post-grasp
+Figure 8: Grasp execution pipeline in MuJoCo used for success rate evaluation. For each
+object, we executed the grasp planned from the optimal pose (R(ω∗), t∗) with the optimal
+gripper aperture δd∗. First, the robot moved its end-effector to a pre-grasp pose computed
+by offsetting the planned grasp pose along the approach direction. Next, from the pre-
+grasp pose, the robot approached the object to reach the final grasp pose and closed the
+gripper to the target aperture δd∗. After grasping, the object was lifted vertically by 30 cm
+and held stationary for 1 s. Finally, grasp success was evaluated from the positional and
+orientational errors of the lifted object.
+5.3. Grasp Success Rate Evaluation
+5.3.1. Settings
+To evaluate the feasibility of the planned grasps, we executed them in the
+MuJoCo physics simulator [28, 32] and measured grasp success rates.
+Since DISF provided only the final grasp pose, we computed a pre-grasp
+pose and executed a simple approach trajectory to the final pose for grasp
+execution (Fig. 8). The pre-grasp pose definition and trajectory procedure
+are detailed in Appendix B.
+We evaluated success using the positional and orientational errors after
+lifting:
+epos = ∥ptarget −plift∥,
+(18a)
+eori = 2 · arccos(|w|),
+(18b)
+where ptarget is the target position determined from the initial object position
+and the lifting height, plift is the observed object position after execution,
+and w is the scalar component of the quaternion representing the object’s
+orientation. A trial was considered successful if both errors remained below
+predefined thresholds, ηpos = 0.06 m and ηori = 30◦:
+Success =
+(
+1,
+if (epos < ηpos) ∧(eori < ηori),
+0,
+otherwise.
+(19)
+21
+
+Table 2: Grasp success on the Panda robot for the Known-shape and Observed-shape
+regimes. The Known-shape regime uses 3D CAD objects, while the Observed-shape regime
+uses YCB objects.
+The checkmark (✓) indicates success, while the horizontal bar (-)
+indicates failure. The bottom row reports the overall grasp success rate for each method
+across all objects of each setting and its average planning time.
+Setting
+Object
+CMA-ES VISF DISF (ours)
+Known-shape
+T-shape_Block
+-
+✓
+✓
+Rubber_Duck
+-
+✓
+✓
+Hammer
+-
+✓
+✓
+Wine_Glass
+-
+-
+✓
+Old_Camera
+-
+✓
+✓
+Observed-shape
+006_mustard_bottle
+-
+-
+✓
+011_banana
+-
+-
+✓
+029_plate
+-
+-
+-
+033_spatula
+-
+-
+-
+035_power_drill
+-
+-
+✓
+037_scissors
+-
+-
+✓
+042_adjustable_wrench
+-
+-
+✓
+052_extra_large_clamp
+-
+-
+✓
+058_golf_ball
+-
+-
+✓
+065-j_cups
+-
+-
+-
+Success rate (Known-shape)
+0/5
+4/5
+5/5
+Success rate (Observed-shape)
+0/10
+0/10
+7/10
+Planning time [ms]
+186.7
+5.7
+9.4
+To mimic safety considerations in real-world execution, we additionally
+treated overly aggressive push-down motions as failures.
+During the ap-
+proach/grasp phase in Fig. 8, if the object was pushed downward along the
+world z axis by more than 0.01 m from its initial height, we terminated the
+execution and counted the trial as a failure.
+To ensure reliable grasp execution in simulation, we applied an additional
+refinement to the fingertip displacement (i.e., a small closing bias) during
+execution. Details are provided in Appendix C.
+5.3.2. Results on the Panda robot
+Table 2 reports the grasp execution results on the Panda robot. DISF
+achieved the highest success rates in both settings, succeeding on all Known-
+22
+
+Table 3: Average grasp success rate (%) across robot–gripper platforms and evaluation
+regimes.
+We report results for three platforms (Panda+Franka Hand, UR5e+Robotiq
+HAND-E, iiwa+UMI gripper), each averaged over all objects in the corresponding setting.
+Setting
+Robot–gripper platform
+CMA-ES
+VISF
+DISF (ours)
+Known-shape
+Panda + Franka Hand
+0
+80
+100
+UR5e + HAND-E
+20
+80
+100
+iiwa + UMI gripper
+0
+40
+80
+Average over platforms
+7
+67
+93
+Observed-shape
+Panda + Franka Hand
+0
+0
+70
+UR5e + HAND-E
+30
+40
+60
+iiwa + UMI gripper
+10
+60
+80
+Average over platforms
+13
+33
+70
+Total Average
+10
+50
+82
+shape objects (5/5) and on 7 out of 10 Observed-shape objects. In contrast,
+VISF succeeded on 4/5 objects in the Known-shape setting but failed on
+all Observed-shape objects (0/10), indicating that geometric-compatibility-
+based surface fitting alone was not robust to sensor-derived geometry with
+noise, missing surfaces and artifacts. CMA-ES failed on all objects in this
+evaluation.
+Beyond success rate, Table 2 also shows the computational efficiency.
+CMA-ES required 186.7 ms on average, whereas the surface-fitting meth-
+ods were substantially faster (5.7 ms for VISF and 9.4 ms for DISF). This
+indicates that DISF improved grasp feasibility while retaining the practical
+runtime of iterative surface fitting.
+5.3.3. Cross-platform Evaluation (Generalization across Grippers)
+To evaluate generality across diverse grippers, Table 3 summarizes the
+average grasp success rates on three representative robot–gripper setups (see
+Fig. 4). While the manipulator models also differ across these platforms,
+our primary interest here is robustness to gripper-geometry variability, i.e.,
+whether DISF transfers across different grippers without redesigning the
+planner. Table 1 summarizes the fingertip surface size and aperture range of
+each gripper.
+DISF consistently outperformed the baselines across all gripper setups,
+23
+
+Panda
+(a)
+(b)
+(c)
+(d)
+(f)
+(g)
+(h)
+(i)
+(j)
+(k)
+(l)
+(m)
+(n)
+(o)
+UR5e
+iiwa
+(e)
+Figure 9: Examples of grasp executions planned by DISF across three robot–gripper plat-
+forms in Mujoco. From top to bottom: Panda, UR5e and iiwa. For each object (a–o), the
+upper inset visualizes the planned grasp pose on the point cloud space where the visual
+elements include contact points (cyan), surface fitting points (blue), and fingertip surfaces
+(plum and lime green). The orange arrow indicate the optimized z-axis direction of the
+gripper, while the purple arrow indicates a given approach direction napp. The lower im-
+age shows the corresponding execution outcome. Green frames with a checkmark indicate
+successful grasps, while magenta frames with a cross indicate failures. The object order
+matches Table 2: (a)–(e) Known-shape, (f)–(o) Observed-shape.
+24
+
+achieving 93% average success in the Known-shape setting and 70% in the
+Observed-shape setting, resulting in an overall average of 82%. Notably, the
+improvement of DISF over VISF was larger in the Observed-shape setting
+(+37 points: 70% vs. 33%) than in the Known-shape setting (+26 points:
+93% vs. 67%), suggesting that explicitly promoting CoM alignment in surface
+fitting can improve robustness when object geometry is imperfect.
+Fig. 9 visualizes representative execution outcomes across platforms. Suc-
+cessful cases show that DISF yields feasible grasps that remain stable during
+lifting, whereas the failures reveal limitations inherent to surface-fitting-based
+planning: (i) contact interactions (e.g., friction and local contact model-
+ing) are not explicitly optimized, and (ii) CoM alignment is computed from
+the available surface representation, which may differ from the true physical
+CoM. These limitations are particularly evident for thin or highly asymmet-
+ric objects (e.g., 029_plate and 033_spatula), where incomplete contact or
+rotational slip can occur even when the planned grasp appears geometrically
+plausible.
+Overall, the results demonstrate that DISF improves grasp success by en-
+hancing contact stability via CoM alignment, while preserving the efficiency
+of iterative surface fitting.
+6. Real-world Experiments
+We conducted real-world grasp executions to evaluate whether grasps
+planned by our surface fitting algorithm transfer to a physical setup under
+real-world uncertainties, including variations in friction and contact dynam-
+ics, calibration errors, and imperfect object observations (e.g., partial views
+and sensor noise). We evaluated three planners (CMA-ES, VISF, and DISF)
+on a UR3e manipulator equipped with a Robotiq Hand-E gripper, and re-
+ported grasp success rate as the primary metric. To mirror the evaluation
+settings used in simulation, we performed experiments under both a Known-
+shape setting and an Observed-shape setting. In the Known-shape setting,
+grasps were planned from CAD-derived object point clouds (3D models) for a
+set of 3D-printed objects. In the Observed-shape setting, grasps were planned
+directly from camera-observed point clouds captured by depth sensors.
+6.1. Common Setup
+This section describes the experimental components shared by both the
+Known-shape and Observed-shape settings. Unless otherwise stated, we used
+25
+
+(a)
+UR3e
+Robotiq HAND-E gripper
+Object
+(b)
+(c)
+X
+Y
+Z
+Calibration Bord
+Figure 10: Real-world experimental setup.
+(a) A UR3e manipulator equipped with a
+Robotiq Hand-E parallel gripper.
+Objects were placed on a printed calibration board
+(grid and reference axes) to define a consistent planning frame in the workspace.
+(b)
+Example object placement on the calibration board. (c) The grasp-planning coordinate
+frame used throughout the real-world experiments. All planned grasp poses were expressed
+in this frame, and the robot task-space reference was calibrated accordingly.
+the same hardware, calibration procedure, grasp initialization, execution
+pipeline, and evaluation protocol across the two settings.
+6.1.1. Hardware Platform
+All real-world experiments were conducted using a UR3e manipulator
+equipped with a Robotiq Hand-E parallel-jaw gripper. The robot executed
+grasp motions in a tabletop workspace, as illustrated in Fig. 10.
+6.1.2. Workspace and Frame Calibration
+To align the real-world workspace with the grasp-planning coordinate
+system, we placed a printed calibration board on the work surface (Fig. 10
+(a)). The board was a planar target showing a 30-mm grid together with
+Cartesian axes. We then adjusted the robot task-space reference such that,
+at a predefined nominal pose in the planning frame (translation t = 0 and
+rotation R = I), the gripper center was aligned with the origin of the calibra-
+tion board. Throughout the experiments, objects were placed on the board
+so that their nominal placement matched the grasp-planning space.
+26
+
+6.1.3. Initialization and Execution Protocol
+We followed the same initialization and execution procedure as in sim-
+ulation described in Sec. 5.1.3. The grasp translation t0 was initialized via
+k-means clustering on the object point cloud, while the rotation R0 was
+manually specified to yield a feasible approach direction for each object, and
+the initial gripper aperture d0 was set to the gripper’s maximum opening
+width (e.g.
+d = 0.05 [m]).
+Because the point-cloud characteristics differ
+between Known-shape and Observed-shape settings (e.g., point density and
+occlusions), the k-means configuration and selected centroid were tuned per
+setting. We also adopted the same grasp execution procedures in the exper-
+iments as in simulation.
+6.1.4. Evaluation Protocol
+In real-world setup, it is difficult to obtain the object’s 6-DoF pose with
+the same accuracy as in simulation. Therefore, directly judging grasp success
+based on complete pose-state information (e.g., the true post-lift pose change)
+is not feasible. To address this, we determine grasp success using a post-
+grasp close-probing procedure, where an additional gripper-closing command
+is issued after the post-grasp motion. Intuitively, if the grasp has not been
+established, the object does not constrain the gripper and the fingers can
+continue closing; consequently, the gripper aperture decreases to near zero.
+In contrast, if the grasp is established, the object thickness prevents further
+closing, and the gripper aperture remains above a certain value.
+Let d [mm] denote the gripper aperture measured after the close-probing
+step, and let ξ [mm] be a threshold that represents the minimum aperture
+indicating that an object remains between the fingers. The protocol is as
+follows: (1) after executing the grasp and the post-grasp lifting motion, we
+send an additional closing command to the gripper; (2) after waiting for δt
+[sec], we read the gripper aperture d and declare the grasp successful if d > ξ.
+This criterion avoids sensitivity to force-sensor drift and noise while keeping
+the implementation simple. In our experiments, we set δt = 1.0 and ξ = 3.0.
+Any execution that was aborted by the controller (e.g., due to collisions
+or kinematically unsafe was counted as a failure.
+6.2. Known-shape Setting
+6.2.1. Setup
+In the Known-shape setting, we executed grasps planned from the same
+object models used in simulation. In the real setup, each object was placed on
+27
+
+(a)
+(b)
+(c)
+(d)
+(e)
+(f)
+(g)
+(h)
+(i)
+Figure 11: Objects used in the real-world evaluation. Objects (a)–(e) were 3D-printed
+using PLA filament and were used in both the Known-shape and Observed-shape set-
+tings to enable a direct comparison, while (f)–(i) were additional objects evaluated only
+in the Observed-shape setting. (a) T-shape_Block, (b) Rubber_Duck, (c) Hammer, (d)
+Wine_Glass, (e) Old_Camera, (f) Tripod, (g) USB, (h) Controller, and (i) Tape.
+the calibration board so that its nominal pose matched the predefined grasp-
+planning coordinate frame, thereby ensuring consistency between the planned
+grasp pose and the physical placement. We evaluated the five objects (a)–(e)
+in Fig. 11 to enable a direct comparison with the Observed-shape setting.
+Grasp parameter setting.
+Since the object geometry is available as a
+clean CAD model in this setting, we did not re-plan grasp pose parameters.
+Instead, we reuse the grasp poses obtained in simulation under the Known-
+shape condition and directly execute them on the physical robot. This setting
+therefore evaluates whether grasps planned under accurate shape information
+transfer reliably to real execution.
+6.2.2. Results
+Table 4 (Known-shape block) summarizes real execution when clean ob-
+ject geometry is available and the grasp poses are directly transferred from
+simulation. Under this setting, DISF succeeds on all trials, and VISF achieves
+the same outcome pattern as in simulation, failing only on Wine_Glass. This
+indicates that, with clean object geometry, the planned grasps transfer to real
+execution with identical success rates for both methods. CMA-ES fails on
+all trials, consistent with its behavior in simulation, indicating that direct
+black-box search over grasp parameters is not reliable.
+28
+
+Table 4: Real-world grasp success results under the Known-shape and Observed-shape
+settings. The Observed-shape setting is reported in two blocks: (i) the same objects as
+the Known-shape setting (enabling a direct Known vs. Observed comparison), and (ii)
+additional objects used only in the Observed-shape setting. The checkmark (✓) indicates
+success, while the horizontal bar (-) indicates failure.
+Setting
+Object
+CMA-ES
+VISF
+DISF (ours)
+Known-shape
+(real execution)
+T-shape_Block
+-
+✓
+✓
+Rubber_Duck
+-
+✓
+✓
+Hammer
+-
+✓
+✓
+Wine_Glass
+-
+-
+✓
+Old_Camera
+-
+✓
+✓
+Observed-shape
+(same objects)
+T-shape_Block
+-
+✓
+✓
+Rubber_Duck
+-
+✓
+✓
+Hammer
+-
+-
+✓
+Wine_Glass
+-
+-
+✓
+Old_Camera
+-
+-
+✓
+Observed-shape
+(additional objects)
+Tripod
+-
+-
+✓
+USB
+-
+-
+✓
+Controller
+-
+-
+-
+Tape
+-
+-
+✓
+Success rate (Known-shape)
+0/5
+4/5
+5/5
+Success rate (Observed-shape, same objects)
+0/5
+2/5
+5/5
+Success rate (Observed-shape, additional objects)
+0/4
+0/4
+3/4
+Success rate (Observed-shape, overall)
+0/9
+2/9
+8/9
+6.3. Observed-shape Setting
+6.3.1. Camera Setup
+To construct observed object point clouds for grasp planning, we use two
+depth sensors (Orbbec Femto Bolt) placed around the workspace to capture
+complementary views of the scene (Fig. 12).
+We refer to the sensors as
+Camera1 (left view) and Camera2 (right view).
+Depth range clipping. To improve the stability of subsequent point cloud
+registration, we clip raw depth measurements to camera-specific valid ranges
+and discard values outside these intervals. This reduces far-range noise and
+background clutter while retaining the geometry around the target object.
+Landmarks for robust registration. Because multi-view registration can
+be ill-conditioned when the scene contains limited geometric variation, we
+29
+
+Camera1
+Object
+Camera2
+(a)
+RGB
+Depth
+Camera1
+Camera2
+(b)
+Figure 12: Two-view depth sensing setup using two Orbbec Femto Bolt sensors (Camera1:
+left view, Camera2: right view). Prior to point cloud generation and multi-view regis-
+tration, depth values are clipped to camera-specific valid ranges (Camera1: 200–700 mm;
+Camera2: 200–1000 mm) to suppress invalid readings. Multiple static landmark objects
+are placed in the scene to improve overlap and stabilize ICP-based cross-view registration.
+intentionally place multiple landmark objects in the scene in addition to
+the target object to be grasped. These landmarks introduce distinctive ge-
+ometric structure, improving the robustness of the global registration stage
+(RANSAC-based) and providing a reliable initialization for subsequent local
+refinement (ICP-based), resulting in more stable alignment between the two
+camera point clouds.
+6.3.2. Point Cloud Preprocessing
+Starting from the merged two-view scene point cloud, we apply a deter-
+ministic preprocessing pipeline to obtain a single object point cloud with a
+consistent coordinate frame suitable for the grasp planner (Fig. 13). The
+pipeline standardizes the workspace orientation, removes the support sur-
+face, isolates the target object from clutter, and finally defines an object-local
+frame (origin and heading) used by the planner. We will describe the detail
+of each stage in the below.
+(1) Align and merge views.
+We first combine the two depth-derived
+point clouds captured from Camera1 (left view) and Camera2 (right view)
+into a single scene point cloud.
+We estimate a rigid transformation that
+aligns the left-view point cloud to the right-view point cloud. For robust-
+ness, we optionally remove sparse outliers from both views using statistical
+30
+
+Grasp Planner
+(1) align & merge views
+(2) align to reference frame
+(3) table removal + clustering
+(4) extract target object
+(5) set origin + heading
+Figure 13:
+Preprocessing pipeline for converting two-view depth observations into a
+planner-ready object point cloud.
+(1) Register and merge the two view point clouds
+into a single scene cloud. (2) Align the scene with the gripper approach axis (z-axis). (3)
+Remove the support plane (table) and cluster remaining points into object candidates. (4)
+Extract and denoise the target object cluster. (5) Set gripper-frame origin and heading.
+outlier removal. We then compute a coarse initial alignment using a global
+registration procedure based on geometric feature matching (RANSAC [33]
+with FPFH descriptors [34]) on voxel-downsampled point clouds. Starting
+from this initialization, we refine the alignment with point-to-plane ICP [12]
+using estimated surface normals. Finally, we transform the left-view point
+cloud into the right-view coordinate frame and merge the two point sets to
+obtain a unified scene point cloud used in subsequent steps.
+(2) Align the scene with the gripper approach axis. To make the
+downstream processing consistent with the planner convention, we re-orient
+the merged scene so that the dominant support plane (the tabletop) provides
+a stable reference for the vertical axis. Concretely, we detect the support
+plane and rotate the scene such that the plane normal becomes aligned with
+the gripper approach axis (the gripper z-axis).
+We additionally shift the
+scene to use the tabletop as a consistent height reference.
+(3) Table removal and clustering into object candidates. After align-
+ment, we remove the support plane to isolate points belonging to objects
+31
+
+T-shape_Block
+Rubber_Duck
+Wine_Glass
+Old_Camera
+Hammer
+Tripod
+USB
+Controller
+Tape
+Figure 14: Observed object point clouds after preprocessing.
+placed on the table. We then cluster the remaining points based on spatial
+proximity to form object candidates. This step yields a set of clusters cor-
+responding to individual objects (and potential small noise clusters), which
+are used for target selection.
+(4) Extract and denoise the target object. We select the cluster corre-
+sponding to the target object by specifying a cluster ID. The extracted cluster
+is further cleaned by removing residual outliers and small disconnected frag-
+ments, producing a compact and denoised target-object point cloud suitable
+for grasp planning.
+(5) Specify object position and heading in gripper frame. Finally,
+to parameterize the object pose in the coordinate convention used by the
+planner, we assign two reference points on the extracted target. The first
+point is chosen as an anchor and is treated as the origin of the gripper
+frame, i.e., the point that corresponds to (0, 0, 0) in the gripper frame. The
+second point defines a heading direction relative to the anchor and is used
+to specify the object’s in-plane orientation (yaw).
+With this anchor-and-
+heading convention, the target point cloud can be expressed consistently in
+the gripper frame, enabling grasp planning. The actual preprocessed object
+point clouds are shown in Fig. 14.
+32
+
+6.3.3. Results
+Table 4 (Observed-shape blocks) reports the grasp performance when
+grasps are planned from observed point clouds. The performance gap be-
+tween DISF and VISF widens markedly under observed geometry. On the
+same objects as in the Known-shape evaluation, DISF achieves an identi-
+cal success rate to the Known-shape setting, while VISF degrades. CMA-
+ES again fails across all Observed-shape trials. DISF further generalizes to
+additional everyday objects introduced only in the Observed-shape setting,
+demonstrating robustness to partial and noisy geometric observations. Ex-
+amples of successful grasp are shown in Fig. 15.
+6.4. Failure Mode Analysis
+To better interpret the real-world outcomes under the Observed-shape
+setting, we analyze failures by categorizing each trial into three observable
+modes: contact-induced abort, misgrasp, and success. A contact-induced abort
+occurs when execution is terminated by the robot’s safety mechanisms due
+to unintended contacts during the pre-grasp or grasp phase in the execution.
+A misgrasp denotes trials where the planned motion is executed without
+safety stops, yet the grasp is not established at closure (e.g., the fingers
+miss the intended contact region or fail to securely grasp the object). The
+remaining trials that satisfy the evaluation protocol described in Section 6.1.4
+are counted as success.
+The resulting failure-mode breakdown is shown in Fig. 16 across the meth-
+ods. CMA-ES exhibits no successful trials; its outcomes are dominated by
+contact-induced aborts and misgrasps, indicating that black-box search of-
+ten produces low-feasibility grasp plans under observed geometry.
+VISF
+achieves a limited number of successes, but still shows a large portion of
+contact-induced aborts and misgrasps, suggesting sensitivity to observation
+imperfections that can perturb the planned approach and contact configura-
+tion. In contrast, DISF converts most trials into successes, with only a single
+misgrasp and no contact-induced abort in our experiments. This indicates
+that enforcing the CoM alignment in the surface fitting-based grasp planning
+algorithm yields safer and more reliable grasps when the object geometry is
+provided as reconstructed point clouds from camera observations.
+Overall, this failure-mode breakdown explains the pronounced perfor-
+mance gap observed in Table 4 under observed geometry: baseline meth-
+ods frequently fail either by triggering safety stops or by producing grasps
+33
+
+Wine_Glass
+success
+Old_Camera
+success
+Tripod
+success
+success
+USB
+success
+Tape
+success
+T-shape_Block
+Figure 15: Successful real-world grasps planned by DISF under the Observed-shape set-
+ting.
+Each figure shows a different object grasped on the UR3e, including both ob-
+jects shared with the Known-shape setting and additional objects evaluated only in the
+Observed-shape setting. The inset in the upper-left of each figure visualizes the planner
+input: the reconstructed object point cloud in the gripper-aligned frame with the corre-
+sponding planned grasp pose.
+34
+
+(a)
+(b)
+(c)
+contact-induced abort
+collision
+Controller
+VISF:
+misgrasp
+Tripod
+CMA-ES:
+no-contact
+Figure 16: Failure-mode analysis in real-world grasp execution under the Observed-shape
+setting. (a) Failure-mode breakdown over 9 trials per method, categorized as contact-
+induced abort, misgrasp, or success according to the evaluation protocol in Sec. 6.1.4. (b–c)
+Representative failure cases illustrating the two dominant failure modes for the baselines:
+(b) a misgrasp where the motion completes but the gripper fails to establish contact with
+the object (CMA-ES on Tripod), and (c) a contact-induced abort triggered by unintended
+collision during approach, leading to an automatic safety stop (VISF on Controller). Insets
+visualize the planner input point cloud and the planned grasp pose for each trial.
+that execute but do not establish stable contact, whereas DISF substantially
+reduces both failure modes.
+7. Discussion
+We discuss several limitations of DISF and outline directions for future
+work toward more reliable and practical grasp planning.
+7.1. Limited physical/contact and kinematics modeling during planning
+While the proposed framework optimizes geometric compatibility and
+contact stability through CoM alignment, it does not explicitly model fric-
+tion, compliance, or contact forces inside the grasp planning. As a result,
+failures can still occur when a geometrically plausible contact configuration
+becomes unstable during execution (e.g., incomplete contact or rotational
+35
+
+slip). Moreover, the lack of contact modeling also makes it difficult to reliably
+detect whether the planned grasp induces physically infeasible penetration
+between the gripper and the object, and thus collision-free execution is not
+guaranteed. Bridging this gap may require tighter coupling with contact-
+aware constraints [35, 19, 20], or closed-loop execution with force/tactile
+feedback and online re-planning.
+Additionally, DISF does not explicitly incorporate robot kinematic reach-
+ability as a planning constraint (except indirectly through the approach-
+direction consistency term); therefore, a grasp pose that is feasible in the
+gripper–object grasp space can still fail in practice when the manipulator
+cannot reach the pose without violating joint limits or encountering colli-
+sions. Incorporating kinematics-aware constraints (e.g., IK feasibility and
+motion-planning constraints) is thus an important direction for improving
+real-world reliability [35, 36, 37].
+7.2. Heuristic selection of correspondence pairs
+To execute the proposed framework, we assume that reliable correspon-
+dence pairs between the object surface and the gripper surface can be ob-
+tained. However, the current implementation does not explicitly provide a
+dedicated pipeline for estimating such correspondences. Instead, we compute
+correspondences using distance- and rotation-based filtering with manually
+tuned heuristic thresholds to select valid pairs from a large set of candidate
+pairs. While this procedure is sufficient as an initial step to validate the core
+concept on relatively simple (often convex) objects, where many correspon-
+dences can be found for a wide range of grasp poses, it limits scalability to
+more complex geometries and tasks. In particular, for non-convex or thin
+objects (e.g., plates, spatulas, or narrow structures such as the rim/edge of
+a mug), we occasionally obtain correspondences only on one side (e.g., from
+a single fingertip region), which can lead to unstable or biased grasp opti-
+mization. Therefore, an important future direction is to integrate a more
+principled and automatic correspondence matching module, for example us-
+ing local geometric feature descriptors [38, 39, 40] or learning-based matching
+methods [41, 42, 43].
+7.3. Lack of task-oriented grasp quality
+The proposed surface-fitting-based grasp planning primarily relies on ge-
+ometric compatibility and contact stability derived from point cloud obser-
+vations, and therefore does not explicitly incorporate semantic or contextual
+36
+
+information about the downstream task after grasping. As a result, task-
+dependent requirements (e.g., where and from which direction to approach,
+or which contact region to prioritize) must currently be specified manually,
+such as by providing an approach-direction vector chosen with heuristics.
+While this is acceptable for controlled settings, it does not scale to larger and
+more complex scenarios where task-oriented grasp selection is critical. From
+this perspective, a promising direction is to integrate task-driven contact-
+region or grasp-pose proposals via affordance reasoning [44, 45, 46, 47, 48]
+and vision–language models [49, 50, 51, 52].
+7.4. Limited robustness to incomplete point clouds
+A further limitation of DISF lies in the assumption that point clouds
+with sufficiently wide surface coverage are available for grasp planning. In our
+Observed-shape setup, we mitigated this issue by deploying two depth sensors
+(Orbbec Femto Bolt) at complementary viewpoints and registering/merging
+the resulting point clouds to obtain a more complete observation of the target
+geometry.
+However, in many deployments, only a single (often low-cost)
+depth camera may be available, yielding noisier and more incomplete point-
+cloud measurements with limited surface visibility. This issue becomes even
+worse in cluttered scenes due to inter-object occlusion, unlike the open-space
+grasping setting used in our evaluations. To extend DISF to such settings, a
+promising direction is to integrate point-cloud completion techniques [53, 54,
+55, 56, 57] to reconstruct missing geometry (or grasp-relevant surface regions)
+from partial observations, enabling robust grasp planning under incomplete
+point clouds.
+8. Conclusion
+In this paper, we proposed a novel surface fitting-based grasp planning
+algorithm that extends conventional geometric compatibility optimization by
+incorporating CoM alignment to ensure that the gripper and object surfaces
+are spatially aligned, thereby enhancing contact stability. Inspired by human
+grasping behavior, our method disentangles the grasp pose optimization pro-
+cess into three sequential steps: (1) rotation optimization to align contact
+normals, (2) translation refinement for CoM alignment, and (3) gripper aper-
+ture adjustment to optimize contact point distribution. We validated DISF
+through extensive simulations under both Known-shape (clean CAD-derived
+37
+
+point clouds) and Observed-shape (YCB point clouds with sensor noise) set-
+tings. Across these settings, DISF consistently reduced CoM misalignment
+while maintaining competitive geometric alignment, and this translated into
+higher grasp success rates in grasp executions. We further evaluated cross-
+platform execution on three robot–gripper platforms, and demonstrated real-
+world grasp executions on a UR3e, showing that our CoM alignment im-
+proved physical feasibility of surface fitting-based grasp planning.
+Appendix A. Pre-Convex Shape Approximation of Objects for Phys-
+ical Simulation
+When directly loading object model files into the physics simulator for
+grasping experiments, the object shapes are automatically approximated as
+convex hulls within the simulator for collision detection purposes. However,
+this convex hull approximation is often too coarse, resulting in significant de-
+viations from the original 3D object shape and causing issues with executing
+grasping experiments accurately. To address this, a pre-processing step using
+CoACD [58] (Collision-Aware Convex Decomposition) was applied to ensure
+that the original object shape is preserved even after automatic convex ap-
+proximations are applied within the simulator (in our case, Mujoco 3.2.4).
+The resolution parameter for the CoACD approximation was set to 50.
+Appendix B. Pre-Grasp and Grasp Trajectory Planning
+While the proposed DISF method provides the final grasp pose, it does
+not plan the complete grasp trajectory, including the intermediate path from
+the robot’s initial pose to the final grasp pose. Therefore, to execute the
+planned grasp in practice, an external trajectory planning algorithm is re-
+quired. In this experiment, based on the grasp pose obtained from DISF,
+we first compute a pre-grasp pose and move the robot hand’s palm from the
+initial pose to the pre-grasp pose.
+The pre-grasp pose is determined based on the final grasp pose (R∗, t∗)
+provided by DISF. The corresponding palm pose in the world coordinate
+frame is given as (R∗
+palm, t∗
+palm). To calculate the pre-grasp pose, we consider
+a sphere centered at the object grasp position t∗
+palm with a radius γ. The
+pre-grasp pose ppre is defined as the surface point on this sphere aligned with
+the grasp rotation R∗
+palm, computed as:
+ppre = t∗
+palm −γ · R∗
+palmnz,
+(B.1)
+38
+
+where γ is the radius of the sphere representing the distance from the grasp
+position to the pre-grasp position. The pre-grasp orientation remains the
+same as the grasp orientation, represented by the rotation matrix: Rpre =
+R∗
+palm. This formulation ensures the pre-grasp pose is aligned with the in-
+tended approach direction, facilitating smooth trajectory planning and grasp
+execution.
+After reaching the pre-grasp pose, the robot continues to move towards
+the final grasp pose (R∗
+palm, t∗
+palm). Finally, at the final grasp pose, the gripper
+open/close command is sent to the robot to complete the grasping process
+using the optimized gripper displacement δd∗.
+Appendix C. Fingertip Displacement Refinement for Grasp Exe-
+cution
+The planned grasp ensures that the gripper surfaces align with the object
+surfaces according to the object’s geometry. However, during actual grasp
+execution, repulsive forces from the object act against the gripper’s grasping
+force.
+This can result in the gripper failing to firmly hold the object if
+the planned gripper opening width is used directly. To address this issue,
+we introduce an additional refinement to the gripper’s opening width when
+executing the grasp in the physics simulator. Specifically, we add a bias ˆδd to
+the planned fingertip displacement δd, resulting in a slightly smaller gripper
+opening width than the planned value.
+This adjustment ensures a more
+secure grasp during execution by compensating for the effects of repulsive
+forces. In both of the simulation and real-world experiment, we applied this
+refinement process into all three comparative methods.
+Appendix D. Correspondence Number of Objects
+In this appendix, we report the number of object correspondences used
+VISF and DISF during optimization. Table C.5 summarizes the correspon-
+dence number for each (robot, object) combination. This number depends on
+both the object geometry and the robot/gripper configuration (e.g., contact
+area and surface coverage).
+39
+
+Table C.5: Number of object correspondences used for grasp planning across objects
+and robotic platforms. The upper block reports the correspondence counts in simulation
+(Panda, UR5e, and iiwa) for both the Known-shape and Observed-shape settings. The
+lower block reports the correspondence counts in real-world execution on UR3e, separated
+into the same objects as the Known-shape setting and additional objects evaluated only
+in the Observed-shape setting.
+Setting (simulation)
+Object
+Panda
+UR5e
+iiwa
+Known-shape
+T-shape_Block
+113
+149
+531
+Rubber_Duck
+32
+89
+121
+Hammer
+34
+63
+119
+Wine_Glass
+14
+22
+36
+Old_Camera
+34
+43
+203
+Observed-shape
+006_mustard_bottle
+18
+19
+141
+011_banana
+10
+30
+39
+029_plate
+16
+11
+121
+033_spatula
+5
+14
+45
+035_power_drill
+14
+29
+126
+037_scissors
+19
+31
+76
+042_adjustable_wrench
+15
+22
+100
+052_extra_large_clamp
+20
+28
+68
+058_golf_ball
+23
+39
+60
+065-j_cups
+16
+17
+58
+Setting (real world)
+Object
+UR3e
+Known-shape
+(same objects)
+T-shape_Block
+73
+Rubber_Duck
+67
+Hammer
+19
+Wine_Glass
+10
+Old_Camera
+74
+Observed-shape
+(additional objects)
+Tripod
+16
+USB
+31
+Controller
+36
+Tape
+52
+40
+
+References
+[1] J. Lukos, C. Ansuini, M. Santello, Choice of contact points during multi-
+digit grasping: Effect of predictability of object center of mass location,
+Journal of Neuroscience 27 (14) (2007) 3894–3903.
+[2] L. Desanghere, J. J. Marotta, The influence of object shape and center
+of mass on grasp and gaze, Frontiers in Psychology 6 (2015).
+[3] L. K. Klein, G. Maiello, V. C. Paulun, R. W. Fleming, Predicting pre-
+cision grip grasp locations on three-dimensional objects, PLoS Comput.
+Biol. 16 (8) (2020).
+[4] R. M. Murray, Z. Li, S. S. Sastry, A mathematical introduction to
+robotics manipulation, CRC Press, 1994.
+[5] B. Buchholz, T. J. Armstrong, A kinematic model of the human hand
+to evaluate its prehensile capabilities, Journal of Biomechanics 25 (2)
+(1992) 149–162.
+[6] S.-W. Lee, X. Zhang, Development and evaluation of an optimization-
+based model for power-grip posture prediction, Journal of Biomechanics
+38 (8) (2005) 1591–1597.
+[7] F. Cordella, L. Zollo, A. Salerno, E. Guglielmelli, B. Siciliano, Experi-
+mental validation of a reach-and grasp optimization algorithm inspired
+to human arm-hand control, in: 33rd Annual International Conference
+of the IEEE Engineering in Medicine and Biology Society, EMBC 2011,
+Boston, MA, USA, August 30 - Sept. 3, 2011, IEEE, 2011, pp. 8150–
+8153.
+[8] V.-D. Nguyen, A bio-inspired grasp optimization algorithm for an an-
+thropomorphic robotic hand, International Journal on Interactive De-
+sign and Manufacturing 6 (2012) 113–122.
+[9] A. Provenzale,
+F. Cordella,
+L. Zollo,
+A. Davalli,
+R. Sacchetti,
+E. Guglielmelli, A grasp synthesis algorithm based on postural syner-
+gies for an anthropomorphic arm-hand robotic system, in: 5th IEEE
+RAS/EMBS International Conference on Biomedical Robotics and
+Biomechatronics, BioRob 2014, Sao Paulo, Brazil, August 12-15, 2014,
+IEEE, 2014, pp. 958–963.
+41
+
+[10] Y. Fan, H. Lin, T. Tang, M. Tomizuka, Grasp planning for customized
+grippers by iterative surface fitting, in: 14th IEEE International Con-
+ference on Automation Science and Engineering, CASE 2018, Munich,
+Germany, August 20-24, 2018, IEEE, 2018, pp. 28–34.
+[11] K. S. Arun, T. S. Huang, S. D. Blostein, Least-squares fitting of two
+3-d point sets, IEEE Trans. Pattern Anal. Mach. Intell. 9 (5) (1987)
+698–700.
+[12] S. Rusinkiewicz, M. Levoy, Efficient variants of the ICP algorithm,
+in: 3rd International Conference on 3D Digital Imaging and Model-
+ing (3DIM 2001), 28 May - 1 June 2001, Quebec City, Canada, IEEE
+Computer Society, 2001, pp. 145–152.
+[13] A. Makadia, A. Patterson, K. Daniilidis, Fully automatic registration
+of 3d point clouds, in: 2006 IEEE Computer Society Conference on
+Computer Vision and Pattern Recognition (CVPR’06), Vol. 1, IEEE,
+2006, pp. 1297–1304.
+[14] J. Yang, H. Li, D. Campbell, Y. Jia, Go-icp: A globally optimal solution
+to 3d icp point-set registration, IEEE transactions on pattern analysis
+and machine intelligence 38 (11) (2015) 2241–2254.
+[15] H. Yang, J. Shi, L. Carlone, Teaser: Fast and certifiable point cloud
+registration, IEEE Transactions on Robotics 37 (2) (2020) 314–333.
+[16] I. Vizzo, T. Guadagnino, B. Mersch, L. Wiesmann, J. Behley, C. Stach-
+niss, Kiss-icp: In defense of point-to-point icp–simple, accurate, and
+robust registration if done the right way, IEEE Robotics and Automa-
+tion Letters 8 (2) (2023) 1029–1036.
+[17] Y. Fan, T. Tang, H. Lin, M. Tomizuka, Real-time grasp planning for
+multi-fingered hands by finger splitting, in:
+2018 IEEE/RSJ Inter-
+national Conference on Intelligent Robots and Systems, IROS 2018,
+Madrid, Spain, October 1-5, 2018, IEEE, 2018, pp. 4045–4052.
+[18] Y. Fan, X. Zhu, M. Tomizuka, optimization model for planning preci-
+sion grasps with multi-fingered hands, in: 2019 IEEE/RSJ International
+Conference on Intelligent Robots and Systems, IROS 2019, Macau, SAR,
+China, November 3-8, 2019, IEEE, 2019, pp. 1548–1554.
+42
+
+[19] Y. Fan, M. Tomizuka, Efficient grasp planning and execution with mul-
+tifingered hands by surface fitting, IEEE Robotics and Automation Let-
+ters 4 (4) (2019) 3995–4002.
+[20] K. Wang, Y. Fan, I. Sakuma, Robot grasp planning: A learning from
+demonstration-based approach, Sensors 24 (2) (2024) 618.
+[21] V.-D. Nguyen, Constructing force-closure grasps, The International
+Journal of Robotics Research 7 (3) (1988) 3–16.
+[22] F. Cordella, L. Zollo, A. Salerno, D. Accoto, E. Guglielmelli, B. Siciliano,
+Human hand motion analysis and synthesis of optimal power grasps for a
+robotic hand, International Journal of Advanced Robotic Systems 11 (3)
+(2014) 37.
+[23] T. Yamanokuchi, A. Bacchin, E. Olivastri, T. Matsubara, E. Menegatti,
+Disentangled iterative surface fitting for contact-stable grasp planning,
+in: The 19th international conference on Intelligent Autonomous Sys-
+tems (IAS), 2025.
+[24] M. R. Cutkosky, On grasp choice, grasp models, and the design of hands
+for manufacturing tasks, IEEE Trans. Robotics Autom. 5 (3) (1989)
+269–279.
+[25] T. Feix, J. Romero, H. Schmiedmayer, A. M. Dollar, D. Kragic, The
+GRASP taxonomy of human grasp types, IEEE Trans. Hum. Mach.
+Syst. 46 (1) (2016) 66–77.
+[26] K.-L. Low, Linear least-squares optimization for point-to-plane icp sur-
+face registration, Tech. Rep. TR04-004, University of North Carolina at
+Chapel Hill (2004).
+[27] C. Chi, Z. Xu, C. Pan, E. Cousineau, B. Burchfiel, S. Feng, R. Tedrake,
+S. Song, Universal manipulation interface: In-the-wild robot teaching
+without in-the-wild robots, in: Proceedings of Robotics: Science and
+Systems (RSS), 2024.
+[28] E. Todorov, T. Erez, Y. Tassa, Mujoco: A physics engine for model-
+based control, in: 2012 IEEE/RSJ International Conference on Intelli-
+gent Robots and Systems, IEEE, 2012, pp. 5026–5033.
+43
+
+[29] B. Çalli, A. Singh, A. Walsman, S. S. Srinivasa, P. Abbeel, A. M. Dollar,
+The YCB object and model set: Towards common benchmarks for ma-
+nipulation research, in: International Conference on Advanced Robotics,
+ICAR 2015, Istanbul, Turkey, July 27-31, 2015, IEEE, 2015, pp. 510–
+517.
+[30] Q.-Y. Zhou, J. Park, V. Koltun, Open3D: A modern library for 3D data
+processing, arXiv:1801.09847 (2018).
+[31] N. Hansen, The CMA evolution strategy: A comparing review, in: To-
+wards a New Evolutionary Computation - Advances in the Estimation
+of Distribution Algorithms, Vol. 192 of Studies in Fuzziness and Soft
+Computing, Springer, 2006, pp. 75–102.
+[32] K. Zakka, Y. Tassa, M. M. Contributors, Mujoco menagerie: A collec-
+tion of high-quality simulation models for mujoco (2022).
+[33] M. A. Fischler, R. C. Bolles, Random sample consensus: A paradigm
+for model fitting with applications to image analysis and automated
+cartography, Commun. ACM 24 (6) (1981) 381–395.
+doi:10.1145/
+358669.358692.
+URL https://doi.org/10.1145/358669.358692
+[34] R. B. Rusu, N. Blodow, M. Beetz, Fast point feature histograms (FPFH)
+for 3d registration, in: 2009 IEEE International Conference on Robotics
+and Automation, ICRA 2009, Kobe, Japan, May 12-17, 2009, IEEE,
+2009, pp. 3212–3217. doi:10.1109/ROBOT.2009.5152473.
+URL https://doi.org/10.1109/ROBOT.2009.5152473
+[35] K. Hang, M. Li, J. A. Stork, Y. Bekiroglu, F. T. Pokorny, A. Billard,
+D. Kragic, Hierarchical fingertip space: A unified framework for grasp
+planning and in-hand grasp adaptation, IEEE Trans. Robotics 32 (4)
+(2016) 960–972. doi:10.1109/TRO.2016.2588879.
+URL https://doi.org/10.1109/TRO.2016.2588879
+[36] J. Urain, N. Funk, J. Peters, G. Chalvatzaki, Se(3)-diffusionfields:
+Learning smooth cost functions for joint grasp and motion optimization
+through diffusion, in: IEEE International Conference on Robotics and
+Automation, ICRA 2023, London, UK, May 29 - June 2, 2023, IEEE,
+2023, pp. 5923–5930.
+44
+
+[37] W. Liu, Y. Du, T. Hermans, S. Chernova, C. Paxton, Structdiffusion:
+Language-guided creation of physically-valid structures using unseen ob-
+jects, in: K. E. Bekris, K. Hauser, S. L. Herbert, J. Yu (Eds.), Robotics:
+Science and Systems XIX, Daegu, Republic of Korea, July 10-14, 2023,
+2023. doi:10.15607/RSS.2023.XIX.031.
+URL https://doi.org/10.15607/RSS.2023.XIX.031
+[38] A. Zeng, S. Song, M. Nießner, M. Fisher, J. Xiao, T. A. Funkhouser,
+3dmatch: Learning local geometric descriptors from RGB-D reconstruc-
+tions, in:
+2017 IEEE Conference on Computer Vision and Pattern
+Recognition, CVPR 2017, Honolulu, HI, USA, July 21-26, 2017, IEEE
+Computer Society, 2017, pp. 199–208. doi:10.1109/CVPR.2017.29.
+URL https://doi.org/10.1109/CVPR.2017.29
+[39] H. Deng, T. Birdal, S. Ilic, Ppfnet: Global context aware local features
+for robust 3d point matching, in: 2018 IEEE Conference on Computer
+Vision and Pattern Recognition, CVPR 2018, Salt Lake City, UT, USA,
+June 18-22, 2018, Computer Vision Foundation / IEEE Computer
+Society, 2018, pp. 195–205. doi:10.1109/CVPR.2018.00028.
+URL
+http://openaccess.thecvf.com/content_cvpr_2018/html/
+Deng_PPFNet_Global_Context_CVPR_2018_paper.html
+[40] H. Deng, T. Birdal, S. Ilic, Ppf-foldnet: Unsupervised learning of rota-
+tion invariant 3d local descriptors, in: V. Ferrari, M. Hebert, C. Smin-
+chisescu, Y. Weiss (Eds.), Computer Vision - ECCV 2018 - 15th Eu-
+ropean Conference, Munich, Germany, September 8-14, 2018, Proceed-
+ings, Part V, Vol. 11209 of Lecture Notes in Computer Science, Springer,
+2018, pp. 620–638. doi:10.1007/978-3-030-01228-1\_37.
+URL https://doi.org/10.1007/978-3-030-01228-1_37
+[41] Y. Wang, J. M. Solomon, Deep closest point: Learning representations
+for point cloud registration, in: Proceedings of the IEEE/CVF interna-
+tional conference on computer vision, 2019, pp. 3523–3532.
+[42] C. Zhao, Z. Cao, C. Li, X. Li, J. Yang, Nm-net:
+Mining reliable
+neighbors for robust feature correspondences, in: IEEE Conference on
+Computer Vision and Pattern Recognition, CVPR 2019, Long Beach,
+CA, USA, June 16-20, 2019, Computer Vision Foundation / IEEE,
+2019, pp. 215–224. doi:10.1109/CVPR.2019.00030.
+45
+
+URL
+http://openaccess.thecvf.com/content_CVPR_2019/html/
+Zhao_NM-Net_Mining_Reliable_Neighbors_for_Robust_Feature_
+Correspondences_CVPR_2019_paper.html
+[43] C.
+B.
+Choy,
+W.
+Dong,
+V.
+Koltun,
+Deep
+global
+registration,
+in:
+2020 IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition,
+CVPR 2020,
+Seattle,
+WA, USA, June 13-19,
+2020, Computer Vision Foundation / IEEE, 2020, pp. 2511–2520.
+doi:10.1109/CVPR42600.2020.00259.
+URL
+https://openaccess.thecvf.com/content_CVPR_2020/html/
+Choy_Deep_Global_Registration_CVPR_2020_paper.html
+[44] A. Nguyen, D. Kanoulas, D. G. Caldwell, N. G. Tsagarakis, Object-
+based affordances detection with convolutional neural networks and
+dense conditional random fields, in: 2017 IEEE/RSJ International Con-
+ference on Intelligent Robots and Systems, IROS 2017, Vancouver, BC,
+Canada, September 24-28, 2017, IEEE, 2017, pp. 5908–5915.
+[45] M. Kokic, J. A. Stork, J. A. Haustein, D. Kragic, Affordance detection
+for task-specific grasping using deep learning, in: 17th IEEE-RAS Inter-
+national Conference on Humanoid Robotics, Humanoids 2017, Birming-
+ham, United Kingdom, November 15-17, 2017, IEEE, 2017, pp. 91–98.
+[46] D. Hadjivelichkov, S. Zwane, L. Agapito, M. P. Deisenroth, D. Kanoulas,
+One-shot transfer of affordance regions? affcorrs!, in: K. Liu, D. Kulic,
+J. Ichnowski (Eds.), Conference on Robot Learning, CoRL 2022, 14-18
+December 2022, Auckland, New Zealand, Vol. 205 of Proceedings of
+Machine Learning Research, PMLR, 2022, pp. 550–560.
+URL
+https://proceedings.mlr.press/v205/hadjivelichkov23a.
+html
+[47] T. Nguyen, M. N. Vu, A. Vuong, D. Nguyen, T. Vo, N. Le, A. Nguyen,
+Open-vocabulary affordance detection in 3d point clouds, in: IROS,
+2023, pp. 5692–5698. doi:10.1109/IROS55552.2023.10341553.
+URL https://doi.org/10.1109/IROS55552.2023.10341553
+[48] F. Yang, W. Chen, K. Yang, H. Lin, D. Luo, C. Tang, Z. Li, Y. Wang,
+Learning granularity-aware affordances from human-object interaction
+for tool-based functional dexterous grasping, IEEE Trans. Neural Net-
+works Learn. Syst. 36 (11) (2025) 19589–19603. doi:10.1109/TNNLS.
+46
+
+2025.3591538.
+URL https://doi.org/10.1109/TNNLS.2025.3591538
+[49] A. Rashid, S. Sharma, C. M. Kim, J. Kerr, L. Y. Chen, A. Kanazawa,
+K. Goldberg, Language embedded radiance fields for zero-shot task-
+oriented grasping, in: Conference on Robot Learning, CoRL 2023, 6-9
+November 2023, Atlanta, GA, USA, Vol. 229 of Proceedings of Machine
+Learning Research, PMLR, 2023, pp. 178–200.
+[50] T. Nguyen, M. N. Vu, B. Huang, A. Vuong, Q. Vuong, N. Le,
+T. Vo, A. Nguyen, Language-driven 6-dof grasp detection using negative
+prompt guidance, in: A. Leonardis, E. Ricci, S. Roth, O. Russakovsky,
+T. Sattler, G. Varol (Eds.), Computer Vision - ECCV 2024 - 18th Eu-
+ropean Conference, Milan, Italy, September 29-October 4, 2024, Pro-
+ceedings, Part XIX, Vol. 15077 of Lecture Notes in Computer Science,
+Springer, 2024, pp. 363–381. doi:10.1007/978-3-031-72655-2\_21.
+URL https://doi.org/10.1007/978-3-031-72655-2_21
+[51] Q. Feng, D. S. M. Lema, M. Malmir, H. Li, J. Feng, Z. Chen, A. Knoll,
+Dexgangrasp: Dexterous generative adversarial grasping synthesis for
+task-oriented manipulation, in: 23rd IEEE-RAS International Confer-
+ence on Humanoid Robots, Humanoids 2024, Nancy, France, November
+22-24, 2024, IEEE, 2024, pp. 918–925. doi:10.1109/HUMANOIDS58906.
+2024.10769950.
+URL https://doi.org/10.1109/Humanoids58906.2024.10769950
+[52] C. Tang, D. Huang, W. Dong, R. Xu, H. Zhang, Foundationgrasp: Gen-
+eralizable task-oriented grasping with foundation models, IEEE Trans
+Autom. Sci. Eng. 22 (2025) 12418–12435.
+doi:10.1109/TASE.2025.
+3542418.
+URL https://doi.org/10.1109/TASE.2025.3542418
+[53] X. Wen, T. Li, Z. Han, Y. Liu, Point cloud completion by skip-attention
+network with hierarchical folding, in: 2020 IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, CVPR 2020, Seattle, WA,
+USA, June 13-19, 2020, Computer Vision Foundation / IEEE, 2020,
+pp. 1936–1945. doi:10.1109/CVPR42600.2020.00201.
+URL
+https://openaccess.thecvf.com/content_CVPR_2020/html/
+Wen_Point_Cloud_Completion_by_Skip-Attention_Network_With_
+Hierarchical_Folding_CVPR_2020_paper.html
+47
+
+[54] X. Yu, Y. Rao, Z. Wang, Z. Liu, J. Lu, J. Zhou, Pointr:
+Diverse
+point cloud completion with geometry-aware transformers, in:
+2021
+IEEE/CVF International Conference on Computer Vision, ICCV 2021,
+Montreal, QC, Canada, October 10-17, 2021, IEEE, 2021, pp. 12478–
+12487. doi:10.1109/ICCV48922.2021.01227.
+URL https://doi.org/10.1109/ICCV48922.2021.01227
+[55] X. Wen, P. Xiang, Z. Han, Y. Cao, P. Wan, W. Zheng, Y. Liu, Pmp-net:
+Point cloud completion by learning multi-step point moving paths, in:
+IEEE Conference on Computer Vision and Pattern Recognition, CVPR
+2021, virtual, June 19-25, 2021, Computer Vision Foundation / IEEE,
+2021, pp. 7443–7452. doi:10.1109/CVPR46437.2021.00736.
+URL
+https://openaccess.thecvf.com/content/CVPR2021/html/
+Wen_PMP-Net_Point_Cloud_Completion_by_Learning_Multi-Step_
+Point_Moving_Paths_CVPR_2021_paper.html
+[56] R. Cui, S. Qiu, S. Anwar, J. Liu, C. Xing, J. Zhang, N. Barnes, P2C:
+self-supervised point cloud completion from single partial clouds, in:
+IEEE/CVF International Conference on Computer Vision, ICCV 2023,
+Paris, France, October 1-6, 2023, IEEE, 2023, pp. 14305–14314. doi:
+10.1109/ICCV51070.2023.01320.
+URL https://doi.org/10.1109/ICCV51070.2023.01320
+[57] J. Wang, Y. Cui, D. Guo, J. Li, Q. Liu, C. Shen, Pointattn: You only
+need attention for point cloud completion, in: M. J. Wooldridge, J. G.
+Dy, S. Natarajan (Eds.), Thirty-Eighth AAAI Conference on Artificial
+Intelligence, AAAI 2024, Thirty-Sixth Conference on Innovative Appli-
+cations of Artificial Intelligence, IAAI 2024, Fourteenth Symposium on
+Educational Advances in Artificial Intelligence, EAAI 2014, February
+20-27, 2024, Vancouver, Canada, AAAI Press, 2024, pp. 5472–5480.
+doi:10.1609/AAAI.V38I6.28356.
+URL https://doi.org/10.1609/aaai.v38i6.28356
+[58] X. Wei, M. Liu, Z. Ling, H. Su, Approximate convex decomposition for
+3d meshes with collision-aware concavity and tree search, ACM Trans.
+Graph. 41 (4) (2022) 42:1–42:18. doi:10.1145/3528223.3530103.
+URL https://doi.org/10.1145/3528223.3530103
+48

@@ -1,0 +1,901 @@
+Improving Few-Shot Change Detection Visual
+Question Answering via Decision-Ambiguity-guided
+Reinforcement Fine-Tuning
+Fuyu Dong1, Ke Li1, Di Wang1, Nan Luo1, Yiming Zhang2, Kaiyu Li3, Jianfei Yang1, Quan Wang1
+1School of Computer Science and Technology, Xidian University, Xi’an, China
+2Department of Mathematics, University of California, San Diego, USA
+3School of Software Engineering, Xi’an Jiaotong University, Xi’an, China
+Abstract—Change detection visual question answering (CD-
+VQA) requires answering text queries by reasoning about seman-
+tic changes in bi-temporal remote sensing images. A straightfor-
+ward approach is to boost CDVQA performance with generic
+vision-language models via supervised fine-tuning (SFT). Despite
+recent progress, we observe that a significant portion of failures
+do not stem from clearly incorrect predictions, but from decision
+ambiguity, where the model assigns similar confidence to the cor-
+rect answer and strong distractors. To formalize this challenge,
+we define Decision-Ambiguous Samples (DAS) as instances with
+a small probability margin between the ground-truth answer
+and the most competitive alternative. We argue that explicitly
+optimizing DAS is crucial for improving the discriminability and
+robustness of CDVQA models. To this end, we propose DARFT,
+a Decision-Ambiguity-guided Reinforcement Fine-Tuning frame-
+work that first mines DAS using an SFT-trained reference policy
+and then applies group-relative policy optimization on the mined
+subset. By leveraging multi-sample decoding and intra-group
+relative advantages, DARFT suppresses strong distractors and
+sharpens decision boundaries without additional supervision.
+Extensive experiments demonstrate consistent gains over SFT
+baselines, particularly under few-shot settings.
+Index Terms—Change detection visual question answering, re-
+mote sensing, vision-language models, reinforcement fine-tuning,
+decision ambiguity
+I. INTRODUCTION
+Change Detection Visual Question Answering (CDVQA)
+is a challenging vision-language reasoning task that requires
+models to infer semantic changes from bi-temporal remote
+sensing images. Specifically, given a pair of images captured
+at different times with a text query, a CDVQA model must not
+only determine whether changes have occurred, but also infer
+“what has changed”. This capability is crucial for various
+real-world applications such as urban development monitoring,
+disaster assessment, and environmental analysis [1]–[4].
+Despite its practical importance, CDVQA remains rela-
+tively under-explored. Yuan et al. [5] first formulated the
+CDVQA task, constructed a benchmark dataset, and proposed
+a Siamese-based architecture to enable cross-modal interaction
+between language and bi-temporal visual features. Subsequent
+work by Li et al. [6] introduced explicit change grounding
+mechanisms to improve answer reliability and interpretability,
+together with the QAG-360K dataset, further advancing this
+research direction. More recently, generic vision-language
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+(a) Probability margin (x)
+0
+10
+20
+30
+40
+50
+Samples (%)
+SFT
+DARFT (ours)
+0.2
+0.5
+0.8
+1.0
+(b) (upper bound)
+0
+20
+40
+60
+80
+100
+Cumulative (%)
+Fig. 1.
+Decision ambiguity distribution before and after DARFT. (a)
+Histogram of decision ambiguity scores ∆(x), where ∆(x) denotes the
+probability margin between the ground-truth answer and the strongest compet-
+ing distractor. (b) Corresponding cumulative distribution functions of ∆(x).
+Compared to SFT, the proposed DARFT substantially shifts the distribution
+toward larger margins, indicating reduced decision ambiguity and sharper
+decision boundaries.
+models (VLMs) have shown promising capabilities in multi-
+temporal geospatial reasoning through supervised fine-tuning
+(SFT) on remote sensing datasets [7]–[9]. These advances nat-
+urally raise the following question: Can generic VLMs, when
+adapted via standard SFT, solve the CDVQA task reliably and
+robustly?
+However, our empirical results suggest that the answer is
+non-trivial. Even after SFT, introducing generic VLMs yields
+only limited performance gains on CDVQA, and fails to
+establish a stable advantage over models specifically designed
+for this task. To understand the underlying cause of this
+phenomenon, we conduct a systematic analysis of model
+predictions. Surprisingly, many prediction failures cannot be
+attributed to obvious reasoning errors or missing key visual
+evidence. Instead, errors tend to occur in more subtle cases,
+where the correct answer and one or more incorrect options
+receive highly similar prediction scores. In such cases, the
+model’s decision lies near an unstable boundary, where multi-
+ple candidate answers can be supported by visually confusable
+change cues, rendering the prediction highly sensitive to minor
+perturbations.
+To quantitatively characterize this phenomenon, we intro-
+duce a sample-level measure of decision ambiguity. Specifi-
+cally, we first obtain a reference policy πθ0 via supervised fine-
+tuning and apply it to score each training instance. For each
+sample (x, y), the model produces a distribution over candidate
+arXiv:2512.24591v1 [cs.CV] 31 Dec 2025
+
+answers p0(a | x) = πθ0(a | x). We define the strongest
+competing incorrect option as ˆa = arg maxa∈A\{y} p0(a | x).
+The ambiguity score is then defined as the absolute proba-
+bility margin between the correct answer and this strongest
+competitor: ∆(x) = |p0(y | x) −p0(ˆa | x)| . When ∆(x) < τ,
+we regard the sample as a decision-ambiguous sample (DAS),
+indicating that the model’s prediction is made under high
+uncertainty and lies close to the decision boundary.
+As shown in Figure. 1, we visualize this phenomenon by
+comparing the answer confidence distributions of correctly and
+incorrectly predicted samples. The results show that a large
+portion of prediction errors concentrate in regions with small
+confidence margin, suggesting a strong association between
+prediction failures and elevated decision ambiguity. Impor-
+tantly, DAS are neither equivalent to misclassified samples nor
+caused by annotation noise. Rather, they reflect an intrinsic
+ambiguity in CDVQA, particularly in fine-grained change
+detection scenarios where multiple candidate answers remain
+plausible given visually confusable evidence.
+These observations expose a key limitation of existing train-
+ing paradigms. Standard supervised fine-tuning (SFT) typically
+optimizes global likelihood or accuracy, implicitly assuming
+that each sample admits a single, clearly dominant correct
+answer [10], [11]. Under this assumption, decision-ambiguous
+samples are treated indistinguishably from easy ones, and
+the structured competition between the correct answer and
+strong distractors is not explicitly modeled. Existing efforts
+to improve performance on difficult or uncertain samples
+generally follow two directions: hard example mining [12]
+and uncertainty-aware modeling [13]. However, the former
+mining usually relies on misclassification as the criterion, and
+therefore fails to capture samples that are predicted correctly
+yet remain highly ambiguous. And the latter, on the other hand,
+focus on quantifying overall predictive uncertainty, without
+explicitly modeling the relative ordering and margin structure
+among competing answer candidates. As a result, models may
+achieve strong average performance while remaining fragile on
+decision-ambiguous samples.
+To address this issue, we propose a Decision-Ambiguity-
+guided
+Reinforcement
+Fine-Tuning
+framework,
+called
+DARFT. It can improve the model’s discriminative capability
+on boundary-critical cases by explicitly identifying and
+optimizing
+the
+DAS
+subset.
+Specifically,
+DARFT
+first
+aligns the model with the CDVQA task through SFT and
+automatically identifies decision-ambiguous samples based
+on prediction margins. It then applies group-relative policy
+optimization
+(GRPO)
+on
+the
+selected
+subset,
+sampling
+multiple candidate answers under the same visual-question
+context and constructing relative advantages within each
+group. This procedure explicitly reinforces a stable preference
+for the correct answer while suppressing strong distractors,
+thereby sharpening the model’s decision boundary. Notably,
+DARFT requires neither additional human annotations nor
+external reward models. Extensive experiments on multiple
+CDVQA benchmarks, including QAG-360K, demonstrate that
+DARFT consistently outperforms standard SFT baselines,
+particularly
+in
+few-shot
+settings.
+Our
+contributions
+are
+summarized as follows:
+• We identify decision ambiguity as a key challenge in CD-
+VQA and introduce the concept of Decision-Ambiguous
+Samples (DAS) to characterize boundary-critical cases.
+• We propose DARFT, a decision-ambiguity-guided rein-
+forcement fine-tuning framework that explicitly optimizes
+DAS to enhance the model’s discriminative capability.
+• We conduct extensive experiments demonstrating that
+DARFT consistently improves CDVQA performance
+across multiple few-shot settings, establishing new state-
+of-the-art results.
+II. METHODOLOGY
+We propose a Decision-Ambiguity-Guided Reinforcement
+Fine-Tuning framework, called DARFT, for CDVQA. The core
+idea of DARFT is to explicitly identify and refine predictions
+near decision boundaries, where multiple answer options re-
+ceive comparable confidence. The framework follows a two-
+stage training paradigm. First, SFT aligns a general-purpose
+vision–language model with the CDVQA task distribution.
+Second, the model is further optimized on a subset of decision-
+ambiguous samples using GRPO, with the goal of stabilizing
+and sharpening predictions in ambiguous regions of the output
+space. Between the two stages, we perform an intermediate
+ambiguity mining step to construct Damb using the SFT
+reference policy πθ0, which does not update model parameters.
+A. Problem Formulation
+CDVQA is formulated as a multi-choice reasoning problem
+over bi-temporal remote sensing images. Each input instance
+is represented as x = (It1, It2, q), where It1 and It2 denote
+images captured at two different time, and q is a natural-
+language query. The model is required to select an answer
+from a fixed option set A, with ground-truth label y ∈A.
+We model prediction as a conditional policy πθ(a | x) pa-
+rameterized by θ, and focus on improving its discriminability
+in regions where competing answer options exhibit similar
+posterior probabilities.
+B. Model Interface and Output Space
+Prompting. To ensure consistent semantic grounding across
+all answer options, we adopt a unified system prompt that
+explicitly specifies the meaning of each option. Following the
+original dataset protocol, we retain the complete option space
+of 23 candidates without restricting answer availability.
+Prompt Template of CDVQA
+These are two images of the same location before and after the change.
+Please provide your answer based on the question. Answer the question
+with one capital letter, like A, B or C, without anything else. The
+correspondence between the options and the capital letters is as follows:
+0: A, trees: B, bare land: C, low vegetation: D, 20 to 30: E, 70 to 80:
+F, buildings: G, 0 to 10: H, 10 to 20: I, no: J, yes: K, 40 to 50: L, 50
+to 60: M, 30 to 40: N, 90 to 100: O, 60 to 70: P, water: Q, 80 to 90:
+R, playgrounds: S, road: T, others: U, green house: V, bridge: W. A: 0
+is the selection of change ratio, means 0%.
+
+Decision-Ambiguous Sample Mining
+Compute decision
+ambiguity scores:
+Identify the strongest
+competing option:
+Select decision-
+ambiguous samples:
+These are two images of the same location 
+before and after the change. Please provide 
+your answer based on the question…
+T1
+T2
+Stage 1: Supervised Fine-Tuning 
+Visual
+Encoder
+Visual
+Encoder
+Prompt
+“What type of change is 
+the smallest in the first 
+image?”
+Query
+Tokenizer
+Stage 2: Reinforcement Learning
+Finetuned VLM
+DAS
+VLM
+Rewards
+Advantages
+Group Computation
+Fig. 2. The visualization of the training pipeline of our DARFT framework.
+Output and option probabilities. Although CDVQA is for-
+mulated as a multi-choice task over a discrete option set A,
+the underlying vision–language model predicts tokens from the
+full vocabulary V. Let zv(x) denote the logit of token v ∈V
+at the answer position, where x = (It1, It2, q). The model
+defines a token-level distribution via
+pθ(v | x) =
+exp(zv(x))
+P
+v′∈V exp(zv′(x)).
+(1)
+Each answer option a ∈A corresponds to a dedicated option
+token v(a) ∈V (i.e., the letter token). We therefore define the
+option probability as
+pθ(a | x) ≜pθ(v(a) | x),
+a ∈A.
+(2)
+This option probability is consistently used for supervised
+fine-tuning, decision ambiguity estimation, and reinforcement
+optimization.
+C. Stage I: Task Alignment via Supervised Fine-Tuning
+We first align the vision-language model with the CD-
+VQA task distribution through SFT. Given the training set
+D = {(xi, yi)}N
+i=1, we optimize the standard cross-entropy
+objective:
+LSFT = −E(x,y)∼D log pθ(y | x).
+(3)
+The resulting policy πθ0 serves as a stable, task-aligned
+reference. Beyond providing a strong initialization, it plays
+a dual role in subsequent stages: (1) estimating sample-level
+decision ambiguity, and (2) acting as a reference policy for KL
+regularization during reinforcement optimization to prevent
+excessive policy drift.
+D. Decision-Ambiguous Sample Mining
+A key observation in CDVQA is that prediction errors
+often arise when multiple answer options receive comparable
+confidence under the same input, indicating weak option
+separability. To explicitly identify such cases, we score each
+training sample using the reference policy πθ0.
+For a given (x, y), we compute p0(a | x) = πθ0(a | x) and
+identify the strongest competing option:
+ˆa = arg
+max
+a∈A\{y} p0(a | x).
+(4)
+We then define the decision ambiguity score as the probability
+margin between the correct answer and the strongest distractor:
+∆(x) = |p0(y | x) −p0(ˆa | x)| .
+(5)
+Samples with ∆(x) < τ are regarded as decision-ambiguous
+samples (DAS) and collected into a subset, denoted as:
+Damb = {(x, y) ∈D | ∆(x) < τ}.
+(6)
+Unless otherwise specified, we set τ = 0.2. This criterion
+isolates samples whose predictions lie close to the decision
+boundary and are therefore most sensitive to small perturba-
+tions.
+E. Stage II: Decision-Ambiguity-Guided GRPO
+We further optimize the model on Damb using group-relative
+policy optimization (GRPO). Rather than treating each pre-
+diction independently, GRPO operates on groups of sampled
+answers under the same input, enabling explicit comparison
+among competing options.
+Group sampling. For each ambiguous input x, we sample
+K candidate answers from the current policy a(k) ∼πθ(· |
+x),
+k = {1, . . . , K}, where πθold denotes the old policy
+used to collect rollouts. We use a fixed decoding configuration
+throughout GRPO training, i.e., temperature T = 1.0 and top-
+p = 0.9.
+Reward signal. Given the discrete nature of CDVQA annota-
+tions, we adopt a binary reward reflecting answer correctness
+which is defined as:
+r(k) =
+(
+1,
+a(k) = y,
+0,
+otherwise.
+(7)
+Relative advantage construction. To emphasize relative per-
+formance within each group, rewards are normalized to com-
+pute group-relative advantages:
+A(k) = r(k) −µr
+σr + ϵ ,
+(8)
+where µr and σr denote the mean and standard deviation of
+rewards within the group. This normalization reduces variance
+across samples and highlights informative gradients when
+correct answers emerge among strong distractors.
+Policy Objective. We optimize the policy with a clipped
+surrogate objective and KL regularization to a reference policy.
+
+Let πθold denote the policy before the update and define the
+probability ratio
+ρ(k) =
+πθ(a(k) | x)
+πθold(a(k) | x).
+(9)
+Following GRPO, we maximize the clipped surrogate objec-
+tive:
+Jclip(θ) = E
+h
+min
+
+ρ(k)A(k), clip(ρ(k), 1 −ϵ, 1 + ϵ)A(k)i
+.
+(10)
+To limit deviation from the SFT-aligned reference policy πθref,
+we add a KL penalty and maximize:
+J(θ) = Jclip(θ) −λ KL(πθ ∥πθref) .
+(11)
+This objective refines decision boundaries on ambiguous sam-
+ples while constraining policy drift.
+F. Inference
+At inference, we use deterministic greedy decoding for fair
+comparison with prior methods, which is defined as:
+ˆy = arg max
+a∈A πθ(a | x).
+(12)
+To analyze robustness to sampling stochasticity, we addition-
+ally consider a multi-sample setting. Given an input x, we
+draw N=20 i.i.d. samples ai ∼πθ(· | x) using the same
+sampling hyperparameters as in training.
+Under this multi-sample setting, we report two aggregation
+schemes. First, majority voting predicts the label with the
+highest empirical frequency, which can be formulated as:
+ˆymv(x) = arg max
+a∈A
+N
+X
+i=1
+I[ai = a] .
+(13)
+We report the corresponding majority-vote accuracy, which
+can be represented as:
+Accmv =
+1
+|D|
+X
+(x,y)∈D
+I[ˆymv(x) = y] .
+(14)
+Second, we compute the mean accuracy by averaging correct-
+ness over the N sampled outputs, which is denoted as:
+Accmean =
+1
+|D|
+X
+(x,y)∈D
+1
+N
+N
+X
+i=1
+I[ai(x) = y] ,
+(15)
+where D denotes the evaluation set and I[·] is the indicator
+function. The DARFT training procedure is summarized in
+Algorithm 1.
+III. EXPERIMENTS
+A. Experimental Setup
+Datasets. We evaluate DARFT on QAG-360K [6], currently
+the largest and most diverse benchmark for CDVQA. It covers
+8 question categories of varying difficulty, including Change
+or Not (CN), Change to What (CtW), Change from What
+(CfW), Increase or Not (IN), Decrease or Not (DN), Largest
+Change (LC), Smallest Change (SC), and Change Ratio (CR).
+To assess performance in low-data regimes, we construct two
+Algorithm 1 DARFT: Decision-Ambiguity-guided Reinforce-
+ment Fine-Tuning for CDVQA
+Require: Training set D = {(xi, yi)}N
+i=1, option set A,
+threshold τ, group size K, clip range ϵ, KL weight λ,
+Ensure: Optimized policy πθ
+1: Stage I: Supervised Fine-Tuning (SFT)
+2: Initialize θ ←θbase
+3: Minimize LSFT = −E(x,y)∼D log pθ(y | x)
+4: Set reference policy πθ0 ←πθ
+5: Decision-Ambiguous Sample Mining
+6: Damb ←∅
+7: for each (x, y) ∈D do
+8:
+Compute p0(a | x) under πθ0 for all a ∈A
+9:
+ˆa ←arg maxa∈A\{y} p0(a | x)
+10:
+∆(x) ←|p0(y | x) −p0(ˆa | x)|
+11:
+if ∆(x) < τ then
+12:
+Damb ←Damb ∪{(x, y)}
+13:
+end if
+14: end for
+15: Stage II: GRPO with PPO-style clipping on Damb
+16: while not converged do
+17:
+θold ←θ
+18:
+Rollout buffer B ←∅
+19:
+for each (x, y) ∈Damb do
+20:
+Sample {a(k)}K
+k=1 with a(k) ∼πθold(· | x)
+21:
+for k = 1 to K do
+22:
+r(k) ←I[a(k) = y]
+23:
+end for
+24:
+µr ←1
+K
+PK
+k=1 r(k)
+25:
+σr ←
+q
+1
+K
+PK
+k=1
+ r(k) −µr
+2
+26:
+for k = 1 to K do
+27:
+A(k) ←r(k)−µr
+σr+ε
+28:
+Store (x, a(k), A(k)) into B
+29:
+end for
+30:
+end for
+31:
+for u = 1 to U do
+32:
+Jclip ←0
+33:
+for each (x, a, A) ∈B do
+34:
+ρ ←
+πθ(a|x)
+πθold(a|x)
+35:
+Jclip ←Jclip + min
+
+ρA, clip(ρ, 1 −ϵ, 1 + ϵ)A
+
+36:
+end for
+37:
+Jclip ←
+1
+|B|Jclip
+38:
+J ←Jclip −λ KL(πθ ∥πθ0)
+39:
+Update θ by ascending ∇θJ
+40:
+end for
+41: end while
+42: return πθ
+few-shot training subsets by randomly sampling 0.5K and 2K
+instances from the original training split.
+Evaluation Metrics. To comprehensively evaluate the pro-
+posed DARFT framework, we adopt both answer accuracy and
+spatial grounding metrics. Following common VQA practice,
+
+TABLE I
+COMPARISONS ON THE QAG-360K TEST SET USING DETERMINISTIC GREEDY DECODING.
+Method
+CN
+CtW
+CfW
+IN
+DN
+LC
+SC
+CR
+AA
+OA
+Specialist Methods
+CDVQA [5]
+82.25
+57.81
+60.44
+75.41
+76.76
+47.67
+29.27
+65.20
+61.85
+67.91
+VisTA [6]
+85.85
+63.20
+66.41
+84.65
+86.14
+62.74
+38.21
+71.13
+69.79
+74.59
+Zero-shot Baselines
+Qwen2.5-VL-3B [14]
+51.37
+9.93
+4.69
+48.22
+47.55
+2.74
+14.96
+5.14
+23.08
+27.44
+Qwen2.5-VL-7B [14]
+47.37
+43.42
+12.20
+47.62
+53.66
+37.68
+13.24
+15.75
+33.87
+33.10
+Few-shot Fine-tune (0.5K samples)
+VisTA
+68.55
+42.51
+36.94
+66.72
+64.44
+28.73
+19.13
+47.32
+41.59
+52.90
+Qwen2.5-VL-3B-SFT
+77.74
+53.04
+52.58
+71.25
+57.95
+35.20
+19.57
+36.50
+50.48
+54.52
+Qwen2.5-VL-3B-DARFT 78.13 (+0.39) 53.99 (+0.95) 56.11 (+3.53) 74.48 (+3.23) 62.45 (+4.50) 38.67 (+3.47)
+16.61 (-2.96)
+54.88 (+18.38) 54.42 (+3.94)
+60.57 (+6.05)
+Few-shot Fine-tune (2K samples)
+VisTA
+68.29
+39.26
+48.34
+62.14
+69.25
+33.06
+21.90
+52.23
+43.83
+55.13
+Qwen2.5-VL-3B-SFT
+76.13
+53.14
+55.23
+77.07
+73.40
+40.35
+15.80
+40.37
+53.93
+57.35
+Qwen2.5-VL-3B-DARFT 75.96 (-0.17)
+46.45 (-6.69)
+54.31 (-0.92)
+76.97 (-0.10)
+76.70 (+3.30) 40.54 (+0.19) 18.24 (+2.44) 55.88 (+15.51) 55.63 (+1.70) 61.48 (+4.13)
+TABLE II
+COMPARISONS ON THE QAG-360K TEST SET UNDER MEAN@20 WITH MULTI-SAMPLE DECODING.
+Method
+CN
+CtW
+CfW
+IN
+DN
+LC
+SC
+CR
+AA
+OA
+Few-shot Fine-tune (0.5K samples)
+Qwen2.5-VL-3B-SFT
+71.65
+41.67
+35.38
+67.59
+53.44
+25.24
+19.22
+25.82
+42.50
+46.74
+Qwen2.5-VL-3B-DARFT 74.65 (+3.00) 49.45 (+7.78) 49.79 (+14.41) 71.62 (+4.03)
+60.49 (+7.05)
+33.53 (+8.29)
+18.69 (-0.53)
+51.03 (+25.21) 51.16 (+8.66) 57.22 (+10.48)
+Few-shot Fine-tune (2K samples)
+Qwen2.5-VL-3B-SFT
+73.53
+41.60
+41.23
+70.03
+64.32
+29.67
+17.30
+35.75
+46.68
+51.71
+Qwen2.5-VL-3B-DARFT 75.87 (+2.34) 45.73 (+4.13) 53.51 (+12.28) 76.62 (+6.59) 76.28 (+11.96) 40.01 (+10.34) 18.42 (+1.12) 52.09 (+16.34) 54.82 (+8.14)
+60.26 (+8.55)
+we report Average Accuracy (AA) and Overall Accuracy
+(OA) to measure the correctness of predicted answers at
+the category level and the dataset level, respectively. To
+further probe robustness to decoding stochasticity, we addi-
+tionally report two multi-sample metrics with N=20 samples
+per instance: MV@20 (majority-vote accuracy; Eq. 14) and
+Mean@20 (mean accuracy; Eq. 15), using the same sampling
+configuration as training (temperature T=1.0, top-p=0.9). For
+clarity, we highlight improvements over the corresponding
+SFT baseline in red.
+Implementation Details. We implement our DARFT frame-
+work based on the Qwen2.5-VL-3B model [14], and adopt
+LoRA [15] for parameter-efficient fine-tuning in both stages.
+Training is performed on the few-shot training set described
+in the previous section. For SFT, we use the AdamW [16]
+optimizer for 3 epochs with an effective batch size of 64
+and a peak learning rate of 1 × 10−4, where the learning
+rate follows a cosine decay schedule. We then conduct the
+GRPO [17] stage with group size K = 8 and clip range
+ϵ = 0.35, together with a DAPO-style [18] dynamic sampling
+strategy to improve training stability and sample efficiency.
+The policy is optimized with a peak learning rate of 1 × 10−5
+for up to 4 epochs, also using cosine decay, with early stopping
+once convergence is observed. All experiments are conducted
+on 4 NVIDIA RTX 4090 GPUs.
+B. Main Results
+Table I reports results on QAG-360K under determinis-
+tic greedy decoding. We compare DARFT with specialist
+CDVQA models, zero-shot VLM baselines, and SFT of
+Qwen2.5-VL under different data regimes. Zero-shot VLMs
+perform poorly on fine-grained change categories, particularly
+Change to What, Change from What, and Change Ratio,
+suggesting that such queries require task-specific adaptation
+beyond generic vision–language pretraining. While SFT sub-
+stantially improves overall accuracy, noticeable gaps remain on
+ambiguity-prone categories, where semantically close options
+are often supported by visually confusable evidence.
+By contrast, DARFT consistently improves upon SFT across
+both 0.5K and 2K few-shot settings, with the largest gains on
+fine-grained categories that exhibit high decision ambiguity.
+Notably, Change Ratio shows the most substantial improve-
+ment: +18.38 in the 0.5K setting and +15.51 in the 2K setting.
+These results support our hypothesis that explicitly optimizing
+decision-ambiguous samples sharpens the model’s preference
+for correct answers over strong distractors. We also observe
+minor drops on a small number of categories in certain regimes
+(e.g., Change to What under 2K), which is expected since
+ambiguity-guided optimization redistributes learning emphasis
+toward resolving highly confusable instances; category-wise
+fluctuations can further arise from sampling variance and
+
+TABLE III
+COMPARISONS ON THE QAG-360K TEST SET UNDER MV@20 WITH
+MULTI-SAMPLE DECODING.
+Method
+AA
+OA
+Few-shot Fine-tune (0.5K samples)
+Qwen2.5-VL-3B-SFT
+48.12
+52.41
+Qwen2.5-VL-3B-DARFT
+54.04 (+5.92)
+60.23 (+7.82)
+Few-shot Fine-tune (2K samples)
+Qwen2.5-VL-3B-SFT
+52.94
+56.42
+Qwen2.5-VL-3B-DARFT
+55.53 (+2.59)
+61.23 (+4.81)
+differences in ambiguity composition across subsets. Never-
+theless, DARFT consistently improves AA and OA, and its
+largest gains concentrate on fine-grained categories, indicating
+improved robustness in the most critical region, near decision
+boundaries where standard SFT remains fragile.
+C. Decision Stability under Multi-sample Inference.
+To further examine the robustness of model decisions, we
+evaluate multi-sample inference settings and report Mean@20
+and MV@20 results. As shown in Table II, DARFT consis-
+tently outperforms SFT under Mean@20 across all categories
+and data regimes. The improvements are especially significant
+for fine-grained and ambiguity-prone categories, with Change
+Ratio showing gains of +25.21 (0.5K) and +16.34 (2K). Such
+large margins indicate that DARFT not only improves greedy
+decoding accuracy, but also increases the probability quality
+of the correct answer under stochastic sampling. Table III
+further reports MV@20 results, which aggregate sampled
+predictions via majority voting. DARFT achieves substantial
+gains over SFT in both few-shot settings, improving OA by
++7.82 and +4.81 under 0.5K and 2K data, respectively. This
+demonstrates that DARFT leads to more consistent predictions
+across samples, reflecting increased decision stability and
+reduced sensitivity to sampling-induced perturbations.
+IV. CONCLUSION
+This work studies CDVQA from the perspective of decision
+ambiguity. We show that many failures of SFT-adapted vision–
+language models arise from ambiguous decision boundaries,
+where the correct option and strong distractors receive highly
+similar confidence, especially in fine-grained change reason-
+ing. To address this issue, we define Decision-Ambiguous
+Samples and propose DARFT, a decision-ambiguity-guided
+reinforcement fine-tuning framework. DARFT explicitly op-
+timizes relative preferences among competing answers under
+the same input, sharpening decision boundaries without ad-
+ditional supervision. Experiments on QAG-360K demonstrate
+consistent improvements over SFT baselines, with pronounced
+gains in low-data regimes and ambiguity-prone categories.
+REFERENCES
+[1] Yumin Tian, Haojie Xu, Di Wang, Ke Li, and Lin Zhao, “Alignment and
+multimodal reasoning for remote sensing visual question answering,” in
+IGARSS 2024-2024 IEEE International Geoscience and Remote Sensing
+Symposium. IEEE, 2024, pp. 7115–7118.
+[2] Di Wang, Fuyu Dong, Ke Li, and Duo Chen, “Kernel-adaptive change
+detection network in remote sensing imagery,” in IGARSS 2024-2024
+IEEE International Geoscience and Remote Sensing Symposium. IEEE,
+2024, pp. 10192–10196.
+[3] Kaiyu Li, Xiangyong Cao, Yupeng Deng, Chao Pang, Zepeng Xin, Deyu
+Meng, and Zhi Wang,
+“Dynamicearth: How far are we from open-
+vocabulary change detection?,” arXiv preprint arXiv:2501.12931, 2025.
+[4] Chenyang Liu, Jiafan Zhang, Keyan Chen, Man Wang, Zhengxia Zou,
+and Zhenwei Shi,
+“Remote sensing spatiotemporal vision–language
+models: A comprehensive survey,”
+IEEE Geoscience and Remote
+Sensing Magazine, 2025.
+[5] Zhenghang Yuan, Lichao Mou, Zhitong Xiong, and Xiao Xiang Zhu,
+“Change detection meets visual question answering,” IEEE Transactions
+on Geoscience and Remote Sensing, vol. 60, pp. 1–13, 2022.
+[6] Ke Li, Fuyu Dong, Di Wang, Shaofeng Li, Quan Wang, Xinbo Gao,
+and Tat-Seng Chua, “Show me what and where has changed? question
+answering and grounding for remote sensing change detection,” arXiv
+preprint arXiv:2410.23828, 2024.
+[7] Weihao Xuan, Junjue Wang, Heli Qi, Zihang Chen, Zhuo Zheng, Yanfei
+Zhong, Junshi Xia, and Naoto Yokoya,
+“Dynamicvl: Benchmarking
+multimodal large language models for dynamic city understanding,”
+arXiv preprint arXiv:2505.21076, 2025.
+[8] Chenyang Liu, Keyan Chen, Haotian Zhang, Zipeng Qi, Zhengxia Zou,
+and Zhenwei Shi, “Change-agent: Towards interactive comprehensive
+remote sensing change interpretation and analysis,” IEEE Transactions
+on Geoscience and Remote Sensing, 2024.
+[9] Yujie Li, Wenjia Xu, Guangzuo Li, Zijian Yu, Zhiwei Wei, Jiuniu Wang,
+and Mugen Peng, “Unirs: Unifying multi-temporal remote sensing tasks
+through vision language models,”
+arXiv preprint arXiv:2412.20742,
+2024.
+[10] Tianzhe Chu, Yuexiang Zhai, Jihan Yang, Shengbang Tong, Saining
+Xie, Dale Schuurmans, Quoc V Le, Sergey Levine, and Yi Ma, “Sft
+memorizes, rl generalizes: A comparative study of foundation model
+post-training,” arXiv preprint arXiv:2501.17161, 2025.
+[11] Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll Wain-
+wright, Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina
+Slama, Alex Ray, et al., “Training language models to follow instructions
+with human feedback,”
+Advances in neural information processing
+systems, vol. 35, pp. 27730–27744, 2022.
+[12] Evgeny Smirnov, Aleksandr Melnikov, Andrei Oleinik, Elizaveta
+Ivanova, Ilya Kalinovskiy, and Eugene Luckyanets,
+“Hard example
+mining with auxiliary embeddings,”
+in Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition Workshops,
+2018, pp. 37–46.
+[13] Xiao Liang, Di Wang, Zhicheng Jiao, Ronghan Li, Pengfei Yang, Quan
+Wang, and Tat-Seng Chua, “Uncertainty-driven expert control: Enhanc-
+ing the reliability of medical vision-language models,” in Proceedings
+of the IEEE/CVF International Conference on Computer Vision, 2025,
+pp. 21144–21154.
+[14] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Sibo
+Song, Kai Dang, Peng Wang, Shijie Wang, Jun Tang, et al., “Qwen2.
+5-vl technical report,” arXiv preprint arXiv:2502.13923, 2025.
+[15] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi
+Li, Shean Wang, Lu Wang, Weizhu Chen, et al.,
+“Lora: Low-rank
+adaptation of large language models.,” ICLR, vol. 1, no. 2, pp. 3, 2022.
+[16] Ilya Loshchilov and Frank Hutter, “Decoupled weight decay regulariza-
+tion,” arXiv preprint arXiv:1711.05101, 2017.
+[17] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song,
+Xiao Bi, Haowei Zhang, Mingchuan Zhang, YK Li, Yang Wu, et al.,
+“Deepseekmath: Pushing the limits of mathematical reasoning in open
+language models,” arXiv preprint arXiv:2402.03300, 2024.
+[18] Qiying Yu, Zheng Zhang, Ruofei Zhu, Yufeng Yuan, Xiaochen Zuo,
+Yu Yue, Weinan Dai, Tiantian Fan, Gaohong Liu, Lingjun Liu, et al.,
+“Dapo: An open-source llm reinforcement learning system at scale,”
+arXiv preprint arXiv:2503.14476, 2025.

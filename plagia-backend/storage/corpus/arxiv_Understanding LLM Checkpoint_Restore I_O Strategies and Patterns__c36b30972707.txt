@@ -1,0 +1,1194 @@
+Understanding LLM Checkpoint/Restore I/O Strategies and
+Patterns
+Mikaila J. Gossman
+Clemson University
+Clemson, IL, USA
+mikailg@g.clemson.edu
+Avinash Maurya
+Argonne National Lab
+Lemont, IL, USA
+amaurya@anl.gov
+Bogdan Nicolae
+Argonne National Lab
+Lemont, IL, USA
+bnicolae@anl.gov
+Jon C. Calhoun
+Clemson University
+Clemson, SC, USA
+jonccal@clemson.edu
+Abstract
+As large language models (LLMs) and foundation models (FMs)
+scale, checkpoint-restore has become critical pattern for both train-
+ing and inferences. This is a difficult pattern: LLMs and FMs are
+distributed at scale using 3D parallelism (tensor, pipeline, data), re-
+sulting in a large number of processes, each holding a large number
+of tensors of different shapes and sizes, which need to be captured
+to stable storage (e.g. parallel file systems) frequently. As a conse-
+quence, checkpoint and restore becomes a big data problem, ex-
+hibiting volume, variery and velocity. A key challenge is the need to
+traverse an entire storage stack, from the GPUs, where the tensors
+live, through the host memory, local storage and finally external
+repositories such as parallel file systems, where the checkpoints
+need to be persisted. Despite efficient I/O techniques (e.g. asyn-
+chronous flushing/prefetching), the memory tiers of the storage
+stack exhibit orders of magnitdue difference in I/O performance,
+leading to I/O bottlenecks, especially under concurrency. Kernel-
+accelerated I/O libraries such as liburing aim to address some of
+these I/O bottlenecks compared with the aging POSIX I/O interface.
+However, their effectiveness for LLM and checkpoint and restore
+remains largely unexplored. To this end, we develop a series of
+microbenchmarks that study various trade-off when using liburing.
+Specifically, we evaluate how aggregation, alignment, and I/O coa-
+lescing interact under buffered and direct I/O modes. Results show
+that uncoalesced, small-buffer operations halve throughput rela-
+tive to synthetic workloads, while aggregation restores bandwidth
+and reduces metadata overhead compared to the state-of-the-art
+LLM checkpointing engines, achieving up to 3.9× higher write
+throughput than DataStates-LLM and 7.6× higher than TorchSnap-
+shot. These findings underscore the importance of adopting file
+system–aware aggregation and I/O coalescing strategies in LLM
+checkpointing to fully exploit modern storage and I/O backends.
+Keywords
+Large Language Models, Checkpoint-Restore, I/O Characterization,
+Benchmarking
+ACM Reference Format:
+Mikaila J. Gossman, Avinash Maurya, Bogdan Nicolae, and Jon C. Calhoun.
+2026. Understanding LLM Checkpoint/Restore I/O Strategies and Patterns.
+In SCA/HPCAsia 2026 Workshops: Supercomputing Asia and International
+Conference on High Performance Computing in Asia Pacific Region Workshops
+(SCA/HPCAsiaWS 2026), January 26–29, 2026, Osaka, Japan. ACM, New York,
+NY, USA, 11 pages. https://doi.org/10.1145/3784828.3784830
+1
+Introduction
+Context. Large Language Models (LLMs) have evolved expo-
+nentially over the past half-decade and continue to demonstrate
+widespread adoption across a wide range of industrial, commercial,
+and scientific applications. LLMs have shown remarkable fluency,
+accuracy, and coherence for use cases such as knowledge distilla-
+tion [15], text summarization, literature search [37], and complex
+reasoning [7]. Encouraged by such promising potential of LLMs,
+the more general Foundation Models (FMs) are gaining rapid trac-
+tion, which combine multi-modal domain-specific data/instructions,
+capturing cross correlations through self and cross attention mech-
+anisms [16, 20]. These models, coupled with agentic capabilities,
+drive advanced use cases, such as scientific assistants [14], auto-
+mated data analysis, experimental design [6], hypotheses formula-
+tion [22], self-evaluation, and critiquing of results [8].
+Unsurprisingly, the advancement of LLMs and FMs necessi-
+tates a substantial amount of resources and data for training, fine-
+tuning, and serving. For instance, the BLOOM-176B [33] model
+was trained on 384 GPUs for 3.5 months, accounting for ∼1M GPU
+hours. LLM inferences, on the other hand, are even more resource-
+intensive, amounting to 65% of energy consumption of the AI clus-
+ters, whereas training and fine-tuning amount only to 35% [10].
+It is increasingly common to train and serve large models com-
+posed of billions or even trillions of parameters. At the same time,
+enterprises and organizations develop, refine, and serve multiple
+variations of these models, each tailored for different use cases. This
+results in a large number of variations of LLM checkpoints, which
+together amount to an order of terabytes of data.
+Motivation. Given the long-running, large-scale distributed na-
+ture (using “3D” parallelism: data, tensor, pipeline) of LLM training
+and fine-tuning across thousands of GPUs [2, 33], it becomes essen-
+tial to capture and persist LLM checkpoints for a variety of use cases:
+fault-tolerance, suspend-resume for accommodating high-priority
+jobs and walltime limits, studying model evolution, debugging /
+recovering from unstable training trajectories (e.g., model spikes),
+etc. Such LLM checkpoints need to be captured with high frequency
+(“velocity”), sometimes as frequently as every iteration (e.g. to cap-
+ture and analyze differences introduced by specific mini-batches).
+Furthermore, each checkpoint is composed of heterogeneous ten-
+sors (“variety”): parameters of layers of different shapes and sizes,
+optimizer states, etc. These heterogeneous tensors, distributed over
+a large number of GPUs, are grouped together into shards and
+persisted into a large number of files, which can grow to massive
+sizes (“volume”). As a consequence, capturing checkpoints is a big
+data problem that exhibits all three Vs.
+Restoring checkpoints is a big data problem as well. LLM check-
+points are loaded from persistent repositories at high frequency
+(“velocity”) in various scenarios: to resume training or perform
+fine-tuning at high frequency by opportunistically utilizing faster
+and cheaper preemptible instances (HPC) or spot instances (Cloud
+arXiv:2512.24511v1 [cs.DC] 30 Dec 2025
+
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+Gossman et al.
+and Hyperscalars) [3, 12, 38]; to serve inference requests that need
+a large number of different models, all of which don’t fit into the
+GPU memory at the same time and therefore need to be swapped
+in and out of slower memory tiers as needed. The same “variety”
+and “volume” as in the case of training applies to restored LLM
+checkpoints as well.
+For both checkpoint and restore, a key challenge is the need to
+traverse an entire storage stack, from the GPUs, where the tensors
+live, through the host memory, local storage and finally external
+repositories such as parallel file systems, where the checkpoints
+need to be persisted. This leads to significant I/O pressure on the
+memory and interconnect subsystem because the faster memory
+tiers (GPU HBM, host DRAM) have fast interconnects (e.g., PCIe)
+to transfer checkpoints, but are limited in capacity; whereas the
+slower storage tiers (local disk, remote storage) have large capacities
+but perform slower read/writes and are connected through com-
+paratively low-bandwidth interconnects (e.g., Infiniband). Without
+efficient I/O techniques, checkpoint and restore become a bottleneck
+that slow down both training and inferences. Thus, it is important
+to study how the specific I/O patterns, caused by velocity, vari-
+ety, and volume of LLM checkpoints, especially under concurrency
+due to 3D parallelism, affect the I/O performance and scalability
+of checkpoint and restore on modern HPC systems tailored for AI
+workloads.
+Challenges. For large-scale LLM training, runtimes such as
+DeepSpeed [30] flush model states in parallel across GPUs, pro-
+ducing hundreds to thousands of distinct files per checkpoint, each
+capturing a portion of model or optimizer state [25]. This highly
+parallel write pattern accelerates checkpointing and simplifies the
+design of the runtime and checkpoint engine. However, the pro-
+liferation of large quantities of files on shared persistent storage
+causes metadata contention, leading to suboptimal I/O throughput
+and complex data management [1]. Recent studies [9] show that
+metadata-related operations alone account for up to 60% of all file
+system operations, underscoring the non-trivial overheads imposed
+by frequent small-file creation and management. This results in a
+mismatch between “simplifying application-centric checkpointing”
+and “I/O and storage-centric data-management”, which remains
+largely unoptimized for LLM and AI workloads [19, 25, 27].
+Furthermore, modern file systems and users continue to rely on
+buffered I/O by default, an approach originally optimized for slow
+spinning disks and early generation SSDs. Current HPC PFSes and
+SSDs now sustain multi-GB/s throughput per node, but buffered
+reads and writes can introduce redundant memory copies between
+the compute node’s DRAM and file system caches. These extra
+copies inflate access latencies and amplify contention on metadata
+and I/O servers. These extra copies inflate access latencies and
+amplify contention on metadata and I/O servers. Traditional bench-
+marking tools such as IOR [34] capture these effects only coarsely,
+as they are limited to POSIX semantics and simplified access pat-
+terns (e.g., file-per-process or a single aggregated file). Moreover,
+IOR assumes uniform object and access sizes across processes, mak-
+ing it unable to represent the heterogeneous and fine-grained data
+distributions observed in LLM checkpointing, where model states
+and optimizer tensors vary substantially in size across ranks. These
+gaps highlight the need for newer benchmarking strategies capable
+of modeling LLM checkpoint workloads and supporting backends
+beyond POSIX.
+Compounding these factors, LLM checkpointing generates a
+vast number of read and write operations across a wide range of
+object sizes, from kilobytes (metadata headers) to multi-gigabyte
+tensors (optimizer states). This diversity leads to poor bandwidth
+utilization under traditional POSIX I/O. Emerging I/O libraries,
+such as liburing [4], provide a promising avenue to alleviate such
+inefficiencies by enabling batched, non-blocking data movement,
+combined with efficient shared buffers between user and kernel
+space to reduce per-call system overheads. When combined with
+file system flags like O_DIRECT, or registered buffers, it can further
+enable zero-copy data movement between user-space and storage.
+However, despite their potential, the efficiency kernel-assisted I/O
+libraries remains largely unexplored in the context of production-
+grade checkpoint/restore (C/R) engines. Crucial aspects such as I/O
+concurrency levels, buffered versus direct I/O, aggregation strate-
+gies need to be characterized in depth for successful adoption.
+Key Contributions. Motivated by these challenges, this work
+conducts an extensive investigation into the I/O behavior of LLM
+checkpoint/restore. In particular, we focus on liburing,a well es-
+tablished kernel-assisted I/O library integrated with the Linux ker-
+nel. Our findings aim to guide both the LLM and big data com-
+munities toward more performant, scalable, and data-aware C/R
+frameworks for next-generation AI workloads. We summarize our
+contributions as follows:
+(1) A benchmarking framework for modern I/O engines: We
+develop a microbenchmark designed to evaluate the perfor-
+mance of liburing, a kernel-accelerated I/O library, under
+both synthetic and realistic LLM workloads. The benchmark
+addresses limitations of existing tools by modeling file-per-shard
+I/O– the default behavior of modern checkpointing frameworks–
+and capturing heterogeneous object sizes across ranks. It char-
+acterizes peak throughput and latency for emerging kernel-
+accelerated interfaces while systematically exploring how file
+system flags, aggregation strategies, and I/O concurrency affect
+checkpoint read and write performance at scale.
+(2) Characterizing aggregation for large LLM states: Using
+this benchmark, we analyze I/O performance under varying
+aggregation granularities, bypass of caches, and data sizes. Our
+results show how grouping multiple tensors or model shards
+into larger I/O submissions affects throughput and metadata
+contention, exposing trade-offs between application-level con-
+currency and storage-level efficiency.
+(3) Evaluation of LLM checkpointing engines: We empirically
+assess two state-of-the-art checkpointing runtimes– PyTorch’s
+TorchSnapshot [29] and DataStates-LLM [25] through our mi-
+crobenchmarks, highlighting how I/O patterns introduced by
+different phases of checkpoint and restore cycles, e.g., hetero-
+geneity of data structures, buffering, (de)/serialization, and frag-
+mented or uncoalesced I/O impact scalability on large parallel
+file systems.
+2
+Background and Related Works
+Composition of LLM Checkpoints. Modern LLMs generate
+vast amounts of data during training; for example, a 3B parameter
+
+Understanding LLM Checkpoint/Restore I/O Strategies and Patterns
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+. . .
+M files 
+per rank
+each
+having
+different
+num. of 
+objects
+N ranks
+Figure 1: Composition of
+a single LLM Checkpoint.
+User App
+VFS /
+OS-cache
+PFS Client
+Driver
+O_DIRECT
+Enabled?
+No
+Yes
+COMPUTE NODE
+MDS/OSS
+O_DIRECT
+Enabled?
+Yes
+OSS Cache
+No
+PERSISTENT STORAGE
+OST
+OST
+Figure 2: Flow of Operations Based on Bypass Cache
+(O_DIRECT) flags on the Parallel File System.
+Ideal
+(liburing)
+DataStates
+LLM
+Torch
+Snapshot
+torch.save
+0
+10
+20
+30
+40
+Time (s)
+3.7s
+5.7s
+6.9s
+14.2s
+11.8s11.7s
+16.8s
+33.0s
+Training
+Memcpy
+Checkpoint
+Restore
+Figure 3: Checkpoint and Restore
+Overheads when Training a 3B model.
+model distributed across 4 GPUs produces tens of gigabytes of data
+per rank per checkpoint. While these data volumes are compara-
+ble to traditional HPC applications, the I/O characteristics differ
+substantially. In traditional settings, applications either checkpoint
+inherently large contiguous data structures or rely on C/R frame-
+works such as VELOC [27], FTI [5], and SCR [26] to pre-coalesce
+smaller structures into contiguous per-rank files on local storage
+before flushing to the PFS in fixed-size, aligned chunks and are
+largely not adopted for GPU-accelerated workloads. GPU-aware
+variants (e.g., VELOC-GPU [23, 24], cudaCR [28], CRIUgpu [36],
+GDSCR [17]) extend this model to minimize device-to-host transfers
+via direct memory access, but still target large contiguous objects
+rather than the fragmented data typical of LLM checkpoints.
+Large models are typically sharded and parallelized across mul-
+tiple GPUs using data-, tensor-, pipeline-parallelism, and ZeRO-
+redundancy– collectively referred to as “4D parallelism” [18]. While
+such strategies enables efficient training of LLMs [33], it leads to
+a fragmented application state, wherein each GPU holds either
+replicated (data-parallel), or a unique shard (tensor, pipeline, ZeRO-
+redundancy) of the model or optimizer states [25]. To exploit paral-
+lel I/O, frameworks such as DeepSpeed [35] adopt a file-per-shard
+checkpointing approach, resulting in an 𝑁∗𝑀file layout that pro-
+duces hundreds of files per rank. Furthermore, each file ranges
+from a few MB to multiple GB, as illustrated in Figure 1, and quan-
+titatively detailed in Figure 4. While this “application-centric” lay-
+out simplifies runtime design, it dramatically increases file system
+metadata load. Even traditional HPC’s file-per-process can generate
+significant bottlenecks and management challenges [1, 13]; LLMs
+exacerbate this issue by massively multiplying file counts, stressing
+both compute and storage resources.
+Many LLM-specific C/R engines, such as DataStates-LLM [25]
+adopt this same checkpointing pattern, as it is simple to integrate
+with existing training frameworks. Other solutions, such as Torch-
+Snapshot [19], exacerbate this problem even more: large objects
+and model states are subdivided into fixed size amounts (512 MB
+by default), and each fixed-size chunk is flushed to a separate file
+inside a deeply nested subdirectory, stressing all levels of the PFS
+(MDS, OSS, and OSTs). Furthermore, these frameworks immediately
+issue write operations for each data structure within the checkpoint
+object, regardless of size, leading to higher MDS contention and sub-
+optimal usage of available PFS bandwidth, which is better designed
+for large, contiguous transfers. These challenges highlight a key
+tension in LLM checkpoint design: while the application-centric
+layouts simplify integration with training frameworks, they diverge
+sharply from the filesystem-friendly patterns that underpin tradi-
+tional HPC checkpointing, motivating the need for aggregation and
+smarter I/O orchestration to fully leverage PFS capabilities.
+I/O Path on the Parallel File Systems. Modern HPC systems
+connect compute nodes to a shared parallel file system (PFS) through
+high-bandwidth interconnects (e.g., InfiniBand). A PFS comprises a
+metadata server (MDS) that manages filesystem metadata stored on
+metadata targets (MDTs), and multiple object storage servers (OSSs)
+that handle file data stored on object storage targets (OSTs). Com-
+pute nodes interact with the MDS for metadata operations and with
+the OSSs for data I/O, as illustrated in Figure 2.
+At runtime, OS-level caches on compute and storage nodes act
+as transient burst buffers between the application and the PFS. The
+O_DIRECT flag– a POSIX file system flag specified during file open–
+controls whether I/O bypasses these caches, enabling direct trans-
+fers between user space and storage, eliminating double-buffering
+at the cost of exposing raw storage latency. Conversely, cached
+I/O can mask latency and coalesce small writes, but may inflate
+memory use and obscure performance analysis.
+These tradeoffs are central to understanding checkpoint I/O.
+Fine-grained, writes from hundreds of ranks trigger thousands of
+metadata and small I/O operations, stressing the PFS. Monitoring
+tools like Darshan [21] reveal these bottlenecks by exposing file
+access patterns and metadata load on production systems [32].
+However, Darshan’s analysis is limited for asynchronous I/O, as
+it records only request submission times rather than actual I/O
+completion, and currently lacks integration with interfaces such
+as liburing. This gap underscores the need for new performance
+models and measurement tools that reflect LLM checkpoint/restore
+workloads on shared storage systems.
+Kernel Accelerated I/O Libraries. The emergence of kernel-
+bypass and low-overhead I/O frameworks, such as io_uring, libaio,
+and SPDK [11, 31], introduces new opportunities to optimize data
+paths in modern storage systems. Libraries like liburing expose
+submission and completion queues directly in user space, enabling
+batched, asynchronous I/O and reducing system call and context
+switch overhead. While this does not inherently bypass the file
+system or enable “direct-to-storage” transfers (which still depend
+on O_DIRECT), it eliminates much of the user–kernel transition cost
+that traditionally limits small, frequent I/O operations [11].
+In the context of LLM checkpoints, such kernel-accelerated in-
+terfaces allow applications to pipeline data movement between
+user-space buffers and storage asynchronously, breaking the bottle-
+neck of sequential I/O and improving host CPU utilization. When
+
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+Gossman et al.
+combined with aggregation and multithreaded flushing, liburing
+can approach or even exceed the throughput of well-tuned POSIX
+I/O at scale, particularly under high concurrency [4].
+However, leveraging these advantages requires careful alignment
+between the application’s internal I/O granularity and the PFS’s
+stripe and metadata behavior. Without such coordination, asyn-
+chronous I/O may increase contention or induce small, misaligned
+writes. Consequently, an ideal checkpointing system must not only
+overlap computation and I/O but also co-design its buffering, aggre-
+gation, and kernel-level I/O strategies with the underlying storage
+system to fully exploit available bandwidth.
+Dissecting The Flow of Events During Checkpoint and Re-
+store Operations. As depicted in Figure 1, each checkpoint file rep-
+resents a logical object composed of multiple nested data structures–
+strings, runtime class objects, random state iterators, lists, tensors,
+etc. The major size of each file is dictated by tensors, which re-
+side both on the CPU and the GPU. Unlike other data structures,
+which need to be serialized and converted to a byte stream to be
+stored on disk, tensors and contiguous containers (e.g., numpy ar-
+rays) are inherently contiguous byte streams, i.e., pre-serialized
+buffers, and can be saved directly. Therefore, due to large sizes,
+distributed memory locations (GPU and host memory), and zero
+serializations needed, tensors and the remaining data structures
+are treated separately during checkpoint/restore, as detailed next.
+For each logical checkpoint object, the default checkpointing
+approach– torch.save, adopted by training runtimes [30], syn-
+chronously and sequentially allocate host memory for all GPU resi-
+dent data structures, transfer them from GPU to the host memory,
+serialize the entire logical object, and finally flush to disk, leading to
+significant I/O overheads, often dominating the training time [25].
+To accelerate checkpointing, state-of-the-art LLM engines such as
+TorchSnapshot [29] and DataStates-LLM [25] decompose the check-
+point operation on each of the 𝑁∗𝑀files into several synchronous
+and asynchronous stages:
+(1) Tensor extraction and “lean object” serialization: Tensors,
+both resident on GPU or host memory, are detached from the
+logical checkpoint object, and the remaining data, referred to
+as “lean checkpoint object” is serialized (typically using pickle
+module). Given the Global Interpreter Lock (GIL) limitations of
+Python<3.14, this stage was synchronous, i.e., blocked training.
+(2) GPU to host transfers: GPU resident datastructures, typi-
+cally tensors, are flushed on (pre-allocated) host buffers, ei-
+ther synchronously (TorchSnapshot [29]), or asynchronously
+(DataStates-LLM [25]), i.e., overlapped transfers with immutable
+forward and backward phases of training.
+(3) Host to file transfers: All tensors, serialized datastructures,
+and metadata of the logical checkpoint object are asynchronously
+flushed to slower storage tiers while training proceeds.
+(4) Header/metadata generation: Metadata headers map tensors
+to offsets in files for reconstruction during the restore.
+During restore, all the 𝑁processes operate in parallel and read
+back their 𝑀files each from the latest checkpoint version directory.
+While the 𝑁processes restore in parallel, all checkpoint engines
+restore the 𝑀logical objects (or files) serially, i.e., the next file is read
+only when the previous logical checkpoint object has been fully
+restored on both GPU and host tiers. Unlike checkpointing, wherein
+some stages are asynchronous, during restore, all checkpointing
+engines adopt a synchronous and serial read approach, i.e., each
+data structure of each logical object on a given process is moved
+across one tier at a time, and only when restored on the destination
+memory, the next data structure is read from the file.
+Conventional approaches, i.e., torch.load, opaquely allocate
+memory for the entire checkpoint object, read it from the file, per-
+form deserialization of the entire object, and transfer data struc-
+tures to the GPU if needed. However, due to the separation of pre-
+serialized tensors and the “lean checkpoint object” during check-
+pointing, state-of-the-art engines cannot adopt such opaque poli-
+cies, and restore using the following stages.
+(1) Reading the metadata triggers a few bytes of read operation.
+(2) Restoring the “lean checkpoint object”, based on the offset
+dictated by the metadata header, the “lean checkpoint object”,
+typically of a few kilobytes, is read back and de-serialized.
+(3) Restoring tensors by iterating over each tensor entry in meta-
+data, host memory is allocated, where the tensor is copied from
+the file, triggering reads amounting to tens of MB to tens of GB.
+(4) Host to GPU transfers are triggered once the entire “check-
+point object” is reconstructed on the host memory, after which
+the GPU resident data structures are copied from host to GPU
+synchronously.
+This design, while modular and simple, yields inefficient I/O
+behavior. Restoring thousands of small objects and fragmented files
+lead to high metadata traffic and low effective throughput, as each
+tensor, metadata entry, or manifest component often triggers an
+independent read or write call. Furthermore, both frameworks per-
+form separate reads for metadata and data objects. TorchSnapshot
+first reads a single manifest file describing all tensors and metadata,
+then iteratively restores each object one-by-one—triggering one
+read call per object. In contrast, DataStates-LLM issues a separate
+read for every entry referenced in the metadata header, including
+one for the metadata itself, one for the serialized (“lean”) object, and
+one for each tensor or chunk—typically tripling the number of read
+operations. Furthermore, both frameworks allocate host memory
+for each read on the fly rather than preallocating buffers, intro-
+ducing additional memory management overhead and preventing
+efficient pipelining of I/O and data placement.
+Together, these design choices: per-object granularity, lack of
+I/O coalescing, and dynamic memory allocation create substantial
+metadata contention and underutilize available bandwidth. They
+highlight a broader tension between modular, application-centric
+checkpointing and filesystem-efficient I/O, motivating the need
+for aggregation and coordinated data movement strategies that
+consolidate small reads/writes into fewer, larger transfers.
+Motivation. To understand the I/O overheads during LLM check-
+point and restore, we consider the case of 3B model, running on
+4×A100-40GB GPUs using tensor-parallelism, meaning each model
+layer is partitioned across the GPUs, and each GPU holds a dis-
+tinct shared of the model’s weights and activations. Cumulatively
+across the 4 ranks, the 3B model produces 132 files, aggregating
+to 42 GB for each checkpoint. We study the I/O overheads of fully
+persisting a checkpoint to the PFS, and then restoring it using three
+engines: default deepspeed (torch.save), Pytorch’s TorchSnap-
+shot [29], and DataStates-LLM [25]. In addition to the LLM engines,
+
+Understanding LLM Checkpoint/Restore I/O Strategies and Patterns
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+we also compare against an “ideal approach”, simulated through
+a microbenchmark, which flushes from 4 ranks, the same volume
+of a single large host-resident, contiguous data buffer using the
+liburing library. We profile the time taken by the major phases of
+an iteration, i.e., forward, backward, device transfers, and check-
+point/restore times (data loading and update phase are negligible).
+Gaps in Checkpointing: The pink bars in Figure 3 show the
+breakdown of a single iteration when checkpointing using different
+engines. When compared against the “ideal approach”, we observe
+that DataStates-LLM, TorchSnapshot, and default torch.save check-
+point engines lead to 1.8×, 3.2×, and 4.5× slower iterations, respec-
+tively. This hints at significant I/O gaps in LLM checkpointing
+engines, which has not been previously characterized and studied.
+Gaps in Restore: Next, we study the breakdown of a single iter-
+ation when restarting, depicted using the blue bars in Figure 3. The
+TorchSnapshot engine performs the fastest restoration of the check-
+point, outperforming DataStates-LLM and the default torch.save
+approach by 1.22× and 2.8×, respectively. Similar to the case of
+checkpointing, we observe that all approaches lag behind the “ideal
+approach” by at least 51%, showing potential for accelerating re-
+store phases. However, despite the common notion of reads being
+faster than writes, on our platform 3.1, we observe a reversed trend
+wherein checkpoint flushes are faster than restore reads.
+These findings highlight a growing disconnect between the
+checkpointing abstractions used by LLM frameworks and the ideal
+access patterns expected by high-performance file systems. Bridging
+this gap requires rethinking how model states are serialized, grouped,
+and issued to the storage stack to fully exploit available I/O bandwidth.
+3
+Study of I/O Patterns and PFS Interactions
+49M
+(84.8%)
+5.1M
+(3.0%)
+>1G
+(3.0%)
+<1M
+(3.0%)
+75M-200M
+(6.1%)
+(a) 3B model
+105M
+(82.1%)
+5.1M
+(5.1%)
+>1G
+(5.1%)
+<1M
+(2.6%)
+75M-200M
+(5.1%)
+(b) 7B model
+152M
+(78.4%)
+5.1M
+(7.8%)
+>1G
+(7.8%)
+<1M
+(2.0%)
+75M-200M
+(3.9%)
+(c) 13 model
+Figure 4: Checkpoint file size distribution of different models.
+3.1
+Experimental Testbed
+We conduct our experiments on the ALCF Polaris System, compris-
+ing 560 nodes each equipped with 1 AMD EPYC Milan 753P CPU,
+4×A100-40GB GPUs, and 512 GB of DDR4 with a bandwidth of 204.8
+GB/s. The system is connected to a Lustre-based PFS with 100 PB
+of storage, containing 40 metadata servers (OSSes) and 160 object
+storage targets (OSTs), with an aggregate bandwidth of 650 GB/s.
+We change the default stripe settings to allow all files to be striped
+across all available OSTs and set the stripe size to 64 MB, which
+better ensures that concurrent requests are spread out among more
+OSTs and each I/O operation touches 1 OST. The microbenchmark
+uses liburing version 2.12 and is compiled with gcc 13.3.1.
+We present a benchmarking framework that captures both syn-
+thetic and LLM-realistic workloads to evaluate I/O performance
+under varying aggregation strategies and modern I/O interfaces
+such as liburing and libaio. By systematically varying tensor
+sizes and aggregation layout, our framework isolates performance
+bottlenecks in the checkpoint/restore pipeline and provides a de-
+tailed performance model of memory- and storage-level interac-
+tions during C/R I/O. This approach enables precise characteriza-
+tion of serialization, batching, memory limitations, and metadata
+overheads that affect overall throughput.
+3.2
+Methodology
+This work aims to characterize peak performance of the Linux
+liburing interface under C/R workloads representative of LLM
+training and compare how close state-of-the-art C/R engines ap-
+proach this peak. We design a suite of experiments that establish
+performance models for liburing under a range of I/O conditions:
+ring contention levels, checkpoint sizes, scaling the number of
+processes performing checkpointing, aggregation granularity, and
+caching modes. These experiments isolate how kernel-level I/O
+acceleration behaves under LLM’s multi-file and concurent check-
+pointing requirements, helping identify design principles for future
+checkpointing engines that better align with PFS capabilities.
+3.2.1
+I/O Aggregation and Data Locality. Aggregation plays
+a critical role in determining both I/O throughput and PFS scala-
+bility [13]. Fine-grained, file-per-object strategies used in current
+LLM frameworks create excessive metadata contention and make
+suboptimal use PFS bandwidth, whereas coarser aggregation im-
+proves data locality and aids I/O coalescing, but risks coordination
+overhead and OST contention.
+We explore this trade-off through three representative strategies:
+(1) File-per-Tensor: Each tensor or shard is written independently,
+reflecting the uncoalesced I/O patterns of frameworks such as
+DeepSpeed and TorchSnapshot and exposes the metadata and
+queue contention costs at scale
+(2) File-per-Process: Each rank writes all its data to a single file,
+reducing file handle count and improving sequential locality.
+This strategy demonstrates the benefits of moderate aggregation
+for typical PFS configurations.
+(3) File-per-Tensor: All ranks write to disjoint, contiguous offsets
+in a shared file. This represents the best-case scenario for data
+coalescing and enables us to model contention effects of both the
+PFS and submission ring and completion queues of liburing.
+By studying these strategies, we characterize how liburing
+handles aggregation compared to traditional POSIX I/O, which is
+known to degrade rapidly under high file counts but has not been
+extensively evaluated in kernel-accelerated contexts.
+3.2.2
+Buffered vs. Direct I/O Paths. We examine how the data
+path impacts performance by enabling and disabling the O_DIRECT
+flag, which bypasses the Linux page cache. Buffered I/O routes data
+through the kernel’s caching layer, potentially improving small se-
+quential writes but introducing additional copies and unpredictable
+flushing. In contrast, O_DIRECT transfers data directly between user
+buffers and storage, eliminating caching overhead but requiring
+strict alignment and padding to the filesystem block size. This ex-
+periment quantifies how caching affects throughput asymmetrically
+for writes and reads, especially under mixed object sizes. POSIX
+
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+Gossman et al.
+serves as the baseline here to contrast user-space buffering behavior
+against liburing’s kernel-bypass semantics.
+3.2.3
+Benchmark Design. We design two complementary bench-
+marks to provide both controlled performance models and LLM-
+representative evaluations.
+(1) Synthetic Benchmark: This benchmark isolates intrinsic I/O
+characteristics without higher-level framework overheads (frag-
+mentation, uneven object sizes, non-aligned offsets). Each rank
+issues contiguous writes from host-resident buffers of 128 MB–8 GB,
+approximating the total checkpoint volumes of mid-scale models
+while maintaining controlled granularity.
+(2) Representative LLM Benchmark: The second benchmark
+models realistic checkpoint workloads derived from BLOOM-
+3B, LLaMA-7B, and LLaMA-13B training configurations out-
+lined in Figure 4. Checkpoint structures reproduce the actual
+file layouts, tensor distributions, and process counts used during
+training (4, 8, and 16 ranks respectively). Each rank manages mul-
+tiple buffers representing model and optimizer states and issues
+I/O batches up to the configured queue depth before awaiting
+completions, capturing non-uniform and staggered submission
+behavior. We use this benchmark to evaluate how liburing
+behaves under real-world fragmentation, varying aggregation
+strategies, and different data paths.
+3.3
+I/O Coalescing with Synthetic Benchmark
+We first evaluate liburing in isolation using the synthetic bench-
+mark. In both experiments there are no more than 4 processes per
+node (matching Polaris’ GPU setup). Each rank divides its large
+buffer into 64 MB regions, similar to DataStates-LLM [25], and
+submits all chunks at once, enabling us to evaluate liburing’s
+concurrent I/O. Varying the total buffer size allows us to explore
+both how liburing handles data sizes representative of checkpoint
+objects and the maximum concurrency the queue or PFS can sus-
+tain. Inspired by DataStates-LLM, which coalesces objects into host
+buffers but submits I/O as soon as each object is available, our
+benchmark instead accumulates data up to the buffer size before
+issuing a batched flush, balancing minimized application stalls with
+high sustained PFS throughput.
+Figures 5 and 6 illustrate the I/O throughput during writes and
+reads on a small scalability experiment, varying the number of
+processes from 1-16, with 4 processes per node. Each process check-
+points and restores 8 GB of data (the largest file size in the BLOOM-
+3B model). Both aggregation strategies (even a naive write-at-offset),
+outperform the file-per-shard strategy by up to ≈34%. File-per-
+process and single aggregated file strategies show similar through-
+put, suggesting that liburing suffers contention as the number of
+files increases: multiple files require repeated kernel lookups, per-
+mission checks, block I/O setup, and lock management, whereas a
+single file allows cached reuse and reduces overhead. Read through-
+put on the other hand remains relatively stagnate across 1-4 pro-
+cesses, suggesting the node-level outgoing bandwidth is capped
+around 7 GB/s.
+Figures 7 and 8 zoom in on single-node performance (4 processes)
+across data sizes from 128 MB to 8 GB. Write throughput scales with
+per-rank data size up to ≈2 GB before plateauing as node resources
+saturate, while read throughput stays roughly constant and ≈2×
+lower than writes. Aggregation consistently outperforms file-per-
+tensor layouts across all configurations, confirming its effectiveness
+in improving I/O efficiency.
+Observation 1: Aggregation is shown to be necessary for sus-
+taining throughput in LLM checkpointing. In multi-node exper-
+iments (figures 5 and 6) liburing exhibits increasing contention
+as the number of per-rank files grows, causing throughput to
+degrade even when aggregate I/O volume remains constant.
+Single-file aggregation mitigates this effect by reducing meta-
+data presure and kernel-level coordination overheads that are
+amplified by the highly sharded checkpoint layouts of modern
+LLMs. On a single-node, write throughput scales only up to
+approximately 2 GB per rank before saturating, indicating a
+practical upper bound on effective batching. This saturation
+point defines an LLM-specific aggregation threshold that train-
+ing frameworks such as DataStates-LLM must target to maxi-
+mize sustained PFS utilization without incurring diminishing
+returns.
+Aggregation improves throughput across all configurations.
+Multi-node experiments show that liburing experiences con-
+tention when managing numerous files, favoring single-file ag-
+gregation. Single-node tests reveal that write throughput scales
+up to ≈2 GB per rank before saturating, suggesting an opti-
+mal batching threshold for frameworks like DataStates-LLM to
+maximize sustained PFS performance.
+3.4
+O_DIRECT Influence on Writes and Reads
+Figures 9 and 10 evaluate the impact of the O_DIRECT flag on
+liburing and POSIX throughput using the synthetic benchmark.
+We use 4 processes on a single node and focus on the single aggregated-
+file configuration, varying data sizes from 256 MB to 8 GB to match
+representative checkpoint sizes. POSIX is included as a baseline
+to distinguish whether observed effects stem from system-level
+caching or liburing itself.
+O_DIRECT bypasses both kernel page caching and OSS-level
+buffering, forcing data to move directly between user-space buffers
+and storage. This change affects reads and writes in opposing ways
+due to differences in how the kernel manages cache residency and
+delayed flushing. For writes, avoiding double buffering eliminates
+extra memory copies and writeback synchronization, yielding up
+to 4.8× and 2.2× higher throughput for liburing and POSIX, re-
+spectively. The larger benefit observed with liburing reflects its
+lower system call overhead and the ability to batch I/O submissions
+without invoking kernel-side buffering mechanisms. In contrast,
+reads degrade when caching is disabled because the kernel cannot
+exploit page cache locality or readahead to prefetch contiguous
+regions. Buffered reads remain up to 2.3× faster for smaller data
+sizes (≤1 GB), where repeated accesses can be served directly from
+memory, but this advantage disappears once client and OSS caches
+saturate beyond ≈4 GB. At this point, O_DIRECT achieves slightly
+higher and more stable throughput, as it avoids cache eviction
+and memory pressure across multiple processes issuing concurrent
+reads.
+Therefore, a natural solution would seem to be to use the O_DIRECT
+flag only for writes and disable it for reads when the data region is
+
+Understanding LLM Checkpoint/Restore I/O Strategies and Patterns
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+Figure 5: Write throughput comparing
+the 3 aggregation strategies on the syn-
+thetic benchmark (1 - 16 processes with
+up to 4 processes per node where each
+process checkpoints 8 GB of data; higher
+is better)
+Figure 6: Read throughput comparing the
+3 aggregation strategies on the synthetic
+benchmark (1 - 16 processes with up to
+4 processes per node where each process
+restores 8 GB of data; higher is better)
+Figure 7: Write throughput comparing
+the 3 aggregation strategies for the syn-
+thetic benchmark varying the contigu-
+ous tensor size between 128 MB-8 GB (1
+compute node using 4 processes; higher
+is better)
+Figure 8: Read throughput comparing the
+3 aggregation strategies for the synthetic
+benchmark varying the contiguous ten-
+sor size between 128 MB-8 GB (1 compute
+node, using 4 processes; higher is better)
+Figure 9: Write throughput varying data
+region sizes in multiples of 4 from 256M -
+8G for both POSIX and liburing under dif-
+ferent O_DIRECT flag configurations. (1
+compute node using 4 processes; higher
+is better).
+Figure 10: Read throughput varying data
+region sizes in multiples of 4 from 256M -
+8G for both POSIX and liburing under dif-
+ferent O_DIRECT flag configurations. (1
+compute node using 4 processes; higher
+is better).
+≤≈1 GB. However, as shown in figure 10, this yields no improve-
+ment, even further reducing throughput by up to 3× for liburing
+and 3.3× for POSIX. When buffering is reintroduced for large, cold
+reads, the kernel and OSS attempt to cache data opportunistically
+but cannot sustain it at scale, leading to the same disk-bound perfor-
+mance with added cache management overhead. For these reasons,
+we opt to keep the O_DIRECT flag enabled for both writes and
+reads throughout the remainder of our experiments, as it provides
+the best balance between write and read performance.
+Observation 2: The impact of O_DIRECT on I/O performance
+diverges between checkpoint and restart phases of LLM train-
+ing. While direct I/O consistently improves checkpoint write
+throughput by avoiding double buffering, its effect on restore
+performance is highly dependent on access granularity, working-
+set size, and access ordering. Unlike traditional scientific restart
+workloads, LLMs checkpoints consist of largely non-uniform tes-
+nor layouts ranging from KB or MB to multi-gigabyte parameter
+shards. Restore phasses therefore interleave small, fragmented
+reads with large, sequential transfers, limiting page-cache reuse
+and increaseing management overhead. The assymetry, com-
+bined with the increasing frequency of restarts during LLM
+training and inference workloads, inidicates that caching as-
+sumptions inherited from traditional HPC workloads do not
+hold for large-scale LLM restore patterns and must be explicitly
+accounted for in checkpoint system design.
+3.5
+Modeling Ideal liburing Performance
+Against LLM Checkpointing Engines
+We next compare our liburing-based synthetic benchmark (single
+aggregated file configuration) against two production-grade LLM
+checkpointing systems: DataStates-LLM and TorchSnapshot. Both
+represent state-of-the-art frameworks, but differ in backend and
+design: DataStates-LLM uses liburing, while TorchSnapshot relies
+on libaio, an older interface lacking modern batching and queueing
+capabilities. This comparison highlights how different I/O engines,
+abstractions, and runtime design affect end-to-end C/R throughput.
+Figures 11–12 show that our baseline achieves up to 1.2× and
+6.6× higher write and 1.5× and 3× higher read throughput than
+DataStates-LLM and TorchSnapshot, respectively. TorchSnapshot’s
+performance collapses under heavy metadata and fragmentation
+overhead: each object (≤512 MB) is split into multiple files and
+directories, amplifying MDS/OSS contention and I/O serialization.
+Combined with the limitations of libaio, these design choices lead
+to severe throughput degradation and no scalability.
+Although DataStates-LLM uses the same liburing backend as
+our benchmark, its performance is constrained by higher-level
+runtime costs. Our benchmark isolates raw I/O throughput, while
+DataStates-LLM executes a full checkpoint/restore pipeline involv-
+ing metadata management, object serialization, and dynamic buffer
+allocation. Thus, its lower throughput reflects framework over-
+heads rather than I/O inefficiency. However, DataStates-LLM’s
+
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+Gossman et al.
+Figure 11: Checkpoint throughput of the
+synthetic benchmark using the single ag-
+gregated file configuration (1 - 16 pro-
+cesses with up to 4 processes per node
+where each process checkpoints 8 GB of
+data; higher is better)
+Figure 12: Restore throughput of the syn-
+thetic benchmark using the single aggre-
+gated file configuration (1 - 16 processes
+with up to 4 processes per node where
+each process restores 8 GB of data; higher
+is better)
+Figure
+13:
+DataStates-LLM
+restore
+pipeline
+broken
+down
+by
+major
+operations– memory allocation and PFS
+reads (1 compute node with 4 processes)
+Figure 14: Restore throughput of the syn-
+thetic benchmark using the single aggre-
+gated file configuration. DataStates-LLM
+does not include memory allocation time
+(1 compute node with 4 processes; higher
+is better)
+Figure 15: Checkpoint throughput of the
+synthetic benchmark using the single ag-
+gregated file configuration (1 compute
+node with 4 processes; higher is better)
+Figure 16: Restore throughput of the syn-
+thetic benchmark using the single aggre-
+gated file configuration (1 compute node
+with 4 processes; higher is better)
+write throughput plateaus beyond 2 GB per rank, and read through-
+put declines beyond 1 GB, indicating additional bottlenecks.
+To pinpoint these bottlenecks, we profiled the DataStates-LLM
+restore path. As depicted in Figure 13, memory allocation dominates
+restore time, nearly matching raw read cost, while other operations
+such as deserialization and header parsing are negligible. Excluding
+allocation overhead nearly doubles throughput (Figure 14), aligning
+it with the baseline. This confirms that restore performance is
+primarily memory-bound, suggesting that preallocated or circular
+buffer reuse could significantly improve efficiency.
+Observation 3: Production frameworks underperform relative
+to the isolated liburing baseline due to design and runtime
+overheads rather than I/O inefficiency. TorchSnapshot’s frag-
+mentation and metadata-heavy structure severely limit scala-
+bility, while DataStates-LLM’s throughput plateaus from per-
+object allocation overheads. Profiling shows that memory allo-
+cation dominates restore latency– removing it nearly doubles
+throughput– indicating that preallocated or reusable buffers
+could close much of the performance gap.
+3.6
+Impacts of LLM Checkpointing Structures
+We evaluate our liburing baseline under realistic LLM check-
+point/restore workloads (§2). While both experiments use the same
+I/O engine, their configurations differ fundamentally: the synthetic
+benchmark uses a single large contiguous buffer per process, whereas
+the LLM benchmark reflects true model layouts—multiple buffers
+of varying, non-aligned sizes. Unlike the synthetic setup, which
+used block-aligned power-of-two regions, the LLM benchmark re-
+quires explicit offset alignment for each buffer. Under the single
+aggregated file configuration, this introduces a serialized prefix-
+sum calculation across ranks: each must wait for its predecessor
+to compute total space (including padding) before writing, slightly
+increasing coordination overhead. These layout constraints stress
+different parts of the I/O stack: the synthetic benchmark primarily
+measures raw data-path throughput, while the LLM benchmark
+exposes metadata management, alignment handling, and queue
+depth limits that better resemble end-to-end checkpoint behavior.
+In particular, the irregular write sizes reduce batching opportunities
+within liburing, often resulting in shorter submission queues and
+lower completion parallelism
+Figure 17 shows throughput for 3B, 7B, and 13B checkpoints
+across aggregation strategies. Unlike the synthetic experiments
+(Figures 5–8), where aggregation yielded clear gains over file-per-
+shard, all strategies here perform comparably, with only modest
+aggregation benefits.
+This difference stems from non-coalesced I/O. In the synthetic
+case, each rank could submit one large batched request, maximizing
+queue concurrency. In contrast, the LLM benchmark issues many
+
+Understanding LLM Checkpoint/Restore I/O Strategies and Patterns
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+Figure 17: Read and write throughputs with different aggre-
+gation strategies on the realistic LLM benchmark using 3B (4
+GPUs), 7B (8 GPUs), and 13B (16 GPUs) models, 4 GPUs/node;
+higher is better.
+Figure 18: Checkpoint and restore throughputs of the realis-
+tic LLM benchmark using the single aggregated file configu-
+rations; using 3B (4 GPUs), 7B (8 GPUs), and 13B (16 GPUs)
+models, 4 GPUs/node; higher is better.
+small, irregularly sized buffers. The effect intensifies for larger
+checkpoints (7B, 13B), where a larger percentage of I/O operations
+are using small sizes, halving sustained throughput compared to the
+synthetic baseline. For example, 13B contains many small (≤5 MB)
+buffers, each generating separate I/O requests that limit coalescing
+and increase metadata activity.
+Despite this, aggregated layouts yield tangible throughput gains
+and greatly simplifies checkpoint management. These findings sug-
+gest that future checkpointing frameworks could benefit from hy-
+brid aggregation strategies (e.g., combining logical object group-
+ing in user space with kernel) level request batching—to exploit
+liburing’s concurrency more effectively.
+When comparing checkpointing frameworks in Figure 18 using
+the best-performing aggregation strategy (single aggregated file),
+our benchmark achieves consistently higher throughput than both
+DataStates-LLM and TorchSnapshot, showing larger relative gains
+under realistic LLM workloads than in the synthetic benchmark.
+Across all three model sizes, our benchmark achieves up to 3.9×
+higher write throughput than DataStates-LLM and 7.6× higher
+than TorchSnapshot. For reads we observe up to 3.6× improve-
+ment over DataStates-LLM and 3.8× over TorchSnapshot. These
+gains are particularly pronounced for larger models, where there
+are more numbers of small files and buffers (≤5.1 MB) increase
+metadata overhead and utilize available bandwidth less efficiently
+by submitting many small I/O requests. Despite its simplicity, this
+design achieves superior end-to-end throughput in both synthetic
+and LLM-replica benchmarks, highlighting that both I/O request
+aggregation, as well as file aggregation offers a promising avenue
+for scalable, high-performance C/R frameworks for next generation
+AI workloads.
+Observation 4: Realistic LLM checkpoint layouts expose the
+performance penalties of uncoalesced I/O, where fragmented
+and variably sized buffers disrupt batching and offset alignment.
+While aggregation still improves throughput over the default
+file-per-shard approach, small, misaligned objects and serialized
+offset computations limit achievable concurrency and reduce
+sustained bandwidth. Compared to production frameworks, the
+streamlined liburing baseline sustains over 3× higher write
+and read throughput, showing that efficient batching and object
+aggregation are key to scalable C/R under real workloads.
+4
+Discussion
+Our experiments highlight the critical impact of aggregation and
+the O_DIRECT flag on LLM checkpoint/restore I/O. Our results
+clearly show that using a single aggregated file layout consistently
+outperforms the default file-per-shard approach adopted by cur-
+rent C/R engines, as well as the more aggressively sharded layouts
+used by TorchSnapshot, showing we can obtain better performance
+and significantly improve checkpoint management for users. Fur-
+thermore, by coalescing multiple small objects (e.g., layer weights,
+model states, and metadata) into larger I/O operations, we show
+that performance can improve bandwidth utilization and reduce
+metadata contention.
+The impact of the O_DIRECT flag is strongly workload depen-
+dent. For writes, enabling O_DIRECT bypasses page and OSS cahces,
+improving throughput by up to 4.8×. For reads of small objects or
+files, O_DIRECT is shown to reduce performance, as it cannot take
+advantage of cached data that reduces PFS interactions and im-
+proves throughput. However, for larger read operations (≥4GB),
+it improves read throughput by avoiding cache coherency over-
+head in both the kernel and OSS, demonstrating that careful use
+of O_DIRECT can optimize performance depending on read/write
+size and workload characteristics (e.g, write-heavy vs. read-heavy).
+Comparing against TorchSnapshot and DataStates-LLM high-
+lights the remaining gap to peak achievable performance. Com-
+pared to our aggregated baseline approach, both C/R engines fall
+short of of synthetic benchmark peaks, trailing by up to 1.2× in
+
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+Gossman et al.
+writes and 1.5× in reads for DataStates-LLM and up to 6.6× in
+writes and 3× in reads for TorchSnapshot. These differences are
+even more pronounced in the LLM benchmark, where DataStates-
+LLM trails the baseline benchmark by up tp 3.9× for writes, and
+3.6× for reads. Comparatively, TorchSnapshot trails by up to 6.7×
+in write throughput, and 3.8× in read performance. A key limita-
+tion in DataStates-LLM is repeated buffer allocation during reads,
+whereas our baseline implementation reuses preallocated, aligned
+buffers, reducing memory overhead and improving read through-
+put. These observations indicate significant room for improvement
+via aggregation-aware I/O, coalescing of small I/O operations, and
+careful alignment, which can help future frameworks more fully
+exploit available bandwidth and minimize metadata bottlenecks.
+5
+Conclusions and Future Work
+Our study demonstrates that careful aggregation of checkpoint
+data can substantially improve both write and read throughput in
+LLM training. By consolidating data (such as layer weights, opti-
+mizer states, and metadata) into single, contiguous files, we reduce
+metadata overhead, improve bandwidth utilization, and simplify
+restore operations by limiting each process to a single file han-
+dle. We further show that the O_DIRECT flag has a workload-
+dependent impact: it greatly accelerates writes by bypassing page
+and OSS caches, while for small reads it can reduce performance;
+for large reads (≤4GB), however, it mitigates cache coherency
+overhead, improving throughput. These results highlight that com-
+bining aggregation-aware I/O with judicious use of O_DIRECT can
+significantly enhance checkpoint/restore efficiency
+Future work will focus on integrating these insights into pro-
+duction frameworks such as DataStates-LLM. Specifically, we plan
+to implement persistent buffer reuse to reduce repeated memory
+allocations, batched I/O submissions aligned with queue depth,
+and multi-threaded completion handling to fully utilize available
+bandwidth. In addition, we aim to coalesce small objects (e.g., layer
+weights, optimizer states, metadata) into larger I/O operations to
+maximize bandwidth utilization and reduce metadata pressure. By
+incorporating these optimizations, next-generation C/R systems
+can achieve scalable, high-performance checkpointing tailored to
+the demands of large LLM training pipelines.
+Acknowledgments
+This work is supported in part by the U.S. Department of Energy
+(DOE), Office of Advanced Scientific Computing Research (ASCR)
+under contract DEAC02–06CH11357/0F–60169 and the National Sci-
+ence Foundation (NSF) under award no. 2411386/2411387, 2106635.
+Results presented in this paper are obtained using Argonne’s HPC
+systems– ALCF Polaris, Joint Laboratory for System Evaluation
+(JLSE), and NSF’s CloudLab and Chameleon testbeds.
+References
+[1] 2003. Lustre : A Scalable , High-Performance File System Cluster.
+[2] Meta AI. 2025. The Llama 4 Herd: The Beginning of a New Era of Natively Multi-
+modal AI Innovation. https://ai.meta.com/blog/llama-4-multimodal-intelligence/.
+Accessed: “2025-11-01”.
+[3] Sanjith Athlur, Nitika Saran, Muthian Sivathanu, Ramachandran Ramjee, and
+Nipun Kwatra. 2022. Varuna: scalable, low-cost training of massive deep learn-
+ing models. In Proceedings of the Seventeenth European Conference on Computer
+Systems. 472–487.
+[4] Jens Axboe. 2022. liburing library for io_uring. https://github.com/axboe/liburing.
+https://github.com/axboe/liburing Accessed: 2025-10-20.
+[5] Leonardo Bautista-Gomez, Dimitri Komatitsch, Naoya Maruyama, Seiji Tsuboi,
+Franck Cappello, and Satoshi Matsuoka. 2011. FTI: High Performance Fault
+Tolerance Interface for Hybrid Systems. In Proceedings of the 2011 International
+Conference for High Performance Computing, Networking, Storage and Analysis
+(SC ’11). 32:1–32:32. doi:10.1145/2063384.2063427
+[6] Gantavya Bhatt, Yifang Chen, Arnav M Das, Jifan Zhang, Sang T Truong, Stephen
+Mussmann, Yinglun Zhu, Jeffrey Bilmes, Simon S Du, Kevin Jamieson, et al. 2024.
+An Experimental Design Framework for Label-Efficient Supervised Finetuning
+of Large Language Models. arXiv preprint arXiv:2401.06692 (2024).
+[7] Sébastien Bubeck, Varun Chandrasekaran, Ronen Eldan, Johannes Gehrke, Eric
+Horvitz, Ece Kamar, Peter Lee, Yin Tat Lee, Yuanzhi Li, Scott Lundberg, et al. 2023.
+Sparks of artificial general intelligence: Early experiments with gpt-4. arXiv
+preprint arXiv:2303.12712 (2023).
+[8] Franck Cappello, Sandeep Madireddy, Robert Underwood, Neil Getty, Nicholas
+Lee-Ping Chia, et al. 2025. EAIRA: Establishing a Methodology for Evaluating
+AI Models as Scientific Research Assistants. arXiv:2502.20309 [cs.AI] https:
+//arxiv.org/abs/2502.20309
+[9] André Ramos Carneiro, Jean Luca Bez, Carla Osthoff, Lucas Mello Schnorr, and
+Philippe O.A. Navaux. 2023. Uncovering I/O demands on HPC platforms: Peeking
+under the hood of Santos Dumont. J. Parallel and Distrib. Comput. 182 (2023),
+104744. doi:10.1016/j.jpdc.2023.104744
+[10] Daniel Castro. 2024. Rethinking Concerns About AI’s Energy Use. Technical Report.
+Center for Data Innovation. https://www2.datainnovation.org/2024-ai-energy-
+use.pdf Report.
+[11] Diego Didona, Jonas Pfefferle, Nikolas Ioannou, Bernard Metzler, and Animesh
+Trivedi. 2022. Understanding modern storage APIs: a systematic study of libaio,
+SPDK, and io_uring. In Proceedings of the 15th ACM International Conference on
+Systems and Storage. 120–127.
+[12] Jiangfei Duan, Ziang Song, Xupeng Miao, Xiaoli Xi, Dahua Lin, Harry Xu, Minjia
+Zhang, and Zhihao Jia. 2024. Parcae: Proactive,{Liveput-Optimized}{DNN}
+training on preemptible instances. In 21st USENIX Symposium on Networked
+Systems Design and Implementation (NSDI 24). 1121–1139.
+[13] Mikaila J. Gossman, Bogdan Nicolae, and Jon C. Calhoun. 2024. Scalable I/O
+aggregation for asynchronous multi-level checkpointing. Future Generation
+Computer Systems 160 (2024), 420–432. doi:10.1016/j.future.2024.06.003
+[14] Juraj Gottweis, Wei-Hung Weng, Alexander Daryin, Tao Tu, Anil Palepu, Petar
+Sirkovic, Artiom Myaskovsky, Felix Weissenberger, Keran Rong, Ryutaro Tanno,
+et al. 2025. Towards an AI co-scientist. arXiv preprint arXiv:2502.18864 (2025).
+[15] Jianping Gou, Baosheng Yu, Stephen J Maybank, and Dacheng Tao. 2021. Knowl-
+edge distillation: A survey. International Journal of Computer Vision 129, 6 (2021),
+1789–1819.
+[16] Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche
+Savary, et al. 2024. Mixtral of experts. arXiv preprint arXiv:2401.04088 (2024).
+[17] Junzhe Li, Ran Shu, Ziyue Yang, Shuotao Xu, Chenxiong Qian, and Yongqiang
+Xiong. 2025. Indispensable CPU-centric Checkpointing for GPUs. In Proceedings
+of the 16th ACM SIGOPS Asia-Pacific Workshop on Systems (Lotte Hotel World,
+Emerald Hall, Seoul, Republic of Korea) (APSys ’25). Association for Computing
+Machinery, New York, NY, USA, 115–123. doi:10.1145/3725783.3764394
+[18] Xinyu Lian, Sam Ade Jacobs, Lev Kurilenko, Masahiro Tanaka, Stas Bekman,
+Olatunji Ruwase, and Minjia Zhang. 2025. Universal checkpointing: a flexible
+and efficient distributed checkpointing system for large-scale DNN training
+with reconfigurable parallelism. In Proceedings of the 2025 USENIX Conference
+on Usenix Annual Technical Conference (Boston, MA, USA) (USENIX ATC ’25).
+USENIX Association, USA, Article 90, 16 pages.
+[19] Lightning AI. 2025. AsyncCheckpointIO — PyTorch Lightning 2.5.5 documenta-
+tion. https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.plugins.io.
+AsyncCheckpointIO.html Accessed: 2025-10-20.
+[20] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Cheng-
+gang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. 2024. Deepseek-v3
+technical report. arXiv preprint arXiv:2412.19437 (2024).
+[21] Jakob Luettgau, Shane Snyder, Tyler Reddy, Nikolaus Awtrey, Kevin Harms,
+Jean Luca Bez, Rui Wang, Rob Latham, and Philip Carns. 2023. Enabling Agile
+Analysis of I/O Performance Data with PyDarshan. In Proceedings of the SC
+’23 Workshops of the International Conference on High Performance Computing,
+Network, Storage, and Analysis (Denver, CO, USA) (SC-W ’23). Association for
+Computing Machinery, New York, NY, USA, 1380–1391.
+[22] Benjamin S Manning, Kehang Zhu, and John J Horton. 2024. Automated social
+science: Language models as scientist and subjects. Technical Report. National
+Bureau of Economic Research.
+[23] Avinash Maurya, Bogdan Nicolae, M. Mustafa Rafique, Amr M. Elsayed, Thierry
+Tonellot, and Franck Cappello. 2022. Towards Efficient Cache Allocation for High-
+Frequency Checkpointing. In HiPC’22: The 29th IEEE International Conference
+on High Performance Computing, Data, and Analytics. Bangalore, India, 262–271.
+doi:10.1109/HiPC56025.2022.00043
+[24] Avinash Maurya, Mustafa Rafique, Thierry Tonellot, Hussain AlSalem, Franck
+Cappello, and Bogdan Nicolae. 2023. GPU-Enabled Asynchronous Multi-level
+
+Understanding LLM Checkpoint/Restore I/O Strategies and Patterns
+SCA/HPCAsiaWS 2026, January 26–29, 2026, Osaka, Japan
+Checkpoint Caching and Prefetching. In HPDC’23: The 32nd International Sym-
+posium on High-Performance Parallel and Distributed Computing. Orlando, USA,
+73–85. doi:10.1145/3588195.3592987
+[25] Avinash Maurya, Robert Underwood, M. Mustafa Rafique, Franck Cappello, and
+Bogdan Nicolae. 2024. DataStates-LLM: Lazy Asynchronous Checkpointing for
+Large Language Models. In Proceedings of the 33rd International Symposium on
+High-Performance Parallel and Distributed Computing (HPDC ’24). ACM, 227–239.
+doi:10.1145/3625549.3658685
+[26] Kathryn Mohror, Adam Moody, Greg Bronevetsky, and Bronis R. de Supinski.
+2014. Detailed Modeling and Evaluation of a Scalable Multilevel Checkpointing
+System. IEEE Transactions on Parallel and Distributed Systems 25, 9 (2014), 2255–
+2263. doi:10.1109/TPDS.2013.2296201
+[27] Bogdan Nicolae, Adam Moody, Elsa Gonsiorowski, Kathryn Mohror, and Franck
+Cappello. 2019. VeloC: Towards High Performance Adaptive Asynchronous
+Checkpointing at Large Scale. In 2019 IEEE International Parallel and Distributed
+Processing Symposium (IPDPS). 911–920.
+[28] Behnam Pourghassemi and Aparna Chandramowlishwaran. 2017. cudaCR: An In-
+Kernel Application-Level Checkpoint/Restart Scheme for CUDA-Enabled GPUs.
+In 2017 IEEE International Conference on Cluster Computing (CLUSTER). 725–732.
+doi:10.1109/CLUSTER.2017.100
+[29] PyTorch. 2024. Welcome to the TorchSnapshot documentation. https://pytorch.
+org/torchsnapshot/stable/.
+[30] Jeff Rasley, Samyam Rajbhandari, Olatunji Ruwase, and Yuxiong He. 2020. Deep-
+Speed: System Optimizations Enable Training Deep Learning Models with Over
+100 Billion Parameters. In KDD’20: The 26th SIGKDD International Conference on
+Knowledge Discovery & Data Mining. ACM, Virtual Event CA USA, 3505–3506.
+[31] Zebin Ren and Animesh Trivedi. 2023. Performance characterization of modern
+storage stacks: Posix i/o, libaio, spdk, and io_uring. In Proceedings of the 3rd
+Workshop on Challenges and Opportunities of Efficient and Performant Storage
+Systems. 35–45.
+[32] Ehsan Saeedizade, Roya Taheri, and Engin Arslan. 2023. I/O Burst Prediction for
+HPC Clusters using Darshan Logs. arXiv:2308.10311 [cs.DC] https://arxiv.org/
+abs/2308.10311
+[33] Teven Le Scao, Angela Fan, Christopher Akiki, Ellie Pavlick, Suzana Ilić, Daniel
+Hesslow, and et. al. 2023. BLOOM: A 176B-Parameter Open-Access Multilingual
+Language Model. arXiv:2211.05100 [cs.CL] https://arxiv.org/abs/2211.05100
+[34] Hongzhang Shan and John Shalf. 2007. Using IOR to Analyze the I/O Performance
+for HPC Platforms. https://crd.lbl.gov/assets/pubs_presos/CDS/ATG/IOR.doc
+Describes the IOR benchmark and how to parameterize it for HPC I/O studies.
+[35] Shuaiwen Leon Song, Bonnie Kruft, Minjia Zhang, Conglong Li, Shiyang Chen,
+Chengming Zhang, and et. al. 2023. DeepSpeed4Science Initiative: Enabling
+Large-Scale Scientific Discovery through Sophisticated AI System Technologies.
+arXiv:2310.04610 [cs.AI] https://arxiv.org/abs/2310.04610
+[36] Radostin Stoyanov, Viktória Spišaková, Jesus Ramos, Steven Gurfinkel, Andrei
+Vagin, Adrian Reber, Wesley Armour, and Rodrigo Bruno. 2025. CRIUgpu: Trans-
+parent Checkpointing of GPU-Accelerated Workloads. arXiv:2502.16631 [cs.DC]
+https://arxiv.org/abs/2502.16631
+[37] Deepa Tilwani, Yash Saxena, Ali Mohammadi, Edward Raff, Amit Sheth, Srini-
+vasan Parthasarathy, and Manas Gaur. 2024. REASONS: A benchmark for RE-
+trieval and Automated citationS Of scieNtific Sentences using Public and Propri-
+etary LLMs. arXiv preprint arXiv:2405.02228 (2024).
+[38] Yongji Wu, Xueshen Liu, Haizhong Zheng, Juncheng Gu, Beidi Chen, Z Morley
+Mao, Arvind Krishnamurthy, and Ion Stoica. 2025. RLBoost: Harvesting Pre-
+emptible Resources for Cost-Efficient Reinforcement Learning on LLMs. arXiv
+preprint arXiv:2510.19225 (2025).

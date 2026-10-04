@@ -1,0 +1,1690 @@
+Skim-Aware Contrastive Learning for Efficient Document Representation
+Waheed Ahmed Abro
+CDEP - UR 2471, Univ Artois, France
+wahmed.abro@univ-artois.fr
+Zied Bouraoui
+CRIL - CNRS, Univ Artois, France
+zied.bouraoui@cril.fr
+Abstract
+Although transformer-based models have
+shown strong performance in word- and
+sentence-level tasks, effectively representing
+long documents, especially in fields like law
+and medicine, remains difficult. Sparse atten-
+tion mechanisms can handle longer inputs, but
+are resource-intensive and often fail to cap-
+ture full-document context. Hierarchical trans-
+former models offer better efficiency but do not
+clearly explain how they relate different sec-
+tions of a document. In contrast, humans often
+skim texts, focusing on important sections to
+understand the overall message. Drawing from
+this human strategy, we introduce a new self-
+supervised contrastive learning framework that
+enhances long document representation. Our
+method randomly masks a section of the doc-
+ument and uses a natural language inference
+(NLI)-based contrastive objective to align it
+with relevant parts while distancing it from un-
+related ones. This mimics how humans synthe-
+size information, resulting in representations
+that are both richer and more computationally
+efficient. Experiments on legal and biomedical
+texts confirm significant gains in both accuracy
+and efficiency.
+1
+Introduction
+Since the introduction of Language Models (LMs),
+the focus in NLP has been on fine-tuning large
+pre-trained language models, especially for solv-
+ing sentence and paragraph-level tasks. However,
+accurately learning document embeddings contin-
+ues to be an important challenge for several appli-
+cations, such as document classification (Saggau
+et al., 2023), ranking (Ginzburg et al., 2021; Izac-
+ard et al., 2021), retrieval-augmented generation
+(RAG) systems that demand efficient document
+representation encoders (Zhang et al., 2024; Zhao
+et al., 2025) and legal and medical applications like
+judgment prediction (Chalkidis et al., 2019; Feng
+et al., 2022), legal information retrieval (Sansone
+and Sperlí, 2022), and biomedical document classi-
+fication (Johnson et al., 2016; Wang et al., 2023).
+Learning high-quality document representations
+is a challenging task due to the difficulty in develop-
+ing efficient encoders with reasonable complexity.
+Most document encoders use sentence encoders
+based on self-attention architectures such as BERT
+(Devlin et al., 2019). However, it is not feasible to
+have inputs that are too long as self-attention scales
+quadratically with the input length. To process
+long inputs efficiently, architectures such as Lin-
+former (Wang et al., 2020), Big Bird (Zaheer et al.,
+2020a), Longformer (Beltagy et al., 2020a) and
+Hierarchical Transformers (Chalkidis et al., 2022a)
+have been developed. Unlike quadratic scaling in
+traditional attention mechanisms, these architec-
+tures utilize sparse attention mechanisms or hierar-
+chical attention mechanisms that scale linearly. As
+such, they can process 4096 input tokens, which is
+enough to embed most types of documents, includ-
+ing legal and medical documents, among others.
+While methods based on sparse attention net-
+works offer a solution for complexity, the length
+of the document remains a problem for building
+faithful representations for downstream applica-
+tions such as legal and medical domains. First,
+fine-tuning these models for downstream tasks is
+computationally intensive. Second, capturing the
+meaning of the whole document remains too com-
+plex. In particular, it is unclear how or to what
+extent inner-dependencies between text fragments
+are considered. This is because longer documents
+contain more information than shorter documents,
+making it difficult to capture all the relevant infor-
+mation within a fixed-size representation. Addi-
+tionally, documents usually cover different parts,
+making the encoding process complex and may
+lead to collapsed representations. This is particu-
+larly true for legal and medical documents, as they
+contain specialized terminology and text segments
+that describe a series of interrelated facts.
+1
+arXiv:2512.24373v1 [cs.CL] 30 Dec 2025
+
+When domain experts, such as legal or medi-
+cal professionals, read through documents, they
+skillfully skim the text, honing in on some text
+fragments that, when pieced together, provide an
+understanding of the content. Inspired by this in-
+tuitive process, our work focuses on developing
+document encoders capable of generating high-
+quality embeddings for long documents. These
+encoders mimic the expert ability to distill relevant
+text chunks, enabling them to excel in downstream
+tasks right out of the box, without the need for
+fine-tuning. We propose a novel framework for
+self-supervised contrastive learning that focuses on
+long legal and medical documents. Our approach
+features a self-supervised Chunk Prediction En-
+coder (CPE) designed to tackle the challenge of
+learning document representations without supervi-
+sion. By leveraging both intra-document and inter-
+document chunk relationships, the CPE enhances
+how documents should be represented through its
+important fragments. The model operates by ran-
+domly selecting a text fragment from a document
+and using an encoder to predict whether this frag-
+ment is strongly related to other parts of the same
+document. To simulate the skimming process, we
+frame this task as a Natural Language Inference
+(NLI) problem. In our method, “entailment” and
+“contradiction” are not literal NLI labels. Rather,
+we use an NLI-style binary objective as a practical
+proxy that teaches the model whether a chunk is
+semantically compatible with its document context
+(positive) or not (negative). This enables the en-
+coder to judge whether a local fragment is compati-
+ble with document-level context, thereby capturing
+long-range, cross-fragment relevance. This method
+not only uncovers connections between different
+documents, but also emphasizes the relevance of
+various sections, thus enriching the overall learning
+process for document representations. The main
+contributions are as follows:
+• We introduce a self-supervised Chunk Pre-
+diction Encoder (CPE) that employs random
+span sampling into a hierarchical transformer
+and Longformer: by sampling text spans and
+training the model to predict whether a span
+belongs to the same document, CPE captures
+both intra- and inter-document fragment re-
+lationships, preserves global context through
+chunk aggregation, and models the complex
+hierarchical structures of long texts.
+• We apply a contrastive loss that pulls to-
+gether representations of related fragments
+and pushes apart unrelated ones, reinforcing
+meaningful connections across different parts
+of the same document.
+• We conducted extensive experiments to
+demonstrate the effectiveness of our frame-
+work. Specifically, i) we compare the quality
+of our document embeddings against strong
+baselines, (ii) we benchmark CPE-based mod-
+els in an end-to-end fine-tuning setup while
+training all parameters jointly and compar-
+ing downstream classification performance
+against established methods, and (iii) we per-
+form an ablation study to assess the impact of
+different chunk sizes, visualize the resulting
+embedding space, and evaluate performance
+on shorter documents. We also compare with
+LLMs such as LLaMA capabilities for han-
+dling long legal texts.
+2
+Related Work
+This section provides an overview of the modelling
+of long documents and self-supervised document
+embedding.
+Modeling of long documents.
+Long documents
+are typically handled using sparse-attention models
+such as Longformer (Beltagy et al., 2020b) and
+BigBird (Zaheer et al., 2020b). These models use
+local and global attention mechanisms to overcome
+the O(n2) complexity of standard full attention
+mechanisms. Alternatively, one can use a hierarchi-
+cal attention mechanism (Yang et al., 2016), where
+the document is processed in a hierarchical man-
+ner. For example, (Chalkidis et al., 2019) applied
+a hierarchical BERT model to model long legal
+documents. The model first processes the words in
+each sentence using the BERT-base model to pro-
+duce sentence embeddings. Then, a self-attention
+mechanism is applied to the sentence-level em-
+beddings to produce document embeddings. The
+authors have demonstrated that their hierarchical
+BERT model outperforms both the Vanilla BERT
+architecture and Bi-GRU models. Similarly, (Dai
+et al., 2022) explored the various methods of split-
+ting the long document and compared them with
+sparse attention methods on long document clas-
+sification tasks. Their findings showed that better
+results were achieved by splitting the document
+into smaller chunks of 128 tokens.
+(Wu et al.,
+2021) proposed a model called Hi-Transformer,
+2
+
+which applies both sentence-level and document-
+level transformers followed by hierarchical pooling.
+Meanwhile, (Chalkidis et al., 2022b) introduced a
+variant of hierarchical attention transformers based
+on segment encoder and cross-segment encoder,
+which demonstrated comparable results with the
+Longformer model. In this work, we consider pro-
+cessing long documents with a hierarchical atten-
+tion mechanism and sparse-attention Longformer
+encoders. We further improve document embed-
+ding using self-supervised contrastive learning.
+Unsupervised Document Representation.
+Un-
+supervised document representation learning is a
+highly active research field. At first, deep learning
+models were introduced to create contextualized
+word representations, such as Word2Vec (Mikolov
+et al., 2013) and GloVE (Pennington et al., 2014).
+The Doc2Vec (Le and Mikolov, 2014) model was
+proposed, which utilized contextualized word rep-
+resentation to generate document embeddings. In
+the same vein, the Skip-Thoughts (Kiros et al.,
+2015) model extended the word2vec approach from
+the word level to the sentence level. Transformer-
+based models (Reimers and Gurevych, 2019) were
+also suggested to produce a vector representation
+of the sentence. Recently, there have been advance-
+ments in self-supervised contrastive learning meth-
+ods (Iter et al., 2020; Gao et al., 2021; Giorgi
+et al., 2021; Klein and Nabi, 2022; Saggau et al.,
+2023). In this direction, CONPONO proposes us-
+ing sentence-level objectives with a masked lan-
+guage model to capture discourse coherence be-
+tween sentences. The sentence-level encoder pre-
+dicts text that is k sentences away. On the other
+hand, SimCSE (Gao et al., 2021) uses a dropout ver-
+sion of the same sentence as a positive pair on short
+sentences. Similarly, (Saggau et al., 2023) pro-
+posed SimCSE learning on long documents with
+additional Bregman divergence. On the other hand,
+SDDE (Chen et al., 2019) model was proposed to
+generate document representation based on inter-
+document relationships using an RNN encoder.
+We follow a similar strategy of exploiting inter-
+document relationships, we employe transformer-
+based pre-trained language models with multiple
+negatives ranking contrastive loss.
+Legal and medical document representation
+Processing legal and medical documents is an ac-
+tive research topic. (Chalkidis et al., 2019) propose
+the hierarchical BERT model to process legal docu-
+ments. (Malik et al., 2021) propose the hierarchical
+transformer model architecture for the legal judg-
+ment prediction task. The input document is split
+into several chunks of size 512 tokens. Each chunk
+embedding is produced by a pre-trained XLNET
+model. Then, a Bi-GRU encoder is applied to the
+chunk embeddings to produce final document em-
+beddings. (Zheng et al., 2021) train the BERT
+model on CaseHOLD (Case Holdings On Legal
+Decisions) dataset. (Hamilton, 2023) employed
+GPT-2 models to predict how each justice votes
+for supreme court justice’s opinions. (Yang et al.,
+2019) process the legal document using a Multi-
+Perspective Bi-Feedback Network to classify law
+articles. (Xu et al., 2020) propose to represent the
+document using a graph neural network. To dis-
+tinguish confusing articles, a distillation-based at-
+tention network is applied to extract discriminative
+features.
+For medical document processing, in (Arnold
+et al., 2020), authors propose contextualized docu-
+ment representations to answer questions from long
+medical documents. The model employs a hierar-
+chical dual encoder based on hierarchical LSTM to
+encode medical entities. (Mullenbach et al., 2018)
+proposed a convolutional neural network base label-
+wise attention network to produce label-wise docu-
+ment representations by attending to the most rele-
+vant document information for each medical code.
+In (Chalkidis et al., 2020), authors showed that
+the pre-trained BERT model outperforms CNN-
+based label-wise attention networks. In the same
+direction, (Kementchedjhieva and Chalkidis, 2023)
+proposed encoder-decoder architecture and outper-
+forms the encoder-only model on multi-label text
+classification for legal and medical domains. The
+work in (Wang et al., 2023) provides a compre-
+hensive survey focusing on the integration of pre-
+trained language models within the biomedical do-
+main. Their investigation highlights the substantial
+benefits of employing LMs in various NLP tasks.
+In contrast to previous works, we propose the learn
+document representation using self-supervised con-
+trastive learning pre-trained LMs.
+3
+Chunk Prediction Encoders
+To process long documents in time efficient man-
+ner, we use state-of-the-art hierarchical transformer
+method
+(Chen et al., 2019; Wu et al., 2021;
+Dai et al., 2022) and sparse attention longformer
+model (Beltagy et al., 2020b). To enhance the
+quality of these representations, we propose self-
+3
+
+Figure 1: Illustration of CPE Contrastive Learning via
+the hierarchical transformer model.
+supervised CPE that takes into account the rela-
+tionship between different text chunks and deter-
+mines relevant ones. Finally, we use the document
+embedding to predict the outcome of single and
+multi-label classification for legal and medical clas-
+sification tasks.
+CPE for Hierarchical Representation.
+We first
+briefly introduce hierarchical representation model
+using pre-trained model M. Let D be an input
+document, and c1, c2, ..., cn denotes the set of cor-
+responding text chunks in D where n is the maxi-
+mum number of chunks, padding with zero if the
+chunks are less than n. Each chunk contains a se-
+quence of T tokens C = (w1, w2, .., wt), where t
+is less than 512. Furthermore, the special classi-
+fication [CLS] token is added at the start of each
+chunk. Our aim is to learn the vector representation
+of each chunk using a shared small language model
+encoder as follows:
+f = M(w[CLS], w1, . . . , wt)
+(1)
+where f represents the output of a model (which
+can be BERT, RoBERTa, LegalBERT, Clinical-
+BioBERT or any other). Following the common
+strategy, we consider the [CLS] token as the repre-
+sentation of the whole chunk. To obtain the final
+document representation from different chunk fea-
+tures, we consider the following pooling strategies:
+the Mean-Pooling obtained by taking the mean of
+chunks representation dt = 1/n Pn
+i=1 fi, and the
+Max-Pooling over chunks representation. Each
+chunk encodes the local feature of the document,
+and the whole document is represented by the aver-
+age of these local features.
+Learning process
+We propose a chunk predic-
+tion encoder to train a hierarchical transformer
+model using self-supervised contrastive learning
+to leverage intra and inter-document relationships.
+For each document, we randomly remove one
+Figure 2: The CPE Contrastive Learning process with
+the Longformer model.
+chunk and then ask the NLI classifier to predict
+whether this chunk is derived from other chunks
+of the document. By doing so, we force the model
+to learn the dependencies between chunks and
+their relevance in representing a document. Con-
+sider a mini-batch of N documents, denoted as
+D = {(di)}N
+1 . For each document di, we ran-
+domly select a text chunk c+ and remove it from
+that document ˜di to form a positive pair
+
+˜di, c+
+.
+We then select a negative chunk c−from the re-
+maining N −1 documents of the batch to form
+a negative pair, ( ˜di, c−). Notice that c−does not
+belong to document ˜di. One concern that could be
+seen here is the text chunks could be similar and fit
+on both positive and negative documents. However,
+this is not an issue as in the training objective, we
+have multiple negatives, so our model is forced to
+optimize most dissimilar documents than most sim-
+ilar ones. The chunk predictive contrastive learning
+process can be viewed as an unsupervised natural
+language inference task, where a positive chunk
+sample represents an entailment of a document,
+and negative samples from other documents rep-
+resent a contradiction of the document. We use
+multiple negatives ranking loss (Henderson et al.,
+2017) to train the model:
+L = −1
+n
+n
+X
+i=1
+exp(sim(f( ˜di), f(c+
+i )))
+Pk
+1 exp(sim(f( ˜di), f(c−
+k )))
+, (2)
+where f denotes the feature vector generated by
+document encoder, sim represents cosine similarity,
+c+
+i is the positive chunk taken from the document
+di and c−
+k are the k negative sample of chunk taken
+from other documents than di. Multiple negative
+ranking loss compares the positive pair representa-
+tion with the negative pair samples in mini-batch.
+The general architecture is illustrated in Figure 1.
+Our architecture includes a shared encoder that
+generates a complete document embedding, except
+for chunk C4. Additionally, the shared encoder
+4
+
+shown at the bottom produces a vector representa-
+tion of C4. The classifier is responsible for learning
+whether the embedding of chunk C4 aligns with or
+contradicts the document embedding.
+CPE for Longformer
+During the training of the
+CPE on the Longformer model, the document is
+split into two segments: the reference text and the
+positive text chunk. Our approach aims to ensure
+that the reference text segment and the positively
+sampled text chunk, which is extracted from the
+same document, are in agreement and maximize
+in consequence the objective function. Suppose
+we have a mini-batch of N documents, denoted
+as D = {(di)}N
+1 . For each document di, we ran-
+domly select a text chunk c+ and the remaining text
+as reference text ˜d to form a positive pair
+
+˜di, c+
+i
+
+.
+We then select a negative chunk c−from the re-
+maining N −1 documents of the batch to serve as
+the negative pair, ( ˜di, c−
+j ). The reference text and
+positive text chunks are passed through the same
+Longformer encoder. The proposed method utilizes
+the [CLS] token representations to produce the ref-
+erence text (z ˜di) embedding and text segment (z+
+c )
+embedding. The linear classifier is then trained
+to maximize the agreement between the segment
+and reference text, both sampled from the same
+document and minimize the agreement between
+reference text and segment taken from another doc-
+ument. The multiple negatives ranking loss is used
+to optimize the model as given as follows:
+L = −1
+n
+n
+X
+i=1
+exp(sim(z ˜di, z+
+c ))
+Pk
+1 exp(sim(z ˜di, z−
+ck))
+,
+(3)
+where z ˜di, z+
+ci, and z−
+ck denote the feature vectors
+generated by the Longformer document encoder.
+The general architecture is depicted in Figure 2.
+A shared Longformer encoder creates a document
+embedding for most of the text, excluding a small
+portion that has been removed. Additionally, a
+shared encoder at the bottom generates a vector
+representation of the removed chunk. The classi-
+fier learns to differentiate whether the embedding
+of the small chunk aligns with or contradicts the
+document embedding.
+Document Classification
+After producing our
+document representations, we train an MLP clas-
+sifier, which consists of three hidden layers and
+an output layer. The hidden layer uses the TANH
+activation function. In the output layer, we use
+the sigmoid for the multi-label classifier and the
+softmax for the multi-class classifier.
+ˆy = g(tanh(W ∗d + b))
+(4)
+where g denotes the activation function (sigmoid
+or softmax), d is the document representation, W
+represents the weight matrices, b is the bias vec-
+tor. The model minimizes the cross-entropy loss.
+Notice that we introduce this classifier to assess
+the quality of our document embeddings and to
+evaluate to what extent the representation can be
+considered to perform classification tasks.
+4
+Experimental Setting
+In this section, we define the experimental setup
+for evaluating the proposed contrastive learning
+framework.
+Datasets
+We evaluate our encoders on three legal
+datasets, ECHR, SCOTUS, and EURLEX and two
+medical datasets, MIMIC and Biosq. Table 4 in
+Appendix provides statistics and the average doc-
+ument length of each dataset. Notice that we also
+consider Biosq to test the capability of our model
+in handling short-length documents as well.
+Setting and evaluation metrics
+We consider
+small language models such bert-base1, roberta-
+base2, legal-bert-base3, and ClinicalBioBERT4
+models as we seek for a simple model with less
+number of parameters. While our hierarchical trans-
+former is capable of processing documents of any
+length, in this study, we restrict our analysis to the
+initial 4096 tokens driven primarily by computa-
+tional considerations. The number of text chunks
+is set to 32 and the length of the chunk is set to 128
+for ECHR, SCOTUS, and MIMIC datasets. For
+the EURLEX dataset, which is smaller than other
+datasets, we utilize initial 2048 tokens; 16 seg-
+ments of 128 tokens each. The Longformer model
+can handle sequences of up to 4096 input length.
+We truncate or pad documents that are longer or
+shorter accordingly. The length of the positive
+text chunk is set to 128 tokens for the Longformer
+model. As evaluation metrics, we report results
+in Micro-averaged F1 and Macro-averaged F1 for
+1https://huggingface.co/bert-base-uncased
+2https://huggingface.co/FacebookAI/
+roberta-base
+3https://huggingface.co/nlpaueb/
+legal-bert-base-uncased
+4https://huggingface.co/Dinithi/
+ClinicalBioBERT
+5
+
+Multi-label ECHR and Multi-class SCOTUS clas-
+sification datasets.
+Document Embedding Baseline Models
+We
+compare classifier model performance in the fol-
+lowing settings.
+Pre-trained models Embedding + MLP Classifi-
+cation: In this setting, we obtained the document
+embeddings using the existing pre-trained parame-
+ters of the hierarchical pre-trained language models
+(BERT, RoBERTa, LegalBERT, ClinicalBioBERT),
+and the Longformer model. On top of these docu-
+ment embeddings, we applied a MLP classification
+layer to predict the legal and medical labels. Dur-
+ing training, only the parameters of the MLP layers
+are updated, while the parameters of the pre-trained
+models are fixed.
+SimCSE Embedding + MLP Classification: Sim-
+CSE (Gao et al., 2021) proposed a contrastive learn-
+ing framework that employs dropout for data aug-
+mentation. We train the SimCSE framework using
+hierarchical pre-trained language models and the
+Longformer model on long documents. After pro-
+ducing document embedding from the SimCSE
+framework, we apply an MLP layer for determin-
+ing the legal and medical labels.
+ESimCSE Embedding + MLP Classification: The
+Enhanced SimCSE (Wu et al., 2022) contrastive
+learning framework applied word repetition opera-
+tion to construct positive pair. We train the ESim-
+CSE on long documents by employing hierarchical
+pre-trained language models and the Longformer
+model. We trained an MLP classifier on top of
+fixed ESimCSE document embedding.
+End-to-end Finetuning Baseline Models
+We
+compared our approach against the following state-
+of-the-art fine-tuning methods:
+Hi-LegalBERT (Chalkidis et al., 2022c): The hier-
+archical Legal-BERT encodes each text chunk via
+a pretrained Legal-BERT [CLS] embedding. These
+chunk embeddings are then fed into a two-layer
+Transformer to capture inter-chunk context, then
+max-pool the context-aware chunk vectors into a
+single document embedding for classification. LSG
+Attention (Condevaux and Harispe, 2023): LSG
+architecture employs Local, Sparse, and Global at-
+tention. LSG is based on block local attention for
+short-range context, structured sparse attention for
+mid-range dependencies, and global attention to im-
+prove information flow. LSG produces competitive
+results for classifying long documents.
+LegalLongformer (Mamakas et al., 2022): Legal-
+Longformer adapts the Longformer architecture by
+initializing all parameters from LegalBERT and
+then fine-tuning the entire model on downstream
+long document classification tasks.
+HAT (Chalkidis et al., 2022b): (Hierarchical Atten-
+tion Transformer) employs a two-stage encoder: a
+segment-wise transformer to capture local context,
+followed by a cross-segment transformer to model
+inter-segment interactions. This hierarchical ap-
+proach enables efficient and accurate classification
+of long documents.
+We propose generalized CPE which can be ap-
+plied to any hierarchical attentional document such
+as ToBERT (Chalkidis et al., 2021), RoBERT (Pap-
+pagari et al., 2019), or sparse attention models such
+BigBird (Zaheer et al., 2020a). By leveraging more
+advanced methods, the CPE can achieve better per-
+formance. We output the performance of the CPE
+using an advanced hierarchical attentional docu-
+ment encoder in the table 5.
+5
+Evaluation and Results
+We conduct a comprehensive evaluation of the pro-
+posed CPE framework by benchmarking against a
+hierarchical transformer encoder, a sparse-attention
+Longformer model, and state-of-the-art hierarchi-
+cal transformer variants. Experiments are carried
+out on standard long legal and medical datasets
+under frozen-embedding and full end-to-end fine-
+tuning settings.
+Evaluation of Hierarchical Representation
+Le-
+gal and medical topic classification results on fixed
+document representation via hierarchical trans-
+former results in presented in Table 1. From the
+table, we can observe that MLP classifiers with
+document embedding from various PTM produce
+worse performance on all datasets. It is evident
+that self-supervised contrastive learning SimCSE,
+ESimCSE, and CPE improves the classification
+performance of PTM document embedding across
+the datasets. The SimCSE embedding improves
+the performance of BERT embedding by 12% in
+terms of the macro-F1 score on the ECHR. While
+improvement of ESimCSE over BERT embedding
+is 14%. However, the CPE embedding achieves the
+best performance on all datasets using BERT PTM.
+Specifically, CPE improves macro-F1 scores ap-
+proximately by 6%, and 4% on BERT embedding
+of SimCSE, ESimCSE for ECHR, dataset. Sim-
+ilar improvement can be observed on SCOTUS,
+6
+
+Table 1: Classification Model performance on document embedding produced by contrastively trained pre-trained
+hierarchical transformer models on ECHR, SCOTUS, and MIMIC datasets. Performance is reported in F-scores ×
+100.
+PTM
+Model
+ECHR
+SCOTUS
+EURLEX
+MIMIC
+macro-F1 µ-F1 macro-F1 µ-F1 macro-F1 µ-F1 macro-F1 µ-F1
+BERT
+Emb + MLP
+36.32
+55.56
+40.6
+61.79
+25.86
+51.44
+49.06
+62.99
+EmbSimCSE + MLP
+48.69
+61.37
+45.50
+61.14
+33.43
+57.07
+54.59
+67.13
+EmbESimCSE + MLP
+50.83
+64.41
+52.12
+64.07
+34.16
+54.56
+57.05
+68.08
+EmbCP E + MLP
+54.77
+66.98
+54.56
+66.78
+40.96
+63.68
+57.12
+68.20
+RoBERTa
+Emb + MLP
+35.27
+55.64
+32.77
+57.92
+21.88
+35.05
+49.63
+64.27
+EmbSimCSE + MLP
+49.04
+59.4
+48.28
+62.71
+35.13
+53.64
+55.72
+66.99
+EmbESimCSE + MLP
+45.27
+56.61
+57.73
+67.85
+33.76
+54.14
+57.47
+67.32
+EmbCP E + MLP
+56.02
+65.58
+57.85
+68.07
+41.94
+63.44
+61.01
+69.42
+LegalBERT
+Emb+ MLP
+52.63
+65.31
+44.93
+65.42
+17.78
+39.47
+Not considered
+EmbSimCSE + MLP
+57.52
+68.81
+57.55
+68.92
+40.87
+61.58
+Not considered
+EmbESimCSE + MLP
+56.47
+68.29
+56.08
+67.78
+40.40
+62.59
+Not considered
+EmbCP E + MLP
+57.74
+69.39
+59.45
+71.85
+42.16
+64.17
+Not considered
+ClinicalBioBERT
+Emb + MLP
+not considered for legal documents
+55.84
+68.9
+EmbSimCSE + MLP
+not considered for legal documents
+62.74
+71.06
+EmbESimCSE + MLP
+not considered for legal documents
+60.39
+70.94
+EmbCP E + MLP
+not considered for legal documents
+63.89
+71.72
+Table 2: Classification model performance on document embedding produced by contrastively pre-trained sparse
+attention models on ECHR, SCOTUS, EURLEX, and MIMIC datasets. Performance is reported in F-scores × 100.
+PTM
+Model
+ECHR
+SCOTUS
+EURLEX
+MIMIC
+macro-F1
+µ-F1
+macro-F1
+µ-F1
+macro-F1
+µ-F1
+macro-F1
+µ-F1
+Longformer
+Emb + MLP
+35.89
+50.35
+27.35
+50.28
+25.83
+54.45
+44.55
+62.09
+EmbSimCSE + MLP
+35.15
+46.81
+36.82
+52.64
+32.01
+53.61
+45.36
+60.77
+EmbESimCSE + MLP
+32.92
+46.29
+35.33
+53.35
+35.38
+55.85
+46.06
+61.44
+EmbCP E + MLP
+48.94
+59.71
+47.46
+62.57
+43.24
+64.57
+53.06
+64.93
+EURLEX, and MIMIC.
+The MLP classifiers based on Bert-base model
+perform poorly for both legal and biomedical
+datasets. The potential reason is that legal and
+biomedical terminology are not well represented in
+the generic corpora of the BERT model. So we also
+perform experiments with LegalBERT PTM, BERT
+version pre-trained on legal corpora. Similarly, we
+utilize ClinicalBioBERT which is pre-trained on
+medical documents. The MLP classifier leverag-
+ing LegalBERT and ClinicalBioBERT document
+embeddings demonstrates enhanced performance
+compared to the classifier based on BERT docu-
+ment embeddings. In-domain knowledge appears
+to be particularly crucial for the SCOTUS dataset,
+resulting in a 5% improvement in macro F1 score
+of LegalBERT EmbeddingCPE MLP over BERT
+EmbeddingCPE MLP. In comparison, the improve-
+ments on the ECHR and EURLEX datasets over
+BERT EmbeddingCPE MLP models are 3% and
+2%, respectively. This is because the SCOTUS
+dataset is more domain-specific in its language
+compared to the other datasets. Similarly, in the
+MIMIC dataset, ClinicalBioBERT EmbeddingCPE
+shows a notable 3% enhancement in performance
+compared to BERT EmbeddingCPE.
+The MLP classifier utilizing RoBERTa em-
+beddings shows better performance compared to
+BERT-base model and achieves comparable results
+to the classifiers utilizing LegalBERT and Clini-
+calBioBERT embeddings. This improved perfor-
+mance can be attributed to RoBERTa’s pre-training
+on larger generic corpora and more extensive vo-
+cabulary. The proposed RoBERTa EmbeddingCPE
+MLP outperforms SimCSE, ESimCSE MLP mod-
+els on ECHR, SCOTUS, EURLEX, and MIMIC.
+The proposed CPE outperforms the document Emb,
+EmbSimCSE, EmbESimCSE employing various
+PTM encoders across datasets. The CPE training
+produced better performance using LegalBERT and
+ClinicalBioBERT. These results suggest that CPE
+performance improves with domain-adapted PTM.
+Furthermore, results indicate the dropout augmen-
+tation or simple repetition of words to construct
+positive pairs and generate text embeddings may
+not yield significant improvements at the document
+7
+
+Table 3: Performance comparison of end-to-end fine-
+tuned classification models on the ECHR and SCOTUS
+datasets.
+Model
+ECHR
+SCOTUS
+macro-F1 µ-F1 macro-F1 µ-F1
+Hi-LegalBERT
+64.0
+70.0
+66.5
+76.4
+LSG
+60.3
+71.0
+63.7
+73.3
+LegalLongformer
+63.6
+71.7
+66.9
+76.6
+HAT
+-
+79.8
+59.1
+70.5
+Ours
+66.1
+72.6
+67.3
+77.5
+or paragraph level embeddings.
+Evaluation on Longformer
+Table 2 shows the
+MLP classifier results on document representation
+produced by the contrastively trained Longformer
+model. The Longformer + MLP classifier performs
+poorly in all datasets because the model fails to
+model global context and paragraph-level interac-
+tion. It is evident that self-supervised strategies
+of (SimCSE, ESimCSE, and CPE) improve the re-
+sults in the Longformer models. The proposed CPE
+method has a clear advantage over SimCSE and
+ESimCSE methods, producing 12% and 14% bet-
+ter macro F1-score on the ECHR dataset and 10%
+and 12% improvement in terms of macro F1-score
+on the SCOTUS dataset. Similarly, on the MIMIC
+dataset, the performance gain from CPE is 8% and
+7% in macro F1 over SimCSE and ESimCSE, re-
+spectively. Based on the results, it is clear that hi-
+erarchical transformer models perform better than
+Longformer-based models on the ECHR, SCOTUS,
+and MIMIC datasets. The only dataset where Long-
+former models demonstrate superior performance
+is EURLEX. This improved performance on the
+EURLEX dataset can likely be attributed to its
+shorter length, which allows the Longformer model
+to capture all relevant information more efficiently
+than the hierarchical transformer model. Overall,
+our self-contrastive CPE methods, which are based
+on Longformer and hierarchical transformer, yield
+better results compared to SimCSE and ESimCSE
+models. This demonstrates the effectiveness of
+our method. Stacking MLP classifiers on top of
+document embeddings proves to be an effective
+approach for encoding long documents.
+Evaluation on End-to-end Finetuning Setting
+To further solidify our findings, we evaluated our
+proposed CPE encoder in an end-to-end fine-tuning
+setting. We applied the LegalBERT CPE encoder to
+encode different chunks. Rather than using simple
+average pooling, we employed a two-layer trans-
+former encoder to aggregate the information from
+different chunks. All parameters are trained in
+an end-to-end manner. The results for the clas-
+sification of long documents are presented in Ta-
+ble 3. On the ECHR dataset, our model achieves
+a macro-F1 score of 66.1 an improvement of 2.5
+points over LegalLongformer and 2.1 points over
+Hi-LegalBERT—and a micro-F1 score that is 0.9
+points higher than LegalLongformer and 2.6 points
+higher than Hi-LegalBERT. Compared with LSG,
+we see even larger margins +5.8 pp macro and +1.6
+pp micro on ECHR, +3.6 pp macro and +4.2 pp mi-
+cro on SCOTUS. HAT delivers a strong micro-F1
+(79.8) on ECHR but underperforms on SCOTUS
+macro (59.1), indicating less balanced class han-
+dling. Our consistent gains in both macro- and
+micro-F1 confirm that our CPE encoder generates
+high-quality chunk representations, simplifying the
+downstream classification of both frequent and rare
+legal classes during fine-tuning.
+Supplementary Evaluation and Analysis
+Ad-
+ditional evaluations in the appendix highlight the
+robustness of the proposed CPE framework. As
+shown in Table 3, end-to-end fine-tuning with
+a hierarchical transformer improves performance
+over baselines like Hi-LegalBERT and LegalLong-
+former, confirming CPE’s effectiveness. An ab-
+lation study on chunk size (Table 6) shows 128-
+token chunks offer the best performance, balanc-
+ing context and relevance. On the short-document
+BIOSQ dataset (Table 7), CPE outperforms con-
+trastive baselines, demonstrating its adaptability
+beyond long texts. Embedding visualizations and
+similarity metrics (Figure 3) further confirm that
+CPE produces semantically coherent and discrimi-
+native document representations.
+6
+Conclusion
+We proposed a novel self-supervised contrastive
+learning framework, Chunk Prediction Encoders
+(CPE), for generating long document representa-
+tions in legal and biomedical domains. CPE cap-
+tures intra-document and inter-document relation-
+ships by aligning text chunks within a document
+and distinguishing them from other documents.
+Our experiments on legal and biomedical classi-
+fication tasks demonstrated significant improve-
+ments in macro F1 scores, outperforming base-
+lines.
+Additionally, leveraging domain-specific
+pre-trained models like LegalBERT and Clinical-
+8
+
+BioBERT within CPE further boosted performance,
+emphasizing the value of domain adaptation in doc-
+ument representation. Our findings highlight the
+potential of CPE for enhancing document under-
+standing in legal and medical domain.
+Limitations
+While CPE demonstrates strong performance in
+long document representation, certain aspects war-
+rant further exploration. Its effectiveness across
+diverse domains beyond legal and medical texts
+remains to be fully assessed. Additionally, while
+the model effectively captures intra-document re-
+lationships, further refinements could enhance its
+adaptability to varying document structures. Fu-
+ture work could explore extensions to multilingual
+datasets and cross-domain applications.
+Acknowledgments
+This work was supported by ANR-22-CE23-0002
+ERIANA and ANR Chaire IA Responsable.
+References
+Sebastian Arnold, Betty van Aken, Paul Grundmann,
+Felix A. Gers, and Alexander Löser. 2020. Learn-
+ing Contextualized Document Representations for
+Healthcare Answer Retrieval. In Proceedings of The
+Web Conference 2020 (WWW ’20), page 1332–1343.
+Iz Beltagy, Matthew E. Peters, and Arman Cohan. 2020a.
+Longformer: The long-document transformer. CoRR,
+abs/2004.05150.
+Iz Beltagy, Matthew E. Peters, and Arman Cohan.
+2020b. Longformer: The long-document transformer.
+arXiv:2004.05150.
+Ilias Chalkidis, Ion Androutsopoulos, and Nikolaos Ale-
+tras. 2019. Neural legal judgment prediction in En-
+glish. In Proceedings of the 57th Annual Meeting of
+the Association for Computational Linguistics, pages
+4317–4323.
+Ilias Chalkidis, Xiang Dai, Manos Fergadiotis, Pro-
+dromos Malakasiotis, and Desmond Elliott. 2022a.
+An exploration of hierarchical attention transform-
+ers for efficient long document classification. CoRR,
+abs/2210.05529.
+Ilias Chalkidis, Xiang Dai, Manos Fergadiotis, Prodro-
+mos Malakasiotis, and Desmond Elliott. 2022b. An
+exploration of hierarchical attention transformers for
+efficient long document classification. arXiv preprint
+arXiv:2210.05529.
+Ilias Chalkidis, Manos Fergadiotis, Sotiris Kotitsas, Pro-
+dromos Malakasiotis, Nikolaos Aletras, and Ion An-
+droutsopoulos. 2020. An empirical study on large-
+scale multi-label text classification including few and
+zero-shot labels. In Proceedings of the 2020 Con-
+ference on Empirical Methods in Natural Language
+Processing, EMNLP 2020, Online, November 16-20,
+2020, pages 7503–7515.
+Ilias Chalkidis, Manos Fergadiotis, Dimitrios Tsarapat-
+sanis, Nikolaos Aletras, Ion Androutsopoulos, and
+Prodromos Malakasiotis. 2021. Paragraph-level ratio-
+nale extraction through regularization: A case study
+on European court of human rights cases. In Pro-
+ceedings of the 2021 Conference of the North Amer-
+ican Chapter of the Association for Computational
+Linguistics: Human Language Technologies, pages
+226–241, Online. Association for Computational Lin-
+guistics.
+Ilias Chalkidis, Abhik Jana, Dirk Hartung, Michael
+Bommarito, Ion Androutsopoulos, Daniel Katz, and
+Nikolaos Aletras. 2022c. LexGLUE: A benchmark
+dataset for legal language understanding in English.
+In Proceedings of the 60th Annual Meeting of the
+Association for Computational Linguistics (Volume
+1: Long Papers), pages 4310–4330, Dublin, Ireland.
+Association for Computational Linguistics.
+Hong-You Chen, Chin-Hua Hu, Leila Wehbe, and Shou-
+De Lin. 2019. Self-discriminative learning for unsu-
+pervised document embedding. In Proceedings of
+the 2019 Conference of the North American Chap-
+ter of the Association for Computational Linguistics:
+Human Language Technologies, Volume 1 (Long and
+Short Papers), pages 2465–2474, Minneapolis, Min-
+nesota. Association for Computational Linguistics.
+Charles Condevaux and Sébastien Harispe. 2023. Lsg
+attention: Extrapolation of pretrained transformers
+to long sequences. In Pacific-Asia Conference on
+Knowledge Discovery and Data Mining, pages 443–
+454. Springer.
+Xiang Dai, Ilias Chalkidis, Sune Darkner, and Desmond
+Elliott. 2022. Revisiting transformer-based models
+for long document classification. In Findings of the
+Association for Computational Linguistics: EMNLP
+2022, pages 7212–7230, Abu Dhabi, United Arab
+Emirates. Association for Computational Linguistics.
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+Kristina Toutanova. 2019. BERT: Pre-training of
+deep bidirectional transformers for language under-
+standing. In Proceedings of the 2019 Conference of
+the North American Chapter of the Association for
+Computational Linguistics: Human Language Tech-
+nologies, Volume 1 (Long and Short Papers), pages
+4171–4186.
+Yi Feng, Chuanyi Li, and Vincent Ng. 2022. Legal
+judgment prediction via event extraction with con-
+straints. In Proc. ACL 2022, Vol. 1 (Long Papers),
+pages 648–664.
+Tianyu Gao, Xingcheng Yao, and Danqi Chen. 2021.
+SimCSE: Simple contrastive learning of sentence em-
+beddings. In Proceedings of the 2021 Conference on
+Empirical Methods in Natural Language Processing,
+pages 6894–6910.
+9
+
+Dvir Ginzburg, Itzik Malkiel, Oren Barkan, Avi Caciu-
+laru, and Noam Koenigstein. 2021. Self-supervised
+document similarity ranking via contextualized lan-
+guage models and hierarchical inference. In Find-
+ings of the Association for Computational Linguistics:
+ACL-IJCNLP 2021, pages 3088–3098. Association
+for Computational Linguistics.
+John Giorgi, Osvald Nitski, Bo Wang, and Gary Bader.
+2021. DeCLUTR: Deep contrastive learning for un-
+supervised textual representations. In Proceedings
+of the 59th Annual Meeting of the Association for
+Computational Linguistics and the 11th International
+Joint Conference on Natural Language Processing
+(Volume 1: Long Papergiorgi2021declutrs), pages
+879–895, Online. Association for Computational Lin-
+guistics.
+Sil Hamilton. 2023. Blind judgement: Agent-based
+supreme court modelling with gpt. arXiv preprint
+arXiv:2301.05327.
+Matthew Henderson, Rami Al-Rfou, Brian Strope, Yun-
+Hsuan Sung, László Lukács, Ruiqi Guo, Sanjiv Ku-
+mar, Balint Miklos, and Ray Kurzweil. 2017. Effi-
+cient natural language response suggestion for smart
+reply. arXiv preprint arXiv:1705.00652.
+Dan Iter, Kelvin Guu, Larry Lansing, and Dan Jurafsky.
+2020. Pretraining with contrastive sentence objec-
+tives improves discourse performance of language
+models. In Proceedings of the 58th Annual Meet-
+ing of the Association for Computational Linguistics,
+pages 4859–4870. Association for Computational
+Linguistics.
+Gautier Izacard, Mathilde Caron, Lucas Hosseini, Se-
+bastian Riedel, Piotr Bojanowski, Armand Joulin,
+and Edouard Grave. 2021. Unsupervised dense in-
+formation retrieval with contrastive learning. arXiv
+preprint arXiv:2112.09118.
+Alistair E. W. Johnson, Tom J. Pollard, Lu Shen,
+Li wei H. Lehman, Mengling Feng, Moham-
+mad Mahdi Ghassemi, Benjamin Moody, Peter
+Szolovits, Leo Anthony Celi, and Roger G. Mark.
+2016.
+Mimic-iii, a freely accessible critical care
+database. Scientific Data, 3.
+Yova Kementchedjhieva and Ilias Chalkidis. 2023. An
+exploration of encoder-decoder approaches to multi-
+label classification for legal and biomedical text. In
+Findings of the Association for Computational Lin-
+guistics: ACL 2023, pages 5828–5843.
+Ryan Kiros, Yukun Zhu, Russ R Salakhutdinov, Richard
+Zemel, Raquel Urtasun, Antonio Torralba, and Sanja
+Fidler. 2015. Skip-thought vectors. In Advances in
+Neural Information Processing Systems, volume 28,
+pages 3294–3302. Curran Associates, Inc.
+Tassilo Klein and Moin Nabi. 2022.
+SCD: Self-
+contrastive decorrelation of sentence embeddings. In
+Proceedings of the 60th Annual Meeting of the As-
+sociation for Computational Linguistics (Volume 2:
+Short Papers), pages 394–400.
+Quoc Le and Tomas Mikolov. 2014. Distributed rep-
+resentations of sentences and documents. In Pro-
+ceedings of the 31st International Conference on Ma-
+chine Learning, volume 32 of Proceedings of Ma-
+chine Learning Research, pages 1188–1196. PMLR.
+Vijit Malik, Rishabh Sanjay, Shubham Kumar Nigam,
+Kripabandhu Ghosh, Shouvik Kumar Guha, Arnab
+Bhattacharya, and Ashutosh Modi. 2021. ILDC for
+CJPE: Indian legal documents corpus for court judg-
+ment prediction and explanation. In Proceedings
+of the 59th Annual Meeting of the Association for
+Computational Linguistics and the 11th International
+Joint Conference on Natural Language Processing
+(Volume 1: Long Papers), pages 4046–4062.
+Dimitris Mamakas, Petros Tsotsi, Ion Androutsopou-
+los, and Ilias Chalkidis. 2022. Processing long legal
+documents with pre-trained transformers: Modding
+LegalBERT and longformer. In Proceedings of the
+Natural Legal Language Processing Workshop 2022,
+pages 130–142.
+Tomas Mikolov, Ilya Sutskever, Kai Chen, Greg S Cor-
+rado, and Jeff Dean. 2013. Distributed representa-
+tions of words and phrases and their compositional-
+ity. In Advances in Neural Information Processing
+Systems, volume 26, pages 3111–3119. Curran Asso-
+ciates, Inc.
+James Mullenbach, Sarah Wiegreffe, Jon Duke, Jimeng
+Sun, and Jacob Eisenstein. 2018. Explainable predic-
+tion of medical codes from clinical text. In Proceed-
+ings of the 2018 Conference of the North American
+Chapter of the Association for Computational Lin-
+guistics: Human Language Technologies, Volume 1
+(Long Papers), pages 1101–1111.
+Raghavendra Pappagari, Piotr Zelasko, Jesús Villalba,
+Yishay Carmiel, and Najim Dehak. 2019. Hierarchi-
+cal transformers for long document classification. In
+2019 IEEE automatic speech recognition and under-
+standing workshop (ASRU), pages 838–844. IEEE.
+Jeffrey Pennington, Richard Socher, and Christopher
+Manning. 2014. GloVe: Global vectors for word
+representation. In Proceedings of the 2014 Confer-
+ence on Empirical Methods in Natural Language Pro-
+cessing (EMNLP), pages 1532–1543, Doha, Qatar.
+Association for Computational Linguistics.
+Nils Reimers and Iryna Gurevych. 2019.
+Sentence-
+BERT: Sentence embeddings using Siamese BERT-
+networks. In Proceedings of the 2019 Conference on
+Empirical Methods in Natural Language Processing
+and the 9th International Joint Conference on Natu-
+ral Language Processing (EMNLP-IJCNLP), pages
+3982–3992, Hong Kong, China. Association for Com-
+putational Linguistics.
+Daniel Saggau, Mina Rezaei, Bernd Bischl, and Ilias
+Chalkidis. 2023. Efficient document embeddings
+via self-contrastive bregman divergence learning. In
+Findings of the Association for Computational Lin-
+guistics: ACL 2023, pages 12181–12190.
+10
+
+Carlo Sansone and Giancarlo Sperlí. 2022. Legal infor-
+mation retrieval systems: State-of-the-art and open
+issues. Information Systems, 106:101967.
+George Tsatsaronis, Georgios Balikas, Prodromos
+Malakasiotis, Ioannis Partalas, Matthias Zschunke,
+Michael R Alvers, Dirk Weissenborn, Anastasia
+Krithara, Sergios Petridis, Dimitris Polychronopou-
+los, and 1 others. 2015. An overview of the bioasq
+large-scale biomedical semantic indexing and ques-
+tion answering competition. BMC bioinformatics,
+16(1):1–28.
+Benyou Wang, Qianqian Xie, Jiahuan Pei, Zhihong
+Chen, Prayag Tiwari, Zhao Li, and Jie Fu. 2023. Pre-
+trained language models in biomedical domain: A
+systematic survey. ACM Computing Surveys, 56(3):1–
+52.
+Sinong Wang, Belinda Z. Li, Madian Khabsa, Han Fang,
+and Hao Ma. 2020. Linformer: Self-attention with
+linear complexity. CoRR, abs/2006.04768.
+Chuhan Wu, Fangzhao Wu, Tao Qi, and Yongfeng
+Huang. 2021. Hi-transformer: Hierarchical inter-
+active transformer for efficient and effective long
+document modeling. In Proceedings of the 59th An-
+nual Meeting of the Association for Computational
+Linguistics and the 11th International Joint Confer-
+ence on Natural Language Processing (Volume 2:
+Short Papers), pages 848–853, Online. Association
+for Computational Linguistics.
+Xing Wu, Chaochen Gao, Liangjun Zang, Jizhong Han,
+Zhongyuan Wang, and Songlin Hu. 2022. ESimCSE:
+Enhanced sample building method for contrastive
+learning of unsupervised sentence embedding. In
+COLING, pages 3898–3907.
+Nuo Xu, Pinghui Wang, Long Chen, Li Pan, Xiaoyan
+Wang, and Junzhou Zhao. 2020. Distinguish con-
+fusing law articles for legal judgment prediction. In
+Proceedings of the 58th Annual Meeting of the Asso-
+ciation for Computational Linguistics, pages 3086–
+3095.
+Wenmian Yang, Weijia Jia, Xiaojie Zhou, and Yutao
+Luo. 2019. Legal judgment prediction via multi-
+perspective bi-feedback network. In Proceedings of
+the Twenty-Eighth International Joint Conference on
+Artificial Intelligence, IJCAI-19, pages 4085–4091.
+International Joint Conferences on Artificial Intelli-
+gence Organization.
+Zichao Yang, Diyi Yang, Chris Dyer, Xiaodong He,
+Alex Smola, and Eduard Hovy. 2016. Hierarchical
+attention networks for document classification. In
+Proceedings of the 2016 Conference of the North
+American Chapter of the Association for Computa-
+tional Linguistics: Human Language Technologies,
+pages 1480–1489, San Diego, California. Associa-
+tion for Computational Linguistics.
+Manzil Zaheer, Guru Guruganesh, Kumar Avinava
+Dubey, Joshua Ainslie, Chris Alberti, Santiago On-
+tañón, Philip Pham, Anirudh Ravula, Qifan Wang,
+Li Yang, and Amr Ahmed. 2020a. Big bird: Trans-
+formers for longer sequences. In Advances in Neural
+Information Processing Systems 33: Annual Confer-
+ence on Neural Information Processing Systems 2020,
+NeurIPS 2020, December 6-12, 2020, virtual.
+Manzil Zaheer, Guru Guruganesh, Kumar Avinava
+Dubey, Joshua Ainslie, Chris Alberti, Santiago On-
+tanon, Philip Pham, Anirudh Ravula, Qifan Wang,
+Li Yang, and Amr Ahmed. 2020b. Big bird: Trans-
+formers for longer sequences. In Advances in Neural
+Information Processing Systems, volume 33, pages
+17283–17297. Curran Associates, Inc.
+Xin Zhang, Yanzhao Zhang, Dingkun Long, Wen Xie,
+Ziqi Dai, Jialong Tang, Huan Lin, Baosong Yang,
+Pengjun Xie, Fei Huang, Meishan Zhang, Wenjie
+Li, and Min Zhang. 2024. mGTE: Generalized long-
+context text representation and reranking models for
+multilingual text retrieval. In Proc. EMNLP 2024
+(Industry Track), pages 1393–1412.
+Xinping Zhao, Yan Zhong, Zetian Sun, Xinshuo Hu,
+Zhenyu Liu, Dongfang Li, Baotian Hu, and Min
+Zhang. 2025.
+FunnelRAG: A coarse-to-fine pro-
+gressive retrieval paradigm for RAG. In Findings
+of NAACL-HLT 2025, pages 3029–3046.
+Lucia Zheng, Neel Guha, Brandon R Anderson, Peter
+Henderson, and Daniel E Ho. 2021. When does pre-
+training help? assessing self-supervised learning for
+law and the casehold dataset of 53,000+ legal hold-
+ings. In Proceedings of the eighteenth international
+conference on artificial intelligence and law, pages
+159–168.
+A
+Experimental Setting
+A.1
+Datasets
+The different datasets we use are the following.
+Table 4 reports statistics.
+ECHR: The European Court of Human Rights
+(ECHR) (Chalkidis et al., 2021) comprises around
+11K cases of alleged human rights violations. Each
+case contains a list of facts or events from the
+case description and the task is to predict whether
+specific human rights articles have been violated
+among 10 labels.
+SCOTUS: The Supreme Court of the United
+States (SCOTUS) (Chalkidis et al., 2022c) contains
+complex cases that are not well solved by the lower
+court. SCOTUS is a single-label classification task,
+which predicts the court opinions from a choice of
+14 available issues such as criminal procedure, and
+civil rights, among others. The training set consists
+of 5K and the validation and test set contain 1.4k
+cases.
+EURLEX (Chalkidis et al., 2022c): European
+Union (EU) legislation dataset contains 65K cases
+11
+
+Table 4: Statistics of the long and short documents
+dataset - Average text token length and number of train
+and test samples for self-contrastive pre-training
+Dataset
+Train
+Test
+Avg. token length
+ECHR
+9000
+1000
+2050
+SCOTUS
+5000
+1400
+8000
+MIMIC
+30000
+10000
+3200
+EUR-LEX
+55000
+5000
+1400
+Bioasq
+80000
+20000
+300
+from the European Union portal 5. The task is
+to predict its EuroVoc labels such as ( economics,
+trade, and healthcare). The training set consists
+of 55K and the validation and test set contain 5k
+cases. The average document length is approxi-
+mately 1400 tokens. EUR-LEX is a multi-label
+classification dataset containing 100 labels (con-
+cepts).
+MIMIC-III: Medical information mart for inten-
+sive care (MIMIC-III) (Johnson et al., 2016) dataset
+comprises 40K discharge summaries from US hos-
+pitals, with each summary mapped to one or more
+(International classification of diseases, ninth revi-
+sion) ICD-9 taxonomy labels. We utilized labels
+from the first level of the ICD-9 hierarchy.
+BIOASQ (Tsatsaronis et al., 2015): The BIOASQ
+dataset comprises biomedical articles sourced from
+PubMed. Each article is annotated with concepts
+from the Medical Subject Headings (MeSH) tax-
+onomy. We used the first levels of the MeSH tax-
+onomy. The dataset is divided into train and test
+categories.
+A.2
+Configuration
+We use the AdamW optimizer with a learning rate
+of 2e −5 and weight decay of 0.001. The model is
+trained for 3 epochs for self-supervised SimCSE,
+ESimCSE, and CPE settings, while the MLP clas-
+sifier model is trained for 20 epochs. The classifier
+uses a batch size of 16, while the self-contrastive
+learning module uses a batch size of 4. We apply
+Max Pooling to the chunk representations to aggre-
+gate information across the chunks. All models are
+trained using NVIDIA Quadro RTX 8000 48GB
+GPU.
+Evaluation of Advanced Hierarchical Represen-
+tation
+In Section 3, we introduced a generalized
+CPE that can be used with any long document
+encoder.
+We hypothesise that the performance
+5http://eur-lex.europa.eu/
+Table 5: Performance evaluation of classification model
+using different hierarchical transformer CPE encoders
+applied on BERT for ECHR and SCOTUS datasets.
+Model
+ECHR
+SCOTUS
+macro-F1 µ-F1 macro-F1 µ-F1
+HBERT+MLP
+54.77
+66.98
+54.56
+66.78
+RoBERT+MLP
+54.99
+67.05
+58.34
+69.64
+ToBERT+MLP
+60.28
+68.46
+58.79
+70.07
+of CPE improves when using an advanced doc-
+ument encoder. To test this, we conducted exper-
+iments using Transformer over BERT (ToBERT)
+and Recurrence over BERT (RoBERT). For classifi-
+cation tasks, we kept the parameters of BERT fixed
+(frozen), and only the Transformer and LSTM en-
+coder with MLP layer were learned during training.
+The results in Table 5 show indeed that ToBERT im-
+proved the performance of the generalized HBERT
+by 6% in macro F1 and 1.5% in µ F1-score. On
+the SCOTUS dataset, ToBERT achieved a perfor-
+mance gain of approximately 4% in both macro
+and µ F1-scores.
+B
+Ablation Study
+We conducted an ablation study to evaluate the im-
+pact of different chunk sizes, visualize the quality
+of the embedding space, and examine the perfor-
+mance of the CPE framework on short documents.
+Impact of chunk length: Table 6 and Figure 3
+summarize the CPE classification performance
+measured by macro-F1 using a hierarchical Trans-
+former encoder with chunk sizes of 64, 128, 256,
+and 512 across four datasets: ECHR, SCOTUS,
+EURLEX, and MIMIC. Fig 3 illustrates how perfor-
+mance varies with chunk size. For the ECHR data
+set, on small chunk size of 64 produce 57.64 macro
+F1 score and remains stable for chunk size 128 and
+produce 57.74 micro F-1 score. The model per-
+formance then gradually decreases for large chunk
+sizes of 256 and 512. On the other hand, for SCO-
+TUS dataset, there is a notable improvement when
+moving from a chunk size of 64 to 128, after which
+the performance slightly drops for larger sizes. The
+scores for MIMIC show a modest decline, on chunk
+size 64 to chunk size 512. This demonstrates rel-
+ative robustness with only a slight decrease as the
+chunk size increases. Conversely, the EURLEX
+dataset exhibits its best performance at the smaller
+chunk sizes of 64 and 128, but shows a sharp de-
+cline at chunk sizes of 256 and 512. This suggests
+12
+
+Figure 3: Macro-F1 Scores vs. Chunk Size via hierar-
+chical transformer encoders applied on LegalBERT for
+ECHR, SCOTUS, EURLEX, and ClinicalBioBERT for
+MIMIC datasets.
+that EURLEX is highly sensitive to the chunk size
+parameter, likely because its shorter average text
+length means that larger chunks incorporate too
+much irrelevant detail.
+Performance on short document corpus To eval-
+uate our CPE framework on short documents, we
+perform experiments on the BIOASQ dataset. We
+followed the method outlined in Section 3.2, but
+instead of using the Longformer encoder, we uti-
+lized ClinicalBioBERT and BERT features, set-
+ting the length of the positive chunk to 64 tokens.
+Table
+7 reports classification results.
+The top
+rows show the performance of models using BERT
+embedding and the bottom rows display the per-
+formance of models using ClinicalBioBERT em-
+bedding. The ClinicalBioBERT EmbeddingCPE
++ MLP model produces the highest macro and mi-
+cro F1 scores, achieving 71.28 and 84.43 macro
+F1 and micro F1-scores, respectively. This indi-
+cates that self-supervised CPE learning produces
+high-quality embeddings. Conversely, the state-of-
+the-art ClinicalBioBERT EmbSimCSE + MLP and
+ClinicalBioBERT EmbESimCSE + MLP models
+does not enhance the performance of the baseline
+model Embedding + MLP. This suggests that us-
+ing only dropout augmentation or basic word rep-
+etition to form positive pairs for generating text
+embeddings yields little benefit for document- or
+paragraph-level representations, even though these
+techniques perform very well for sentence embed-
+dings. Results demonstrate that the proposed CPE
+method improves embedding derived from Clini-
+calBioBERT by around 4% macro-F1.
+Embeddings Quality Figure 4 shows the t-SNE
+projections of the CPE embeddings compared to
+the SimCSE baseline using the LegalBERT encoder
+on SCOTUS. As we can see, CPE demonstrates a
+higher quality of legal act encoding, as evidenced
+by more compact clusters. To quantify the compar-
+ison of visualized embeddings, we applied the DB-
+Scan clustering algorithm to the t-SNE projections.
+We evaluated clustering quality using completeness
+and homogeneity measures. As shown in Figure 4,
+the completeness and homogeneity scores for CPE
+are 0.31 and 0.38, respectively, compared to 0.23
+and 0.32 for SimCSE. This indicates a clear im-
+provement in topic separation using the projected
+embeddings from CPE.
+Training Time
+Table 8 presents the training time required by
+each model on the ECHR and SCOTUS datasets.
+Self-supervised contrastive learning using a CPE
+encoder requires approximately 3 h on ECHR and
+1.5 h on SCOTUS dataset. In contrast, SimCSE
+and ESimCSE training takes place 4.5 on ECHR
+and 2.5 h on SCOTUS dataset.
+SimCSE, and ESimCSE require significantly
+longer training times due to their document-level
+postive pair and negative pair. Our CPE training
+is more efficient because each positive and nega-
+tive pair involves a single sampled chunk paired
+with an aggregated document context rather than
+encoding the entire document twice, reducing both
+computation and memory overhead.
+Furthermore, for the evaluation of the document
+embedding in the downstream with an MLP head
+(1.78M trainable parameters), the training is light,
+taking less than 10 minutes per epoch on our hard-
+ware.
+Prompting LLAMA on long legal documents
+Table 9 demonstrates that the zero-shot prompt-
+ing model LLAMA underperforms compared to
+embedding models (HBERT+MLP), primarily due
+to the extensive length of its prompts. Although
+the literature suggests that few-shot demonstrations
+can enhance model performance, the limited con-
+text window presents significant challenges when
+handling long documents, each averaging 4,096
+tokens. Incorporating even one-shot examples into
+the prompt consumes nearly all available space,
+leaving insufficient room for the actual query. Fur-
+thermore, the LLAMA model tends to over-predict
+a limited number of classes while rarely predicting
+others, leading to imbalanced classification out-
+comes, as indicated by a low macro-F1 score.
+13
+
+Table 6: Performance evaluation of classification model using different chunk size length via hierarchical transformer
+encoders applied on LegalBERT for ECHR, SCOTUS, EURLEX, and ClinicalBioBERT for MIMIC datasets.
+Chunk
+Size
+ECHR
+SCOTUS
+EURLEX
+MIMIC
+macro-F1
+µ-F1
+macro-F1
+µ-F1
+macro-F1
+µ-F1
+macro-F1
+µ-F1
+64
+57.64
+69.1
+58.77
+71.14
+42.10
+63.81
+63.09
+70.74
+128
+57.74
+69.39
+62.69
+73.29
+42.16
+64.17
+63.35
+70.79
+256
+56.93
+67.69
+59.18
+71.79
+38.99
+59.18
+61.54
+70.27
+512
+55.60
+67.29
+59.45
+71.85
+29.29
+43.63
+60.63
+68.90
+Table 7: Performance evaluation of classification model on short document BIOASQ dataset using BERT and
+ClinicalBioBERT encoders.
+PTM
+Model
+Bioasq
+macro-F1
+µ-F1
+BERT
+Embedding + MLP
+68.64
+83.30
+EmbeddingSimCSE + MLP
+68.05
+82.70
+EmbeddingESimCSE + MLP
+68.04
+82.66
+EmbeddingCP E + MLP
+70.51
+84.08
+ClinicalBioBERT
+Embedding + MLP
+68.05
+83.60
+EmbeddingSimCSE + MLP
+69.13
+83.31
+EmbeddingESimCSE + MLP
+68.77
+83.17
+EmbeddingCP E + MLP
+71.28
+84.43
+Table 8: Training time (in hours or minutes) across
+different datasets.
+Model
+ECHR (T)
+SCOTUS (T)
+CPE
+3 h
+1.5 h
+SimCSE
+4.5 h
+2.5 h
+ESimCSE
+4.5 h
+2.5 h
+Table 9: Classification performance of the zero-shot
+LLAMA model on the ECHR and SCOTUS datasets.
+Model
+ECHR
+SCOTUS
+macro-F1 µ-F1 macro-F1 µ-F1
+HBERT+MLP
+54.77
+66.98
+54.56
+66.78
+Llama3-8B-Instruct
+15.39
+22.54
+0.369
+24.91
+14
+
+Figure 4: t-SNE visualization on the Scotus dataset with corresponding legal class.
+15

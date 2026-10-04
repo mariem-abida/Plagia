@@ -1,0 +1,1466 @@
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+Zijian Zhao 1 Yitong Shang 1 Sen Li 1 2
+Abstract
+Accurate traffic prediction is essential for Intel-
+ligent Transportation Systems, including ride-
+hailing, urban road planning, and vehicle fleet
+management. However, due to significant pri-
+vacy concerns surrounding traffic data, most ex-
+isting methods rely on local training, resulting in
+data silos and limited knowledge sharing. Feder-
+ated Learning (FL) offers an efficient solution
+through privacy-preserving collaborative train-
+ing; however, standard FL struggles with the
+non-independent and identically distributed (non-
+IID) problem among clients. This challenge has
+led to the emergence of Personalized Federated
+Learning (PFL) as a promising paradigm. Nev-
+ertheless, current PFL frameworks require fur-
+ther adaptation for traffic prediction tasks, such
+as specialized graph feature engineering, data
+processing, and network architecture design. A
+notable limitation of many prior studies is their
+reliance on hyper-parameter optimization across
+datasets—information that is often unavailable
+in real-world scenarios—thus impeding practi-
+cal deployment. To address this challenge, we
+propose AutoFed, a novel PFL framework for
+traffic prediction that eliminates the need for man-
+ual hyper-parameter tuning1. Inspired by prompt
+learning, AutoFed introduces a federated repre-
+sentor that employs a client-aligned adapter to
+distill local data into a compact, globally shared
+prompt matrix. This prompt then conditions a
+personalized predictor, allowing each client to
+benefit from cross-client knowledge while main-
+taining local specificity. Extensive experiments
+on real-world datasets demonstrate that AutoFed
+1Department of Civil and Environmental Engineering, The
+Hong Kong University of Science and Technology, Hong Kong,
+China
+2Intelligent Transportation Thrust, Systems Hub, The
+Hong Kong University of Science and Technology (Guangzhou),
+Guangzhou, China. Correspondence to: Sen Li <cesli@ust.hk>.
+1Note the hyper-parameters in this paper mainly refer to
+those related to framework structure, rather than standard
+machine learning hyper-parameters such as learning rate or
+batch size.
+consistently achieves superior performance across
+diverse scenarios. The code of this paper is pro-
+vided at https://github.com/RS2002/
+AutoFed.
+1. Introduction
+Traffic Prediction (TP) is a cornerstone of modern Intelligent
+Transportation Systems (ITS), enabling critical applications
+such as real-time ride-hailing dispatch, dynamic pricing,
+urban infrastructure planning, and congestion management
+[36]. However, the development of robust TP models faces
+a fundamental challenge: although traffic data is abundant,
+it is also highly sensitive and fragmented [42]. Stringent
+privacy regulations and commercial interests often result
+in this data being confined to isolated silos maintained by
+various municipal authorities (e.g., agencies in different ju-
+risdictions) or private companies (e.g., Uber, Lyft). As a
+result, centralized training on aggregated datasets is gener-
+ally infeasible, and most practical solutions must rely on
+local training with limited data. This siloed approach leads
+to poor generalization and an inability to capture broader,
+transferable patterns essential for effective traffic prediction.
+Federated Learning (FL) has emerged as a promising
+paradigm for collaboratively training models without shar-
+ing raw data, thereby preserving privacy [40]. However,
+conventional FL algorithms such as FedAvg [25] are built
+on the assumption that client data are Independent and Iden-
+tically Distributed (IID)—an assumption that is rarely sat-
+isfied in the context of traffic prediction. In reality, traffic
+patterns exhibit significant heterogeneity (non-IID) across
+different regions, driven by variations in urban layout, pop-
+ulation density, and economic activity. Training a single
+global model on such non-IID data can lead to client drift
+and suboptimal performance for all participants. Personal-
+ized Federated Learning (PFL) addresses this challenge by
+allowing clients to learn customized models while still lever-
+aging collective knowledge from the federation [35]. As a
+result, PFL has become a particularly promising framework
+for achieving realistic, privacy-preserving traffic prediction.
+Nevertheless, existing PFL frameworks are not directly
+suited for the unique challenges of TP. Compared to stan-
+dard time series prediction tasks, TP faces significant chal-
+1
+arXiv:2512.24625v1 [cs.LG] 31 Dec 2025
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+lenges, including complex spatiotemporal dependencies,
+non-stationary fluctuations, and numerous external features
+[1]. This necessitates the adaptation of standard PFL frame-
+works to meet the specific demands of TP tasks, where
+traditional methods often fail to incorporate domain-specific
+needs. Unfortunately, these adaptation processes frequently
+rely on complex manual efforts, such as intricate graph con-
+struction [32; 31; 39] or hyper-parameter tuning [14; 46; 45].
+For instance, the filter method and pattern amount in [14; 46]
+can result in performance variations of over 5% based
+solely on parameter adjustments mentioned in their papers.
+However, optimal settings can vary significantly between
+datasets, and a single configuration can lead to substan-
+tial performance variability. The setting process is often
+contingent upon prior knowledge of the dataset and client
+configurations or expert insights, which can be challenging
+to obtain in practice, creating significant barriers to robust
+and scalable deployment.
+To address these challenges, we propose a novel PFL frame-
+work for TP, named AutoFed, which eliminates the need
+for manual adaptation efforts. AutoFed comprises two key
+components: a Personalized Predictor (PP) that adapts to
+local data distributions and a Federated Representor (FR)
+that shares and provides global common knowledge. For
+the PP, we utilize the Adaptive Graph Convolutional Recur-
+rent Network (AGCRN) [4], which can learn the adjacency
+matrix adaptively, thus removing the need for manual de-
+sign tailored to different clients. Unlike conventional FL
+approaches that rely on model parameter aggregation, the
+FR is inspired by prompt learning. Specifically, it first com-
+presses local input data through the Auto-Encoder (AE)
+denoiser and AGCRN encoder to capture refined local fea-
+tures [19]. Then, following the principle of FedBN [22],
+the FR leverages shared linear layers of the Multi-Layer
+Perceptron (MLP) to align these local features into a uni-
+fied global representation across clients, while retaining
+distinct batch normalization layers for each client to pre-
+serve personalized statistical characteristics. This generates
+a personalized prompt for the PP while adapting to non-IID
+data distributions. This design enables AutoFed to create
+adaptive and personalized global prompt representations,
+eliminating the need for manual hyper-parameter tuning and
+enhancing the framework’s robustness and generalization
+ability. Compared to previous methods such as [14; 46; 45],
+our approach demonstrates superior performance across a
+range of real-world TP datasets.
+2. Related Work
+2.1. Traffic Prediction
+Serving as a key component of ITS, TP encompasses various
+tasks such as travel demand prediction, traffic flow predic-
+tion, and travel time prediction. Early research treated each
+traffic node as an independent entity, framing TP as a general
+time series prediction task. Many methods were developed
+based on conventional single-dimensional time series ap-
+proaches, including statistical methods [24], cluster-based
+pattern matching [41], and neural networks [38]. However,
+these approaches often overlook the spatial relationships
+among traffic nodes. For instance, when a traffic jam oc-
+curs in one area, neighboring regions are likely to expe-
+rience increased traffic flow as well. Subsequently, most
+approaches adopted a paradigm that first extracts spatial fea-
+tures within each time frame and then employs time series
+networks for prediction. For example, [24; 3; 17] proposed
+a CNN-LSTM network for traffic flow prediction. However,
+CNN-based spatial extraction struggles to adequately repre-
+sent the non-Euclidean nature of traffic networks, resulting
+in challenges in accurately learning robust spatial features
+[45; 46]. Recently, Graph Neural Networks (GNNs) have
+emerged as a promising solution, effectively capturing the
+relationships among nodes in traffic networks. An exam-
+ple is the AGCRN [4], which uses a GCN-LSTM structure
+and employs adaptive adjacency matrices to capture spatial
+dependencies, allowing for end-to-end learning. Addition-
+ally, STWave [12] introduced a novel decoupling approach
+to separate traffic data into stationary and non-stationary
+components, utilizing both temporal and spatial attention
+methods to capture relationships accurately.
+Despite these advancements, most of these methods rely on
+centralized training, neglecting the privacy considerations
+inherent in traffic data, which are increasingly recognized
+by data privacy regulations such as the General Data Pro-
+tection Regulation (GDPR) and the California Consumer
+Privacy Act (CCPA). Recently, some research has begun to
+focus on FL-based paradigms to address privacy concerns.
+For instance, Shang et al. [32; 31] proposed both horizon-
+tal and vertical methods based on FedAvg [25], in which
+a carefully designed traffic graph efficiently captures the
+relationships among traffic nodes. Additionally, Hu et al.
+[14] introduced FedGCN, which considers the relationship
+between graph nodes and external factors through a novel
+MendGCN module. In the realm of PFL methods, Zhou
+et al. [45; 46] developed FedTPS, which utilizes a traffic
+pattern repository to share knowledge among clients. How-
+ever, most of these methods depend on meticulous manual
+feature design and hyper-parameter optimization tailored
+to specific clients or datasets, which hinders their efficient
+application and adaptation to distinct contexts.
+2.2. Federated Learning
+In recent years, FL has been widely applied in high-privacy
+and resource-limited scenarios [5], including medical recog-
+nition [28], traffic prediction [33], and autonomous driving
+[18]. However, standard FL methods like FedAvg rely on
+the assumption of IID data among clients, which is not
+2
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+always feasible in practice. According to [27], solutions
+for non-IID data distributions can be categorized into three
+types: data-based, framework-based, and model-based meth-
+ods. Among these, PFL, as a model-based approach, shows
+promising performance. In PFL, clients share only portions
+of the model to leverage common knowledge while retain-
+ing personalized parameters or structures to adapt to local
+data distributions.
+Starting with FedPer [2], different clients share upstream
+layers for robust feature extraction while keeping person-
+alized downstream layers for final output, which is also a
+well-recognized paradigm in the theory of transfer learning
+[47]. Following this, various methods have introduced in-
+novative technologies such as clustering [7], where clients
+within a single cluster share data distribution similarities;
+meta-learning [11], which aims to find a suitable starting
+point for all clients; and hyper-networks [30], which directly
+output personalized network parameters with a high capac-
+ity for expansion to new clients. Moreover, PFL can be
+effectively utilized in scenarios where different clients have
+varying model structures, as it allows for the aggregation
+of common sub-networks. This flexibility is particularly
+advantageous when clients possess different computational
+resources for varying model scales. As mentioned in the
+introduction, due to the unique challenges in TP, it is essen-
+tial to adapt these methods for specific tasks. However, this
+adaptation still encounters the challenges faced by conven-
+tional TP models discussed in the previous subsection.
+2.3. Prompt Learning
+Recently, the success of Large Language Models (LLMs)
+[9] has led to the effective application and adaptation of var-
+ious related technologies, such as Masked Language Model
+(MLM) pre-training [44], Retrieval-Augmented Generation
+(RAG) [13], and LLMs themselves [16], in time series anal-
+ysis. Among these technologies, prompt learning is recog-
+nized for its efficiency and ease of implementation. In the
+context of LLMs, prompts play a crucial role in directly
+influencing the subsequent output decoding, a concept well-
+established since the development of T5 [29]. Subsequently,
+prompt tuning has emerged as a promising solution for en-
+hancing or fine-tuning models with low cost by utilizing
+learnable prompt tokens [23].
+In the field of time series analysis, most research has con-
+centrated on designing prompts to adapt pre-trained LLMs
+or their architectures for specific tasks [6; 37]. For example,
+[15; 45; 46] employ learnable prototypes (or patterns) as
+guiding prompts for the decoding process. However, the
+number of prototypes can significantly impact model per-
+formance, and the optimal quantity varies across datasets
+[45; 46]. In contrast, this paper proposes a neural network-
+based prompt generator, eliminating the need for prototypes.
+Furthermore, while some graph-based works have also in-
+troduced prompt learning [20], their focus is primarily on
+designing spatial prompt representations, which differs from
+our emphasis on the temporal dimension.
+3. Methodology
+3.1. Problem Setup
+In this paper, we study the federated TP task, which involves
+m clients C = {C1, C2, . . . , Cm} with non-IID data and a
+centralized server S. For each region i ∈{1, . . . , n}, the
+transportation network can be represented as Gi = (Vi, Ei),
+where Vi and Ei denote the nodes and edges, respectively.
+Additionally, Ai ∈R|Vi|,|Vi| is the weighted adjacency ma-
+trix, representing the relationship (e.g. spatial, similarity,
+and dependencies) among traffic nodes, where and | · | rep-
+resents the size of set. Specifically, each client possesses
+a private dataset Di = {Xi, Yi}, where Xi ∈RNi,T ,|Vi|,H
+represents the historical traffic features, and Yi ∈RNi,T ,|Vi|
+is the ground truth for future demand. Specifically, Ni de-
+notes the sample size for client i, T and T are the lengths of
+the historical information sequence and the future horizon to
+be predicted, respectively, and H is the feature dimension.
+Specifically, we consider a PFL scenario, where the network
+of each client i at round m can be expressed as f(·; θm
+i , Θm),
+where θm
+i represents the private part of the network param-
+eters of client i, which learns the personalized aspects of
+the data in their own data distribution, while Θm denotes
+the shared part of the network parameters, which learns a
+global general representation for all clients. Consequently,
+the target of PFL is defined as:
+arg
+min
+θ1,θ2,...,θn,Θ
+n
+X
+i=1
+|Vi|
+Pn
+i=1 |Vi|L(f(Xi; θi, Θ), Yi) ,
+(1)
+where L(·, ·) is the loss function.
+3.2. Method Overview
+The network structure is depicted in Fig. 1, comprising
+two main components: the Personalized Predictor (PP)
+and the Federated Representor (FR). The PP utilizes an
+encoder-decoder-based graph time series network that is
+trained locally, allowing it to adapt to local data distribu-
+tions. During inference, the encoder receives historical data
+x ∈RT ,n,H as input, while the decoder predicts future traf-
+fic data ˆy ∈RT ,n in an Auto-Regressive (AR) manner. For
+client i, the input x is derived from its dataset Xi, where
+n represents the number of nodes (|Vi|). Specifically, the
+FR generates a prompt matrix pg ∈Rn,h based on the input
+x (where h is the hidden dimension), which serves as a
+prefix token for the decoder. This design is motivated by
+the intuition that different clients may share similar traffic
+patterns [45; 46], allowing the prefix prompt to convey per-
+3
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+Figure 1. Network Architecture: The network consists of the PP and FR. PP utilizes a graph time series network with an encoder-decoder
+structure. FR employs an AE-based denoiser for robust feature extraction, a graph time series encoder for feature compression, and an
+client-aligned adapter for transferring local representations to global representations, providing a guided prompt matrix for the decoder in
+PP. In the figure, only the modules with the “earth" icon are shared among clients.
+tinent pattern information from the input x and guide the
+decoding process. During training, the parameters of the FR
+are partially shared among clients, facilitating the learning
+of a global common traffic pattern representation. Simul-
+taneously, personalized components are also employed to
+adapt to local data distributions like PP.
+3.3. Personalized Predictor
+Although our framework is ultimately dependent on a graph
+time series model, we recommend utilizing methods with
+adaptive graph structures, such as the AGCRN [4], which
+is also employed in the experiments of this paper. This
+recommendation is based on the following considerations.
+Currently, most traffic prediction models rely on manu-
+ally designed graphs [32; 33]. While these approaches
+yield promising results, constructing such graphs is time-
+consuming and requires careful consideration of multiple
+factors, including spatial connections, distance relationships,
+and node similarities. Furthermore, the effectiveness of each
+graph feature may vary across different regions or datasets.
+In contrast, AGCRN adapts the graph structure through a
+learnable parameter, E ∈Rn,h. The AGCRN process can
+be represented as:
+˜A = Softmax(ReLU(EET )) ,
+ut = σ(GCNu(xt, Ht−1, ˜A)) ,
+rt = σ(GCNr(xt, Ht−1, ˜A)) ,
+Ct = tanh(GCNC(xt, (rt ⊙Ht−1), ˜A)) ,
+Ht = ut ⊙Ht−1 + (1 −ut) ⊙Ct ,
+(2)
+where the matrix ˜A ∈Rn,n is the adaptive adjacency ma-
+trix, xt ∈Rn,H represents the input x at frame t (i.e.
+x = {x1, x2, . . . , xT }), and ut, rt, Ct, Ht−1 ∈Rn,h repre-
+sent the update gate, reset gate, candidate state, and previous
+hidden state of the GRU at frame t, respectively. Specifi-
+cally, we employ the same AGCRN structure both the en-
+coder and decoder in the PP.
+3.4. Federated Representor
+As shown in Fig. 1, the FR consists of three components: an
+Auto-Encoder (AE) denoiser for robust feature extraction, a
+graph time series encoder for further information extraction
+and compression, and a client-aligned adapter to transfer
+the local feature representation to a global common feature
+prompt, which serves as guidance for the PP.
+• Auto-Encoder Denoiser: The goal of the FR is to gen-
+erate a guiding prompt that captures the traffic pattern
+information, which necessitates a focus on stable fea-
+tures while ignoring random noise. While some previous
+works have utilized low-pass filters [45; 46; 12], selecting
+the appropriate filtering method and its hyper-parameters
+can be challenging, directly affecting model performance
+[45; 46]. Additionally, these methods rely on the assump-
+tion that low-frequency components contain more sta-
+ble patterns, whereas high-frequency components contain
+more noise. However, the specific threshold between
+these components is often unclear. To address these is-
+sues, we propose using an AE-based denoiser that can
+learn stable patterns autonomously. This approach has
+proven effective in various fields, including signal pro-
+cessing [26] and image denoising [19]. The denoising
+process can be represented as:
+p = AE-enc(x) ,
+ˆx = AE-dec(p) ,
+(3)
+4
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+where the AE encoder compresses the original input se-
+quence x ∈RT ,n,H into a feature space p ∈RT ,n,h, and
+the AE decoder attempts to recover it back to the original
+input ˆx ∈RT ,n,H. Since time series data predominantly
+consists of regular patterns and irregular noise, recovering
+the noise element can be challenging, allowing the AE to
+effectively perform denoising. Since denoising is similar
+across different nodes, we choose to share this module
+among clients. Compared to the recovered sequence ˆx,
+the hidden feature p includes more dense information,
+which we utilize for subsequent computations. The recov-
+ered sequence ˆx be used solely for calculating the AE loss
+during training.
+• Graph Time Series Encoder: Even though the AE de-
+noiser provides robust stable features, it can be difficult to
+use the long-sequence p as a prompt for the PP. Therefore,
+we propose utilizing a graph time series encoder to com-
+press p while extracting additional information. Specif-
+ically, we adopt the same encoder structure as the PP,
+compressing the feature p into a single vector pl ∈Rn,h,
+referred to as the local feature. Given the differing graph
+structures and data distributions among clients, we opt for
+a personalized encoder for each client.
+• Client-Aligned Adapter: To facilitate knowledge shar-
+ing among clients, we introduce a client-aligned adapter
+that transfers the local traffic pattern representation pl to
+a global representation pg ∈Rn,h. For this process, we
+utilize a shared MLP. Specifically, we employ the FedBN
+[22] strategy to tackle the challenges posed by non-IID
+data, which persists in the local feature space pl. In de-
+tail, the parameters of the linear layers are shared among
+clients, while the batch normalization layers remain dis-
+tinct, retaining their statistical information, such as the
+average values and standard deviations, along with the
+rescaling parameters.
+To summarize, the full process of the PP can be expressed
+as follows:
+HT = Encoder(x; 0) ,
+z = Decoder(pg; HT ) ,
+ˆy = MLP(z) ,
+(4)
+where 0 represents a zero matrix that serves as the initial
+hidden state for the encoder, pg is the first input token for
+the decoder, HT is the final hidden state of the encoder,
+which serves as the initial hidden state for the decoder,
+the variable z ∈RT ,n,h is the output of the decoder,
+and an additional MLP (Rh →R) maps z to the final
+prediction result ˆy ∈RT ,n. It is important to note that
+the intermediate output z is necessary because the output
+dimension of each token in the decoder must match that of
+the first prompt token pg, due to its AR nature. Note that
+although the encoder and decoder have the same structure,
+the inputs (x and pg) have different dimensions. This is
+because the decoder follows the AR paradigm, while the
+encoder processes the full input sequence.
+3.5. Training Process
+In considering the training process, we first define the loss
+function, which consists of two parts: the regression loss of
+the AE-denoiser and the regression loss of the PP. In this
+paper, we choose the Mean Absolute Error (MAE) as the
+loss function. For each client i, the two loss functions can
+be represented as:
+Lae
+i
+= Ex∈Xi||x −ˆx||1 ,
+Lpre
+i
+= Ey∈Yi||y −ˆy||1 ,
+(5)
+where || · ||1 denotes the L1 norm. The overall loss function
+for client i is then defined as:
+Li = Lpre
+i
++ αLae
+i
+,
+α = Lae
+i
+Lpre
+i
+,
+(6)
+where α is an adaptive hyper-parameter, inspired by [43].
+This approach allows the training process for denoising and
+prediction to adaptively balance: when the denoiser has a
+high error, the prompt matrix may not be effective, making
+a large weight for the prediction loss less meaningful since
+the prompt matrix will change thereafter. Thus, a higher
+weight for the denoising loss is warranted. This relationship
+is vice versa as well. The detailed training process follows
+the conventional PFL paradigm, as shown in Appendix A.
+4. Experiment
+4.1. Experiment Setup
+In our experiments, we compare the performance of our
+method against several benchmarks, including general FL
+methods (FedAvg [25], FedProx [21]), PFL methods (Fed-
+Per [2], pFedMe [34]), and State-Of-The-Art FL methods
+focused on traffic prediction (FedTPS [45; 46], FedGCN
+[14]). To ensure fairness, we employ the same AGCRN
+architecture as the backbone for all methods. The detailed
+introduction of these methods is shown in Appendix B. Addi-
+tionally, we utilize local training (where each client trains a
+personalized model using their own data) as a baseline. The
+experiments are conducted on a workstation running Win-
+dows 11, equipped with an Intel(R) Core(TM) i7-14700KF
+processor and an NVIDIA RTX 4080 graphics card.
+To validate our method, we conduct two case studies: one
+for the Travel Demand Prediction (TDP) task and another
+for the Traffic Flow Prediction (TFP) task, both utilizing
+real-world datasets. For TDP, we use ride-hailing data from
+the New York City Taxi and Limousine Commission dataset
+[10], which includes demand data for Uber and Lyft across
+five governmental districts in New York City (NYC). Ini-
+tially, we consider the entire Uber and Lyft data as two
+5
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+Table 1. Model Performance on TDP Task: The best results are highlighted in bold, while the second-best results are indicated with
+underlining. This notation is consistent throughout the following tables.
+Type
+Method
+Uber (S0)
+Lyft (S0)
+MAE
+RMSE
+MSE
+MAPE/%
+MAE
+RMSE
+MSE
+MAPE/%
+Local Training
+3.64
+6.12
+37.54
+39.36
+1.97
+3.12
+9.76
+50.41
+FL
+FedAvg [25]
+3.50
+5.92
+35.14
+40.51
+1.88
+3.00
+9.00
+48.91
+FedProx [21]
+3.55
+5.92
+35.14
+39.45
+1.83
+2.87
+8.25
+50.05
+PFL
+FedPer [2]
+3.51
+5.87
+34.61
+41.72
+1.87
+2.92
+8.55
+50.97
+pFedMe [34]
+3.61
+6.13
+37.70
+40.00
+1.96
+3.10
+9.61
+50.72
+TrafficFL
+FedTPS [45; 46]
+3.47
+5.85
+34.24
+40.35
+1.88
+2.96
+8.74
+50.71
+FedGCN [14]
+3.33
+5.65
+32.06
+38.57
+1.82
+2.88
+8.29
+48.63
+Ours
+AutoFed
+3.35
+5.65
+32.01
+38.95
+1.82
+2.88
+8.29
+48.55
+w/o AE
+3.53
+5.94
+35.30
+39.19
+1.89
+2.99
+8.95
+48.74
+w/o FedBN
+3.52
+5.90
+34.83
+40.33
+1.96
+3.13
+9.81
+48.74
+Type
+Method
+Uber (S1)
+Lyft (S2)
+MAE
+RMSE
+MSE
+MAPE/%
+MAE
+RMSE
+MSE
+MAPE/%
+Local Training
+3.40
+5.35
+32.72
+39.60
+1.87
+2.85
+8.56
+50.02
+FL
+FedAvg [25]
+3.55
+5.68
+37.30
+40.17
+1.89
+2.88
+8.75
+51.05
+FedProx [21]
+3.57
+5.73
+38.37
+39.91
+1.89
+2.89
+8.80
+51.44
+PFL
+FedPer [2]
+3.59
+5.65
+36.46
+40.49
+1.89
+2.90
+8.81
+51.29
+pFedMe [34]
+3.39
+5.33
+32.31
+40.12
+1.89
+2.89
+8.83
+50.37
+TrafficFL
+FedTPS [45; 46]
+3.46
+5.44
+33.80
+39.25
+1.85
+2.83
+8.44
+50.25
+FedGCN [14]
+3.46
+5.48
+33.96
+39.61
+1.88
+2.87
+8.69
+49.87
+Ours
+AutoFed
+3.36
+5.25
+31.38
+38.82
+1.81
+2.74
+8.01
+50.12
+w/o AE
+3.40
+5.32
+32.31
+39.39
+1.85
+2.84
+8.61
+49.52
+w/o FedBN
+3.37
+5.29
+31.75
+39.05
+1.85
+2.83
+8.42
+50.46
+Type
+Method
+Uber (S3)
+Lyft (S3)
+MAE
+RMSE
+MSE
+MAPE/%
+MAE
+RMSE
+MSE
+MAPE/%
+Local Training
+3.40
+5.35
+32.72
+39.60
+1.87
+2.85
+8.56
+50.02
+FL
+FedAvg [25]
+3.63
+5.90
+41.49
+40.36
+1.86
+2.86
+8.62
+49.45
+FedProx [21]
+3.57
+5.74
+39.27
+40.56
+1.87
+2.85
+8.60
+49.81
+PFL
+FedPer [2]
+3.67
+5.79
+38.32
+40.62
+1.92
+2.94
+9.13
+51.85
+pFedMe [34]
+3.41
+5.38
+33.10
+39.84
+1.86
+2.84
+8.51
+50.48
+TrafficFL
+FedTPS [45; 46]
+3.42
+5.42
+33.66
+39.38
+1.85
+2.84
+8.52
+50.09
+FedGCN [14]
+3.50
+5.56
+34.93
+39.66
+1.91
+2.94
+9.08
+50.43
+Ours
+AutoFed
+3.32
+5.19
+30.63
+39.35
+1.83
+2.79
+8.22
+50.00
+w/o AE
+3.41
+5.35
+32.74
+39.21
+1.84
+2.80
+8.40
+49.50
+w/o FedBN
+3.38
+5.34
+32.56
+39.38
+1.85
+2.83
+8.43
+50.73
+separate clients, leading to scenario (i) S0. However, our
+experiments reveal that this approach is not optimal. In the
+current configuration, the graph encompasses the entirety
+of New York City, which is excessively large and may not
+accurately reflect real-world operational patterns. In prac-
+tice, traffic demand in Manhattan has limited impact on
+Queens, as most ride-hailing activities are confined within
+individual regions. Combining all districts into a single
+graph can introduce mutual interference, complicating the
+training process—particularly for models with adaptive ad-
+6
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+Table 2. Model Performance on TFP Task: Results from comparative experiments are sourced from [45; 46; 14]. The MAPE for FedGCN
+[14] is not provided in their paper. Additionally, we omit the MSE metric for this task, as it is not reported in all studies.
+Method
+PEMS03 [8]
+PEMS04 [8]
+PEMS07 [8]
+PEMS08 [8]
+MAE
+RMSE
+MAPE/%
+MAE
+RMSE
+MAPE/%
+MAE
+RMSE
+MAPE/%
+MAE
+RMSE
+MAPE/%
+Local Training
+15.86
+26.31
+16.65
+20.22
+31.79
+13.89
+22.14
+35.72
+10.66
+16.11
+25.41
+10.86
+FedAvg [25]
+16.55
+26.61
+22.90
+20.23
+31.87
+14.42
+24.29
+37.12
+11.51
+16.29
+25.56
+11.16
+FedProx [21]
+16.35
+26.52
+21.13
+20.73
+32.31
+14.66
+25.10
+38.12
+12.41
+16.51
+25.44
+11.87
+FedPer [2]
+15.56
+26.29
+15.43
+19.72
+31.42
+12.99
+24.56
+37.48
+11.68
+16.08
+25.40
+10.24
+pFedMe [34]
+15.48
+26.44
+15.13
+19.60
+31.21
+12.88
+22.67
+35.55
+9.58
+15.96
+24.98
+10.14
+FedTPS [45; 46]
+15.05
+25.94
+14.70
+19.46
+31.18
+12.67
+21.74
+34.57
+9.16
+15.81
+24.91
+10.28
+FedGCN [14]
+15.87
+23.78
+–
+20.46
+30.75
+–
+20.50
+35.22
+–
+16.56
+24.91
+–
+AutoFed
+15.04
+25.76
+14.56
+19.41
+31.14
+12.69
+20.90
+33.66
+8.87
+15.90
+25.15
+10.13
+Table 3. Training Costs Comparison
+Method
+Computation
+Communication
+(time/round) (s)
+(parameter/round)
+FedAvg [25]
+76.2
+5.5M
+FedProx [21]
+77.2
+5.5M
+FedPer [2]
+81.6
+2.9M
+pFedMe [34]
+90.0
+5.5M
+FedTPS [45; 46]
+106.4
+0.1K
+FedGCN [14]
+76.8
+12.9M
+AutoFed
+104.6
+175.0K
+jacency matrices such as AGCRN. We find that dividing
+the overall graph into several regional subgraphs actually
+yields better prediction performance (detailed experimental
+results are presented in the next subsection). Therefore, we
+propose treating each company within each district as a sep-
+arate client, although this decision is motivated by modeling
+effectiveness rather than privacy concerns. We consider
+three scenarios: (ii) S1: the five Uber clients are trained
+together; (iii) S2: the five Lyft clients are trained together;
+(iv) S3: all Uber and Lyft clients are trained together. For
+TFP, we employ four datasets from the California Trans-
+portation Agencies (CalTrans) Performance Measurement
+System (PEMS) [8], with each dataset (PEMS03, PEMS04,
+PEMS07, PEMS08) originating from different regions and
+time periods on California’s highways. The detailed config-
+uration setup, along with the evaluation metrics, is provided
+in Appendix C.
+4.2. Experiment Results
+The experimental results for the TDP and TFP tasks are
+illustrated in Table 1 and Table 2, respectively. For the TDP
+task, our AutoFed achieves SOTA performance in almost all
+scenarios. Notably, we observe two key findings: (i) First,
+all methods exhibit the worst performance in scenario S0.
+In comparison to scenarios S1-S3, models in S0 focus on
+(a) Client Distribution under Local Representation
+(b) Client Distribution under Global Representation
+Figure 2. Comparison Between Local Representation and Global
+Representation
+the spatial relationships among districts, resulting in mu-
+tual interference due to the limited influence among them.
+In contrast, scenarios S1-S3 treat the districts as separate
+clients and leverage FL to aggregate their common temporal
+relationships, leading to improved performance. (ii) Second,
+in scenario S3, most methods experience a decline in perfor-
+mance due to the increased diversity of clients compared to
+S1 and S2. While AutoFed shows improvement on the Uber
+dataset, there is a slight decrease in performance on the Lyft
+dataset. Although FedTPS improves on both datasets, it still
+underperforms relative to AutoFed.
+7
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+Figure 3. Training Process: This figure shows the change of different metrics in valid set during training.
+Regarding the TFP task, our method demonstrates perfor-
+mance similar to the two previous SOTA methods for traffic
+prediction tasks, namely FedTPS and FedGCN. However, it
+is important to note that both of these methods are highly
+dependent on hyper-parameters (such as the pattern amount
+and low-pass filter method in FedTPS, and the number of
+neighbors in FedGCN), which can lead to significant fluctu-
+ations in performance, as reported in their respective papers
+[45; 46; 14]. In the experiments of these benchmark meth-
+ods, they model performance is evaluated based on optimal
+hyper-parameters, which can be challenging to achieve in
+practice. In contrast, our method does not rely on any hyper-
+parameter optimization. Moreover, we observe that the
+performance of FedGCN shows a significant increase in the
+TFP task compared to the TDP task. This may be due to
+FedGCN’s design, which considers the potential influence
+of neighbors within the entire graph. In the TDP task, the
+neighbors of each client are from different districts, where
+taxis are seldom transferred among them. Conversely, in the
+TFP task, all clients are from the same highway, creating a
+more interconnected relationship.
+4.3. Discussions and Analysis
+In this section, we further illustrate the efficiency of our
+method using the scenario S1 in TDP task as an example for
+principle analysis and an ablation study. First, to analyze
+the efficacy of each module, we conduct an ablation study,
+primarily focusing on the FR part. Specifically, we illustrate
+the model performance when eliminating the AE-denoiser
+and FedBN in the Adapter, respectively, as shown in Table 1.
+The results indicate that both modules significantly influence
+model performance, underscoring the efficacy of our module
+design. Additionally, we observe that our AutoFed still
+outperforms other methods in most scenarios, even within
+the context of the ablation study. This further illustrates the
+efficiency of our global representation method.
+To further explain the efficacy of our proposed method, we
+analyze the local feature vector pl and the global feature
+vector pg (i.e., the vectors before and after the adapter in
+the FR). Specifically, we first combine all pl and pg across
+clients and then utilize KMeans for clustering. We set the
+initial cluster centers as the centers of each client. Next,
+we analyze the proportion of each client within different
+clusters, as shown in Fig. 2. The results indicate that for
+the local feature, there are significant differences among
+clients, leading to the dispersion of local features across
+different clusters. In contrast, the distribution of global fea-
+tures among clients is relatively uniform within each cluster,
+suggesting that the global feature pg ignores client-specific
+characteristics and instead focuses on global common pat-
+terns.
+Finally, we compare the convergence speed, computational
+cost, and communication cost during training. Fig. 3 illus-
+trates the change in different metrics as the training rounds
+increase on the validation set, where AutoFed clearly demon-
+strates a faster convergence speed compared to the others.
+Additionally, we present the detailed training costs in Table
+3. The results indicate that AutoFed and FedTPS have the
+lowest communication costs but the highest computation
+times, as both methods require a prompt generation process.
+5. Conclusion
+In this paper, we propose a novel personalized federated
+traffic prediction framework named AutoFed. Our method
+comprises a personalized predictor trained locally to adapt
+to local data distributions and a federated representor that
+transforms non-IID input data among clients into a common
+global representation, serving as a guiding prompt for the
+personalized predictor’s decoding process. Compared to
+conventional methods, our approach eliminates the need for
+manual feature design or hyper-parameter tuning, making
+it more practical, as these settings often depend on prior
+knowledge of clients or datasets. Through validation on real-
+world travel demand prediction and traffic flow prediction
+datasets, our method demonstrates superior performance
+with reduced communication costs. In the future, it would
+be worthwhile to explore the applicability of our method in
+more general time series prediction scenarios.
+8
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+Impact Statement
+We believe this work raises minimal ethical concerns, as
+Federated Learning is designed to prioritize privacy protec-
+tion.
+References
+[1] Aouedi, O., Le, V. A., Piamrat, K., and Ji, Y. Deep
+learning on network traffic prediction: Recent ad-
+vances, analysis, and future directions. ACM Com-
+puting Surveys, 57(6):1–37, 2025.
+[2] Arivazhagan, M. G., Aggarwal, V., Singh, A. K., and
+Choudhary, S. Federated learning with personalization
+layers. arXiv preprint arXiv:1912.00818, 2019.
+[3] Asif, M. T., Dauwels, J., Goh, C. Y., Oran, A., Fathi,
+E., Xu, M., Dhanya, M. M., Mitrovic, N., and Jail-
+let, P. Spatiotemporal patterns in large-scale traffic
+speed prediction. IEEE Transactions on Intelligent
+Transportation Systems, 15(2):794–804, 2013.
+[4] Bai, L., Yao, L., Li, C., Wang, X., and Wang, C. Adap-
+tive graph convolutional recurrent network for traffic
+forecasting. Advances in neural information process-
+ing systems, 33:17804–17815, 2020.
+[5] Cai, Z., Chen, H., and Zhu, G. Feedsign: robust full-
+parameter federated fine-tuning of large models with
+extremely low communication overhead of one bit.
+arXiv preprint arXiv:2501.17610, 2025.
+[6] Cao, D., Jia, F., Arik, S. O., Pfister, T., Zheng, Y.,
+Ye, W., and Liu, Y. Tempo: Prompt-based genera-
+tive pre-trained transformer for time series forecasting.
+In The Twelfth International Conference on Learning
+Representations, 2024.
+[7] Chang, Y., Shi, X., Zhao, X., Chen, Z., and Ma, D.
+Dual prompt personalized federated learning in foun-
+dation models. Scientific Reports, 15(1):28026, 2025.
+[8] Chen, C. Freeway performance measurement system
+(PeMS). University of California, Berkeley, 2002.
+[9] Chen, H., Chen, H., Zhao, Z., Han, K., Zhu, G., Zhao,
+Y., Du, Y., Xu, W., and Shi, Q. An overview of domain-
+specific foundation model: key technologies, appli-
+cations and challenges. Science China Information
+Sciences, 69(1):111301, 2026.
+[10] Deri, J. A. and Moura, J. M. Taxi data in new york city:
+A network perspective. In 2015 49th asilomar con-
+ference on signals, systems and computers, pp. 1829–
+1833. IEEE, 2015.
+[11] Fallah, A., Mokhtari, A., and Ozdaglar, A. Person-
+alized federated learning: A meta-learning approach.
+arXiv preprint arXiv:2002.07948, 2020.
+[12] Fang, Y., Qin, Y., Luo, H., Zhao, F., Xu, B., Zeng, L.,
+and Wang, C. When spatio-temporal meet wavelets:
+Disentangled traffic forecasting via efficient spectral
+graph attention networks. In 2023 IEEE 39th Interna-
+tional Conference on Data Engineering (ICDE), pp.
+517–529. IEEE, 2023.
+[13] Han, S., Lee, S., Cha, M., Arik, S. O., and Yoon,
+J. Retrieval augmented time series forecasting. In
+Forty-second International Conference on Machine
+Learning, 2025.
+[14] Hu, N., Liang, W., Zhang, D., Xie, K., Li, K., and
+Zomaya, A. Y. Fedgcn: A federated graph convolu-
+tional network for privacy-preserving traffic prediction.
+IEEE Transactions on Sustainable Computing, 9(6):
+925–935, 2024.
+[15] Huang, Y.-H., Xu, C., Wu, Y., Li, W.-J., and Bian,
+J. Timedp: Learning to generate multi-domain time
+series with domain prompts. In Proceedings of the
+AAAI Conference on Artificial Intelligence, volume 39,
+pp. 17520–17527, 2025.
+[16] Jin, M., Wang, S., Ma, L., Chu, Z., Zhang, J., Shi,
+X., Chen, P.-Y., Liang, Y., Li, Y.-f., Pan, S., et al.
+Time-llm: Time series forecasting by reprogramming
+large language models. In International Conference
+on Learning Representations, 2024.
+[17] Ke, J., Zheng, H., Yang, H., and Chen, X. M.
+Short-term forecasting of passenger demand under on-
+demand ride services: A spatio-temporal deep learning
+approach. Transportation research part C: Emerging
+technologies, 85:591–608, 2017.
+[18] Kou, W.-B., Lin, Q., Tang, M., Ye, R., Wang,
+S., Zhu, G., and Wu, Y.-C.
+Fast-convergent and
+communication-alleviated heterogeneous hierarchical
+federated learning in autonomous driving. IEEE Trans-
+actions on Intelligent Transportation Systems, 2025.
+[19] Lee, W.-H., Ozger, M., Challita, U., and Sung, K. W.
+Noise learning-based denoising autoencoder. IEEE
+Communications Letters, 25(9):2983–2987, 2021.
+[20] Li, J., Sun, X., Li, Y., Li, Z., Cheng, H., and Yu, J. X.
+Graph intelligence with large language models and
+prompt learning. In Proceedings of the 30th ACM
+SIGKDD Conference on Knowledge Discovery and
+Data Mining, pp. 6545–6554, 2024.
+9
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+[21] Li, T., Sahu, A. K., Zaheer, M., Sanjabi, M., Talwalkar,
+A., and Smith, V. Federated optimization in hetero-
+geneous networks. Proceedings of Machine learning
+and systems, 2:429–450, 2020.
+[22] Li, X., Jiang, M., Zhang, X., Kamp, M., and Dou, Q.
+Fedbn: Federated learning on non-iid features via local
+batch normalization. arXiv preprint arXiv:2102.07623,
+2021.
+[23] Li, Z., Su, Y., and Collier, N. A survey on prompt
+tuning. arXiv preprint arXiv:2507.06085, 2025.
+[24] Liu, W., Zheng, Y., Chawla, S., Yuan, J., and Xing,
+X. Discovering spatio-temporal causal interactions
+in traffic data streams. In Proceedings of the 17th
+ACM SIGKDD international conference on Knowledge
+discovery and data mining, pp. 1010–1018, 2011.
+[25] McMahan, B., Moore, E., Ramage, D., Hampson, S.,
+and y Arcas, B. A. Communication-efficient learning
+of deep networks from decentralized data. In Artifi-
+cial intelligence and statistics, pp. 1273–1282. PMLR,
+2017.
+[26] Nguyen, X. H., Nguyen, V.-D., Luu, Q.-T., Gian, T. D.,
+and Shin, O.-S. Robust wifi sensing-based human pose
+estimation using denoising autoencoder and cnn with
+dynamic subcarrier attention. IEEE Internet of Things
+Journal, 2025.
+[27] Pei, J., Liu, W., Li, J., Wang, L., and Liu, C. A review
+of federated learning methods in heterogeneous sce-
+narios. IEEE Transactions on Consumer Electronics,
+70(3):5983–5999, 2024.
+[28] Pfitzner, B., Steckhan, N., and Arnrich, B. Federated
+learning in a medical context: a systematic literature
+review. ACM Transactions on Internet Technology
+(TOIT), 21(2):1–31, 2021.
+[29] Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang,
+S., Matena, M., Zhou, Y., Li, W., and Liu, P. J. Ex-
+ploring the limits of transfer learning with a unified
+text-to-text transformer. Journal of machine learning
+research, 21(140):1–67, 2020.
+[30] Scott, J., Zakerinia, H., and Lampert, C. H. Pefll:
+Personalized federated learning by learning to learn.
+In The Twelfth International Conference on Learning
+Representations, 2024.
+[31] Shang, Y. and Li, S. Security-enhanced spatiotemporal
+ride-hailing demand prediction—part ii: Vertical feder-
+ated learning. IEEE Transactions on Intelligent Trans-
+portation Systems, 26(9):13363–13377, 2025. doi:
+10.1109/TITS.2025.3564629.
+[32] Shang, Y. and Li, S. Security-enhanced spatiotemporal
+ride-hailing demand prediction—part i: Horizontal
+federated learning. IEEE Transactions on Intelligent
+Transportation Systems, 2025.
+[33] Shang, Y., Li, D., Li, Y., and Li, S. Explainable spa-
+tiotemporal multi-task learning for electric vehicle
+charging demand prediction. Applied Energy, 384:
+125460, 2025.
+[34] T Dinh, C., Tran, N., and Nguyen, J. Personalized
+federated learning with moreau envelopes. Advances
+in neural information processing systems, 33:21394–
+21405, 2020.
+[35] Tan, A. Z., Yu, H., Cui, L., and Yang, Q. Towards
+personalized federated learning. IEEE transactions on
+neural networks and learning systems, 34(12):9587–
+9603, 2022.
+[36] Tedjopurnomo, D. A., Bao, Z., Zheng, B., Choudhury,
+F. M., and Qin, A. K. A survey on modern deep neural
+network for traffic prediction: Trends, methods and
+challenges. IEEE Transactions on Knowledge and
+Data Engineering, 34(4):1544–1561, 2020.
+[37] Xue, H. and Salim, F. D. Promptcast: A new prompt-
+based learning paradigm for time series forecasting.
+IEEE Transactions on Knowledge and Data Engineer-
+ing, 36(11):6851–6864, 2023.
+[38] Yang, B., Sun, S., Li, J., Lin, X., and Tian, Y. Traffic
+flow prediction using lstm with feature enhancement.
+Neurocomputing, 332:320–327, 2019.
+[39] Yuan, X., Chen, J., Yang, J., Zhang, N., Yang, T., Han,
+T., and Taherkordi, A. Fedstn: Graph representation
+driven federated learning for edge computing enabled
+urban traffic flow prediction. IEEE Transactions on
+Intelligent Transportation Systems, 24(8):8738–8748,
+2022.
+[40] Zhang, C., Xie, Y., Bai, H., Yu, B., Li, W., and Gao,
+Y. A survey on federated learning. Knowledge-Based
+Systems, 216:106775, 2021.
+[41] Zhang, L., Liu, Q., Yang, W., Wei, N., and Dong, D.
+An improved k-nearest neighbor model for short-term
+traffic flow prediction. Procedia-Social and Behav-
+ioral Sciences, 96:653–662, 2013.
+[42] Zhang, R., Mao, J., Wang, H., Li, B., Cheng, X., and
+Yang, L. A survey on federated learning in intelli-
+gent transportation systems. IEEE Transactions on
+Intelligent Vehicles, 2024.
+[43] Zhao, Z. Let network decide what to learn: Sym-
+bolic music understanding model based on large-scale
+10
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+adversarial pre-training. In Proceedings of the 2025
+International Conference on Multimedia Retrieval, pp.
+2128–2132, 2025.
+[44] Zhao, Z., Meng, F., Lyu, Z., Li, H., Li, X., and Zhu,
+G. Csi-bert2: A bert-inspired framework for efficient
+csi prediction and classification in wireless commu-
+nication and sensing. IEEE Transactions on Mobile
+Computing, pp. 1–17, 2025. doi: 10.1109/TMC.2025.
+3640420.
+[45] Zhou, H., Yu, W., Wan, S., Tong, Y., Gu, T., and
+Gong, C. Traffic pattern sharing for federated traffic
+flow prediction with personalization. In 2024 IEEE
+International Conference on Data Mining (ICDM), pp.
+639–648. IEEE, 2024.
+[46] Zhou, H., Yu, W., Wan, S., Tong, Y., Gu, T., and
+Gong, C. Fedtps: traffic pattern sharing for personal-
+ized federated traffic flow prediction. Knowledge and
+Information Systems, pp. 1–27, 2025.
+[47] Zhuang, F., Qi, Z., Duan, K., Xi, D., Zhu, Y., Zhu, H.,
+Xiong, H., and He, Q. A comprehensive survey on
+transfer learning. Proceedings of the IEEE, 109(1):
+43–76, 2020.
+Algorithm 1 Training Process of AutoFed
+Require: Number of clients n, local datasets {Di}n
+i=1,
+shared model parameters Θ0, personal model parame-
+ters {θ0
+i }n
+i=1, communication rounds M, local epochs
+E
+Ensure: Personalized models {θM
+i , ΘM}n
+i=1
+1: Server executes:
+2: Initialize shared parameters Θ0
+3: Broadcast Θ0 to all clients
+4: for each communication round m = 0, 1, . . . , M −1
+do
+5:
+Randomly select a subset of clients Sm ⊆{1, . . . , n}
+6:
+for each client i ∈Sm in parallel do
+7:
+θm+1
+i
+, ∆Θm
+i ←ClientUpdate(i, θm
+i , Θm)
+8:
+end for
+9:
+Aggregate shared parameters: Θm+1 ←Θm +
+1
+|Sm|
+P
+i∈Sm ∆Θm
+i
+10:
+Broadcast Θm+1 to all clients
+11: end for
+12:
+13: ClientUpdate(client i, personal parameters θi, shared
+parameters Θ):
+14: Initialize local shared parameters: Θi ←Θ
+15: for each local epoch e = 1 to E do
+16:
+for each batch (Xb, Yb) ∈Di do
+17:
+Forward Pass:
+18:
+Compute
+denoised
+features:
+ˆXb
+=
+AE-dec(AE-enc(Xb))
+19:
+Extract local features: pl = Encoder(Xb)
+20:
+Generate global prompt: pg = Adapter(pl)
+21:
+Generate predictions: ˆYb = PP(Xb, pg)
+22:
+Loss Computation:
+23:
+Compute AE loss: Lae = MAE(Xb, ˆXb)
+24:
+Compute prediction loss: Lpre = MAE(Yb, ˆYb)
+25:
+Compute adaptive weight: α =
+Lae
+Lpre
+26:
+Compute total loss: L = Lpre + α · Lae
+27:
+Backward Pass:
+28:
+Update θi and Θi via gradient descent: ∇θi,ΘiL
+29:
+end for
+30: end for
+31: Compute parameter update: ∆Θi = Θi −Θ
+32: Return θi, ∆Θi
+A. Algorithm
+The detailed process of our AutoFed is illustrated in Algo-
+rithm 1.
+B. Introduction of Comparative Methods
+• FedAvg [25]: This classical FL method enables each
+client to train on their individual data at each round, after
+which the server parameters are updated to the average of
+11
+
+AutoFed: Manual-Free Federated Traffic Prediction via Personalized Prompt
+all clients’ parameters, which are then distributed before
+the next round.
+• FedProx [21]: FedProx introduces a proximal term to the
+loss function of FedAvg, preventing the local model from
+deviating too far from the global model. However, it still
+aims to optimize a global model rather than personalized
+ones.
+• FedPer [2]: As a classical PFL method, FedPer allows
+different clients to share a common base layer for robust
+feature extraction while maintaining personalized output
+layers for tailored results.
+• pFedMe [34]: pFedMe is a PFL framework that utilizes
+Moreau envelopes as a regularized loss function, enabling
+each client to efficiently find its optimal model while
+leveraging global information.
+• FedTPS [45; 46]: Similar to our method, FedTPS em-
+ploys a low-pass filter for stable pattern extraction and a
+pattern repository for prompt generation. However, these
+processes require manual settings and hyper-parameter
+tuning, and the aggregation in the pattern repository is
+based on similarity among clients, leading to higher com-
+putational costs.
+• FedGCN [14]: FedGCN is based on the assumption that
+potential neighbor nodes of all real nodes exist within the
+graph. It introduces the MendGCN module to consider
+these external factors.
+C. Experiment Details
+In all experiments, we set the ratio of training, validation,
+and testing sets to 6:2:2. For the TDP task, we reproduce
+all comparative methods ourselves, setting the batch size to
+128, the communication rounds to 50 with a local epoch of
+1, and the learning rate to 10−3 using the Adam optimizer.
+The results for the TFP task are sourced from [45; 46; 14].
+To ensure fairness in the TFP task, we follow the same
+settings as [45; 46], adjusting the communication rounds
+to 200 and setting the client amount to 4. Additionally,
+we employ the same techniques such as column learning,
+gradient clipping, and the MultiStepLR scheduler provided
+in their official repository2.
+During experiment, we consider the following evaluation
+metrics: Mean Absolute Error (MAE), Root Mean Square
+Error (RMSE), Mean Square Error (MSE), and Mean Abso-
+2https://github.com/lichuan210/FedTPS
+lute Percentage Error (MAPE):
+MAE = ∥ˆy −y∥1 ,
+RMSE =
+q
+∥ˆy −y∥2
+2 ,
+MSE = ∥ˆy −y∥2
+2 ,
+MAPE =
+
+ˆy −y
+y
+
+1
+,
+(7)
+where ∥· ∥2 denotes the L2 norm.
+12

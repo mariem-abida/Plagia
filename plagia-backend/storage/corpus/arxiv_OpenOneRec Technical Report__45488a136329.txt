@@ -1,0 +1,2862 @@
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+OneRec Team
+https://huggingface.co/OpenOneRec
+§
+https://github.com/Kuaishou-OneRec/OpenOneRec
+While the OneRec series has successfully unified the fragmented recommendation pipeline into an end-
+to-end generative framework, a significant gap remains between recommendation systems and general
+intelligence. Constrained by isolated data, existing models struggle to leverage the massive data scaling
+that drives the emergent capabilities of Large Language Models (LLMs). As a result, they operate as
+domain specialists—proficient in pattern matching but lacking world knowledge, reasoning capabilities,
+and instruction following. This limitation is further compounded by the lack of a holistic benchmark to
+evaluate such integrated capabilities. To address this, our contributions are: 1) RecIF-Bench & Open
+Data: We propose RecIF-Bench, a holistic benchmark covering 8 diverse tasks that thoroughly evaluate
+capabilities from fundamental prediction to complex reasoning. Concurrently, we release a massive
+training dataset comprising 96 million interactions from 160,000 users to facilitate reproducible research.
+2) Framework & Scaling: To ensure full reproducibility, we open-source our comprehensive training
+pipeline, encompassing data processing, co-pretraining, and post-training. Leveraging this framework,
+we demonstrate that recommendation capabilities can scale predictably while mitigating catastrophic
+forgetting of general knowledge. 3) OneRec-Foundation: We release OneRec-Foundation (1.7B and
+8B), a family of models establishing new state-of-the-art (SOTA) results across all tasks in RecIF-Bench.
+Furthermore, when transferred to the Amazon benchmark, our models surpass the strongest baselines
+with an average 26.8% improvement in Recall@10 across 10 diverse datasets (Figure 1). This work
+marks a step towards building truly intelligent recommender systems. Nonetheless, realizing this vision
+presents significant technical and theoretical challenges, highlighting the need for broader research
+engagement in this promising direction.
+Product
+Diamond
+Figure 1 | Holistic Performance Overview. Left: Evaluation on RecIF-Bench and general LLM bench-
+marks. Our model achieves SOTA performance on recommendation tasks while effectively retaining
+general knowledge. "Best Baseline" denotes the highest performance achieved by existing methods
+for each specific task. Right: Amazon Benchmark results. Our model demonstrates exceptional
+cross-domain transferability, consistently surpassing leading baselines across 10 diverse datasets.
+© 2026 Kuaishou. All rights reserved
+arXiv:2512.24762v1 [cs.IR] 31 Dec 2025
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Contents
+1
+Introduction
+4
+2
+Preliminary
+5
+2.1
+Items as Tokens: Bridging the Modality Gap . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Recommendation as Autoregressive Modeling
+. . . . . . . . . . . . . . . . . . . . . .
+6
+3
+RecIF-Bench: A Holistic Recommendation Instruction-Following Benchmark
+6
+3.1
+Dataset Construction . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3.2
+Task Taxonomy: From Alignment to Reasoning . . . . . . . . . . . . . . . . . . . . . .
+8
+3.3
+Evaluation Protocols . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+10
+3.4
+Comparison with Existing Benchmarks . . . . . . . . . . . . . . . . . . . . . . . . . .
+10
+3.5
+Sanity Check: General Intelligence
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+4
+Pre-Training
+11
+4.1
+Pre-training Data . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+4.2
+Training Recipe . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+4.3
+Scaling Laws in Recommendation . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+5
+Post-Training
+16
+5.1
+Multi-task Supervised Fine-tuning . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+5.2
+On-policy Distillation for General Capability . . . . . . . . . . . . . . . . . . . . . . .
+17
+5.3
+Reinforcement Learning for Recommendation . . . . . . . . . . . . . . . . . . . . . .
+19
+6
+Evaluation
+19
+6.1
+Experimental Settings
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+6.2
+Main Results on RecIF-Bench
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+6.3
+Transfer Learning on Amazon Benchmark
+. . . . . . . . . . . . . . . . . . . . . . . .
+20
+6.4
+Ablation Study
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+7
+Conclusion, Limitations, and Future Directions
+26
+A
+Contributions
+31
+B
+Appendix
+31
+B.1
+Evaluation Details for Item Understanding . . . . . . . . . . . . . . . . . . . . . . . .
+31
+2
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+B.2
+Prompts for Item Understanding . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+B.3
+Samples of Recommendation-Domain Pre-training Data . . . . . . . . . . . . . . . . .
+33
+B.4
+Detailed Data Composition and Token Budgets for Pre-training . . . . . . . . . . . . .
+34
+B.5
+Detailed Data Composition and Token Budgets for Multi-task SFT . . . . . . . . . . .
+36
+3
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+1. Introduction
+Recent advances in Large Language Models (LLMs) have catalyzed a paradigm shift toward Generative
+Recommendation (Geng et al., 2022; Wu et al., 2023). Notable efforts, such as the OneRec series (Deng
+et al., 2025; Zhou et al., 2025a,b), have successfully unified the multi-stage recommendation pipeline
+into an end-to-end generative framework, demonstrating the potential of treating user history as a
+context for next-item prediction. Despite these structural advancements, a significant chasm remains
+between current recommendation systems and general intelligence. Existing generative recommenders
+are often confined by isolated data silos, which sever the data scaling loops essential for the emergent
+capabilities seen in general LLMs (Hoffmann et al., 2022; Kaplan et al., 2020). Consequently, these
+systems function as domain-specific experts that are highly effective at collaborative pattern matching
+but lack the general world knowledge essential for broader intelligence.
+To bridge the semantic gap, recent studies such as LC-Rec (Zheng et al., 2024) and OneRec-Think
+(Liu et al., 2025) align discrete recommendation identifiers with the linguistic space of LLMs. However,
+these approaches are typically confined to a limited set of downstream tasks. Such task homogeneity
+often induces catastrophic forgetting, thereby compromising the backbone’s inherent generalization
+capabilities. Furthermore, existing benchmarks remain restricted to narrow, specialized tasks, failing
+to evaluate the holistic capabilities essential for recommendation foundation models. In this work, we
+propose a unified framework (Figure 2) that integrates scalable pre-training, hybrid post-training, and
+holistic evaluation. We introduce RecIF-Bench, which, to our knowledge, is the first evaluation suite
+designed to assess multifaceted capabilities across diverse recommendation scenarios via instruction
+following. To facilitate reproducibility, we open-source our complete training pipeline, including
+data processing, co-pretraining, and post-training protocols, along with checkpoints trained on a
+hundred-billion-token corpus. We summarize our main contributions as follows:
+• RecIF-Bench: A Holistic Recommendation Instruction-Following Benchmark. We release
+RecIF-Bench, a multi-dimensional benchmark designed to rigorously assess recommender ca-
+pabilities across 8 diverse tasks, ranging from fundamental recommendation to complex
+reasoning. Spanning short-video, e-commerce, and online advertising, it serves as a robust testbed
+for quantifying the synergy between instruction following and recommendation. Furthermore,
+we evaluate OneRec-Foundation on 7 widely-recognized general benchmarks (e.g., MATH500,
+LiveCodeBench, GPQA-Diamond) to verify the retention of broad reasoning and coding skills. To
+facilitate reproducible research, we also release a comprehensive training dataset comprising 96
+million interactions from 160,000 users.
+• Open-Source Framework & Validated Scaling Laws. To ensure full reproducibility, we open-
+source our complete training pipeline built upon PyTorch (Paszke et al., 2019) and VeRL (Sheng
+et al., 2024), covering data processing, co-pretraining, and post-training. We introduce a novel
+two-stage alignment strategy—combining on-policy distillation and recommendation-oriented
+Reinforcement Learning (Rec-RL)—to simultaneously recover general reasoning abilities and
+refine task-specific precision. Based on this methodology, we empirically validate scaling laws in
+recommendation, demonstrating predictable capability scaling while effectively mitigating the
+catastrophic forgetting of general knowledge.
+• OneRec-Foundation Model Family. We release the OneRec-Foundation series, comprising
+models with 1.7B and 8B parameters. Built on Qwen (Yang et al., 2025), OneRec-Foundation
+moves beyond simple fine-tuning to endow the backbone with intrinsic recommendation capabilities.
+The series includes Standard versions trained on our open-source dataset and Pro versions enhanced
+with a hundred-billion-token industrial corpus from Kuaishou. Empirical results show SOTA
+performance across all RecIF-Bench tasks. Notably, on 10 Amazon datasets, our model achieves a
+substantial lead over strong baselines, securing an average 26.8% improvement in Recall@10,
+4
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Figure 2 | The Overall Framework of OneRec-Foundation. (1) Pre-Training: Integrates collabo-
+rative signals with general semantics via Itemic-Text Alignment and mixed-domain Co-Pretraining.
+(2) Post-Training: Unlocks diverse downstream capabilities via SFT, and balances general reasoning
+with recommendation performance through alternating General Distillation and Rec-RL. (3) Eval-
+uation: Comprehensively assesses holistic capabilities on RecIF-Bench and validates cross-domain
+transferability on Amazon datasets.
+underscoring its robustness as a foundation model.
+2. Preliminary
+In this section, we reframe the recommendation problem through the lens of generative language
+modeling. We introduce a modality-aligned tokenization strategy for items and formulate the recom-
+mendation task as a standard autoregressive generation problem.
+2.1. Items as Tokens: Bridging the Modality Gap
+A fundamental challenge in applying LLMs to recommendation is the mismatch between the continu-
+ous linguistic space and the discrete item space. Representing items with detailed textual descriptions
+is inefficient due to excessively long contexts for user histories (Yang et al., 2024) and fails to guaran-
+tee the generation of in-corpus items (Zheng et al., 2024). To address this, we treat items as a distinct
+modality, adopting Itemic Tokens (Luo et al., 2025; Zhou et al., 2025a)(see Tokenizer in Figure 2).
+5
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+We employ RQ-Kmeans (Luo et al., 2025) to discretize pre-trained semantic embeddings of item
+metadata into hierarchical discrete codes. This compresses item semantics into short, fixed-length
+sequences, enabling efficient long-context modeling while preserving collaborative structure. Crucially,
+the hierarchical nature of these tokens ensures that items with similar semantics share common
+prefixes, allowing the model to transfer knowledge based on token proximity—analogous to how
+semantic relationships are encoded in natural language tokens.
+2.2. Recommendation as Autoregressive Modeling
+With the item modality aligned to the token space, we unify the vocabulary V = V𝑡𝑒𝑥𝑡∪V𝑖𝑡𝑒𝑚. This
+allows us to treat a user’s interaction history not as a specialized data structure, but simply as a long
+context sequence containing item tokens, optionally interleaved with text.
+We formulate tasks ranging from prediction (e.g., retrieval) to reasoning (e.g., explanation) as
+a unified Next-Token Prediction problem. Formally, given an instruction I and a user context C
+(comprising the interaction history and optional queries), the model maximizes the likelihood of the
+target response 𝑌:
+L(𝜃) = −
+|𝑌|
+∑︁
+𝑡=1
+log 𝑃𝜃(𝑦𝑡|I, C, 𝑦<𝑡),
+(1)
+where 𝑌can be a target item’s token sequence (for recommendation tasks) or a natural language
+sequence (e.g., item metadata, user profile, or reasoning). This formulation allows us to leverage
+the standard transformer architecture and training infrastructure of LLMs without any task-specific
+architectural modifications.
+3. RecIF-Bench: A Holistic Recommendation Instruction-Following Benchmark
+The evolution of recommender systems from specialized experts to general-purpose foundation
+models necessitates a paradigm shift in evaluation. Traditional benchmarks, typically confined to
+closed-set ranking accuracy within single domains, fall short of assessing the broader capabilities of
+Large Language Models (LLMs). To bridge this gap, we introduce RecIF-Bench, a comprehensive
+benchmark designed to rigorously evaluate recommendation foundation models.
+3.1. Dataset Construction
+A prerequisite for a foundation recommendation model is a data substrate that encompasses diverse
+interaction patterns and rich semantics. RecIF-Bench aggregates approximately 120M interactions
+from 200K distinct users, spanning three heterogeneous industrial domains. The detailed statistics
+are presented in Table 1, and the data distributions are visualized in Figure 3.
+Table 1 | Statistics of RecIF-Bench. The dataset covers three distinct industrial domains with diverse
+interaction densities.
+Domain
+# Users
+# Items
+# Interactions
+Avg. Hist. Item
+Avg. Tgt. Item
+Short Video
+195,026
+13,107,675
+94,443,611
+458.1
+8.6
+Ad
+151,259
+177,548
+5,341,911
+29.9
+5.5
+Product
+144,307
+2,055,240
+20,087,210
+132.5
+6.7
+Total
+202,359
+15,340,463
+119,872,732
+574.9
+17.5
+6
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+10
+1
+10
+3
+10
+5
+10
+7
+Item Rank
+10
+0
+10
+1
+10
+2
+10
+3
+10
+4
+Interaction Count
+(a) Item Popularity
+0
+100
+200
+300
+400
+500
+History Length
+0
+10000
+20000
+30000
+40000
+Count
+(b) Short Video Hist.
+0
+50
+100
+150
+History Length
+0
+5000
+10000
+15000
+20000
+Count
+(c) Ad Hist.
+0
+100
+200
+300
+400
+500
+History Length
+0
+5000
+10000
+15000
+20000
+Count
+Short Video
+Ad
+Product
+(d) Product Hist.
+Figure 3 | Data distribution analysis of RecIF-Bench. (a) Item popularity distribution (log-log scale)
+across domains. (b-d) Distribution of user history lengths for Short Video, Ad, and Product domains,
+respectively.
+Multi-Domain Coverage.
+The benchmark spans three distinct domains, each capturing different
+user behavior patterns:
+• Short Video (Content Domain): Short-form videos from Kuaishou, covering viewing behav-
+iors across various APP tabs. We provide impression sequences along with the corresponding
+interaction type for each impression.
+• Ad (Commercial Domain): Promotional short videos sponsored by advertisers on the Kuaishou
+platform, typically containing clickable redirects. We provide click sequences recording user ad
+click behaviors.
+• Product (E-commerce Domain): Products listed in the Kuaishou Mall. We provide click
+sequences recording user product click behaviors.
+Rich Metadata.
+Beyond interaction logs, RecIF-Bench provides comprehensive metadata across
+three dimensions:
+• User-side: Each user is represented by a User Portrait—a unified narrative that interleaves
+natural language descriptions with itemic tokens. This portrait weaves together demograph-
+ics (gender, age), content creation history, recent searches, followed creator types, viewing
+preferences, comments, livestream views, purchase records, shopping cart items, local service
+coupons, ad exposures, and commercial intent signals.
+• Item-side: Each item is associated with multimodal embeddings (4096-dim text embedding
+and 5-frame visual embeddings with 1152-dim per frame). Additionally, we provide dense
+captions for approximately 13M videos.
+• Interaction-side: For each user-video pair in the exposure sequence, we record multi-label
+behavioral signals including like, follow, comment, effective view, and dislike.
+Itemic Tokenization.
+To align these datasets with the generative paradigm defined in Section 2.1,
+we apply the hierarchical quantization strategy to all items in the dataset. Each item in RecIF-Bench
+is thus pre-tokenized into a tuple of discrete tokens 𝑠= (𝑐1, 𝑐2, ..., 𝑐𝑘), enabling direct consumption by
+LLM-based recommenders without further preprocessing. While we provide these pre-computed itemic
+tokens for convenience, their usage is not mandatory. Researchers can alternatively: (1) leverage the
+provided multimodal embeddings to train custom itemic tokenizers tailored to their specific needs, or
+(2) adopt traditional item IDs for conventional recommendation approaches. This flexibility ensures
+that RecIF-Bench accommodates diverse methodological paradigms while maintaining a consistent
+evaluation framework.
+7
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Table 2 | Task Taxonomy of RecIF-Bench. We formalize 8 tasks across 4 capability layers, specifying
+the input/output format and evaluation focus.
+Layer
+Task
+Input (𝑋)
+Target (𝑌)
+Metric
+L0: Alignment
+Item Understanding
+Item 𝑖
+Item Description
+LLM-as-Judge
+L1: Fundamental
+Recommendation
+Short Video Rec
+History H 𝑣𝑖𝑑𝑒𝑜
+Next item 𝑖𝑣𝑖𝑑𝑒𝑜
+Pass@1/32, Recall@32
+Ad Rec
+H 𝑣𝑖𝑑𝑒𝑜+ H 𝑎𝑑
+Next item 𝑖𝑎𝑑
+Pass@1/32, Recall@32
+Product Rec
+H 𝑣𝑖𝑑𝑒𝑜+ H 𝑝𝑟𝑜𝑑𝑢𝑐𝑡
+Next item 𝑖𝑝𝑟𝑜𝑑𝑢𝑐𝑡
+Pass@1/32, Recall@32
+Label Pred.
+H 𝑣𝑖𝑑𝑒𝑜+ Item 𝑖𝑣𝑖𝑑𝑒𝑜
+Binary (Yes/No)
+AUC
+L2: Instruction
+Following
+Interactive Rec
+Portrait P + Query 𝑞
+Item 𝑖user engages with
+Pass@1/32, Recall@32
+Label-Cond. Rec
+H 𝑣𝑖𝑑𝑒𝑜+ Action 𝑎
+Item 𝑖with action 𝑎
+Pass@1/32, Recall@32
+L3: Reasoning
+Rec. Explanation
+P + H 𝑣𝑖𝑑𝑒𝑜+ Item 𝑖
+Explanation
+LLM-as-Judge
+Data Splitting Strategy.
+We adopt a strict user-based splitting strategy to evaluate generalization
+capabilities. From the pool of 200,000 users, we randomly select 20% as the held-out test set. These
+users and their interactions are entirely excluded from the training phase, ensuring zero leakage of
+test user data into the training corpus. For each user, we further partition their interaction sequence
+temporally: interactions before a designated timestamp constitute the history H, while those after
+serve as the target 𝑌for evaluation.
+3.2. Task Taxonomy: From Alignment to Reasoning
+RecIF-Bench organizes 8 distinct tasks into a four-layer capability hierarchy. This taxonomy allows us
+to pinpoint exactly where a model’s capability lies on the spectrum from a traditional recommender
+to an intelligent agent. Table 2 provides a formal summary of these tasks.
+Task Formulation.
+Following the unified formulation in Section 2.2, we instantiate each task as
+a sequence-to-sequence problem 𝑌= F (𝑋). An input sample is formalized as 𝑋= [I, C], where I
+is the task-specific instruction and C denotes the personalized user context. Depending on the task,
+C can take different forms: (1) the interaction history H𝑢= {𝑠𝑖1, 𝑠𝑖2, ..., 𝑠𝑖𝑡} representing the user’s
+sequential behaviors, or (2) the user portrait P𝑢, a unified narrative interleaving natural language
+descriptions with itemic tokens. The target 𝑌can be a next item ID, a sequence of IDs, or a natural
+language explanation.
+3.2.1. Layer 0: Semantic Alignment
+This foundational layer verifies whether the model has successfully bridged the modality gap between
+itemic tokens and natural language—a prerequisite for all downstream tasks.
+• Item Understanding. Given an item 𝑖, the model generates its textual metadata (e.g., title,
+caption). This inverse mapping tests whether the model aligns itemic tokens with language
+tokens.
+3.2.2. Layer 1: Fundamental Recommendation
+This layer evaluates the model’s core capability to capture user preferences and predict item utility
+across multiple domains.
+8
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Instruction: Please describe the content.
+Context: 
+Target: This is a bustling street market scene…
+Alignment
+Item Understanding
+Fundamental Recommendation
+Instruction: Predict next videos to be watched based 
+on historical watched videos.
+Context:
+Target:
+Instruction: Predict next ads to be clicked based on 
+historical watched videos and clicked ads.
+Context:
+Target:
+…
+Instruction: Predict next products to be purchased 
+based on historical videos and products.
+Context:
+Target:
+…
+Instruction : Predict whether 
+will be 
+watched based on historical watched videos.
+Context:
+Target: yes / no 
+…
+…
+Video Rec
+Ad Rec
+Goods Rec
+Label Prediction
+Instruction Following
+Instruction: Predict next videos to be liked / shared / 
+collected based on historical interacted videos.
+Context: She liked , shared and 
+collected .
+Target:
+Label-Conditional
+Reasoning
+Instruction: Why is the video “Blizzard in Altay” 
+recommended to this user?
+Context:
+Target: Given her recent warm clothing purchase …
+Rec. Explanation
+Instruction: Recommend foods videos.
+Context:
+This is a 20-year-old female user. She follows music 
+and food bloggers. Gaming videos are her absolute 
+favorite… Her recent activity includes clicking 
+on , engaging with 
+through views and likes, and making a purchase of
+. 
+Target:
+Interactive Rec
+This is a 20-year-old female user. She follows music 
+and food bloggers. Gaming videos are her absolute 
+favorite… Her recent activity includes clicking 
+on , engaging with 
+through views and likes, and making a purchase of
+. 
+Figure 4 | Task Taxonomy of RecIF-Bench. We organize 8 tasks across 4 capability layers, specifying
+the instruction, context, and target.
+• Short Video Recommendation. Given the user’s video viewing history H 𝑣𝑖𝑑𝑒𝑜, the model
+predicts the next video the user will interact with. This single-domain task serves as the
+canonical next-item prediction benchmark.
+• Ad / Product Recommendation (Cross-Domain). Beyond single-domain modeling, we explore
+the potential of leveraging cross-domain data for more comprehensive user understanding. By
+integrating the user’s rich content viewing history (H 𝑣𝑖𝑑𝑒𝑜) with commercial behaviors (H 𝐴𝑑or
+H 𝑃𝑟𝑜𝑑𝑢𝑐𝑡), the model can capture a more holistic view of user interests. Given H 𝑣𝑖𝑑𝑒𝑜and H 𝐴𝑑
+(or H 𝑃𝑟𝑜𝑑𝑢𝑐𝑡), the model predicts the next ad (or product). This tests the model’s capability in
+cross-domain interest transfer and holistic user modeling.
+• Label Prediction. Given the user’s history H 𝑣𝑖𝑑𝑒𝑜and a candidate item 𝑖, the model predicts
+whether the user will engage (e.g., effective view) with a binary Yes/No response. This point-
+wise estimation complements generative recommendation.
+9
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+3.2.3. Layer 2: Instruction Following
+This layer assesses whether the model can adapt its predictions based on explicit natural language
+instructions, a key differentiator of LLM-based recommenders.
+• Interactive Recommendation. Given the user portrait P and a natural language query 𝑞
+expressing immediate intent (e.g., "something relaxing"), the model predicts items that the user
+will positively engage with (e.g., click, like, or favorite) after issuing the query.
+• Label-Conditional Recommendation. Given the user’s history H 𝑣𝑖𝑑𝑒𝑜and a target behavior
+label 𝑎(e.g., Like, Share), the model predicts items the user will engage with under that specific
+behavior, testing fine-grained behavior modeling.
+3.2.4. Layer 3: Reasoning
+The pinnacle of the hierarchy tests the model’s ability to synthesize information and articulate its
+understanding in natural language.
+• Recommendation Explanation. Given the user portrait P, interaction history H 𝑣𝑖𝑑𝑒𝑜, and a
+recommended item 𝑠, the model generates a natural language justification explaining why
+this item matches the user’s profile. This tests the model’s ability to reason about user-item
+compatibility.
+Ground Truth for L3: Since reasoning tasks lack natural ground truth, we use Gemini-2.5-Pro with
+full metadata access to generate high-quality reference outputs.
+3.3. Evaluation Protocols
+We employ a dual-metric evaluation system to cover both recommendation accuracy and generation
+quality.
+Recommendation Metrics.
+For recommendation tasks (Layer 1 & 2), we use Pass@1, Pass@32,
+and Recall@32. Pass@K measures whether the ground truth item appears in the top-K generated
+candidates; Recall@K measures the proportion of relevant items retrieved.
+Text Generation Metrics.
+For text generation tasks (Layer 0 & 3), we employ LLM-as-Judge,
+prompting an independent LLM to rate the generated text on dimensions such as accuracy and
+coherence. Details are provided in Appendix B.1.
+3.4. Comparison with Existing Benchmarks
+Evaluating foundation models for recommendation requires assessing capabilities beyond traditional
+collaborative filtering. We identify three essential dimensions: (1) Data Complexity: handling
+multi-modal content, cross-domain transfer, long interaction sequences, and diverse user behaviors;
+(2) Task Generalization: executing multiple recommendation tasks within a unified framework; (3)
+Instruction Following & Reasoning: processing interleaved inputs (text and itemic tokens) and
+generating explainable recommendations.
+Existing benchmarks address these dimensions only partially. As shown in Table 3, PixelRec
+and NineRec focus on multi-modal features but lack multi-task and reasoning capabilities. KuaiSAR
+10
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+supports multi-task and multi-behavior settings but omits multi-modal and cross-domain scenarios.
+Critically, no existing benchmark evaluates Interleaved Data processing or Recommendation Expla-
+nation—two capabilities essential for instruction-tuned foundation models. RecIF-Bench is the first
+benchmark to cover all seven dimensions, providing a comprehensive testbed for next-generation
+recommendation foundation models.
+Table 3 | Feature Comparison of Recommendation Benchmarks. RecIF-Bench is the only benchmark
+that simultaneously supports all seven dimensions. Specifically, it uniquely integrates Multi-Behavioral
+interactions, Interleaved Data(combining text and itemic tokens), and Recommendation Explanation
+to evaluate foundation models’ instruction-following ability.
+Benchmark
+Long-Seq. Multi-Task Multi-Modal Cross-Domain Multi-Behav. Interleaved Data Reco. Exp.
+PixelRec
+✓
+✓
+KuaiSAR
+✓
+✓
+✓
+NineRec
+✓
+✓
+Yelp
+✓
+Amazon
+✓
+✓
+RecIF-Bench
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+3.5. Sanity Check: General Intelligence
+To assess whether recommendation-focused models retain general intelligence capabilities, we include
+a sanity check suite covering four categories: (1) Math & Text Reasoning: MATH-500, GSM8K,
+and AIME’24; (2) General Tasks: MMLU-Pro and GPQA-Diamond; (3) Alignment: IFEVAL (strict
+prompt); (4) Coding: LiveCodeBench v5. A successful foundation model should maintain competitive
+performance on these benchmarks while mastering recommendation tasks.
+4. Pre-Training
+In this section, we detail the construction of our pre-training data, followed by the specific training
+strategies and an empirical analysis of scaling laws in recommendation.
+4.1. Pre-training Data
+4.1.1. Recommendation Corpora
+We derive recommendation data from anonymized user logs within Kuaishou, including user-side,
+item-side and interaction-side raw metadata as detailed in 3.1. To bridge the modality gap between
+discrete IDs and natural language, we first employ RQ-Kmeans (Luo et al., 2025) to quantize
+item multimodal embeddings into hierarchical itemic tokens. Specifically, we employ a three-layer
+quantization scheme with a codebook size of 8192 per layer. Each item 𝑖is thus mapped to a tuple of
+hierarchical codes 𝑆𝑖= (𝑐1, 𝑐2, 𝑐3), which is then flattened into a token sequence wrapped by special
+tokens:
+<|item_begin|><item_a_5028><item_b_6733><item_c_2559><|item_end|>
+To enhance the model’s recommendation-domain capability mentioned in 3.2, we organize these
+raw metadata into three types of data:
+11
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+• Itemic Dense Caption Data. To build an initial perception of itemic tokens, we introduce the
+Itemic Dense Caption data. Given an item represented as itemic tokens, the model is trained
+to generate a corresponding natural-language caption. This task facilitates a semantic bridge
+between the abstract, discrete item representations and their rich textual descriptions. Each
+training sample is formatted as a structured sequence, pairing the item tokens with a target
+caption.
+• Sequential User Behavior Data. To enhance the model’s Fundamental Prediction capability,
+we utilize Sequential User Behavior data as the core training corpus. This data captures the
+chronological dynamics of user-item interactions, including views, likes, and shares. By training
+the model to perform next-item prediction within these long-term sequences, we enable it to
+internalize fundamental collaborative filtering signals and temporal patterns. This ensures the
+model excels at the primary recommendation task: accurately predicting a user’s future interest
+based on their historical behavioral trajectory.
+• Interleaved User Persona Grounding Data. To facilitate deep semantic grounding of the
+quantized space, we construct the Interleaved User Persona Grounding data. We construct
+narrative-style user portraits P𝑢by interleaving discrete item representations with heteroge-
+neous user metadata, such as static attributes (e.g., age, gender), active search behaviors (e.g.,
+recent search queries), interactive sequences (represented as itemic token sequences from user
+interaction history), and summarized user interests (e.g., content creation history, followed
+creator types, consumption preferences). This interleaved format enables the model to learn
+rich semantic associations between user characteristics and behavioral patterns, facilitating a
+deeper understanding of user preferences and item relevance beyond surface-level sequential
+patterns.
+The recommendation-domain datasets are derived from the raw metadata introduced in 3.1,
+which has been processed by a strict user-based split to avoid data leakage. The primary training
+corpus encompasses about 160k users, 13 million item captions, and their corresponding interactions.
+For the OneRec-Pro variant, we scale this to ∼20 million users and 98 million item captions. To
+provide a clearer intuition of our pre-training corpus, we provide representative data samples in
+Appendix B.3. These demos show the structured formats of our training instances and illustrate
+the seamless integration of hierarchical itemic tokens with textual metadata. All these data and
+processing scripts will be released in our GitHub repository 1 to facilitate reproducibility.
+4.1.2. General-Domain Corpora
+While injecting specialized recommendation knowledge is crucial for domain specialization, the
+substantial distributional shift between recommendation-domain data and the base pretrained model’s
+original corpus often leads to catastrophic forgetting. To mitigate this degradation and ensure a
+stable transition of model parameters, we adopt a data-mixing strategy that co-trains the model
+on recommendation-domain samples alongside high-quality general-domain text corpus (Basant
+et al., 2025; BespokeLabs, 2025; Chen et al., 2024; Moshkov et al., 2025; Mxode, 2024; Rabeeh
+Karimi Mahabadi, 2025; Team, 2025; Wasi Uddin Ahmad, 2025; Xu et al., 2025b).
+This general-domain text corpus contains multiple languages (including Chinese, English, and
+others) and various domains, mainly focusing on Coding, STEM(Science, Technology, Engineering,
+and Mathematics) and Medical. Crucially, to keep and further enhance the model’s reasoning capability,
+we prioritize reasoning-intensive data, including mathematical derivations, logical puzzles, and code-
+centric corpora. All these data can be downloaded from the Hugging Face dataset repository 2. For
+1https://github.com/Kuaishou-OneRec/OpenOneRec
+2https://huggingface.co/datasets
+12
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+convenience, we also provide detailed data composition and download links in Appendix B.4.
+Specifically, we employ the MinHash algorithm (Broder, 1997) to conduct efficient fuzzy dedu-
+plication, filtering out any general-domain samples that exhibit high similarity to the evaluation
+benchmarks. This process ensures that the model’s performance reflects genuine generalization,
+thereby maintaining the reliability of our experimental results.
+4.2. Training Recipe
+In terms of data composition, we blend recommendation-domain metadata with general-domain text
+at predefined ratios. Specifically, we develop two model variants based on the scale of the training
+corpus: OneRec and OneRec-Pro. The standard variant is trained exclusively on our publicly released
+dataset, encompassing 33B tokens across 41.3 million samples, thereby establishing a reproducible
+baseline for the community. In contrast, the Pro variant leverages an extensive in-house corpus
+with broader user coverage, totaling 130B tokens and 179.1 million samples to achieve enhanced
+robustness. A comprehensive breakdown of the token composition and mixing strategies is provided
+in Appendix B.4.
+For both variants, we initialize our model using the Qwen3 backbone (Yang et al., 2025), inheriting
+its full parameters after post-training for instruction following and reinforcement learning. The
+architecture remains strictly consistent with the original Qwen3 to preserve its foundational linguistic
+and reasoning capabilities. Building on this architecture, our pre-training methodology is structured
+into two distinct stages, as illustrated in the pre-training phase of Figure 2.
+Stage 1: Itemic-Text Alignment.
+The first stage focuses on establishing a preliminary alignment
+between the itemic tokens and text tokens space. We first expand the vocabulary by appending
+these itemic special tokens to the original Qwen3 tokenizer. The embedding parameters for these
+itemic tokens are initialized from a multivariate normal distribution parameterized by the mean
+and covariance of the existing embeddings. During this stage, only the embedding parameters
+corresponding to itemic tokens are trainable, while all other model’s parameters are frozen. Note that
+in Qwen3, smaller models (e.g., 0.6B, 1.7B, 4B) employ tied embeddings where the embedding and
+output projection layers share parameters, while larger models (e.g., 8B and above) have independent
+output projection parameters. For larger models, the output projection parameters corresponding to
+itemic tokens are also trainable, ensuring proper alignment in the output space.
+Stage 2: Full-Parameter Co-Pretraining.
+In the second stage, we unfreeze all model parameters
+and conduct full-parameter pre-training to inject recommendation knowledge into the model. This
+stage aims to enable the model to capture complex patterns in user behavior, item semantics, and user-
+item interactions while preserving the general world knowledge inherited from the original Qwen3
+model. To prevent catastrophic forgetting, we maintain a considerable proportion of general-domain
+knowledge data throughout this stage.
+Training Recipe.
+We use the AdamW optimizer with 𝛽1 = 0.9, 𝛽2 = 0.95, and weight decay of
+0.1. The learning rate follows a cosine decay schedule with a linear warmup phase, where the peak
+learning rate is set to 1 × 10−3 for Stage 1 and 1 × 10−4 for Stage 2, and the minimum learning
+rate is set to 1 × 10−4 and 2 × 10−5. The warmup duration spans the first 10% of training steps.
+To accommodate the long sequential nature of user behavior data, we set the maximum context
+length to 32K tokens, enabling the model to process extended user interaction histories and complex
+13
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+recommendation scenarios. This extended context window is crucial for capturing long-term user
+preferences and understanding intricate patterns in sequential recommendation tasks.
+10
+17
+10
+18
+10
+19
+10
+20
+10
+21
+10
+22
+FLOPs
+1.00
+1.50
+2.00
+Training Loss
+14.0B
+8.0B
+4.0B
+1.7B
+0.6B
+0.6B
+1.7B
+4.0B
+8.0B
+14.0B
+Model Size N (Parameters)
+0.800
+1.00
+1.20
+Loss
+D=8.00B
+D=32.00B
+D=128.00B
+10
+19
+10
+20
+10
+21
+10
+22
+FLOPs (Compute Budget C)
+10
+9
+10
+10
+Optimal Model Size N_opt (Parameters)
+N_opt ~ C^0.44
+10
+19
+10
+20
+10
+21
+10
+22
+FLOPs (Compute Budget C)
+10
+18
+10
+19
+10
+20
+Optimal Token Count D_opt
+D_opt ~ C^0.56
+Figure 5 | Scaling laws on recommendation-domain data. Top-left: training loss vs. FLOPs for
+different model sizes, and the smooth convex envelope shown in grey. Top-right: log-log plot of
+training loss vs. model size under fixed token budgets. Bottom-left: compute-optimal model size
+𝑁opt ∝𝐶0.44 as a function of compute budget 𝐶. Bottom-right: compute-optimal token budget
+𝐷opt ∝𝐶0.56 as a function of 𝐶.
+4.3. Scaling Laws in Recommendation
+To determine the optimal allocation of compute budget 𝐶between model parameters 𝑁and training
+tokens 𝐷, we follow the rigorous methodology established by Hoffmann et al. (2022). Utilizing the
+Qwen3 architecture as our backbone, we evaluate scaling behaviors across a parameter spectrum
+of 𝑁∈{0.6, 1.7, 4, 8, 14} × 109. For the scaling analysis, we vary the token budget 𝐷in Stage 2 of
+pretraining, modulating the cosine learning rate schedule to match the training horizon for each run,
+as recommended to avoid sub-optimal convergence. The training compute budget is estimated using
+the standard approximation 𝐶≈6𝑁𝐷.
+We define the compute-optimal frontier by constructing the convex hull of the final training loss
+across all model sizes. By interpolating the minimum loss 𝐿min(𝐶) on a continuous FLOPs grid, we
+14
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+extract the optimal model size 𝑁opt and token count 𝐷opt for a given budget. These optimal trajectories
+are fitted to power-law scaling relations:
+𝑁opt ∝𝐶𝑎,
+𝐷opt ∝𝐶𝑏
+(2)
+Scaling Laws on Recommendation Data.
+Figure 5 illustrates the recommendation-domain loss
+envelope. We observe a smooth, convex frontier, confirming that scaling behavior in recommendation
+follows predictable power laws analogous to natural language. However, our empirical fit yields the
+scaling exponents:
+𝑁opt ∝𝐶0.44,
+𝐷opt ∝𝐶0.56
+(3)
+This allocation deviates significantly from the Chinchilla scaling laws for general text, which imply an
+equiproportional split (𝑎≈0.5, 𝑏≈0.5). In contrast, our results indicate a data-intensive scaling
+regime (𝑏> 𝑎), suggesting that in the recommendation domain, optimal compute allocation requires
+scaling training data volume more aggressively than model parameters as the budget increases.
+Parametric Fit and Interpretation.
+To elucidate the drivers of this behavior, we model the final
+loss 𝐿(𝑁, 𝐷) using the parametric function proposed by Hoffmann et al. (2022):
+𝐿(𝑁, 𝐷) = 𝐸+ 𝐴
+𝑁𝛼+ 𝐵
+𝐷𝛽
+(4)
+where 𝐸represents the irreducible entropy of the data distribution, and the terms
+𝐴
+𝑁𝛼and
+𝐵
+𝐷𝛽capture
+the deviations due to finite model capacity and finite data size, respectively. Fitting this formulation
+to our experimental data yields:
+𝐿(𝑁, 𝐷) = 0.4232 + 502.32
+𝑁0.3325 +
+7.02
+𝐷0.1865
+(5)
+Based on the theoretical relationship derived in Hoffmann et al. (2022), the optimal scaling exponents
+are governed by the ratio of these decay rates: 𝑎=
+𝛽
+𝛼+𝛽and 𝑏=
+𝛼
+𝛼+𝛽. We derive three critical insights
+from these coefficients:
+• Data-Hungry Scaling (𝛼> 𝛽): Our derived model capacity exponent (𝛼≈0.33) is consistent
+with general LLM literature, but the data exponent (𝛽≈0.19) is notably lower than typical
+text-domain values (𝛽text ≈0.28). Since 𝛼> 𝛽, it mathematically necessitates that 𝑏> 0.5. This
+confirms that because the returns on data quantity diminish more rapidly (lower 𝛽), maintaining
+optimality requires scaling data volume more aggressively than model size.
+• Impact of Warm-Starting (High 𝐴, Low 𝐵): We observe a striking imbalance between the
+scaling coefficients 𝐴(502.32) and 𝐵(7.02). In typical training-from-scratch scenarios, 𝐴and
+𝐵are of comparable magnitude. We attribute the extremely low 𝐵value to the efficacy of
+transfer learning from the Qwen3 backbone, where robust pre-trained linguistic and reasoning
+capabilities lower the entropy of the initial data distribution. Conversely, the inflated coefficient
+𝐴reflects a conflation of model capacity and pre-training quality: as larger variants are typically
+trained with more data, their downstream performance gains are statistically captured into
+𝐴during the fitting process. Notwithstanding this imbalance, our formula aligns well with
+our empirical observations, reflecting the scaling trajectory between 𝐿and the variables (𝑁, 𝐷)
+across all evaluated configurations.
+• Low Entropy of Recommendation Tasks (Low 𝐸): The estimated irreducible loss floor 𝐸= 0.42
+is substantially lower than that of natural text (𝐸≈1.69). This suggests that our recommendation
+15
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+tasks—enriched with structured features such as Itemic Dense Captions—possess lower inherent
+entropy than open-ended text generation, allowing the model to approach a more deterministic
+state. Consequently, this underscores the critical need for curating recommendation corpora
+with greater diversity and higher quality, thereby expanding the information manifold to prevent
+trivial saturation and foster robust generalization.
+Formula 5 provides an initial exploration of the scaling law in recommendation. We acknowledge
+that the limited experimental scale may introduce some fitting noise. Furthermore, since our models
+are not trained from scratch, the formula does not fully separate the scaling contribution of the
+pre-trained backbone. Future work will focus on expanding the experimental scale and design refined
+formula that better integrate the influence of pre-trained knowledge.
+5. Post-Training
+Pretrained 
+Model
+Stage1
+Multi-Task SFT
+Stage2
+General On-Policy 
+Distillation
+Qwen3 Base 
+Model
+Stage3
+RL for Recommendation
+OneRec
+Model
+Figure 6 | Post-training pipeline of the OneRec series models.
+After the pre-training process, the model has already learned to align the itemic tokens with the text
+tokens space, and encoded the collaborative filtering signals into the pretrained models. However, we
+observed that the pre-trained model exhibits a certain degree of degradation in instruction-following
+and reasoning capabilities, which is still not capable of complex recommendation tasks.
+The post-training is designed to enhance the recommendation capabilities and restore the general
+task capabilities of the pre-trained model. We adopt three post-training stages: Multi-task Supervised
+Fine-tuning, On-policy Distillation for General Capability, and Reinforcement Learning for
+Recommendation. Distinct from the pre-training phase, for this stage, we employ identical training
+data and equivalent post-training strategies for both the OneRec and OneRec-Pro variants. An
+overview of these stages is presented in Figure 6.
+5.1. Multi-task Supervised Fine-tuning
+This stage is designed to restore and enhance the model’s foundational instruction-following and
+reasoning capabilities across both general and recommendation domains, providing a robust base for
+subsequent on-policy distillation and reinforcement learning.
+We begin by designing a suite of complex instruction-response pairs that simulate real-world
+recommendation trajectories for post-training. Consistent with the pre-training stage, these con-
+versational datasets are synthesized based on the cleaned metadata from 160K users introduced
+in Section 3.1. This ensures that the instruction-tuning corpus remains strictly partitioned from
+the evaluation benchmarks. Besides, to prevent the degradation of general intelligence, we also
+incorporate high-quality open-source general-domain datasets focusing on instruction-following and
+16
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Policy
+Model
+o
+Teacher 
+Model
+Reverse KL
+Policy Gradient
+r
+q
+Figure 7 | The pipeline of On-policy Distillation via Policy Gradient. The student model (Policy
+Model) samples a trajectory 𝑜for the given prompt 𝑞, while the Teacher Model provides feedback
+through Reverse KL divergence as reward 𝑟. The Policy Model is iteratively optimized using policy
+gradient methods based on reward.
+complex reasoning(He et al., 2025; Li et al., 2025; Madhusudhan et al.; Moshkov et al., 2025; Su
+et al., 2025; Wasi Uddin Ahmad, 2025; Xu et al., 2025b).
+We curate a specialized SFT corpus by blending these general-domain reasoning samples with
+the aforementioned recommendation-specific tasks, and the detail is provided in Appendix B.5. All
+instances are organized into a conversational format and serialized using the Qwen3 chat template
+(Yang et al., 2025). We fine-tune the pre-trained model on this unified dataset using a training
+recipe consistent with the pre-training phase, but with a reduced learning rate (from 2 × 10−5
+to 5 × 10−6). Empirical observations suggest that this stage successfully resuscitates the model’s
+instruction-following capabilities. Notably, we find that the reasoning ability acquired from general-
+domain data cross-fertilizes with recommendation tasks: the model frequently generates coherent
+reasoning trajectories for complex recommendation queries, even though such behaviors were not
+explicitly supervised in the recommendation samples.
+5.2. On-policy Distillation for General Capability
+While previous stages have successfully restored the basic capabilities of instruction-following and
+thinking, a persistent capability gap in general-domain reasoning is observed, likely due to the
+distributional shift and the inherent sensitivity of RL-initialized backbones. To address this, we design
+an on-policy distillation strategy on general tasks.
+On-Policy Distillation via Policy Gradient.
+Unlike traditional off-policy distillation, where the
+student model learns a teacher’s distribution on a static, pre-generated dataset, on-policy distilla-
+tion (Agarwal et al., 2024) involves the student model generating its own trajectories, which are
+subsequently evaluated and supervised by the teacher.
+For simplicity and effectiveness, we employ per-token reverse KL divergence as the objective
+function for on-policy distillation. Specifically, we minimize the divergence between the student’s
+distribution (𝜋𝜃) and the teacher’s (𝜋teacher) at each timestep, conditioned on trajectories sampled by
+the student:
+𝔻𝐾𝐿(𝜋𝜃∥𝜋teacher) = 𝔼𝑥∼𝜋𝜃[log 𝜋𝜃(𝑥𝑡+1|𝑥1..𝑡) −log 𝜋teacher(𝑥𝑡+1|𝑥1..𝑡)]
+(6)
+Inspired by Thinking Machines (2025); Xu et al. (2025a), we optimize the policy 𝜋𝜃directly using
+policy gradient methods. For each input prompt 𝑞, we sample a trajectory 𝑜, and employ the reverse
+KL divergence between the student policy 𝜋𝜃and the teacher policy 𝜋teacher as the reward signal. The
+17
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+objective is to maximize the expected reward via gradient ascent, with the gradient estimated as
+follows:
+∇𝜃𝐽(𝜃) = 𝔼𝑜∼D,𝑥∼𝜋𝜃
+" 𝑇
+∑︁
+𝑡=1
+∇𝜃log 𝜋𝜃(𝑥𝑡|𝑜, 𝑥<𝑡) · 𝑅𝐾𝐿(𝑜, 𝑥)
+#
+where 𝑅𝐾𝐿(𝑜, 𝑥) denotes the per-token reward derived from the teacher’s distribution. To mitigate
+numerical instability caused by extreme log-probability ratios, we apply a clipping mechanism to the
+reverse KL divergence. Specifically, the final reward is defined as:
+𝑅𝐾𝐿(𝑜, 𝑥) = clip (−𝔻𝐾𝐿(𝜋𝜃||𝜋teacher), 𝛼, 𝛽)
+(7)
+where 𝛼and 𝛽represent the lower and upper clipping thresholds, respectively. This constraint
+prevents outlier reward signals from destabilizing the training process, thereby enabling the model
+to robustly recover the teacher’s behavioral distribution through online trajectory sampling. The
+comprehensive pipeline is illustrated in Figure 7.
+On-Policy Distillation on General-Domain.
+To recover general-domain capabilities, we employ
+the original Qwen3 model (of the same parameter scale) as a teacher model 𝜋teacher to supervise our
+SFT-refined policy 𝜋𝜃.
+A critical challenge lies in the vocabulary discrepancy: the teacher model cannot recognize the
+itemic tokens in our expanded vocabulary. A naive approach is discarding any trajectory 𝑜that
+contains itemic tokens. However, since the reward is estimated via per-token reverse KL, which is
+inherently a biased approximation, simply dropping these samples introduces significant sampling
+bias. As training progresses, the model may gradually increase the probabilities of itemic tokens,
+eventually leading to training collapse.
+To address this, we adopt the following robust distillation strategy:
+• Prompt Selection: All queries 𝑞are sampled exclusively from general-domain datasets. Under
+these prompts, the policy model is expected to generate pure text without itemic tokens.
+• Itemic Token Penalty & Truncation: If a sampled trajectory 𝑜contains an itemic token at
+step 𝑡, we set log 𝜋teacher(𝑥𝑡|𝑥<𝑡) to a minimal value (e.g., −1𝑒9) to simulate a zero-probability
+for that token, and truncate the trajectory after 𝑡. This penalty, stabilized by the reward
+clipping mechanism, provides an immediate and strong negative signal for itemic tokens in
+general-domain contexts.
+• Enhanced Exploration: During on-policy sampling, we employ a relatively high temperature
+coefficient. This encourages the policy model to explore the vocabulary space (including the
+itemic tokens), allowing the distillation process to actively identify and correct errors of itemic
+token activations in general-domain tasks.
+Through this distillation process, we sample 200K general-domain questions from the SFT dataset.
+To better recover the instruction-following capabilities on thinking of the original Qwen3, we follow
+the methodology described in the Qwen3 technical report (Yang et al., 2025) and randomly append
+a suffix (/think, /no_think, or an empty string) to the user prompt. This strategy is designed
+to align the model’s behavior with the forced-thinking, non-thinking, and auto-thinking paradigms,
+ensuring robust control over its reasoning processes across diverse scenarios.
+After this stage, we effectively bridge the gap in general intelligence while maintaining the model’s
+specialized recommendation performance.
+18
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+5.3. Reinforcement Learning for Recommendation
+While on-policy distillation effectively restores the model’s general reasoning capabilities, it does not
+directly optimize the discrete ranking metrics (e.g., Recall or NDCG) that define recommendation
+quality. Supervised fine-tuning (SFT) primarily focuses on maximizing the likelihood of ground-truth
+sequences, often suffering from exposure bias and failing to distinguish between "near-misses" and
+irrelevant recommendations. To bridge this gap, we introduce a final stage of Recommendation-
+oriented Reinforcement Learning (Rec-RL).
+Group Relative Policy Optimization
+We employ Group Relative Policy Optimization (GRPO) Shao
+et al. (2024) as our reinforcement learning framework. Unlike traditional Actor-Critic algorithms (e.g.,
+PPO) that require a separate critic model to estimate state values, GRPO computes the advantage of
+a response relative to a group of sampled trajectories for the same prompt. This significantly reduces
+computational overhead while maintaining stability.
+Formally, for each recommendation prompt 𝑞, we sample a group of 𝐺candidate responses
+{𝑅1, 𝑅2, . . . , 𝑅𝐺} from the current policy 𝜋𝜃. The objective is to maximize the following:
+L𝐺𝑅𝑃𝑂(𝜃) = 1
+𝐺
+𝐺
+∑︁
+𝑖=1
+(Adv𝑖· log 𝜋𝜃(𝑅𝑖|𝑞)) −𝛽· 𝐾𝐿(𝜋𝜃||𝜋𝑟𝑒𝑓)
+(8)
+where 𝜋𝑟𝑒𝑓is the model obtained after on-policy distillation, and Adv𝑖is the relative advantage
+calculated by normalizing the rewards within the group.
+Rule-based Recommendation Reward.
+To align the model directly with the ranking accuracy, we
+design a sparse, rule-based reward function 𝑟(𝑅𝑖) focused on "Hit" events. For the 5 core recommen-
+dation tasks—Short Video Rec, Ad Rec, Product Rec, Interactive Rec, and Label-Conditional Rec—the
+reward is defined as:
+𝑟(𝑅𝑖) =
+(
++1.0
+if the target itemic token 𝑠∈𝑅𝑖
+0.0
+otherwise
+(9)
+By sampling multiple candidate sequences (groups) for each user interaction history, GRPO encourages
+the model to assign higher probability mass to itemic tokens that result in successful hits, effectively
+performing "Soft Ranking" within the generative space.
+Implementation Details.
+We initialize the RL trainer with the model post-distillation. To ensure the
+model does not sacrifice its restored general intelligence for domain-specific precision, we maintain a
+strict KL penalty (𝛽) against 𝜋𝑟𝑒𝑓. We utilize the same dataset as the SFT stage, yet observe continuous
+improvement in recommendation performance throughout RL training. After this stage, we observe
+a significant boost on recommendation metrics, demonstrating that Rec-RL effectively aligns the
+language model’s generative behavior with the goals of a recommender system.
+6. Evaluation
+In this section, we present our detailed experimental results. We first demonstrate the comprehensive
+capabilities of OneRec-Foundation on RecIF-Bench. Next, we validate the generalization ability of
+OneRec-Foundation on the Amazon dataset. Finally, we conduct multiple ablation studies to analyze
+the impact of different components on the model.
+19
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+6.1. Experimental Settings
+RecIF-Bench.
+To demonstrate the effectiveness of OneRec-Foundation, we compare it against two
+groups of competitive baselines: (1) Discriminative recommender models, including BERT4Rec (Sun
+et al., 2019), GRU4Rec (Hidasi et al., 2016), SASRec (Kang and McAuley, 2018), HSTU (Zhai
+et al., 2024), and ReaRec (Tang et al., 2025); and (2) Generative recommender models, such as
+TIGER (Rajput et al., 2023) and LC-Rec (Zheng et al., 2024). We adapted these baseline methods
+with task-specific modifications to support different RecIF tasks. Notably, these discriminative-based
+approaches are inherently task-specific, with each task requiring a separately trained model. To
+ensure a fair comparison at the foundation model scale, we implement LC-Rec as “LC-Rec-8B” using a
+comparable Qwen3-8B. We evaluate all methods using the metrics in Section 3.3, with comprehensive
+results reported in Table 4.
+Amazon.
+To evaluate the generalization capability of our model, we utilize ten real-world datasets
+from the popular Amazon review benchmark (McAuley et al., 2015), covering diverse domains: Baby,
+Beauty, Cell Phones and Accessories, Grocery and Gourmet Food, Health and Personal Care, Home and
+Kitchen, Pet Supplies, Sports and Outdoors, Tools and Home Improvement, and Toys and Games. We
+adopt the same baselines as mentioned above. Consistent with previous works (Rajput et al., 2023;
+Wang et al., 2024), we focus on the sequential recommendation setting. For data pre-processing,
+we discard sparse users and items with fewer than 5 interactions. We employ the leave-one-out
+strategy (Rajput et al., 2023; Wang et al., 2024) to split the datasets for training and evaluation. For
+performance comparison, we report Recall@𝐾and NDCG@𝐾with 𝐾∈{5, 10}.
+6.2. Main Results on RecIF-Bench
+Based on the evaluation results, we highlight some key conclusions on RecIF-Bench:
+• State-of-the-Art Recommendation Performance: OneRec-Foundation consistently outperforms
+all baselines across the vast majority of tasks. Notably, the results demonstrate scaling from two
+dimensions: (1) Data scaling: OneRec-Pro consistently surpasses OneRec at the same model
+size; (2) Model scaling: 8B models outperform 1.7B models across all variants.
+• Trade-off on General Capabilities: As shown in Table 5 and Table 6, our model successfully
+retains most of the general capabilities of the Qwen3 backbone, especially with minimal degra-
+dation on mathematical benchmarks. Nevertheless, we observe a performance trade-off in
+general knowledge and recommendation capabilities. This suggests that while the distillation
+process effectively preserves reasoning proficiency, the limited diversity of the general data
+used may have constrained the model’s broader capabilities, indicating that a more refined data
+strategy is required to better balance recommendation and general capabilities.
+6.3. Transfer Learning on Amazon Benchmark
+To evaluate the transferability of OneRec-Foundation, we conduct comprehensive experiments on the
+Amazon benchmark, encompassing 10 distinct domains. These experiments serve to rigorously validate
+whether our foundation model, pre-trained on diverse open-domain data, confers a fundamental
+transfer advantage for modeling specific downstream recommendation distributions.
+Main Results.
+As detailed in Table 7, OneRec-Foundation establishes new state-of-the-art results
+across all 10 datasets. Specifically, our model achieves an average improvement of 26.8% in Recall@10
+20
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Table 4 | Unified performance comparison across all tasks. For each task, the bold results highlight
+the best results (with an orange background), while the second-best ones are underlined. Missing
+entries are marked as “–”.
+Task
+Metric
+SASRec
+BERT4Rec
+GRU4Rec
+HSTU
+ReaRec
+TIGER
+LC-Rec-8B
+OneRec-1.7B
+OneRec-8B
+OneRec-1.7B-Pro
+OneRec-8B-Pro
+Short Video Rec
+Pass@1
+0.0045 0.0040 0.0051 0.0043 0.0052 0.0168 0.0341 0.0496 0.0542 0.0456
+0.0548
+Pass@32
+0.1003 0.0951 0.0993 0.1010 0.1002 0.1061 0.1306 0.1710 0.2104 0.1706
+0.2122
+Recall@32
+0.0119 0.0113 0.0117 0.0119 0.0120 0.0132 0.0180 0.0272 0.0355 0.0274
+0.0369
+Ad Rec
+Pass@1
+0.0044 0.0061 0.0059 0.0076 0.0035 0.0125 0.0197 0.0169 0.0219 0.0190
+0.0259
+Pass@32
+0.0980 0.1225 0.1102 0.1266 0.1054 0.1769 0.2096 0.2037 0.2490 0.2126
+0.2700
+Recall@32
+0.0293 0.0381 0.0336 0.0409 0.0327 0.0581 0.0723 0.0707 0.0877 0.0735
+0.0964
+Product Rec
+Pass@1
+0.0052 0.0054 0.0047 0.0055 0.0030 0.0120 0.0178 0.0144 0.0187 0.0158
+0.0223
+Pass@32
+0.0914 0.0936 0.0821 0.0914 0.0907 0.1276 0.1809 0.1571 0.1971 0.1761
+0.2290
+Recall@32
+0.0175 0.0193 0.0161 0.0178 0.0189 0.0283 0.0416 0.0360 0.0470 0.0405
+0.0538
+Label-Cond. Rec
+Pass@1
+0.0026 0.0026 0.0032 0.0026 0.0027 0.0044 0.0079 0.0064 0.0097 0.0067
+0.0099
+Pass@32
+0.0380 0.0372 0.0393 0.0383 0.0381 0.0337 0.0420 0.0431 0.0535 0.0420
+0.0549
+Recall@32
+0.0140 0.0135 0.0143 0.0139 0.0137 0.0123 0.0170 0.0184 0.0228 0.0182
+0.0235
+Label Pred.
+AUC
+0.6244 0.6598 0.6640 0.6581 0.6204 0.6675 0.6139 0.6184 0.6615 0.6071
+0.6912
+Interactive Rec
+Pass@1
+–
+–
+–
+–
+–
+–
+0.0890 0.0660 0.1230 0.0800
+0.1250
+Pass@32
+–
+–
+–
+–
+–
+–
+0.3730 0.3170 0.4570 0.3370
+0.5080
+Recall@32
+–
+–
+–
+–
+–
+–
+0.2394 0.1941 0.3032 0.2024
+0.3458
+Item Understand.
+LLM-Judge Score
+–
+–
+–
+–
+–
+–
+0.2517 0.3175 0.3202 0.3133
+0.3209
+Rec. Explanation
+LLM-Judge Score
+–
+–
+–
+–
+–
+–
+3.9350 3.3540 3.6774 3.5060
+4.0381
+over the second-best baseline on each domain. These results empirically confirm that large-scale
+generative pre-training endows the model with robust transfer capabilities that far exceed traditional
+collaborative filtering approaches.
+Through our transfer learning experiments, we identify two critical factors that significantly
+influence performance: Comprehensive Utilization of Pre-trained Knowledge, where we design
+adaptive strategies to maximally leverage the collaborative filtering signals and semantic understand-
+ing capabilities encoded during pre-training (detailed in Table 8), and Multi-Domain Joint Training,
+which enables the model to extract universal recommendation patterns across heterogeneous domains,
+as demonstrated in Figure 8. We elaborate on these two critical aspects in the following subsections.
+6.3.1. Adaptive Strategies for Pre-trained Model Utilization
+A primary challenge in transfer learning is the distributional shift of item identifiers. Our pre-trained
+tokenizer is optimized on a broad, open-domain corpus (e.g., short videos, e-commerce products),
+resulting in a codebook that may not granularly distinguish items within a specific vertical like Amazon
+products. Direct application leads to a high collision rate (>30%), causing catastrophic information
+loss. To address this, we systematically explore three strategies to adapt pre-trained representations
+to the target domain:
+Strategy 1: Extended Residual Quantization.
+We extend the hierarchical depth by computing
+residuals from the pre-trained third layer and applying Finite Scalar Quantization (FSQ) (Mentzer
+et al., 2023) to generate a fourth-layer code, reducing collisions to 3.05%. Remaining collisions are
+resolved via popularity-based decoding. This strategy achieves a 10.0% improvement in average
+21
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Table 5 | Performance comparison on general capability (Thinking). For each task, the bold results
+highlight the best results, while the second-best ones are underlined.
+Category
+Task
+Qwen3-1.7B OneRec-1.7B OneRec-1.7B-Pro Qwen3-8B OneRec-8B OneRec-8B-Pro
+Math & Text
+Reasoning
+MATH-500
+0.8780
+0.8840
+0.8840
+0.9520
+0.9460
+0.9380
+GSM8K
+0.9121
+0.8984
+0.8999
+0.9568
+0.9575
+0.9575
+AIME’24
+0.4938
+0.4104
+0.4146
+0.7917
+0.7250
+0.7188
+General Tasks
+MMLU-Pro
+0.5422
+0.3548
+0.3932
+0.7235
+0.5342
+0.5204
+GPQA-Diamond
+0.3788
+0.3232
+0.3333
+0.5606
+0.5000
+0.5051
+Alignment Tasks IFEVALstrict prompt
+0.6969
+0.5471
+0.5416
+0.8577
+0.7893
+0.7634
+Coding
+LiveCodeBench v5
+0.3907
+0.2832
+0.2832
+0.5484
+0.4910
+0.4667
+Table 6 | Performance comparison on general capability (Non-Thinking). For each task, the bold
+results highlight the best results, while the second-best ones are underlined.
+Category
+Task
+Qwen3-1.7B OneRec-1.7B OneRec-1.7B-Pro Qwen3-8B OneRec-8B OneRec-8B-Pro
+Math & Text
+Reasoning
+MATH-500
+0.6980
+0.7060
+0.6940
+0.8380
+0.8240
+0.7980
+GSM8K
+0.8218
+0.8036
+0.8158
+0.9303
+0.9310
+0.9196
+AIME’24
+0.1313
+0.1271
+0.1250
+0.2729
+0.2417
+0.2271
+General Tasks
+MMLU-Pro
+0.4384
+0.3072
+0.2804
+0.6632
+0.5795
+0.4521
+GPQA-Diamond
+0.3030
+0.3131
+0.2778
+0.3990
+0.4040
+0.3939
+Alignment Tasks IFEVALstrict prompt
+0.6747
+0.4769
+0.5250
+0.8392
+0.7357
+0.7098
+Coding
+LiveCodeBench v5
+0.1219
+0.1219
+0.1147
+0.2760
+0.2401
+0.2401
+R@10 over LC-Rec, validating effective transfer of collaborative filtering knowledge. However, the non-
+pretrained fourth layer disrupts the original hierarchical semantics, motivating alternative approaches.
+Strategy 2: Text-Only Adaptation.
+We bypass itemic tokens entirely, representing each item via 5
+distinctive keywords extracted from its metadata, reducing collisions to 4.27%. This strategy achieves
+an 18.8% improvement in average R@10 over Extended Residual Quantization: the model’s linguistic
+core remains intact, enabling robust semantic understanding, while natural language representations
+prove more expressive in narrow domains. However, this approach sacrifices collaborative filtering
+signals embedded in pre-trained itemic tokens.
+Strategy 3: Text-Augmented Itemic Tokens.
+We concatenate the original three-layer pre-trained
+itemic tokens with keyword representations: [itemic_tokens] + [keywords]. Critically, we
+preserve the original pre-trained itemic tokens without structural extension, maintaining hierarchical
+semantics. Keywords provide semantic disambiguation (collision rate 0.47%) and enable full utilization
+of linguistic capabilities. Table 8 shows that this strategy achieves state-of-the-art performance across
+nearly all datasets. The consistent gains validate that effective transfer learning requires maximizing
+utilization of the foundation model’s diverse capabilities—collaborative filtering, knowledge, and
+semantic understanding—while strictly preserving pre-trained structural integrity.
+6.3.2. Domain-Specific Training vs. Multi-Domain Joint Training
+Beyond item representation, another critical factor is the training strategy across domains. We
+compare Domain-Specific Training versus Multi-Domain Joint Training to investigate whether our
+pre-trained foundation model can benefit from multi-domain knowledge integration, in contrast to
+traditional generative recommenders like TIGER.
+22
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Table 7 | Cross-Domain generalization performance on Amazon domains. Best results are indicated
+with bold fonts and orange background.
+Model
+Metric
+Baby
+Beauty
+Cell
+Grocery
+Health
+Home
+Pet
+Sports
+Tools
+Toys
+SASRec
+R@5
+0.0232
+0.0393
+0.0482
+0.0480
+0.0295
+0.0133
+0.0377
+0.0240
+0.0269
+0.0420
+R@10
+0.0381
+0.0639
+0.0782
+0.0789
+0.0506
+0.0212
+0.0607
+0.0389
+0.0437
+0.0658
+N@5
+0.0137
+0.0209
+0.0281
+0.0262
+0.0173
+0.0070
+0.0222
+0.0130
+0.0149
+0.0217
+N@10
+0.0185
+0.0289
+0.0378
+0.0361
+0.0242
+0.0098
+0.0296
+0.0178
+0.0203
+0.0294
+BERT4Rec
+R@5
+0.0117
+0.0219
+0.0325
+0.0307
+0.0204
+0.0063
+0.0218
+0.0151
+0.0145
+0.0200
+R@10
+0.0228
+0.0419
+0.0569
+0.0534
+0.0353
+0.0113
+0.0412
+0.0261
+0.0264
+0.0362
+N@5
+0.0065
+0.0120
+0.0190
+0.0174
+0.0117
+0.0038
+0.0123
+0.0083
+0.0083
+0.0102
+N@10
+0.0101
+0.0185
+0.0268
+0.0247
+0.0165
+0.0054
+0.0186
+0.0119
+0.0121
+0.0154
+GRU4Rec
+R@5
+0.0202
+0.0322
+0.0430
+0.0362
+0.0256
+0.0090
+0.0264
+0.0174
+0.0176
+0.0266
+R@10
+0.0346
+0.0539
+0.0676
+0.0591
+0.0423
+0.0156
+0.0449
+0.0278
+0.0305
+0.0453
+N@5
+0.0124
+0.0201
+0.0275
+0.0230
+0.0164
+0.0058
+0.0163
+0.0110
+0.0116
+0.0171
+N@10
+0.0170
+0.0271
+0.0355
+0.0303
+0.0217
+0.0079
+0.0222
+0.0144
+0.0158
+0.0231
+HSTU
+R@5
+0.0226
+0.0456
+0.0475
+0.0458
+0.0330
+0.0134
+0.0362
+0.0227
+0.0231
+0.0489
+R@10
+0.0350
+0.0643
+0.0725
+0.0712
+0.0485
+0.0197
+0.0521
+0.0347
+0.0337
+0.0649
+N@5
+0.0156
+0.0308
+0.0314
+0.0297
+0.0215
+0.0092
+0.0239
+0.0151
+0.0159
+0.0339
+N@10
+0.0196
+0.0368
+0.0395
+0.0378
+0.0265
+0.0112
+0.0290
+0.0190
+0.0193
+0.0391
+ReaRec
+R@5
+0.0197
+0.0488
+0.0444
+0.0454
+0.0326
+0.0150
+0.0299
+0.0231
+0.0219
+0.0517
+R@10
+0.0320
+0.0702
+0.0711
+0.0730
+0.0481
+0.0210
+0.0486
+0.0348
+0.0310
+0.0706
+N@5
+0.0123
+0.0341
+0.0269
+0.0289
+0.0213
+0.0101
+0.0189
+0.0152
+0.0143
+0.0369
+N@10
+0.0163
+0.0409
+0.0355
+0.0378
+0.0263
+0.0121
+0.0249
+0.0189
+0.0173
+0.0430
+TIGER
+R@5
+0.0191
+0.0413
+0.0540
+0.0447
+0.0328
+0.0142
+0.0343
+0.0216
+0.0228
+0.0367
+R@10
+0.0318
+0.0628
+0.0786
+0.0691
+0.0534
+0.0216
+0.0542
+0.0331
+0.0344
+0.0527
+N@5
+0.0125
+0.0277
+0.0350
+0.0295
+0.0222
+0.0094
+0.0232
+0.0145
+0.0148
+0.0255
+N@10
+0.0162
+0.0346
+0.0429
+0.0373
+0.0289
+0.0118
+0.0295
+0.0182
+0.0184
+0.0307
+LC-Rec
+R@5
+0.0232
+0.0495
+0.0585
+0.0501
+0.0412
+0.0199
+0.0388
+0.0269
+0.0288
+0.0350
+R@10
+0.0344
+0.0764
+0.0883
+0.0790
+0.0616
+0.0293
+0.0612
+0.0418
+0.0438
+0.0549
+N@5
+0.0151
+0.0338
+0.0392
+0.0328
+0.0272
+0.0138
+0.0247
+0.0177
+0.0187
+0.0221
+N@10
+0.0187
+0.0424
+0.0488
+0.0421
+0.0338
+0.0168
+0.0320
+0.0225
+0.0235
+0.0285
+Ours
+R@5
+0.0352
+0.0646
+0.0717
+0.0688
+0.0534
+0.0279
+0.0563
+0.0365
+0.0412
+0.0693
+R@10
+0.0513
+0.0924
+0.1036
+0.1029
+0.0768
+0.0390
+0.0834
+0.0547
+0.0593
+0.0953
+N@5
+0.0238
+0.0456
+0.0490
+0.0460
+0.0376
+0.0202
+0.0389
+0.0252
+0.0295
+0.0496
+N@10
+0.0289
+0.0545
+0.0593
+0.0570
+0.0452
+0.0237
+0.0476
+0.0310
+0.0354
+0.0579
+Improve (%) R@10
+34.6 ↑
+20.9 ↑
+17.3 ↑
+30.3 ↑
+24.7 ↑
+33.1 ↑
+36.3 ↑
+30.9 ↑
+35.4 ↑
+35.0 ↑
+The results in Figure 8 reveal a striking divergence. TIGER exhibits a consistent performance
+decline under joint training, with an average 10.6% drop in Recall@10. In stark contrast, OneRec-
+Foundation demonstrates an average 2.3% improvement.
+This divergence highlights the fundamental advantage of our pre-trained foundation model.
+Traditional models like TIGER primarily memorize domain-specific collaborative statistics. When
+confronted with heterogeneous multi-domain data, they struggle to reconcile conflicting patterns,
+leading to performance degradation.
+In contrast, OneRec-Foundation’s success stems from the unique combination of rich recom-
+mendation knowledge and semantic understanding capabilities acquired during pre-training. This
+enables the model to extract generalizable patterns rather than memorize domain-specific statistics.
+Multi-domain joint training further enriches the model by exposing it to diverse interaction patterns,
+enabling effective cross-domain knowledge transfer. The massive parameter capacity provides suffi-
+cient representational space to encode domain-specific nuances while maintaining shared high-level
+patterns.
+23
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Table 8 | Performance Comparison of Adaptive Strategies for Pre-trained Model Utilization. Extended
+Residual Quantization (collision rate: 3.05%), Text-Only Adaptation (collision rate: 4.27%), and
+Text-Augmented Itemic Tokens (collision rate: 0.47%).
+Strategy
+Metric
+Baby
+Beauty
+Cell
+Grocery
+Health
+Home
+Pet
+Sports
+Tools
+Toys
+Extended
+Residual
+Quantization
+R@5
+0.0288
+0.0534
+0.0574
+0.0562
+0.0479
+0.0227
+0.0518
+0.0315
+0.0350
+0.0511
+R@10
+0.0407
+0.0799
+0.0830
+0.0861
+0.0673
+0.0313
+0.0758
+0.0447
+0.0495
+0.0701
+N@5
+0.0201
+0.0364
+0.0389
+0.0383
+0.0333
+0.0162
+0.0356
+0.0215
+0.0243
+0.0360
+N@10
+0.0239
+0.0449
+0.0471
+0.0480
+0.0396
+0.0190
+0.0433
+0.0258
+0.0289
+0.0421
+Text-Only
+Adaptation
+R@5
+0.0317
+0.0630
+0.0688
+0.0687
+0.0529
+0.0285
+0.0548
+0.0368
+0.0414
+0.0668
+R@10
+0.0448
+0.0883
+0.0985
+0.1048
+0.0752
+0.0398
+0.0850
+0.0548
+0.0615
+0.0931
+N@5
+0.0227
+0.0445
+0.0473
+0.0460
+0.0368
+0.0199
+0.0382
+0.0256
+0.0288
+0.0483
+N@10
+0.0269
+0.0526
+0.0569
+0.0576
+0.0440
+0.0235
+0.0478
+0.0314
+0.0354
+0.0568
+Text-Augmented
+Itemic Tokens
+R@5
+0.0352
+0.0646
+0.0717
+0.0688
+0.0534
+0.0285
+0.0563
+0.0368
+0.0414
+0.0693
+R@10
+0.0513
+0.0924
+0.1036
+0.1029
+0.0768
+0.0398
+0.0834
+0.0547
+0.0593
+0.0953
+N@5
+0.0238
+0.0456
+0.0490
+0.0460
+0.0376
+0.0202
+0.0389
+0.0256
+0.0295
+0.0496
+N@10
+0.0289
+0.0545
+0.0593
+0.0576
+0.0452
+0.0237
+0.0478
+0.0314
+0.0354
+0.0579
+FS
+SD
+MD
+0.025
+0.050
+0.075
+Recall@10
+(a) Baby
+FS
+SD
+MD
+(b) Beauty
+FS
+SD
+MD
+(c) Sports
+FS
+SD
+MD
+(d) Toys
+0.01
+0.02
+0.03
+Gain
+FS: Few-Shot SD: Single-Domain MD: Multi-Domain 
+Ours
+TIGER
+Gain (Ours - TIGER)
+Figure 8 | Impact of Training Strategies (Domain-Specific vs Multi-Domain Joint) and Few-Shot
+Learning on Transfer Performance. We compare OneRec-Foundation (Ours) against TIGER across
+four Amazon domains under three settings: (1) Few-shot learning with 10% training data, (2)
+Full-data training with domain-specific strategy, and (3) Full-data training with joint multi-domain
+strategy. The green dashed line represents the performance gain (Recall@10 difference) of Ours over
+TIGER.
+Few-Shot Learning: Amplified Transfer Advantage.
+Beyond training strategies, Figure 8 also
+reveals that the transfer learning advantage of foundation models becomes significantly more pro-
+nounced under data scarcity. While OneRec-Foundation surpasses TIGER by an average of 77.7%
+in Recall@10 with full training data, this gap widens dramatically to 219.7% in the 10% few-shot
+regime. Crucially, OneRec-Foundation preserves 45.2% of its full-data performance when restricted
+to 10% data, whereas TIGER retains only 23.0%. This striking resilience validates that large-scale
+pre-training confers robust, transferable representations that enable effective domain adaptation
+under severe data constraints.
+6.4. Ablation Study
+6.4.1. Ablation Study on Pre-training Strategies
+We conducted an ablation study to quantify the contribution of the itemic-text alignment (Stage 1)
+within our pre-training pipeline. We compare the full-stage model against an ablated variant (w/o
+Align) that bypasses this initial phase. Both versions utilized an identical pre-training recipe, including
+the optimizer, learning-rate schedule, and context length. Since the raw pre-trained checkpoints lack
+inherent instruction-following capabilities, we applied the Multi-task SFT described in Section 5.1 to
+24
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Table 9 | Ablation study on pre-training strategies. We compare our model with ablated variants.
+w/o Align: removing the itemic-text alignment stage. Results are reported across three model sizes
+(0.6B, 1.7B, 8B). Bold indicates the best result for each task within each model size.
+Task
+Metric
+0.6B
+1.7B
+8B
+Ours
+w/o Align
+Ours
+w/o Align
+Ours
+w/o Align
+Short Video Rec
+Pass@32
+0.1401
+0.1397
+0.1636
+0.1605
+0.2034
+0.1933
+Recall@32
+0.0210
+0.0210
+0.0254
+0.0251
+0.0334
+0.0310
+Ad Rec
+Pass@32
+0.1740
+0.1680
+0.1961
+0.1922
+0.2350
+0.2401
+Recall@32
+0.0586
+0.0569
+0.0673
+0.0669
+0.0821
+0.0841
+Product Rec
+Pass@32
+0.1139
+0.1064
+0.1512
+0.1395
+0.1893
+0.1911
+Recall@32
+0.0257
+0.0243
+0.0343
+0.0312
+0.0447
+0.0442
+Label-Cond. Rec
+Pass@32
+0.0350
+0.0343
+0.0426
+0.0401
+0.0537
+0.0537
+Recall@32
+0.0146
+0.0145
+0.0181
+0.0171
+0.0227
+0.0230
+Interactive Rec
+Pass@32
+0.2460
+0.2360
+0.3110
+0.3050
+0.4650
+0.4490
+Recall@32
+0.1402
+0.1357
+0.1908
+0.1770
+0.3039
+0.2910
+Label Pred.
+AUC
+0.6488
+0.5807
+0.6392
+0.5796
+0.6879
+0.6285
+Item Understanding LLM-Judge Score 0.3174
+0.3112
+0.3170
+0.3181
+0.3225
+0.3103
+Rec. Explanation
+LLM-Judge Score 2.9960
+2.8635
+3.0922
+3.3160
+3.9420
+3.9329
+both variants before benchmarking across three model scales (0.6B, 1.7B, and 8B).
+The results, summarized in Table 9, reveal that Stage 1 serves as a fundamental semantic bridge for
+cold-started itemic token embeddings. By aligning these initialized parameters with the pre-trained
+latent space before full-parameter fine-tuning, Stage 1 establishes a robust semantic foundation,
+which is particularly necessary for smaller models(0.6B, 1.7B). The marginal gains from Stage 1 scale
+inversely with model size, likely because larger backbones possess greater inherent generalization.
+However, this stage remains essential for domain-specific precision, particularly in label prediction
+and interactive recommendation. These findings underscore that explicit alignment is a prerequisite
+for optimizing recommendation performance across all model scales.
+6.4.2. Evolution of Model Capabilities Across Post-training Stages
+We also analyze the performance of our model after each key post-training phase: Multi-task Su-
+pervised Fine-tuning, On-policy Distillation for General Capability, and Reinforcement Learning for
+Recommendation. As shown in Table 10, Table 11, and Table 12, each stage plays a distinct role in
+balancing the performance between recommendation-domain and general-domain.
+Table 10 | Performance comparison on general capability across post-training stages (Thinking).
+math_500
+gsm8k
+AIME’24
+mmlu_pro
+gpqa_diamond
+IFEVAL
+LiveCodeBench
+Qwen3-8B (Base)
+0.952
+0.9568
+0.7917
+0.7235
+0.5606
+0.8577
+0.5484
+Stage 1: Multi-task SFT
+0.936
+0.9083
+0.5104
+0.5307
+0.4949
+0.6174
+0.4516
+Stage 2: On-Policy Distillation
+0.948
+0.9538
+0.7125
+0.5454
+0.5
+0.7653
+0.4659
+Stage 3: Reinforcement Learning
+0.938
+0.9575
+0.7188
+0.5204
+0.5051
+0.7634
+0.4667
+Impact of On-policy Distillation on General Capabilities. As shown in Table 10 and Table 11,
+a comparison between Stage 1 (Multi-task SFT) and Stage 2 (On-policy Distillation) reveals that
+on-policy distillation significantly restores general capabilities, effectively realigning the model with
+the Qwen3 baseline on most general benchmarks. Despite this marked improvement, a performance
+gap persists relative to the original Qwen3 base model across several metrics. This gap is likely
+25
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Table 11 | Performance comparison on general capability across post-training stages (Non-
+Thinking).
+math_500
+gsm8k
+AIME’24
+mmlu_pro
+gpqa_diamond
+IFEVAL
+LiveCodeBench
+Qwen3-8B (Base)
+0.838
+0.9303
+0.2729
+0.6632
+0.399
+0.8392
+0.276
+Stage 1: Multi-task SFT
+0.876
+0.906
+0.0688
+0.4909
+0.3384
+0.5638
+0.1756
+Stage 2: On-Policy Distillation
+0.848
+0.9234
+0.2521
+0.583
+0.4091
+0.7689
+0.2545
+Stage 3: Reinforcement Learning
+0.798
+0.9196
+0.2271
+0.4521
+0.3939
+0.7098
+0.2401
+attributable to the current data composition and quality during the distillation phase, suggesting that
+further refinement of the data strategy is required to fully bridge the remaining gap.
+Interestingly, after the Multi-task SFT stage, we observed that several metrics in the "Non-Thinking"
+mode are unexpectedly high, occasionally even surpassing the Qwen3 base model. Qualitative results
+indicate this is due to instruction drift, where the model disregards the /no_think tag and generates
+"thinking" trajectories (CoT), leading to inflated scores. This issue is effectively mitigated through On-
+policy Distillation, which restores the model’s ability to faithfully switch between distinct reasoning
+modes.
+Advancements through RL for Recommendation. The final reinforcement learning stage
+demonstrates targeted improvements on core recommendation tasks. As illustrated in Table 12, the
+RL-trained model achieves consistent gains on Reco. tasks. These improvements stem from the
+rule-based Hit reward that directly optimizes for ranking accuracy, encouraging the model to assign
+higher probability mass to target itemic tokens. Notably, the Reco Reason task also benefits from RL
+training. This suggests that the refined “recommendation intuition” acquired through RL transfers to
+explanation generation, producing more coherent and relevant reasoning.
+Table 12 | Recommendation benchmark performance across post-training stages.
+Model
+Video Rec
+Ad Rec
+Product Rec
+Label Cond.
+Interactive
+Label Pred.
+Item Understanding
+Reco Reason
+Stage 1: Multi-task SFT
+0.0324
+0.0925
+0.0532
+0.0229
+0.3461
+0.6979
+0.3274
+3.8795
+Stage 2: On-Policy Distillation
+0.0304
+0.0596
+0.0330
+0.0200
+0.2419
+0.6944
+0.3319
+3.9479
+Stage 3: Reinforcement Learning
+0.0370
+0.0967
+0.0536
+0.0236
+0.3458
+0.6908
+0.3209
+4.0381
+7. Conclusion, Limitations, and Future Directions
+In this work, we presented OpenOneRec, a comprehensive framework designed to bridge the gap
+between traditional recommendation systems and Large Language Models. We proposed RecIF-Bench,
+the first holistic benchmark for evaluating recommendation instruction-following capabilities, encom-
+passing diverse tasks from fundamental prediction to complex reasoning. To facilitate reproducibility
+and scalable research, we open-sourced a full-stack training pipeline—including data processing,
+co-pretraining, and post-training protocols—and validated the scaling laws of recommendation ca-
+pabilities. Extensive experiments demonstrate that our OpenOneRec-Foundation models achieve
+state-of-the-art performance across RecIF-Bench and show exceptional transferability to external
+domains, proving the efficacy of our unified generative paradigm. Despite these advancements, several
+limitations remain that point towards important future research directions.
+First, while our experiments confirm that the recommendation backbone significantly enhances
+downstream performance, the magnitude of these gains is currently constrained by tokenizer trans-
+ferability. A promising avenue for future work lies in maximizing the reuse of foundation model
+priors while simultaneously ensuring high-quality item indexing (code quality) for downstream tasks.
+Second, maintaining the model’s general intelligence and reasoning capabilities necessitates mixing
+26
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+vast amounts of general-domain text during training. Investigating the optimal data mixing ratios and
+improving data utilization efficiency are urgent challenges to balance domain-specific precision with
+general capabilities. Third, we observe that Chain-of-Thought reasoning currently yields improvements
+only in limited settings. This underscores the need for a more rigorous exploration of test-time scaling
+strategies to unlock consistent reasoning gains across diverse recommendation scenarios.
+We believe that addressing these challenges requires collective effort from the community. By
+open-sourcing our entire framework, we invite contributions and encourage researchers to build upon
+OpenOneRec. We hope this work serves as a solid foundation for future exploration, accelerating the
+evolution towards truly intelligent recommendation systems.
+27
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+References
+R. Agarwal, N. Vieillard, Y. Zhou, P. Stanczyk, S. R. Garea, M. Geist, and O. Bachem. On-policy
+distillation of language models: Learning from self-generated mistakes. In The Twelfth International
+Conference on Learning Representations, 2024.
+A. Basant, A. Khairnar, A. Paithankar, A. Khattar, A. Renduchintala, A. Malte, A. Bercovich, A. Hazare,
+A. Rico, A. Ficek, et al. Nvidia nemotron nano 2: An accurate and efficient hybrid mamba-transformer
+reasoning model. arXiv preprint arXiv:2508.14444, 2025.
+BespokeLabs.
+Bespoke-stratos:
+The unreasonable effectiveness of reasoning distillation.
+https://www.bespokelabs.ai/blog/bespoke-stratos-the-unreasonable-effectiveness-of-reasoning-
+distillation, 2025. Accessed: 2025-01-22.
+A. Z. Broder. On the resemblance and containment of documents. In Proceedings of Compression
+and Complexity of Sequences, pages 21–29. IEEE, 1997. URL https://ieeexplore.ieee.org/
+document/666900.
+J. Chen, Z. Cai, K. Ji, X. Wang, W. Liu, R. Wang, J. Hou, and B. Wang. Huatuogpt-o1, towards medical
+complex reasoning with llms, 2024. URL https://arxiv.org/abs/2412.18925.
+J. Deng, S. Wang, K. Cai, L. Ren, Q. Hu, W. Ding, Q. Luo, and G. Zhou. Onerec: Unifying re-
+trieve and rank with generative recommender and iterative preference alignment. arXiv preprint
+arXiv:2502.18965, 2025.
+S. Geng, S. Liu, Z. Fu, Y. Ge, and Y. Zhang. Recommendation as language processing (rlp): A unified
+pretrain, personalized prompt & predict paradigm (p5). arXiv preprint arXiv:2203.13366, 2022.
+Z. He, T. Liang, J. Xu, Q. Liu, X. Chen, Y. Wang, L. Song, D. Yu, Z. Liang, W. Wang, Z. Zhang, R. Wang,
+Z. Tu, H. Mi, and D. Yu. Deepmath-103k: A large-scale, challenging, decontaminated, and verifiable
+mathematical dataset for advancing reasoning. 2025. URL https://arxiv.org/abs/2504.
+11456.
+B. Hidasi, A. Karatzoglou, L. Baltrunas, and D. Tikk. Session-based recommendations with recurrent
+neural networks. In ICLR. ICLR, 2016.
+J. Hoffmann, S. Borgeaud, A. Mensch, E. Buchatskaya, T. Cai, E. Rutherford, D. d. L. Casas, L. A.
+Hendricks, J. Welbl, A. Clark, et al. Training compute-optimal large language models. arXiv preprint
+arXiv:2203.15556, 2022.
+W.-C. Kang and J. McAuley. Self-attentive sequential recommendation. In ICDM, pages 197–206.
+IEEE, 2018.
+J. Kaplan, S. McCandlish, T. Henighan, T. B. Brown, B. Chess, R. Child, S. Gray, A. Radford, J. Wu,
+and D. Amodei. Scaling laws for neural language models. arXiv preprint arXiv:2001.08361, 2020.
+J. Li, L. Du, H. Zhao, B. wen Zhang, L. Wang, B. Gao, G. Liu, and Y. Lin. Infinity instruct: Scaling
+instruction selection and synthesis to enhance language models, 2025. URL https://arxiv.
+org/abs/2506.11116.
+Z. Liu, S. Wang, X. Wang, R. Zhang, J. Deng, H. Bao, J. Zhang, W. Li, P. Zheng, X. Wu, et al.
+Onerec-think: In-text reasoning for generative recommendation. arXiv preprint arXiv:2510.11639,
+2025.
+28
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+X. Luo, J. Cao, T. Sun, J. Yu, R. Huang, W. Yuan, H. Lin, Y. Zheng, S. Wang, Q. Hu, et al. Qarm:
+Quantitative alignment multi-modal recommendation at kuaishou. In Proceedings of the 34th ACM
+International Conference on Information and Knowledge Management, pages 5915–5922, 2025.
+S. T. Madhusudhan, S. Radhakrishna, J. Mehta, and T. Liang. Millions scale dataset distilled from
+r1-32b. https://huggingface.co/datasets/ServiceNow-AI/R1-Distill-SFT.
+J. McAuley, C. Targett, Q. Shi, and A. Van Den Hengel. Image-based recommendations on styles
+and substitutes. In Proceedings of the 38th International ACM SIGIR Conference on Research and
+Development in Information Retrieval, pages 43–52. ACM, 2015.
+F. Mentzer, D. Minnen, E. Agustsson, and M. Tschannen. Finite scalar quantization: Vq-vae made
+simple. arXiv preprint arXiv:2309.15505, 2023.
+I. Moshkov, D. Hanley, I. Sorokin, S. Toshniwal, C. Henkel, B. Schifferer, W. Du, and I. Gitman. Aimo-2
+winning solution: Building state-of-the-art mathematical reasoning models with openmathreasoning
+dataset. arXiv preprint arXiv:2504.16891, 2025.
+Mxode.
+Chinese-reasoning-distil-data:
+A
+multidisciplinary
+chinese
+reasoning
+dataset
+distilled
+from
+frontier
+models.
+https://huggingface.co/datasets/Mxode/
+Chinese-Reasoning-Distil-Data, 2024.
+A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan, T. Killeen, Z. Lin, N. Gimelshein,
+L. Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. Advances in
+neural information processing systems, 32, 2019.
+S. P. M. P. M. S. B. C. Rabeeh Karimi Mahabadi, Sanjeev Satheesh. Nemotron-cc-math: A 133 billion-
+token-scale high quality math pretraining dataset. 2025. URL https://arxiv.org/abs/2508.
+15096.
+S. Rajput, N. Mehta, A. Singh, R. Hulikal Keshavan, T. Vu, L. Heldt, L. Hong, Y. Tay, V. Tran, J. Samost,
+et al. Recommender systems with generative retrieval. Advances in Neural Information Processing
+Systems, 36:10299–10315, 2023.
+Z. Shao, P. Wang, Q. Zhu, R. Xu, J. Song, X. Bi, H. Zhang, M. Zhang, Y. Li, Y. Wu, et al. Deepseek-
+math: Pushing the limits of mathematical reasoning in open language models. arXiv preprint
+arXiv:2402.03300, 2024.
+G. Sheng, Y. Chi, K. Yao, Y. Zhao, Y. Xia, W. Li, H. Zhao, S. Wang, and Y. Wang. Hybridflow: A flexible
+and efficient rlhf framework. arXiv preprint arXiv:2409.19256, 2024.
+Y. Su, D. Yu, L. Song, J. Li, H. Mi, Z. Tu, M. Zhang, and D. Yu. Expanding rl with verifiable rewards
+across diverse domains. arXiv preprint arXiv:2503.23829, 2025.
+F. Sun, J. Liu, J. Wu, C. Pei, X. Lin, W. Ou, and P. Jiang. Bert4rec: Sequential recommendation with
+bidirectional encoder representations from transformer. In CIKM, pages 1441–1450. ACM, 2019.
+J. Tang, S. Dai, T. Shi, J. Xu, X. Chen, W. Chen, J. Wu, and Y. Jiang. Think before recommend: Unleash-
+ing the latent reasoning power for sequential recommendation. arXiv preprint arXiv:2503.22675,
+2025.
+G. A. Team. Reasoning-v1-20m: A massive synthetic dataset of 22.2 million general domain reasoning
+traces. https://huggingface.co/datasets/glaiveai/reasoning-v1-20m, 2025.
+29
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+Thinking Machines. On-policy distillation. Thinking Machines Blog, Oct 2025. URL https://
+thinkingmachines.ai/blog/on-policy-distillation. https://thinkingmachines.
+ai/blog/on-policy-distillation, Last accessed on: 2025-12-20.
+W. Wang, H. Bao, X. Lin, J. Zhang, Y. Li, F. Feng, S.-K. Ng, and T.-S. Chua. Learnable item tokenization
+for generative recommendation. In CIKM. ACM, 2024.
+S. M. A. F. S. J. J. H. V. N. B. G. Wasi Uddin Ahmad, Sean Narenthiran. Opencodereasoning: Advancing
+data distillation for competitive coding. 2025. URL https://arxiv.org/abs/2504.01943.
+L. Wu, Z. Zheng, Z. Qiu, H. Wang, H. Gu, T. Shen, C. Qin, C. Zhu, H. Zhu, Q. Liu, et al. A survey on
+large language models for recommendation. arXiv preprint arXiv:2305.19860, 2023.
+H. Xu, Q. Zhu, H. Deng, J. Li, L. Hou, Y. Wang, L. Shang, R. Xu, and F. Mi. Kdrl: Post-training reasoning
+llms via unified knowledge distillation and reinforcement learning. arXiv preprint arXiv:2506.02208,
+2025a.
+Z. Xu, Y. Liu, Y. Yin, M. Zhou, and R. Poovendran. Kodcode: A diverse, challenging, and verifiable
+synthetic dataset for coding. 2025b. URL https://arxiv.org/abs/2503.02951.
+A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu,
+F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang,
+J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang,
+P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang,
+X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and
+Z. Qiu. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025.
+L. Yang, A. Subbiah, H. Patel, J. Y. Li, Y. Song, R. Mirghaderi, V. Aggarwal, and Q. Wang. Item-language
+model for conversational recommendation. arXiv preprint arXiv:2406.02844, 2024.
+J. Zhai, L. Liao, X. Liu, Y. Wang, R. Li, X. Cao, L. Gao, Z. Gong, F. Gu, M. He, et al. Actions speak
+louder than words: Trillion-parameter sequential transducers for generative recommendations.
+arXiv preprint arXiv:2402.17152, 2024.
+B. Zheng, Y. Hou, H. Lu, Y. Chen, W. X. Zhao, M. Chen, and J.-R. Wen. Adapting large language
+models by integrating collaborative semantics for recommendation. In 2024 IEEE 40th International
+Conference on Data Engineering (ICDE), pages 1435–1448. IEEE, 2024.
+G. Zhou, J. Deng, J. Zhang, K. Cai, L. Ren, Q. Luo, Q. Wang, Q. Hu, R. Huang, S. Wang, et al. Onerec
+technical report. arXiv preprint arXiv:2506.13695, 2025a.
+G. Zhou, H. Hu, H. Cheng, H. Wang, J. Deng, J. Zhang, K. Cai, L. Ren, L. Ren, L. Yu, et al. Onerec-v2
+technical report. arXiv preprint arXiv:2508.20900, 2025b.
+30
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+A. Contributions
+Within each role, authors are listed alphabetically by their first name.
+Core Contributors
+Guorui Zhou
+Honghui Bao
+Jiaming Huang
+Jiaxin Deng
+Jinghao Zhang
+Junda She
+Kuo Cai
+Lejian Ren
+Lu Ren
+Qiang Luo
+Qianqian Wang
+Qigen Hu
+Rongzhou Zhang
+Ruiming Tang
+Shiyao Wang
+Wuchao Li
+Xiangyu Wu
+Xinchen Luo
+Xingmei Wang
+Yifei Hu
+Yunfan Wu
+Zhanyu Liu
+Zhiyang Zhang
+Zixing Zhang
+Contributors
+Bo Chen
+Bin Wen
+Chaoyi Ma
+Chengru Song
+Chenglong Chu
+Defu Lian
+Fan Yang
+Feng Jiang
+Hongtao Cheng
+Huanjie Wang
+Kun Gai
+Pengfei Zheng
+Qiang Wang
+Rui Huang
+Siyang Mao
+Tingting Gao
+Wei Yuan
+Yan Wang
+Yang Zhou
+Yi Su
+Zexuan Cheng
+Zhixin Ling
+Ziming Li
+B. Appendix
+B.1. Evaluation Details for Item Understanding
+For the Item Understanding task (Layer 0), we employ a rigorous LLM-as-Judge framework to
+evaluate the semantic alignment between the model-generated captions and the ground truth. The
+ground truth captions are generated by Gemini-2.5-Pro given the video frames and metadata. The
+evaluation process consists of three steps: Information Point Extraction, Semantic Matching, and
+Weighted Scoring. We use Gemini-2.5-Flash-Lite as the judge for extraction and matching.
+B.1.1. WIP Extraction and Matching
+We first prompt the LLM to decompose captions into atomic Weighted Information Points (WIPs),
+each containing a fact statement and an importance score (1-5). Then, we employ the LLM to align
+model-generated WIPs with ground truth WIPs, identifying valid matches, hallucinations (unmatched
+model WIPs), and omissions (unmatched GT WIPs). The specific prompts are detailed in Section B.2.
+B.1.2. Scoring Protocol
+To compute the final score, we calculate a Double-Weighted F1 Score that incorporates both
+the semantic importance of the information and the quality of the match. For each matched pair
+(𝑤𝑔𝑡, 𝑤𝑚𝑜𝑑𝑒𝑙), we compute a match quality score 𝑞∈[0, 1], which is the F1 score calculated by
+BERTScore (using bert-base-chinese).
+The contributions to True Positives (𝑇𝑃𝑖), False Negatives (𝐹𝑁𝑖), and False Positives (𝐹𝑃𝑖) for each
+31
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+sample 𝑖are calculated as follows:
+𝑇𝑃𝑖=
+∑︁
+(𝑤𝑔𝑡,𝑤𝑚𝑜𝑑𝑒𝑙)∈Matches
+score(𝑤𝑔𝑡) × 𝑞
+𝐹𝑁𝑖=
+∑︁
+(𝑤𝑔𝑡,𝑤𝑚𝑜𝑑𝑒𝑙)∈Matches
+score(𝑤𝑔𝑡) × (1 −𝑞) +
+∑︁
+𝑤𝑔𝑡∈Unmatched GT
+score(𝑤𝑔𝑡)
+𝐹𝑃𝑖=
+∑︁
+(𝑤𝑔𝑡,𝑤𝑚𝑜𝑑𝑒𝑙)∈Matches
+score(𝑤𝑚𝑜𝑑𝑒𝑙) × (1 −𝑞) +
+∑︁
+𝑤𝑚𝑜𝑑𝑒𝑙∈Unmatched Model
+score(𝑤𝑚𝑜𝑑𝑒𝑙)
+The F1 score for sample 𝑖is computed as:
+𝐹1𝑖=
+2 · 𝑇𝑃𝑖
+2 · 𝑇𝑃𝑖+ 𝐹𝑃𝑖+ 𝐹𝑁𝑖
+(10)
+The final score is the LLM-Judge Score, computed as the average of per-sample F1 scores:
+LLM-Judge Score = 1
+𝑁
+𝑁
+∑︁
+𝑖=1
+𝐹1𝑖
+(11)
+This metric penalizes both hallucinations (high FP) and omissions (high FN), while rewarding
+high-quality matches on important information points.
+B.2. Prompts for Item Understanding
+We provide the core instructions of the prompts used for the Item Understanding evaluation below.
+Prompt for WIP Extraction (Abridged)
+任务: 你是一位信息抽取专家。请将描述性文本分解为结构化的【原子化且唯一】的"信息点(WIPs)"列表。
+输出结构:
+• info_point: 一个简洁的、陈述事实的短语。
+• importance_score: 整数[1-5] (5=核心, 1=琐碎)。
+关键原则:
+1. 原子性: 每个点只包含一个独立事实。
+2. 唯一性: 概念上不重复。
+3. 合并: 将相似描述合并为一个代表性点。
+打分指南: 5 (灵魂/核心), 4 (骨架/关键事件), 3 (血肉/重要细节), 2 (背景/次要细节), 1 (琐碎信息)。
+Prompt for WIP Matching (Abridged)
+任务: 你是一位语义匹配专家。请对比"Ground Truth WIPs"和"Model-Generated WIPs"，识别匹配项、幻觉和漏报。
+匹配规则:
+1. 语义核心: 基于info_point 的核心含义进行匹配。
+2. 部分匹配: 只要有语义重叠即可匹配(例如："篮球比赛" 匹配"球员打篮球")。
+3. 一对一: 寻找最佳匹配对。
+输出结构:
+• matches: 语义相似的配对列表{model_wip, gt_wip}。
+• unmatched_model_wips: 幻觉(False Positives)。
+• unmatched_gt_wips: 漏报(False Negatives)。
+32
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+B.3. Samples of Recommendation-Domain Pre-training Data
+In this section, we provide some simple samples for the three recommendation-domain pre-training
+data discussed in Section 4.1.1.
+B.3.1. Itemic Dense Caption Data
+Itemic Dense Caption Data
+视频<|item_begin|><item_a_5028><item_b_6733><item_c_2559><|item_end|> 展示了以下内容：视频
+内容聚焦在庆祝冬至这一重要节日的习俗，特别是享受饺子与汤圆等美食。视频表达了冬至节气的特色意义，以及
+人们对新一年开始的寓意。内容上，显现出浓浓的节日气氛与家庭温暖，可能会触动那些寻求传统节日体验和家的
+感觉的观众。视频还可能激发观众对中华传统文化的兴趣，以及对家人团聚时的美好记忆。通过美食与节日的结
+合，观众可感受到温馨和幸福，为冬至节日的到来营造了欢乐与期盼。
+<|item_begin|><item_a_5028><item_b_6733><item_c_2559><|item_end|> focuses on the customs of
+celebrating the Winter Solstice, a significant traditional festival, with a particular emphasis on enjoying delicacies such
+as dumplings and tangyuan. It conveys the unique cultural significance of the Winter Solstice solar term and its
+symbolism as the beginning of a new cycle. In terms of content, the video exudes a profound festive atmosphere and
+familial warmth, likely resonating with viewers seeking traditional holiday experiences and a sense of home.
+Furthermore, it may spark interest in traditional Chinese culture and evoke cherished memories of family reunions. By
+blending culinary traditions with the holiday spirit, the video allows the audience to experience warmth and
+happiness, fostering a sense of joy and anticipation for the arrival of the Winter Solstice.
+B.3.2. Sequential User Behavior Data
+Sequential User Behavior Data
+用户的曝光序列为<|item_begin|><s_a_1023><s_b_5426><s_c_6422><|item_end|>,
+<|item_begin|><s_a_3168><s_b_7950><s_c_4134><|item_end|>,......；
+其中长播列表是<|item_begin|><s_a_4988><s_b_7436><s_c_2477><|item_end|>,
+<|item_begin|><s_a_5087><s_b_7888><s_c_4759><|item_end|>,......；
+点赞列表是<|item_begin|><s_a_3168><s_b_7950><s_c_4134><|item_end|>,
+<|item_begin|><s_a_250><s_b_2310><s_c_4925><|item_end|>,......
+The user’s exposure sequence is <|item_begin|><s_a_1023><s_b_5426><s_c_6422><|item_end|>,
+<|item_begin|><s_a_3168><s_b_7950><s_c_4134><|item_end|>, ...;
+The long-viewed list is <|item_begin|><s_a_4988><s_b_7436><s_c_2477><|item_end|>,
+<|item_begin|><s_a_5087><s_b_7888><s_c_4759><|item_end|>, ...;
+The like list is <|item_begin|><s_a_3168><s_b_7950><s_c_4134><|item_end|>,
+<|item_begin|><s_a_250><s_b_2310><s_c_4925><|item_end|>, ...
+33
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+B.3.3. Interleaved User Persona Grounding Data
+Interleaved User Persona Grounding
+平台上有一名用户，她创作内容涵盖：8个其他，1个美食，1个数码，1个明星娱乐。
+她近期的搜索记录包括：怎么拍游戏视频、黑白头像可爱、......。
+她近期的购买记录包括：商
+品<|item_begin|><item_a_6133><item_b_5060><item_c_5431><|item_end|>，具体类型为【女装-裤
+子-休闲裤】，花费290元。
+她近期在视频<|item_begin|><item_a_3316><item_b_7440><item_c_2022><|item_end|>下评论了"这个
+短剧叫什么名字啊"；在视
+频<|item_begin|><item_a_7822><item_b_1648><item_c_5756><|item_end|>下评论了"嘻嘻嘻，真的
+吗？我也喜欢玩蛋仔派对，早就关注你了"；......。
+她点赞了视频<|item_begin|><item_a_5743><item_b_930><item_c_1231><|item_end|>......；
+收藏了视频<|item_begin|><item_a_468><item_b_8186><item_c_5877><|item_end|>......；
+分享了视频......。她关注的博主类型有：【其他】占47.58%，【颜值】占16.52%，【明星娱乐】
+占8.37%，......。
+她近期观看的直播类型包括：【闲聊互动-热闹闲聊】分类下的直播点赞了6次，评论了59次；......
+她过去30天观看时间最长的1种短剧类型分别是:[解密_悬疑]看了30.0分钟
+......
+There is a user on the platform whose content creation covers: 8 in "Other," 1 in "Food," 1 in "Digital Tech," and 1 in
+"Celebrity & Entertainment."
+Her recent search history includes: "how to film game videos," "cute black and white avatars," ...
+Her recent purchase records include the item
+<|item_begin|><item_a_6133><item_b_5060><item_c_5431><|item_end|>, categorized as [Women’s
+Wear - Pants - Casual Pants], costing 290 RMB.
+In terms of recent social interactions, she commented "What is the name of this short drama?" under the video
+<|item_begin|><item_a_3316><item_b_7440><item_c_2022><|item_end|>; and commented "Really? I
+love playing Eggy Party too! Actually, I’ve been following you for a while" under the video
+<|item_begin|><item_a_7822><item_b_1648><item_c_5756><|item_end|>; ...
+She also liked the video <|item_begin|><item_a_5743><item_b_930><item_c_1231><|item_end|> ...;
+Bookmarked the video <|item_begin|><item_a_468><item_b_8186><item_c_5877><|item_end|> ...
+Shared the video ...
+The types of creators she follows are: [Others] accounting for 47.58%, [Beauty] accounting for 16.52%,
+[Entertainment] accounting for 8.37%, and ...
+Her recent livestream viewing history includes: 6 likes and 59 comments in the [Chat & Interaction - Lively Chat]
+category; and 9 comments in another...
+Over the past 30 days, her most-watched short drama genre was [Mystery/Suspense], with a total viewing time of
+30.0 minutes...
+B.4. Detailed Data Composition and Token Budgets for Pre-training
+Table 13 presents the main datasets used in Stage 2 of our Open model’s pre-training. To ensure the
+model maintains robust general reasoning capabilities while adapting to recommendation tasks, we
+curate a diverse data mixture that is primarily composed of two parts:
+General Domain Data: All general-domain datasets listed in the table are publicly available
+and can be downloaded from HuggingFace repository 3. We incorporate a significant proportion of
+mathematical and coding datasets (e.g., Nemotron and OpenMath series) alongside general reasoning
+corpora to prevent the catastrophic forgetting of logic and instruction-following abilities.
+Recommendation Domain Data: The three recommendation-domain datasets (Itemic Dense
+Caption Data, Interleaved User Persona Grounding Data, and Sequential User Behavior Data) are
+constructed from the raw meta data we have released, following the formats illustrated in the examples
+3https://huggingface.co/datasets
+34
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+above (Section B.3).
+Table 13 | Data mixture for Pre-training. The table presents the distribution across general domains
+and recommendation domains, showing the sampling weight of each dataset and the subtotal ratio
+for each category.
+Dataset
+Weight (%)
+Category
+Subtotal (%) Token Budget
+Nemotron_CC_Math_v14
+37.41%
+Math
+62.34%
+29B
+Nemotron_Pretraining_Code_v15
+12.91%
+Code
+Nemotron_CC_v26
+5.59% Math, General, Code
+reasoning_v1_20m7
+4.04%
+General
+OpenMathReasoning8
+1.16%
+Math
+NuminaMath-QwQ-CoT-5M9
+0.79%
+Math
+OpenCodeReasoning10
+0.26%
+Code
+KodCode_V1_SFT_R111
+0.09%
+Code
+Chinese-Reasoning-Distil-Data12
+0.07%
+General
+medical-o1-reasoning-SFT13
+0.02%
+Medical
+Bespoke-Stratos-17k14
+0.01% Math, Code, Science
+Itemic Dense Caption Data
+37.66%
+Reco
+37.35%
+4B
+Interleaved User Persona Grounding Data
+0.21%
+Reco
+Sequential User Behavior Data
+0.38%
+Reco
+Table 14 | Data Composition and Token Budgets for Pre-training Stages. This table illustrates the
+training configurations for the Open and Pro model variants across different stages, specifying the
+parameter focus, data domain distribution, and allocated token budgets.
+Model
+Stage
+Training
+General-Domain Reco-Domain Token Budget
+OneRec
+stage1 Itemic-related Parameters
+62.34%
+37.66%
+16B
+stage2
+Full-Parameter
+33B
+OneRec-Pro stage1 Itemic-related Parameters
+19%
+81%
+30B
+stage2
+Full-Parameter
+53%
+47%
+130B
+For the OneRec variant, Stage 2 uses all datasets listed in Table 13, totaling 33B tokens, while Stage
+1 training data is sampled from this corpus. Table 14 details the comprehensive data composition
+and token budgets allocated for each pre-training stage, characterizing the strategic balance between
+general-domain and recommendation-domain knowledge.
+In contrast, the OneRec-Pro model leverages a significantly expanded budget of 130B tokens to
+achieve superior performance, by increasing the sampling ratios of the general-purpose datasets from
+Table 13, integrating additional proprietary in-house datasets, and substantially expanding the scale
+of user-interaction data within the recommendation domain.
+4https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1
+5https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Code-v1
+6https://huggingface.co/datasets/nvidia/Nemotron-CC-v2
+7https://huggingface.co/datasets/glaiveai/reasoning-v1-20m
+8https://huggingface.co/datasets/nvidia/OpenMathReasoning
+9https://huggingface.co/datasets/PrimeIntellect/NuminaMath-QwQ-CoT-5M
+10https://huggingface.co/datasets/nvidia/OpenCodeReasoning
+11https://huggingface.co/datasets/KodCode/KodCode-V1-SFT-R1
+12https://huggingface.co/datasets/Mxode/Chinese-Reasoning-Distil-Data
+13https://huggingface.co/datasets/FreedomIntelligence/medical-o1-reasoning-SFT
+14https://huggingface.co/datasets/bespokelabs/Bespoke-Stratos-17k
+35
+
+OpenOneRec Technical Report
+An Open Foundation Model and Benchmark to Accelerate Generative Recommendation
+B.5. Detailed Data Composition and Token Budgets for Multi-task SFT
+Table 15 | Data Mixture for Multi-task SFT. The table presents the distribution across reasoning and
+recommendation domains, showing the sampling weight of each dataset and the subtotal ratio for
+each category.
+Dataset
+Weight (%)
+Category
+Subtotal (%)
+OpenMathReasoning15
+12.971%
+Math
+64.978%
+R1-Distill-SFT16
+12.784%
+General
+Infinity_Instruct17
+11.359%
+Instruction
+OpenCoderReasoning18
+11.130%
+Code
+Chinese-Reasoning-Distil-Data19
+4.552%
+General
+Reasoning_Multi_subject_RLVR20
+4.376%
+Multi-subject
+Reasoning_KodCode_V1_SFT_R121
+4.167%
+Code
+DeepMath103K22
+2.362%
+Math
+medical-o1-reasoning-SFT23
+1.277%
+Medical
+Label prediction
+7.800%
+Reco
+35.022%
+SID to Caption generation
+7.493%
+Reco
+Interactive recommendation
+6.392%
+Reco
+Video recommendation
+3.971%
+Reco
+Label conditional recommendation
+3.575%
+Reco
+Product recommendation
+2.878%
+Reco
+Ad recommendation
+2.820%
+Reco
+Recommendation reasoning
+0.094%
+Reco
+15https://huggingface.co/datasets/nvidia/OpenMathReasoning
+16https://huggingface.co/datasets/ServiceNow-AI/R1-Distill-SFT
+17https://huggingface.co/datasets/BAAI/Infinity-Instruct
+18https://huggingface.co/datasets/nvidia/OpenCodeReasoning
+19https://huggingface.co/datasets/Mxode/Chinese-Reasoning-Distil-Data
+20https://huggingface.co/datasets/punwaiw/multi-subject-rlvr-final-reasoning-traces
+21https://huggingface.co/datasets/KodCode/KodCode-V1-SFT-R1
+22https://huggingface.co/datasets/zwhe99/DeepMath-103K
+23https://huggingface.co/datasets/FreedomIntelligence/medical-o1-reasoning-SFT
+36

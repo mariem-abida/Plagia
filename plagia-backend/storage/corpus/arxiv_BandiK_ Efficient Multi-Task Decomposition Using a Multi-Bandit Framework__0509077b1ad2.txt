@@ -1,0 +1,939 @@
+BandiK: Efficient Multi-Task Decomposition
+Using a Multi-Bandit Framework
+András Millinghoffera,b,1, András Formaneka,c,1, András Antosa and Péter Antala,b,*
+aDepartment of Artificial Intelligence and Systems Engineering, Faculty of Electrical Engineering and Informatics,
+Budapest University of Technology and Economics, M˝uegyetem rkp. 3, H-1111 Budapest, Hungary
+b E-Group ICT Software Zrt., Alsó Törökvész út 2, H-1022 Budapest, Hungary
+cDepartment of Electrical Engineering (ESAT), STADIUS Center for Dynamical Systems, Signal Processing and
+Data Analytics, KU Leuven, 3001 Leuven, Belgium
+Abstract.
+The challenge of effectively transferring knowledge across multi-
+ple tasks is of critical importance and is also present in downstream
+tasks with foundation models. However, the nature of transfer, its
+transitive-intransitive nature, is still an open problem, and negative
+transfer remains a significant obstacle. Selection of beneficial aux-
+iliary task sets in multi-task learning is frequently hindered by the
+high computational cost of their evaluation, the high number of plau-
+sible candidate auxiliary sets, and the varying complexity of selection
+across target tasks.
+To address these constraints, we introduce BandiK, a novel three-
+stage multi-task auxiliary task subset selection method using multi-
+bandits, where each arm pull evaluates candidate auxiliary sets by
+training and testing a multiple output neural network on a single ran-
+dom train-test dataset split. Firstly, BandiK estimates the pairwise
+transfers between tasks, which helps in identifying which tasks are
+likely to benefit from joint learning. In the second stage, it constructs
+a linear number of candidate sets of auxiliary tasks (in the number
+of all tasks) for each target task based on the initial estimations,
+significantly reducing the exponential number of potential auxiliary
+task sets. Thirdly, it employs a Multi-Armed Bandit (MAB) frame-
+work for each task, where the arms correspond to the performance
+of candidate auxiliary sets realized as multiple output neural net-
+works over train-test data set splits. To enhance efficiency, BandiK
+integrates these individual task-specific MABs into a multi-bandit
+structure. The proposed multi-bandit solution exploits that the same
+neural network realizes multiple arms of different individual bandits
+corresponding to a given candidate set. This semi-overlapping arm
+property defines a novel multi-bandit cost/reward structure utilized
+in BandiK.
+We validate our approach using a drug-target interaction bench-
+mark. The results show that our methodology facilitates a computa-
+tionally efficient task decomposition, making it a scalable solution
+for complex multi-task learning scenarios.
+1
+Introduction
+The availability of foundation models in multiple domains, starting
+with vision and culminating in linguistic tasks redefined the scope
+∗Corresponding Author. Email: antal@mit.bme.hu
+1 Equal contribution.
+of multitask learning as omni-task learning towards artificial general
+intelligence [28, 6]. Still, detailed quantitative evaluations of mul-
+titask learning are frequently grappling with the presence of nega-
+tive transfer effects, i.e., the intricate, complex pattern of beneficial-
+detrimental effects of certain tasks on others [36]. It is by no sur-
+prise as the nature of transfer learning is multi-factorial and trans-
+fer effects can be attributed to (1) shared data, (2) shared latent
+representations, and (3) shared optimization; thus transfer effects
+are contextual and depend on the sample sizes, task similarities,
+sufficiency of hidden representations, and stages of the optimiza-
+tion [8, 23, 35, 15, 18, 34, 32, 37, 31, 12, 27, 10].
+An alternative paradigm suggests selecting the beneficial auxiliary
+task subsets for each target task or eliminating the detrimental aux-
+iliary tasks; however, evaluation of candidate auxiliary task subsets
+can be computationally demanding and statistically leads to loss of
+power due to multiple hypothesis testing.
+To address these constraints, we introduce BandiK, a novel three-
+stage multi-task auxiliary task subset selection method using multi-
+bandits, where each arm pull evaluates candidate auxiliary sets by
+training and testing a multiple output neural network on a single ran-
+dom train-test dataset split (the problem setup is shown in Figure 1).
+Figure 1: The multi-task subset selection problem as a multi-bandit:
+The selection of a multi-task neural network implies both the selec-
+tion of a target set and their respective auxiliary task set.
+Firstly, BandiK estimates the pairwise transfers between tasks,
+which helps in identifying which tasks are likely to benefit from
+joint learning [33, 5, 20, 37]. In the second stage, it constructs a lin-
+ear number of candidate sets of auxiliary tasks (in the number of all
+tasks) for each target task based on the initial estimations, signifi-
+arXiv:2512.24708v1 [cs.LG] 31 Dec 2025
+
+cantly reducing the exponential number of potential auxiliary task
+sets [27]. Thirdly, it employs a Multi-Armed Bandit (MAB) frame-
+work including the tasks, where the arms correspond to the perfor-
+mance of candidate auxiliary sets realized as multiple output neural
+networks over train-test data set splits [11, 22]. The major steps are
+summarized in Algorithm 1.
+Algorithm 1 The main contribution of the BandiK multi-bandit
+method: pairwise transfer effect-based candidate (auxiliary) task sets
+as arms in bandits for each target task, and multi-task neural networks
+as semi-overlapping arms.
+procedure BANDIK
+STAGE 1.: Estimation of pairwise transfer learning effects be-
+tween tasks and building positive and negative transfer graphs
+based on different tests for transfer
+STAGE 2.: Construction of candidate auxiliary sets for each
+task by applying search methods in the graphs
+STAGE 3.: Definition and simulation of a multi-bandit using
+the adaptive GapE-V method; selection of best performing multi-
+task neural network for each target task.
+In this paper, we adopt the auxiliary task subset selection approach
+using hard parameter sharing networks and investigate (1) the con-
+struction methods of auxiliary sets, (2) the efficiency of a multi-bandit
+approach, and (3) the effects of the novel semi-overlapping arms in
+a multi-bandit. We answer the following questions:
+Q1 Baseline performance: What are the best performances of single,
+pairwise, and multi-task learning scenarios per tasks?
+Q2 Pairwise task landscape: What are the performances of pairwise
+target-auxiliary learning scenarios per tasks?
+Q3 Uncertainty and heterogeneity of task performances: What are the
+variances of task performances? What is their heterogeneity and
+relation to task properties, such as task sample size?
+Q4 Heuristics for candidate auxiliary sets: What is the landscape
+of candidate auxiliary sets based on heuristics, such as greedy
+pairwise, filtered pairwise, pairwise-based transitive closures and
+cliques, incremental-decremental approaches?
+Q5 Multi-bandit dynamics: What are the distributions of pulls and
+convergence rates over individual bandits throughout learning, es-
+pecially regarding their performance gaps and variances?
+Q6 Semi-overlapping arms: What are the effects of semi-overlapping
+arms between bandits, i.e., the massive multiple presence of
+shared networks and pulls?
+Q7 Performance of candidate auxiliary task sets: What are the per-
+formances of candidate auxiliary task sets, especially regarding
+their types and the availability of shared candidates (is there any
+cross-gain)?
+Q8 Nature of transfer: What are the implications of the results for the
+nature of transfer, i.e., transfer by shared samples, latent features
+or optimization?
+Q9 Applicability of foundation models: What are the implications for
+foundation models in special quantitative domains, e.g., in drug-
+target interaction prediction?
+We demonstrate our methods on a drug-target interaction (DTI)
+prediction problem [30].
+2
+Related works
+MABs are successfully applied in hyper-parameter optimization and
+neural architecture search, though we go a step deeper: a pull of an
+arm corresponds to a single train-test split evaluation in our case (see
+e.g., [13]). The selection of multiple tasks for joint learning moti-
+vated a series of sequential learning methods [16]. Combinatorial
+multi-armed bandits (MABs) allow the pull of multiple arms simul-
+taneously resulting in an aggregate reward of individual arms [7].
+Notably, the ’top-k’ extension considers the subsets up to size k and
+allows variants whether the rewards for the individual arms are avail-
+able or only their non-linear aggregations [21, 1]. Another relevant
+extension to our formalization with multiple auxiliary task subset se-
+lection problem for each task is the multi-bandit approach, also al-
+lowing overlap between the arms [11], [22]. Finally, recent MAB
+extensions investigated the use of task representations and learning
+task relatedness [9, 19, 24].
+3
+Problem setup
+Consider a Multi-Task Learning problem with M tasks, in which one
+should decide among K = 2M−1 options for auxiliary task sets for
+each taskm to reach optimal performance. (2M−1 being the number
+of possible sets surely containing taskm, which number we propose
+to significantly reduce in the first two stages of BandiK.) This prob-
+lem can be formulated as the best arm identification over M multi-
+armed bandits with K arms each. In the setting each target task cor-
+responds to a multi arm bandit and each set in the power set of tasks
+containing the target taskm is considered an arm. (We use indices m,
+p, q for the bandits and k, i, j for the arms.) Pulling an arm induces
+the training of a neural network on this set of tasks, and we are asked
+to recommend an arm for each bandit after a given number of pulls
+(budget).
+This setting is a special case of the multi-bandit best arm identifi-
+cation problem [11]. To acquire the reward of an armmk of banditm,
+we train a neural network on the tasks covered by armmk (al-
+ways containing at least taskm itself) that we denote armsetmk.
+Notice that for a given task subset T , at pulling any armmk with
+armsetmk = T of banditm corresponding to target taskm ∈T ,
+an identical network can be constructed, just there are |T | varia-
+tions which is the target task in T and which is the (complement)
+auxiliary task set. Being the target task or an auxiliary one is only
+a matter of evaluation. Thus, if armsetmk = armsetpi the cost of
+training the underlying network is incurred only once for armmk and
+armpi, however, the corresponding rewards, depending on the target
+tasks (taskm vs. taskp), are different. Hence, we call such armmk
+and armpi semi-overlapping arms (as opposed to (fully) overlapping
+arms with the same reward, e.g., in [22]). Therefore, in our case joint
+optimization of the auxiliary task selection problem is not only rea-
+sonable for optimal resource allocation among the bandits, but more
+importantly each banditp having a semi-overlapping armpi with
+armmk can also make an update about the arm’s reward whenever
+armmk is pulled in banditm, because the neural network trained
+once can be evaluated for any included task, so the cost of the reward
+has to be paid only once.
+Following the notation of [11], let M be the number of bandits
+and K = 2M−1 be the number of possible arms of each bandit. Each
+armmk of a banditm is characterized by a distribution νmk bounded
+in [0, 1] with mean µmk. We denote by µ∗
+m the mean and k∗
+m the
+index of the best arm of banditm. In each banditm, we define the
+gap for each arm as ∆mk = |maxj̸=k µmj −µmk|.
+At each round of the game t = 1, . . . , n, the forecaster pulls a
+bandit-arm pair I(t) = (m, k) and observes a sample drawn from
+each distribution in {νpi : armsetpi = armsetmk} independent of
+the past. Let Tmk(t) be the number of times that a sample from νmk
+
+has been observed by the end of round t, meaning Tmk(t) = Tpi(t)
+throughout the whole game if armsetmk = armsetpi. Let us note
+that, in contrast of the non-overlapping case, the final number n of
+rounds is not equal to the sum of Tmk(n)’s for all m and k, leading
+to a massive relative budget increase. We use the adaptive GapE-V
+algorithm of [11] with the same values bµmk(t), b∆mk(t), bσ2
+mk(t) 2,
+Bmk(t), and b
+Hσ(t) as derived in [11].
+In each t time step, an armmk is pulled and an f(t)
+=
+f(Dtrain(t), T (t)) hard parameter sharing neural network is trained,
+from random initialization, to predict the T (t) = armsetmk set
+of tasks, utilizing a random train split of the data. Monte Carlo
+Subsampling [25] is used to split the dataset into Dtrain(t) and
+Dtest(t) in each round, with sizes 80% and 20%, respectively. All
+banditp corresponding to a taskp ∈T (t) receives a sample Xpi(t)
+by evaluating the performance of the network separately: Xpi(t) =
+Lp(f(t), Dtest(t)), where i is chosen so that armsetpi = T (t).
+Monte Carlo Cross Validation has been shown asymptotically con-
+sistent [25]. Let Lm(T ) = Lm(f(Dtrain(u), T ), Dtest(u)) denote
+the loss corresponding to taskm of a network trained and evaluated
+on a random data split, to predict the tasks in T . L can be any stan-
+dard loss function, but throughout this paper we use the Area Under
+the Receiver Operating Curve (AUROC, LAUR) and the Area Under
+the Precision-Recall Curve (AUPR, LAUP ) metrics.
+4
+Data and methods
+4.1
+Data set
+Following [30], we use the NURA-2021 data set binarized as ’strong
+binder’ versus other labels. It includes 22 targets and 31006 com-
+pounds. Since completely random train/test splits suffer from the
+compound series bias, leading to overoptimistic performance estima-
+tions [17], we utilize a more realistic, scaffold-based train/test split
+in the spirit of [26], which resulted in 6441 scaffolds.
+4.2
+Models and computations
+Every time a network train is mentioned, the SparseChem [3] model,
+a multiple output MLP is used. Architecture and other hyperparam-
+eters were determined by grid search and apart from the number of
+neurons in the last layer these values were always unchanged. Con-
+sequently, ADAM optimizer was used with a learning rate of 10−4
+and weight decay of 10−6. Trainings run for 25 epochs with 10%
+batch ratio. Following the 32000 neuron-wide input layer, and two
+1000 neuron-wide hidden layers, the width of the output layer was
+always |T |. ReLU activation and 0.7 dropout ratio were used in the
+hidden layers. Sigmoid and 0.2 dropout in the last layer.
+4.3
+BandiK
+We introduce BandiK, a novel three-stage method using multi-
+bandits for solving the multi-task auxiliary task subset selection
+problem described in Section 3.
+4.3.1
+Estimating pairwise transfer and building transfer
+graphs
+In the first stage, we discover multi-task transfer effects, by training
+on a number of base case candidate task sets. There are four main
+2 Note that there is a missing Tmk(t)/(Tmk(t) −1) factor in the definition
+of the unbiased sample variance bσ2
+mk(t) in [11].
+training scenarios: single task learning (STL, Tm = {m}), pairwise
+learning (PW, Tpq = {p, q}), full multitask learning (FMTL, TF =
+{1, . . . , M}) and leave-one-out learning (LOO, Tm−= TF \ {m}).
+We train all possible scenarios on 500 random dataset splits to ac-
+quire a sample of the network performances.
+Using the results of the base cases, we construct directed positive
+tranfer graphs (P metric,test) and directed negative tranfer graphs
+(N metric,test). The existence of a (p, q) directed edge in a given
+graph indicates that taskp has a (positive or negative) transfer effect
+on taskq. To construct the positive transfer effect matrices we check
+if PW options perform better than STL. The edges of negative trans-
+fer matrices are derived from comparing LOO to FMTL, e.g., if a
+taskq performs better with Tp−than trained with TF , it means that
+taskp has a clear individual negative transfer effect on taskq.
+- P AUP,diff
+pq
+= 1 ⇐⇒LAUP
+q
+(Tpq) −LAUP
+q
+(Tq) > 0
+- P AUR,diff
+pq
+= 1 ⇐⇒LAUR
+q
+(Tpq) −LAUR
+q
+(Tq) > 0
+- N AUP,diff
+pq
+= 1 ⇐⇒LAUP
+q
+(Tp−) −LAUP
+q
+(TF ) > 0
+- N AUR,diff
+pq
+= 1 ⇐⇒LAUR
+q
+(Tp−) −LAUR
+q
+(TF ) > 0
+In addition to using the difference to indicate better performance,
+we propose two kinds of significance tests to assess transfer effect:
+- t-test: P AUP,tt, P AUR,tt, N AUP,ttN AUR,tt
+- nemenyi-thrd: P AUP,nem, P AUR,nem, N AUP,nem, N AUR,nem
+where the existence of a (p, q) edges of the graphs in the t-test list
+are calculated using Student t-test with p = 0.05, e.g., if the hypoth-
+esis h0 : LAUP
+q
+(Tpq) ≤LAUP
+q
+(Tq) can be rejected. Nemenyi-thrd:
+for each taskm, firts, Friedman Chi2 test is run to check if there are
+signifficant differences between the STL, PW, FMT and LOO par-
+formances (44 distributions per task) and if so this is followed by
+Nemenyi test to search pair-wise significant performance differences
+between .
+4.3.2
+Construction of candidate auxiliary task sets
+In the second stage, using transfer graphs constructed in Stage 1.,
+we propose to construct a fixed number of candidate sets for each
+taskm, by running different heuristic based graph search algorithms
+to find connected tasks with positive/negative transfer. These heuris-
+tics closely resemble forward and backward methods used in the fea-
+ture subset selection problem [2]. In the case of positive transfer the
+initial candidate set is always T ′ = Tm which is inflated with newly
+found nodes. When negative transfer graphs are searched, results are
+removed from the initial T ′ = TF .
+Candidate sets are generated using the following methods.
+The final candidate sets genereted by GENERATEARMS({
+P AUP,diff,P AUR,diff,
+N AUP,diff,
+N AUR,diff,
+P AUP,tt,
+P AUR,tt
+,
+N AUP,tt,
+N AUR,tt,
+P AUP,nem,
+P AUR,nem
+,
+N AUP,nem, N AUR,nem}, M)
+398 unique candidate sets are generated in Stage 2. using 4 search
+methods that utilize different suppositions about the transitivity of
+pairwise transfer effects.
+S1 DIRECTNEIGHBOURS: the most conservative, choosing only the
+inward pointing star graph of the direct neighbors of taskm
+S2 TRANSITIVE: supposes that the pairwise transfer effects are fully
+transitive and so all the taskp nodes in the graph with a connected
+(directed) path from taskp to taskm are chosen
+S3 FILTEREDTRANSITIVE: supposes that the dense transfer effect
+graph has a sparse generator, therefore, before running S2 it re-
+duces the graph to its maximum weight spanning tree
+
+S4 CLIQUE: supposes that the pairwise transfer is not only transitive,
+but should also be symmetric, so the biggest subset of fully con-
+nected nodes containing taskm is chosen as the candidate set
+4.3.3
+Multi-Armed Bandit (MAB)
+In the final stage, the problem of task-wise auxiliary task set selec-
+tion is mapped to a Multi-Armed Multi-Bandit, where each task has
+a corresponding bandit and the arms give performance estimations
+of candidate auxiliary sets. The 276 base cases from Stage 1. and
+398 Stage 2. candidate sets give us a total of 674 semi-overlapping
+arms. In this stage the A-GapE-V algorithm [11] is run with a total
+of 22 bandits and 398 semi-overlapping arms, where the arm set of
+banditm is chosen to be the set of candidate sets containing taskm.
+After the termination of the algorithm each bandit/task is presented
+with the best arm/auxiliary task set.
+5
+Results
+We present results about the multi-task properties of the DTI pre-
+diction problem, the properties of the multi-bandit architecture, its
+dynamics, and its performance.
+5.1
+Domain characterization
+We explored the performance landscape of the DTI domain and the
+possibility of multi-task improvements by estimating the base case
+scenarios of Section 4.3.1 (see Figure 2) .
+Figure 2: Task-by-task comparison of AUPR performances of the
+single-task (horizontal axis), multi-task and the best and worst of the
+pairwise and leave-one-out cases (vertical axis).
+The detailed pairwise transfer effects are illustrated in Figure 3.
+The variances of the performance metrics have a major impact on
+the number of necessary train-test data splits for reliable performance
+estimation and model selection. Figure 4 shows the sample sizes and
+the standard deviations of the tasks, which are a major factor deter-
+mining their variances.
+5.2
+Static properties of BandiK
+The generated candidate auxiliary subsets (see Section 4.3.2) for a
+given task are illustrated in Figure 5 and 6. A histogram of the sizes
+of all generated candidate auxiliary subsets are shown in Figure 7.
+5.3
+Dynamics of BandiK
+The performances of the individual bandits corresponding to the tar-
+get tasks are shown in Figure 8. The final best arms are used as refer-
+ences and the simple regret, the selection error of a non-optimal arm
+in a given bandit, and the selection error of any non-optimal arm in
+the multi-bandit [11, 22] are shown.
+We also investigated the effects of the semi-overlapping arms in
+BandiK, i.e., the effect of shared neural networks between the bandits
+in the multi-bandit structure. Figure 9 shows the number of pulls per
+bandits and the ratio of own pulls versus other pulls originating from
+such semi-overlapping arms.
+The learning process in the GapE-V method is driven by the gaps
+between the expected values of the arms, specifically by the gap be-
+tween the two top arms, and their variances. Figure 10 illustrates the
+relation between the number of pulls, gaps, and variances. The pulls
+are separated according to their origin: coming from the pull of the
+arm of the actual bandit or from the pull of a semi-overlapping arm
+of another bandit. Table 1 shows the ratios of own and total pulls for
+each bandits/tasks.
+task
+own pulls
+induced pulls
+ratio of own pulls
+0
+12630
+60273
+20.95%
+1
+2848
+60293
+4.72%
+2
+2263
+69719
+3.25%
+3
+1344
+64094
+2.10%
+4
+22035
+61406
+35.88%
+5
+7805
+61119
+12.77%
+6
+808
+58277
+1.39%
+7
+5533
+54378
+10.18%
+8
+8136
+68726
+11.84%
+9
+4134
+60873
+6.79%
+10
+872
+68127
+1.28%
+11
+3716
+69973
+5.31%
+12
+1721
+60494
+2.84%
+13
+4379
+58220
+7.52%
+14
+2076
+70694
+2.94%
+15
+3215
+60287
+5.33%
+16
+1804
+69516
+2.60%
+17
+7122
+68042
+10.47%
+18
+9867
+58904
+16.75%
+19
+6176
+57290
+10.78%
+20
+32224
+56309
+57.23%
+21
+9292
+68301
+13.60%
+TOTAL
+150000
+1385315
+10.83%
+Table 1: The number of own and total pulls and their ratio for each
+task.
+Figure 3: The pairwise transfer effects between tasks (difference of
+the AUROC and AUPR metrics, between the paired and single-task
+cases) The differences for the full multi-task case are also included
+in the column denoted by ’M’.
+
+Figure 4: The estimated standard deviations and the sample sizes for
+the tasks (estimates based on 500 data splits in Monte Carlo CV).
+Figure 5: The candidate auxiliary task subsets for a given target task
+(task 19) illustrated in a trie. The octagon-shaped node represents
+the root task from which the graph searches were started, rectangular
+nodes denote leaf nodes (i.e. endings of candidate sets).
+5.4
+Output of BandiK
+The best performances of various types of candidate auxiliary task
+subsets for each task are shown in Figure 11 for the AUPR and AU-
+ROC measures.
+Figure 12 shows the distributions of the performances of the arms
+for each multi-armed bandit (corresponding to tasks), again using the
+single-task case as reference point.
+Figure 6: Candidate auxiliary task subsets (i.e. neural networks) in
+a matrix for target 19 (columns correspond to sets/networks, rows
+correspond to auxiliary tasks.)
+Figure 7: Histogram of the size of the candidate auxiliary task subsets.
+Blue represents the heuristic candidate sets, while orange denotes the
+base-cases: single, pairwise, leave-one-out and full multi-task.
+Figure 8: Performances (simple regret, red line) of individual bandits
+corresponding to the target tasks throughout learning and the number
+of own (orange) and induced (purple) pulls on the best arm and their
+sum (green).
+The best candidate auxiliary subsets, are shown in Figure 13. Note
+that the cross signs in the diagonal indicate when the best network
+comes from its own candidate set.
+The distribution of the best candidate auxiliary sets according to
+the origin of candidate set generation is shown in Figure 14. The
+properties of the best candidate auxiliary sets are summarized in Ta-
+ble 2.
+
+Figure 9: Number of pulls by the type of candidate sets for each ban-
+dit (corresponding to tasks); numbers are normalized by the number
+of candidate sets of each type. Left: pulls directly initiated by the
+given arm (own pulls), left: pulls from which the arm received a sam-
+ple (induced pulls).
+6
+Discussion
+The exploration of the baseline performances (Q1), the single, pair-
+wise, and multi-task learning scenarios indicated the possibility of
+improvements (Q1), see Figure 2.
+The pairwise task landscape (Q2) confirmed other studies about
+the existence of central auxiliary tasks, which are useful auxiliary
+tasks for many other tasks, tasks, which can utilize many other tasks,
+and the existence of tasks, which seems unrelated to all other tasks
+using a pairwise task-task similarity approach (see task 4, 20 Fig-
+ure 3.
+The variances of the task performances were surprisingly high,
+which could be related to the highly incomplete and missing-not-at-
+random property of the DTI domain; furthermore, the variances were
+highly varying (Q3), see Figure 4.
+We explored a wide range of heuristics to generate a fixed list
+of candidate auxiliary subsets (Q4); however, their redundancy in-
+dicated a high-level consistency in the domain, see Figure 5 and 6.
+The distributions of pulls and convergence rates over individual
+bandits throughout learning were in line with the theoretical expec-
+tations and confirmed the sufficiency of the applied simulation length
+(Q5), see e.g. Figure 8 and 10.
+The novel feature of BandiK, the semi-overlapping arms between
+bandits, proved to be extremely useful, also in the training process
+(Q6). Figure 9 and Table 1 show the ratio of such overlap pulls (dom-
+Figure 10: The relation between the number of pulls, gaps, and vari-
+ances (the pulls are separated according to their origin corresponding
+to its own arm or to a semi-overlapping arm).
+Figure 11: Best performances of various types of AUPR performances
+of candidate auxiliary task subsets for each task compared to the
+single-task case.
+Figure 12: Distribution of performances of arms (corresponding to
+cadidate auxiliary sets) for each multi-armed bandit for the AUPR
+metric.
+inated by external pulls).
+The performances of candidate auxiliary task sets and the fi-
+nal results also confirmed the fundamental importance of the semi-
+overlapping nature of BandiK: Figure 14 shows that 18 of the 22
+tasks have an externally generated best network (Q7).
+The types of the best networks indicate that complex generation
+methods, including aspects of multi-task consistency, positive and
+negative tranfer, and filtering are all useful (Q8), see Table 2 and
+Figure 14. This suggests that shared latent features, and not shared
+data, are behind large parts of the transfer effects (we minimized the
+
+Figure 13: The best candidate auxiliary subset for each task. Rows
+correspond to target tasks, cross sign indicates the origin (the gener-
+ator) of the candidate auxiliary subset, red denotes the members of
+the set (network). Set sizes are displayed in parentheses.
+Table 2: Final selected candidate sets per task. The columns corre-
+spond to the metric used for evaluation, the type of transfer matrix
+used, the test used for including edges in the graph (see 4.3.1) the
+search algorithm to choose candidates and finally the original task
+for which the candidate has been designed. If the first cell is empty it
+means that the same candidate set as the previous was found twice.
+Task
+Metric
+Graph
+Test
+Search
+Start Search
+0
+AUPR
++
+diff
+NEIGHBOURS
+0
+1
+AUROC
+-
+diff
+CLIQUE
+7
+2
+AUPR
+-
+tt
+NEIGHBOURS
+4
+3
+AUPR
++
+nem
+TRANSITIVE
+13
+4
+AUROC
+-
+diff
+FILTERED
+4
+5
+AUPR
+-
+diff
+NEIGHBOURS
+10
+6
+AUPR
+-
+diff
+CLIQUE
+0
+AUPR
+-
+diff
+CLIQUE
+3
+7
+AUROC
+-
+diff
+CLIQUE
+13
+8
+AUROC
++
+tt
+FILTERED
+1
+9
+AUROC
+-
+diff
+CLIQUE
+9
+10
+AUPR
++
+diff
+NEIGHBOURS
+17
+11
+AUROC
++
+nem
+FILTERED
+12
+12
+AUROC
++
+diff
+NEIGHBOURS
+17
+13
+AUPR
+-
+diff
+NEIGHBOURS
+14
+14
+AUPR
++
+diff
+NEIGHBOURS
+2
+15
+AUPR
+-
+diff
+CLIQUE
+5
+16
+AUPR
+-
+tt
+FILTERED
+17
+17
+AUPR
++
+tt
+FILTERED
+1
+AUPR
++
+nem
+TRANSITIVE
+1
+18
+AUROC
++
+nem
+FILTERED
+5
+AUROC
++
+nem
+NEIGHBOURS
+5
+19
+AUPR
++
+diff
+CLIQUE
+19
+20
+AUPR
++
+diff
+NEIGHBOURS
+7
+21
+AUPR
++
+diff
+NEIGHBOURS
+21
+cross-optimization effects using sufficiently lengthy training). How-
+ever, our results also indicate that in special quantitative domains,
+such as in drug-target interaction prediction, explicit modeling of la-
+tent features, specifically the modeling of drug-target mechanisms,
+could be essential to understand, detect, and avoid negative transfer
+(Q9) [14, 29, 4].
+Figure 14: The distribution of the best candidate auxiliary sets ac-
+cording to the origin of its generation. The first group correspond to
+the metric used for evaluation, the second group indicates the type of
+transfer matrix used, and the third grouping is based on the test used
+for including edges in the graph (see 4.3.1). The last group shows
+the chosen candidates as a proportion of search algorithm used (see
+4.3.2).
+The performances of candidate auxiliary task sets resulted in a sig-
+nificant improvement for each task, see Figure 11.
+7
+Conclusion
+We introduced BandiK, a novel three-stage multi-task auxiliary task
+subset selection method using multi-bandits, where each arm pull
+evaluates candidate auxiliary sets by training and testing a multiple
+output neural network on a single random train-test dataset split. To
+enhance efficiency, BandiK integrates these individual task-specific
+MABs into a multi-bandit structure, which coordinates the selection
+process across tasks and ensures a globally efficient task subset se-
+lection for all the tasks. The proposed multi-bandit solution exploits
+that the same neural network realizes multiple arms of different in-
+dividual bandits corresponding to a given candidate set. This semi-
+overlapping arm property defines a novel multi-bandit cost/reward
+structure utilized in BandiK.
+We validated our approach using a drug-target interaction bench-
+mark. The results show that our methodology facilitates a computa-
+tionally efficient task decomposition, making it a scalable solution
+for complex multi-task learning scenarios. These could include more
+advanced methods modeling the task dependency-independency
+structure, usage of task similarity metrics, which can cope with
+the high-level incompleteness, and the use of adaptive construction
+methods already applied in neural architecture search. The compu-
+tational efficiency of BandiK could be a key to scale up the current
+approach using fixed candidate auxiliary task sets to a full-fledged
+Monte Carlo Tree Search method.
+Acknowledgements
+This study was supported by the European Union project RRF-2.3.1-
+21-2022-00004 within the framework of the Artificial Intelligence
+National Laboratory.
+References
+[1] M. Agarwal, V. Aggarwal, A. K. Umrawal, and C. J. Quinn. Stochastic
+top k-subset bandits with linear space and non-linear feedback with ap-
+plications to social influence maximization. ACM/IMS Transactions on
+Data Science (TDS), 2(4):1–39, 2022.
+[2] Q. Al-Tashi, S. J. Abdulkadir, H. M. Rais, S. Mirjalili, and H. Alhussian.
+Approaches to multi-objective feature selection: A systematic literature
+review. IEEE Access, 8:125076–125096, 2020.
+[3] A. Arany, J. Simm, M. Oldenhof, and Y. Moreau. Sparsechem: Fast and
+accurate machine learning model for small molecules. arXiv preprint
+arXiv:2203.04676, 2022.
+
+[4] P. Bai, F. Miljkovi´c, B. John, and H. Lu. Interpretable bilinear atten-
+tion network with domain adaptation improves drug–target prediction.
+Nature Machine Intelligence, 5(2):126–136, 2023.
+[5] S. Ben-David, J. Blitzer, K. Crammer, A. Kulesza, F. Pereira, and J. W.
+Vaughan. A theory of learning from different domains. Machine learn-
+ing, 79:151–175, 2010.
+[6] S. Bubeck, V. Chandrasekaran, R. Eldan, J. Gehrke, E. Horvitz, E. Ka-
+mar, P. Lee, Y. T. Lee, Y. Li, S. Lundberg, et al.
+Sparks of artifi-
+cial general intelligence: Early experiments with gpt-4. arXiv preprint
+arXiv:2303.12712, 2023.
+[7] N. Cesa-Bianchi and G. Lugosi. Combinatorial bandits. Journal of
+Computer and System Sciences, 78(5):1404–1422, 2012.
+[8] Z. Chen, V. Badrinarayanan, C.-Y. Lee, and A. Rabinovich. Gradnorm:
+Gradient normalization for adaptive loss balancing in deep multitask
+networks. In International conference on machine learning, pages 794–
+803. PMLR, 2018.
+[9] Y. Du, L. Huang, and W. Sun. Multi-task representation learning for
+pure exploration in linear bandits. In International Conference on Ma-
+chine Learning, pages 8511–8564. PMLR, 2023.
+[10] C. Fifty, E. Amid, Z. Zhao, T. Yu, R. Anil, and C. Finn. Efficiently
+identifying task groupings for multi-task learning. Advances in Neural
+Information Processing Systems, 34:27503–27516, 2021.
+[11] V. Gabillon, M. Ghavamzadeh, A. Lazaric, and S. Bubeck. Multi-bandit
+best arm identification.
+Advances in Neural Information Processing
+Systems, 24, 2011.
+[12] T. Galanti, A. György, and M. Hutter. Improved generalization bounds
+for transfer learning via neural collapse.
+In First Workshop on Pre-
+training: Perspectives, Pitfalls, and Paths Forward at ICML 2022, 2022.
+[13] H. Guo, R. Pasunuru, and M. Bansal.
+Autosem: Automatic
+task selection and mixing in multi-task learning.
+arXiv preprint
+arXiv:1904.04153, 2019.
+[14] K. Huang, C. Xiao, L. M. Glass, and J. Sun. Moltrans: molecular inter-
+action transformer for drug–target interaction prediction. Bioinformat-
+ics, 37(6):830–836, 2021.
+[15] S. Liu, Y. Liang, and A. Gitter. Loss-balanced task weighting to reduce
+negative transfer in multi-task learning. In Proceedings of the AAAI con-
+ference on artificial intelligence, volume 33, pages 9977–9978, 2019.
+[16] G. Lugosi, O. Papaspiliopoulos, and G. Stoltz. Online multi-task learn-
+ing with hard constraints. arXiv preprint arXiv:0902.3526, 2009.
+[17] A. Mayr, G. Klambauer, T. Unterthiner, M. Steijaert, J. K. Wegner,
+H. Ceulemans, D.-A. Clevert, and S. Hochreiter. Large-scale compari-
+son of machine learning methods for drug target prediction on chembl.
+Chemical science, 9(24):5441–5451, 2018.
+[18] Z. Meng, X. Yao, and L. Sun. Multi-task distillation: Towards mitigat-
+ing the negative transfer in multi-task learning. In 2021 IEEE Interna-
+tional Conference on Image Processing (ICIP), pages 389–393. IEEE,
+2021.
+[19] S. Mukherjee, Q. Xie, J. Hanna, and R. Nowak. Multi-task represen-
+tation learning for pure exploration in bilinear bandits. Advances in
+Neural Information Processing Systems, 36, 2024.
+[20] A. Pentina and C. H. Lampert. Multi-task learning with labeled and
+unlabeled tasks.
+In International Conference on Machine Learning,
+pages 2807–2816. PMLR, 2017.
+[21] I. Rejwan and Y. Mansour. Top-k combinatorial bandits with full-bandit
+feedback.
+In Algorithmic Learning Theory, pages 752–776. PMLR,
+2020.
+[22] J. Scarlett, I. Bogunovic, and V. Cevher.
+Overlapping multi-bandit
+best arm identification.
+In 2019 IEEE International Symposium on
+Information Theory (ISIT), pages 2544–2548. IEEE, 07 2019.
+doi:
+10.1109/ISIT.2019.8849327.
+[23] O. Sener and V. Koltun. Multi-task learning as multi-objective opti-
+mization. Advances in neural information processing systems, 31, 2018.
+[24] P. G. Sessa, P. Laforgue, N. Cesa-Bianchi, and A. Krause. Multitask
+learning with no regret: from improved confidence bounds to active
+learning.
+Advances in Neural Information Processing Systems, 36,
+2024.
+[25] J. Shao. Linear model selection by cross-validation. Journal of the
+American statistical Association, 88(422):486–494, 1993.
+[26] J. Simm, L. Humbeck, A. Zalewski, N. Sturm, W. Heyndrickx,
+Y. Moreau, B. Beck, and A. Schuffenhauer. Splitting chemical structure
+data sets for federated privacy-preserving machine learning. Journal of
+cheminformatics, 13(1):1–14, 2021.
+[27] T. Standley, A. Zamir, D. Chen, L. Guibas, J. Malik, and S. Savarese.
+Which tasks should be learned together in multi-task learning? In Inter-
+national Conference on Machine Learning, pages 9120–9132. PMLR,
+2020.
+[28] S. Subramanian, A. Trischler, Y. Bengio, and C. J. Pal. Learning general
+purpose distributed sentence representations via large scale multi-task
+learning. arXiv preprint arXiv:1804.00079, 2018.
+[29] J. Wang and N. V. Dokholyan. Yuel: Improving the generalizability
+of structure-free compound–protein interaction prediction. Journal of
+Chemical Information and Modeling, 62(3):463–471, 2022.
+[30] J. Wang, C. Lou, G. Liu, W. Li, Z. Wu, and Y. Tang. Profiling pre-
+diction of nuclear receptor modulators with multi-task deep learning
+methods: toward the virtual screening. Briefings in Bioinformatics, 23
+(5):bbac351, 2022.
+[31] S. Wu, H. R. Zhang, and C. Ré. Understanding and improving informa-
+tion transfer in multi-task learning. arXiv preprint arXiv:2005.00944,
+2020.
+[32] D. Xin, B. Ghorbani, J. Gilmer, A. Garg, and O. Firat. Do current multi-
+task optimization methods in deep learning even help? Advances in
+Neural Information Processing Systems, 35:13597–13609, 2022.
+[33] Y. Xu, J. Ma, A. Liaw, R. P. Sheridan, and V. Svetnik.
+Demystify-
+ing multitask deep neural networks for quantitative structure–activity
+relationships. Journal of chemical information and modeling, 57(10):
+2490–2504, 2017.
+[34] E. Yang, J. Pan, X. Wang, H. Yu, L. Shen, X. Chen, L. Xiao, J. Jiang,
+and G. Guo. Adatask: A task-aware adaptive learning rate approach to
+multi-task learning. In Proceedings of the AAAI Conference on Artificial
+Intelligence, volume 37, pages 10745–10753, 2023.
+[35] T. Yu, S. Kumar, A. Gupta, S. Levine, K. Hausman, and C. Finn. Gra-
+dient surgery for multi-task learning. Advances in Neural Information
+Processing Systems, 33:5824–5836, 2020.
+[36] W. Zhang, L. Deng, L. Zhang, and D. Wu. A survey on negative transfer.
+IEEE/CAA Journal of Automatica Sinica, 2022.
+[37] F. Zhou, C. Shui, M. Abbasi, L.-É. Robitaille, B. Wang, and C. Gagné.
+Task similarity estimation through adversarial multitask neural network.
+IEEE Transactions on Neural Networks and Learning Systems, 32(2):
+466–480, 2020.

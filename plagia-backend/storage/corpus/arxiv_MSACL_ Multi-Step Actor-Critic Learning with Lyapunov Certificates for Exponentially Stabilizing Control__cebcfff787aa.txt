@@ -1,0 +1,2921 @@
+1
+MSACL: Multi-Step Actor-Critic Learning with Lyapunov
+Certificates for Exponentially Stabilizing Control
+Yongwei Zhang, Yuanzhe Xing, Quan Quan, Senior Member, IEEE, and Zhikun She
+Abstract—Achieving provable stability guarantees in model-
+free reinforcement learning (RL) for control systems remains
+a fundamental challenge, particularly in balancing exploration
+efficiency with rigorous safety requirements. This article intro-
+duces MSACL, a novel framework that seamlessly integrates
+exponential stability theory with maximum entropy reinforce-
+ment learning through multi-step Lyapunov certificate learning.
+Unlike conventional approaches that rely on complex reward
+engineering or single-step constraints, MSACL leverages off-
+policy multi-step trajectory data to learn Lyapunov certificates
+that strictly satisfy theoretical stability conditions. By introducing
+the concept of Exponential Stability Labels (ESL) and a λ-
+weighted aggregation mechanism, the framework effectively bal-
+ances the bias-variance trade-off inherent in multi-step learning.
+Policy optimization is subsequently guided by a stability-aware
+advantage function, which ensures that the learned policy π
+promotes the rapid descent of the Lyapunov certificate. We
+rigorously evaluate the proposed method across six benchmark
+environments, encompassing four stabilization tasks and two
+high-dimensional nonlinear tracking scenarios. The experimental
+results demonstrate consistent superiority over baseline RL algo-
+rithms and state-of-the-art Lyapunov-based RL algorithms. Re-
+markably, MSACL achieves both exponential stability and rapid
+convergence under simple, intuitive reward structures, while
+exhibiting significant robustness to environmental uncertainties
+and exceptional generalization to unseen reference trajectories.
+Our sensitivity analysis reveals that the multi-step horizon n is a
+critical factor in stability learning, with n = 20 established as a
+robust default across diverse dynamical systems. By establishing
+a rigorous connection between Lyapunov stability theory and off-
+policy actor-critic frameworks, MSACL provides a foundational
+approach for developing verifiably safe learning-based controllers
+in safety-critical applications. To facilitate reproducibility and
+further research, the source code and benchmark environments
+of MSACL will be made publicly available soon.
+Index Terms—Model-free control, Exponential stability, Lya-
+punov certificates, Multi-step data collection and utilization, Off-
+policy RL, Maximum entropy RL.
+I. INTRODUCTION
+R
+EINFORCEMENT learning (RL) has emerged as a
+powerful paradigm for controlling complex, nonlinear
+dynamical systems without requiring analytical models [1].
+Despite its empirical success in high-dimensional tasks [2],
+Yongwei Zhang, Yuanzhe Xing and Zhikun She are with the School of
+Mathematical Sciences, Beihang University, Beijing 100191, China (e-mail:
+{zhangyongwei, mathXyz, zhikun.she}@buaa.edu.cn). Yongwei Zhang and
+Yuanzhe Xing contributed equally to this work.
+Quan Quan is with the School of Automation Science and Elec-
+trical Engineering, Beihang University, Beijing 100191, China (e-mail:
+qq buaa@buaa.edu.cn).
+Corresponding authors: Quan Quan and Zhikun She.
+This work was supported by the National Key Research and Development
+Program of China (No. 2022YFA1005103), National Natural Science Foun-
+dation of China (NSFC 12371452, NSFC 12401574).
+[3], the widespread deployment of RL in safety-critical appli-
+cations, including autonomous driving and human-robot inter-
+action, remains constrained by the lack of formal reliability
+guarantees [4], [5]. In these domains, stability is not merely
+a desirable metric but an imperative constraint; failure to
+maintain the system within a safe operating region can lead to
+catastrophic consequences. While approaches like constrained
+Markov Decision Processes (cMDPs) [6], [7] and Hamilton-
+Jacobi reachability analysis [8], [9] offer partial solutions,
+certificate-based methods have established themselves as the
+gold standard for verifying learning agents. By leveraging
+rigorous control-theoretic tools, specifically Lyapunov func-
+tions for asymptotic stability [10], [11] and control barrier
+functions (CBFs) for set invariance [12], [13], these methods
+provide concise, data-driven proofs that guarantee the system
+will converge to an equilibrium or remain strictly within safety
+boundaries, offering a level of assurance that standard reward-
+driven learning cannot match.
+The synthesis of stability and safety certificates has under-
+gone a paradigm shift from computationally expensive ana-
+lytical methods, such as sum-of-squares (SOS) optimization
+with its inherent restriction to polynomial dynamics [14], to
+scalable neural approaches. Around 2018, foundational work
+on neural certificates emerged, marking a turning point in
+bridging black-box learning with verifiable control. Early ef-
+forts by Berkenkamp et al. [15] employed Gaussian Processes
+(GP) to learn Lyapunov functions for safe exploration, while
+Richards et al. [16] and Chow et al. [17] developed theoretical
+frameworks for synthesizing Lyapunov functions to estimate
+regions of attraction. These studies established that Lyapunov
+certificates as well as barrier-based counterparts provide a
+rigorous mathematical foundation for analyzing the stability
+and safety of nonlinear systems. Building on this verification-
+centric perspective, recent research has advanced toward the
+joint synthesis of policies and certificates: Chang et al. [18], for
+instance, showed that a neural certificate can act as a “critic”
+or supervision signal during training, directly guiding policy
+learning to satisfy formal stability conditions. This evolution
+underscores the dual role of learned certificates, which not
+only enable post-hoc safety verification but also actively shape
+the learning process to ensure stability and safety by design,
+offering guarantees that standard trial-and-error reinforcement
+learning cannot provide.
+To enable effective learning in complex continuous spaces,
+we build our approach upon the framework of Maximum
+Entropy Reinforcement Learning (MERL). Algorithms such
+as Soft Actor-Critic (SAC) [19] and its distributional variants
+like DSAC [20], [21] maximize not just the expected return
+but also the entropy of the policy. This entropy regularization
+arXiv:2512.24955v1 [cs.LG] 31 Dec 2025
+
+2
+encourages robust exploration and prevents the policy from
+converging prematurely to suboptimal deterministic behaviors.
+Given its superior sample efficiency and robustness to distur-
+bances, the maximum entropy framework serves as an ideal
+substrate for developing advanced, stability-aware control al-
+gorithms.
+However, standard model-free RL algorithms, including
+DDPG [22], TRPO [23], PPO [24], TD3 [25], D4PG [26],
+SAC, and DSAC, face significant limitations when applied to
+stabilization or tracking tasks. First, they lack intrinsic stability
+guarantees; since policies trained via these methods optimize
+solely for scalar reward maximization, stability is essentially
+an incidental byproduct that is achieved only when the agent
+implicitly discovers stable behaviors during the exploration
+process, rather than being structurally enforced. Second, the
+efficacy of these algorithms relies heavily on exhaustive reward
+engineering, requiring practitioners to laboriously calibrate co-
+efficients for state deviation, control effort, and auxiliary terms
+to elicit stable behavior. Our proposed framework, MSACL
+(Multi-Step Actor-Critic Learning with Lyapunov Certificates),
+directly addresses these shortcomings. By adopting a formu-
+lation rooted in quadratic performance functionals such as
+LQR-like costs, MSACL eliminates the need for heuristic
+reward shaping. Most importantly, it guarantees stability by
+design, ensuring that the synthesized controller is not only
+high-performing but also mathematically certifiable.
+While Lyapunov-based RL algorithms have been proposed
+to mitigate the two issues above, existing methods exhibit
+distinct shortcomings. The Policy Optimization with Lyapunov
+Certificates (POLYC) [27] algorithm offers theoretical guar-
+antees but relies on on-policy learning, which results in pro-
+hibitive sample complexity for physical systems. Conversely,
+the Lyapunov-based Actor-Critic (LAC) [28] algorithm intro-
+duces an off-policy approach but fundamentally misaligns the
+objective: it minimizes a stability risk rather than a compre-
+hensive control cost. This often leads to aggressive controllers
+that stabilize the system at the cost of excessive control effort,
+rendering them impractical for real-world actuators. Moreover,
+POLYC and LAC typically certify only asymptotic stability, a
+relatively weaker stability notion that ensures convergence but
+lacks the guaranteed exponential rate of decay. In practice,
+this guarantees eventual convergence but fails to impose a
+minimum convergence rate, often resulting in sluggish tran-
+sient responses unacceptable for high-performance tasks. To
+overcome these limitations, MSACL is built upon an off-policy
+framework [29], [30], significantly improving data efficiency
+by leveraging historical agent-environment interaction data.
+Unlike LAC, MSACL optimizes a comprehensive objective
+covering both state regulation and control effort while enforc-
+ing exponential stability, which guarantees faster convergence
+rates and rigorous stability margins.
+Another critical innovation of our approach is the utiliza-
+tion of multi-step data. Existing RL and Lyapunov-based
+methods typically rely on single-step transitions to enforce
+learning constraints. This pointwise reliance is susceptible
+to significant discretization errors when approximating the
+continuous-time Lie derivative of the Lyapunov function,
+particularly in the presence of local noise. To mitigate this
+and capture long-horizon dynamics, we introduce a multi-
+step learning mechanism. By training on n-step trajectories,
+we effectively bridge the gap between temporal difference
+learning and rigorous stability verification. We integrate this
+multi-step data with exponential stability theory to form a
+robust constraint mechanism. This allows the agent to learn a
+Lyapunov function that certifies exponential convergence over
+trajectory segments, rather than just instantaneous descent,
+thereby reconciling rigorous stability requirements with the
+need for flexible exploration.
+In summary, this article presents a comprehensive RL
+framework for model-free exponentially stabilizing control.
+The main contributions are summarized as follows:
+(i) Exponential
+Stability
+Guarantee
+via
+Multi-Step
+Learning: We introduce the MSACL framework, which
+integrates exponential stability conditions into Lyapunov
+certificate learning using a multi-step data utilization
+mechanism. By employing Exponential Stability La-
+bels (ESL), our approach enforces that the system
+state converges to the equilibrium exponentially, provid-
+ing stronger performance guarantees than conventional
+asymptotic convergence methods.
+(ii) Sample-Efficient Off-Policy Framework: Developed
+within the maximum entropy RL paradigm, our frame-
+work enables efficient off-policy learning. By incorpo-
+rating trajectory-wise importance sampling to correct for
+distribution shifts, MSACL allows for effective reuse of
+historical interaction data, significantly reducing sample
+complexity compared to existing on-policy Lyapunov-
+based RL algorithms.
+(iii) Comprehensive Benchmarking System: We developed
+a diverse suite of six nonlinear dynamical environments,
+spanning four stabilization tasks (e.g., VanderPol) and
+two high-dimensional tracking tasks (e.g., Quadrotor Tra-
+jectory Tracking), to rigorously evaluate and provide a
+standard for Lyapunov-based RL algorithms.
+(iv) Robustness
+and
+Generalization
+Verification:
+Our
+methodology
+demonstrates
+significant
+resilience
+to
+stochastic process noise and parametric uncertainties.
+Furthermore, in tracking scenarios, the learned neural
+policies exhibit robust generalization capabilities, main-
+taining high-precision performance even when navigating
+geometrically distinct, unseen reference trajectories.
+(v) Bias-Variance Trade-off Analysis: We provide a sys-
+tematic analysis of the multi-step horizon parameter n
+and its impact on stability learning. Through the introduc-
+tion of λ-weighted aggregation, we effectively manage
+the trade-off between estimation bias (associated with
+small n) and sampling variance (associated with large
+n), establishing as a robust heuristic for diverse control
+applications.
+The remainder of this article is organized as follows. Section
+II formulates the stabilization and tracking problems and
+establishes the theoretical foundations, including the criteria
+for exponential stability and the maximum entropy reinforce-
+ment learning framework. Section III details the methodology
+for learning the Lyapunov certificate, specifically describing
+
+3
+the multi-step data collection strategy and the loss functions
+designed to enforce formal stability conditions. Section IV
+presents the learning process for the neural control policy,
+deriving the optimization objectives for the soft Q-networks,
+the policy network, and the temperature coefficient. Section
+V reports the experimental results, providing a comprehensive
+comparison with baseline algorithms across six benchmark en-
+vironments, followed by an evaluation of robustness, general-
+ization capabilities, and parameter sensitivity. Finally, Section
+VI provides a discussion on the underlying design philosophy
+and concludes the article.
+II. PRELIMINARIES
+In this section, we establish the theoretical foundations
+for the proposed MSACL framework. We first define the
+stabilization and tracking problems for unknown discrete-time
+systems. Subsequently, the concept of exponential stability is
+introduced along with a Lyapunov-based certificate lemma,
+providing the criteria for convergence guarantees. Finally, we
+present the maximum entropy reinforcement learning frame-
+work, bridging Lyapunov-based control with model-free actor-
+critic optimization.
+A. Problem Statement
+In this article, we study the stabilization and tracking prob-
+lems for general discrete-time deterministic control systems:
+xt+1 = f(xt, ut),
+(1)
+where xt ∈X ⊆Rn denotes the state at time t, ut ∈U ⊆
+Rm represents the control input, X and U denote the sets of
+admissible states and control inputs, respectively, and f : X ×
+U →X is the flow map. We assume that f is unknown in our
+setting, thus focusing on model-free control. It is worth noting
+that the discrete-time framework presented in this article can
+be similarly extended to the continuous-time case; interested
+readers may refer to [10] and [27] for further details.
+In the context of control systems, our objective is to
+find a state feedback policy π : X
+→U such that the
+control input ut = π(xt) renders the closed-loop system
+xt+1 = f(xt, π(xt)) to satisfy desired properties (e.g., sta-
+bility, safety). For clarity, we consider the scenario where the
+state xt is fully observable, and the policy π is a time-invariant
+mapping. Specifically, we focus on tasks including
+• Stabilization: The objective is to find a policy π such that
+the state ultimately converges to a target state xg ∈X.
+Without loss of generality, we assume xg to be the origin,
+i.e., xg = 0.
+• Tracking: The goal is to find a policy π such that the
+state xt eventually converges to a reference signal xref
+t
+(which may represent a desired trajectory, velocity, or
+attitude). We define the tracking error as et = xt −xref
+t ,
+thereby transforming the tracking task into a stabilization
+task where et must converge to zero.
+In brief, the core problem addressed in this article is
+formulated as follows:
+Problem 1: For the control system (1), find a policy π
+such that: (i) in stabilization tasks, xt →0; (ii) in tracking
+tasks, et →0. Moreover, the policy should be optimized to
+achieve the fastest possible convergence rate (e.g., exponential
+stability).
+B. Exponential Stability and Lyapunov Certificates
+Definition 1: For the control system (1), the equilibrium
+point xg = 0 is said to be exponentially stable if there exist
+constants C > 0 and 0 < η < 1 such that
+∥xt −xg∥≤Cηt∥x0 −xg∥,
+∀x0 ∈X0,
+(2)
+where x0 ∈X0 ⊆X denotes the initial state and t ∈Z≥0.
+To guarantee that a closed-loop system is exponentially
+stable with respect to xg, we introduce the following lemma:
+Lemma 1: For the control system (1), if there exists a
+continuous function V
+: X
+7→R and positive constants
+α1, α2 > 0 and 0 < α3 < 1 satisfying:
+α1∥xt∥2 ≤V (xt) ≤α2∥xt∥2,
+V (xt+1) −V (xt) ≤−α3V (xt),
+(3)
+for all t ∈Z≥0, where xt+1 = f(xt, ut), then the origin
+xg = 0 is exponentially stable. The function V is referred
+to as an exponentially stabilizing control Lyapunov function
+(ESCLF) [10], [31].
+Proof: From the condition V (xt+1) ≤(1 −α3)V (xt), we
+can iteratively derive the multi-step relationship:
+V (xt+1) ≤(1 −α3)V (xt),
+V (xt+2) ≤(1 −α3)V (xt+1) ≤(1 −α3)2V (xt),
+...
+V (xt+n) ≤(1 −α3)V (xt+n−1) ≤· · · ≤(1 −α3)nV (xt).
+(4)
+By incorporating the lower and upper quadratic bounds
+α1∥xt∥2 ≤V (xt) ≤α2∥xt∥2, it follows that:
+∥xt+n∥≤
+rα2
+α1
+(1 −α3)n/2∥xt∥.
+(5)
+Specifically, by setting the initial time to t = 0 and denoting
+the current time step as n = t ∈Z≥0, we obtain:
+∥xt∥≤
+rα2
+α1
+(1 −α3)t/2∥x0∥.
+Defining C =
+p
+α2/α1 and η = √1 −α3, the result satisfies
+Definition 1, thereby proving that the control system (1) is
+exponentially stable with respect to xg = 0.
+C. Standard RL and Maximum Entropy RL
+In the reinforcement learning framework, the control system
+(1) is interpreted as a discrete-time deterministic environment,
+where X and U represent continuous state and action spaces,
+respectively. The application of control inputs to the system
+(1) corresponds to an agent interacting with this environment.
+Specifically, at each time step t, the agent observes the state
+xt and executes an action ut according to a policy π. Given a
+reward function r : X × U →R, which is typically designed
+to penalize deviations from the target state xg or reference
+xref
+t
+in accordance with Problem 1, the environment returns a
+
+4
+scalar reward rt := r(xt, ut) and transitions to the next state
+xt+1. Consequently, the interaction sequence is denoted by the
+transition tuple (xt, ut, rt, xt+1).
+While classical control often employs deterministic laws,
+this article utilizes stochastic policies to facilitate exploration
+and robustness within the maximum entropy RL (MERL)
+framework. A stochastic policy is defined as a mapping
+π : X →P(U), where ut ∼π(·|xt) is sampled from a
+probability distribution. We denote the state and state-action
+marginals induced by π as ρπ(xt) and ρπ(xt, ut), respectively.
+Unlike standard RL, which maximizes the expected cumulative
+discounted reward, MERL optimizes an entropy-augmented
+objective:
+Jπ =
+E
+(xi≥t,ui≥t)∼ρπ
+" ∞
+X
+i=t
+γi−t [ri + αH(π(·|xi))]
+#
+,
+(6)
+where γ ∈[0, 1) is the discount factor, α > 0 is the
+temperature coefficient governing the trade-off between reward
+and exploration, and H(π(·|x)) = Eu∼π(·|x)[−log π(u|x)] is
+the policy entropy.
+The corresponding soft Q-function, Qπ(xt, ut), represents
+the expected soft return, which comprises both rewards and
+entropy terms, starting from (xt, ut) and following π there-
+after. The soft Bellman operator T π is defined as:
+T πQπ(xt, ut) ≜rt + γ
+E
+ut+1∼π
+h
+Qπ(xt+1, ut+1)
+−α log π(ut+1|xt+1)
+i
+,
+(7)
+where xt+1 = f(xt, ut). In the soft policy iteration (SPI)
+algorithm [19], the policy is optimized by alternating between
+soft policy evaluation, where Qπ is updated via iterative
+application of T π, and soft policy improvement, which is
+equivalent to finding a policy π that maximizes the soft Q-
+function augmented with an entropy term for xt:
+πnew = arg max
+π
+E
+xt∼ρπ,ut∼π [Qπold(xt, ut) −α log π(ut|xt)] .
+(8)
+Although SPI converges to the optimal maximum entropy
+policy π∗in tabular settings, practical control problems involve
+continuous spaces requiring function approximation. Thus, we
+parameterize the soft Q-function Qθ(xt, ut) and the policy
+πϕ(ut|xt) using neural networks with parameters θ and ϕ. We
+assume πϕ follows a diagonal Gaussian distribution with mean
+µϕ(xt) and standard deviation σϕ(xt). Actions are sampled
+using the reparameterization trick: ut = gϕ(xt; ϵt), where ϵt ∼
+N(0, Im), ensuring that the objective remains differentiable
+with respect to ϕ.
+III. LEARNING LYAPUNOV CERTIFICATE
+In this section, we develop the learning mechanism for the
+Lyapunov certificate within a model-free framework. We first
+introduce a sliding-window data collection strategy to satisfy
+multi-step trajectory requirements. Subsequently, we design a
+comprehensive loss function for the Lyapunov network, in-
+corporating boundedness constraints and a multi-step stability
+loss. To enhance training efficiency and robustness, we employ
+trajectory-wise importance sampling for off-policy correction,
+Fig. 1.
+Schematic of the n-step sliding window data collection process.
+A double-ended queue (deque) of size n is utilized to buffer consecutive
+interaction transitions dt, ensuring that complete n-step trajectories are
+available for the verification of the multi-step Lyapunov certificate.
+a labeling mechanism for positive and negative samples, and a
+λ-weighted aggregation to balance the bias-variance trade-off.
+A. Data Collection
+Our algorithm is developed within the maximum en-
+tropy RL framework, where data is acquired through agent-
+environment interactions with the system (1). Unlike the
+standard SAC algorithm [19] that samples single-step tran-
+sitions, we leverage the multi-step Lyapunov condition pre-
+sented in (4), which necessitates data sequences spanning
+n consecutive steps. We define a single-step interaction tu-
+ple as dt = (xt, ut, rt, πϕ(ut|xt), xt+1), where πϕ(ut|xt)
+represents the probability density of sampling action ut at
+state xt. The collected multi-step data consists of sequences
+{dt, dt+1, . . . , dt+n−1}, which are stored in the experience
+replay buffer D.
+Data storage commences only after n consecutive steps
+have been accumulated. Specifically, during the initial n −1
+steps of any rollout, no data is committed to D. Once the
+rollout length reaches or exceeds n, the collection process
+begins. As illustrated in Fig. 1, we employ a double-ended
+queue (deque) to temporarily buffer interaction data. During
+each agent-environment interaction, new data enters the deque.
+Once the deque reaches a length of n, the complete n-step
+sequence is transferred to D, and the oldest data point is
+removed to maintain the deque size, enabling a continuous
+sliding window for data collection.
+B. Loss Function Design of Lyapunov Network
+Similar to the soft Q-network and policy network, we
+introduce a Lyapunov network parameterized by ψ, denoted
+as Vψ, to estimate the Lyapunov certificate. In designing the
+loss function for the Lyapunov certificate, we strictly adhere
+to the conditions established in Lemma 1, which encompass
+the boundedness and multi-step stability requirements.
+(1) Boundedness Loss: Based on the first condition in
+Lemma 1, we construct the boundedness loss function to
+ensure the Lyapunov certificate is quadratically constrained:
+LBnd(ψ) =
+1
+Nn
+N
+X
+i=1
+n−1
+X
+k=0
+h
+max
+ α1∥xi
+t+k∥2 −Vψ(xi
+t+k), 0
+
++ max
+ Vψ(xi
+t+k) −α2∥xi
+t+k∥2, 0
+ i
+,
+(9)
+where N denotes the number of multi-step trajectories in a
+batch, i denotes the i-th multi-step sample in the batch, and
+n represents the number of steps within each trajectory. This
+
+5
+loss term explicitly constrains Vψ to satisfy the boundedness
+condition defined in (3).
+(2) Multi-step Stability Loss: Consider a sampled multi-
+step trajectory {dt, . . . , dt+n−1} generated by a previous pol-
+icy πϕold. Since our goal is to train the Lyapunov certificate Vψ
+to be compatible with the current policy πϕnew for subsequent
+policy updates, we must account for the off-policy nature of
+the data. We introduce trajectory-wise importance sampling
+to correct the distribution shift. For an n-step trajectory, the
+importance sampling ratio for the segment from t to t + k is
+defined as (k = 1, 2, . . . , n −1):
+ISclip,k =
+t+k−1
+Y
+j=t
+min
+ πϕ(uj|xj)
+πϕold(uj|xj), 1
+
+.
+(10)
+Note that we apply a clipping operation to the importance
+sampling ratios to prevent variance explosion and enhance
+training stability.
+Furthermore, we address the second condition in (3), namely
+the stability requirement. While (4) represents the ideal the-
+oretical decay, empirical trajectories may not strictly satisfy
+the exponential stability bound in (5) during early stages of
+training. To bridge the gap between the stability condition and
+the stochastic samples, we introduce the concepts of positive
+and negative samples.
+Definition 2: Within an n-step sample, for a state xt+k, if
+it satisfies the exponential decay condition:
+∥xt+k∥≤
+rα2
+α1
+(1 −α3)k/2∥xt∥,
+then dt+k is classified as a positive sample; otherwise, it is
+classified as a negative sample.
+Accordingly, we define the Exponential Stability Label
+(ESL) as:
+ESLk =
+(
+1,
+if ∥xt+k∥≤
+q
+α2
+α1 (1 −α3)k/2∥xt∥
+−1,
+otherwise.
+This labeling mechanism allows the Lyapunov network to dis-
+tinguish between transitions that contribute to system stability
+and those that violate the certificate requirements.
+For trajectories composed of multi-step interaction data,
+we introduce a weighting factor λ ∈(0, 1), inspired by
+the (truncated) λ-return in reinforcement learning [33], to
+balance the trade-off between bias and variance. Specifically,
+in the stability condition Vψ(xt+k) ≤(1 −α3)kVψ(xt) from
+(4), the parameter k determines the temporal horizon of the
+system’s evolution. When k is small, the short trajectory
+horizon provides a limited view of the system’s long-term
+dynamics under policy πϕ. Given that the Lyapunov network
+is randomly initialized and potentially inaccurate in the early
+stages of training, relying on short-horizon data can introduce
+significant estimation bias.
+Conversely, a larger k captures more extensive information
+regarding the trajectory evolution (extended horizon), thereby
+providing a stronger and more accurate learning signal that re-
+duces bias. However, since each transition is sampled from the
+environment, every step introduces stochasticity; consequently,
+longer trajectories accumulate higher cumulative variance.
+Therefore, a small k leads to high bias but low variance, while
+a large k results in low bias but high variance. To optimize
+this trade-off, we employ the weighting factor λ to aggregate
+multi-step information.
+By integrating the positive/negative sample labels with the
+weighting factor λ, we construct the Lyapunov stability loss to
+enforce a rigorous correspondence between empirical samples
+and the stability condition (4):
+LStab(ψ) = 1
+N
+N
+X
+i=1
+"n−1
+X
+k=1
+λk−1Li
+diff,k(ψ)
+Pn−1
+j=1 λj−1
+#
+,
+(11)
+and the step-wise difference loss Li
+diff,k(ψ) is defined as:
+Li
+diff,k(ψ) = ISi
+clip,k · max
+
+0,
+ESLi
+k ·
+ Vψ(xi
+t+k) −(1 −α3)kVψ(xi
+t)
+ 
+.
+(3) Combined Lyapunov Loss: By integrating the bound-
+edness and multi-step stability losses, the total loss function
+for optimizing the Lyapunov network is formulated as:
+LLya(ψ) = ωBndLBnd(ψ) + ωStabLStab(ψ),
+(12)
+where ωBnd and ωStab are positive weighting coefficients.
+IV. LEARNING POLICY WITH EXPONENTIAL STABILITY
+CONSTRAINTS
+This section presents the optimization framework for the
+proposed MSACL algorithm. We first establish the soft Q-
+network updates using multi-step Bellman residuals to enhance
+data efficiency. We then introduce a novel policy loss function
+that incorporates a stability advantage derived from the Lya-
+punov certificate, utilizing a PPO-style clipping mechanism to
+ensure robust convergence toward exponentially stable behav-
+ior. Finally, we describe the automated temperature adjustment
+and synthesize the complete actor-critic learning procedure.
+A. Loss Function Design of Soft Q Networks
+Based on the soft Bellman operator (7), we define the
+sampled Bellman residual for the i-th transition within a multi-
+step sequence for the soft Q-network Qθ as:
+Bi
+t(θ) = Qθ(xi
+t, ui
+t) −
+h
+ri
+t + γQ¯θ(xi
+t+1, ui
+t+1)
+−α log πϕ(ui
+t+1|xi
+t+1)
+i
+,
+(13)
+where Q¯θ denotes the target network parameterized by ¯θ,
+which is updated via polyak averaging to stabilize the learning
+process. Utilizing the collected multi-step sequences, the loss
+function for the soft Q-network is defined as the mean squared
+Bellman error (MSBE) across the entire trajectory:
+LSoftQ(θ) =
+1
+Nn
+N
+X
+i=1
+n−1
+X
+k=0
+(Bi
+t+k(θ))2.
+(14)
+While standard implementations of maximum entropy RL
+algorithms, such as SAC [19], typically set the upper limit of
+the inner summation in (14) to zero (i.e., n = 1) to utilize only
+single-step transitions, our formulation leverages the complete
+
+6
+n-step sequence for parameter updates. Theoretically, mini-
+mizing the MSBE requires state-action pairs (xt, ut) to be
+sampled from a distribution that ensures an unbiased stochastic
+gradient estimate. Specifically, the objective is given by:
+JSoftQ(θ) =
+E
+xt∼ρπ,ut∼π
+h
+Qθ(xt, ut) −
+
+rt + γ
+E
+xt+1∼ρπ,ut+1∼π
+ Q¯θ(xt+1, ut+1) −α log πϕ(ut+1|xt+1)
+i2
+.
+Strictly speaking, the transitions within a multi-step se-
+quence are temporally correlated, and utilizing the full se-
+quence simultaneously deviates from the independent and
+identically distributed (i.i.d.) sampling requirement commonly
+assumed in stochastic optimization. However, this approach
+represents a deliberate trade-off between mathematical rigor
+and sample efficiency. By incorporating all transitions within
+each collected sequence into the loss function, we significantly
+enhance the data utilization rate and the information density
+of each training batch. Experimental evidence suggests that
+as long as the sequence length n remains moderate, the
+bias introduced by these short-term correlations does not
+undermine the stability of the Q-function learning. In practice,
+the benefits of improved sample efficiency and accelerated
+convergence often outweigh the theoretical concerns regarding
+strict uniform sampling, ultimately contributing to more robust
+control performance.
+Remark 1: In the practical implementation of Algorithm 1,
+we utilize clipped double-Q learning with two networks, Qθ1
+and Qθ2, to mitigate the overestimation bias of soft Q-values,
+as motivated by the TD3 framework [25]. Furthermore, we
+incorporate the “delayed policy update” technique to ensure
+that the policy is updated against a more stable value function,
+thereby facilitating smoother convergence of the actor-critic
+process.
+B. Loss Function Design of Policy Network
+This subsection details the optimization process for the pol-
+icy network, which integrates the maximum entropy objective
+with a Lyapunov-based stability constraint. In the standard
+SAC framework [19], policy optimization aims to maximize
+the expected soft Q-value. For the i-th multi-step sequence,
+the SAC-component of the loss function is expressed as:
+Li
+π,SAC(ϕ) = 1
+n
+n−1
+X
+k=0
+h
+Qθ(xi
+t+k, gϕ(xi
+t+k; ϵi
+t+k))
+−α log πϕ(gϕ(xi
+t+k; ϵi
+t+k)|xi
+t+k)
+i
+.
+To ensure the learned policy satisfies the exponential stabil-
+ity requirements, we utilize the learned Lyapunov certificate
+Vψ to guide the policy updates. Inspired by the Generalized
+Advantage Estimation (GAE) in PPO [24], we define a stabil-
+ity advantage function based on Vψ, which serves as a metric
+for convergence performance:
+At,k = (1 −α3)kVψ(xt) −Vψ(xt+k).
+(15)
+A positive stability advantage (At,k ≥0) indicates that
+the system trajectory from xt to xt+k strictly adheres to
+the exponential decay condition. Maximizing this advantage
+encourages the policy to select actions that accelerate the
+decay of Vψ, thereby directly increasing the state convergence
+rate toward the equilibrium xg. Conversely, At,k < 0 signifies
+a violation of the stability certificate, representing a disad-
+vantage that the policy must learn to avoid. This stability-
+driven optimization paradigm aligns with recent developments
+in stable model-free control, such as D-learning [34], [35].
+To robustly handle the bias-variance trade-off across varying
+horizons, we apply the weighting factor λ to obtain the
+aggregated stability advantage:
+At,λ =
+n−1
+X
+k=1
+λk−1At,k
+Pn−1
+j=1 λj−1 .
+(16)
+For a multi-step sample {dt, . . . , dt+n−1}, we define the
+policy importance sampling ratio based on the initial transition
+as ρi(ϕ) =
+πϕ(ui
+t|xi
+t)
+πϕold(ui
+t|xi
+t). Incorporating the clipping mechanism
+to prevent excessively large policy updates, the final policy
+loss function is formulated as:
+Lπ(ϕ) = −1
+N
+N
+X
+i=1
+h
+Li
+π,SAC(ϕ) + min
+
+ρi(ϕ)Ai
+t,λ,
+clip(ρi(ϕ), 1 −ε, 1 + ε)Ai
+t,λ
+i
+.
+(17)
+Remark 2: It is important to distinguish between the two
+importance sampling (IS) strategies employed in this article.
+In (11), sequence-level IS (from t to t+k −1) is used to train
+the Lyapunov certificate Vψ. While sequence-level IS typically
+introduces higher variance, it provides the low-bias correction
+necessary for the Lyapunov network to accurately reflect the
+stability of the current policy πϕ using off-policy data. Since
+the policy parameters are fixed during the Lyapunov update
+phase, this variance remains manageable via the truncation in
+(10). However, when optimizing the policy πϕ itself, sequence-
+level IS would introduce prohibitive variance into the gradient
+estimates, often leading to training divergence. Consequently,
+following the design principle of PPO, we utilize only the first-
+step IS ratio ρ(ϕ) in (17). This approach effectively reduces the
+variance of the policy gradient, ensuring stable optimization
+while still benefiting from the multi-step stability information
+embedded within the weighted advantage At,λ.
+C. Automated Temperature Adjustment
+In maximum entropy RL, the temperature coefficient α
+in (6) is critical for balancing exploration and exploitation.
+Following the automated entropy adjustment mechanism in-
+troduced in [19], we update α by minimizing the following
+loss function:
+LEnt(α) =
+1
+Nn
+N
+X
+i=1
+n−1
+X
+k=0
+
+−α log πϕ(ui
+t+k|xi
+t+k) −α ¯H
+
+,
+(18)
+where ¯H denotes the target entropy, typically set as ¯H = −m,
+with m representing the dimension of the action space.
+By integrating the loss functions for the soft Q-network Qθ,
+the Lyapunov network Vψ, the policy network πϕ, and the
+temperature coefficient α, we iteratively update the parameters
+within an actor-critic framework using the Adam optimizer
+
+7
+[37]. The complete algorithmic procedure is summarized in
+Algorithm 1, and the overall flowchart is illustrated in Fig. 2.
+Fig. 2. Flowchart of the proposed MSACL algorithm.
+Algorithm 1 Multi-Step Actor-Critic Learning with Lyapunov
+Certificates (MSACL)
+Require: Double soft Q-networks Qθ1, Qθ2, Lyapunov net-
+work Vψ, policy network πϕ, temperature coefficient α
+Require: Target soft Q-network parameters ¯θi ←θi, i = 1, 2
+Require: Replay buffer D, double-ended queue (deque) DQ
+with length n, delay frequency d
+for each iteration do
+for each sampling step do
+Select action ut ∼πϕ(·|xt)
+Obtain reward rt and observe next state xt+1
+Store tuple dt = (xt, ut, rt, πϕ(ut|xt), xt+1) in DQ
+if length(DQ) = n then
+Store {di}t+n−1
+i=t
+= {dt, . . . , dt+n−1} in D
+end if
+end for
+for each update step do
+Sample N multi-step sequences {di}t+n−1
+i=t
+from D
+Update Vψ via ψ ←ψ −βψ∇ψLLya(ψ)
+Update Qθi via θi ←θi −βθ∇θiLSoftQ(θi) 1
+if (iteration count mod d) = 0 then 2
+Update πϕ via ϕ ←ϕ −βϕ∇ϕLπ(ϕ)
+Update α via α ←α −βα∇αLEnt(α)
+end if
+Update target parameters: ¯θi ←τθi + (1 −τ)¯θi
+end for
+end for
+Remark 3: In the flowchart of Algorithm 1, we incorporate
+two implementation refinements. Specifically, regarding foot-
+note 1: for the soft Q-loss function (14), we replace the target
+value Q¯θ with min{Q¯θ1, Q¯θ2} to mitigate overestimation bias,
+as noted in Remark 1. Regarding footnote 2: we implement
+delayed updates for both the policy network πϕ and the tem-
+perature coefficient α. However, within each delayed update
+cycle, we perform d consecutive updates for these parameters
+as a “delayed update compensation” mechanism to ensure
+adequate policy improvement. These techniques are adapted
+from the cleanrl framework [38], and our experiments
+(a)
+(b)
+(c)
+(d)
+(e)
+(f)
+Fig. 3.
+Benchmark environments. (a) Uncontrolled VanderPol (Phase Por-
+trait), (b) Pendulum, (c) Planar DuctedFan, (d) Two-link planar robot, (e)
+SingleCarTracking, (f) QuadrotorTracking.
+demonstrate that integrating these refinements significantly
+enhances overall performance and training stability.
+V. EXPERIMENTS
+In this section, we conduct a comprehensive experimen-
+tal evaluation of the MSACL algorithm across six bench-
+mark environments, encompassing both stabilization and
+high-dimensional nonlinear tracking tasks. We compare our
+approach against baseline model-free RL algorithms and
+Lyapunov-based RL algorithms using rigorous performance
+and stability metrics. The analysis further includes the visual-
+ization of learned Lyapunov certificates, extensive robustness
+and generalization testing under parametric uncertainties and
+stochastic noise, and a sensitivity study investigating the
+impact of the multi-step horizon n on the learning process.
+A. Benchmark Environments
+In this subsection, we present the benchmark environments
+utilized to evaluate the experimental performance of the pro-
+posed and baseline algorithms, encompassing both stabiliza-
+tion and tracking tasks. We categorize these environments by
+their primary control objectives. For stabilization tasks, the en-
+vironments include: Controlled VanderPol (hereafter referred
+to as VanderPol), Pendulum, Planar DuctedFan (DuctedFan),
+and Two-link planar robot (Two-link). For tracking tasks, the
+benchmark comprises SingleCarTracking and QuadrotorTrack-
+ing. As illustrated in Figure 3, comprehensive specifications
+and dynamical parameters for all environments are provided
+in Appendix A.
+In stabilization tasks, the control objective is to drive the
+system state to the equilibrium point, i.e., xg = 0 ∈Rn. In
+tracking tasks, the goal is to ensure the system state follows
+a time-varying reference trajectory xref
+t , which may represent
+desired coordinates, velocities, or attitudes. Across all tasks,
+we employ a unified reward structure:
+rt = −
+ x⊤
+t Qrxt + u⊤
+t Rrut
+
+|
+{z
+}
+Penalty
++ rapproach
+|
+{z
+}
+Encouragement
+(19)
+
+8
+where the first term is a penalty term inspired by the perfor-
+mance functionals commonly utilized in optimal control [39],
+with Qr and Rr being positive definite weight matrices. This
+term penalizes deviations from the equilibrium and excessive
+control effort at each time step, effectively minimizing the
+cumulative cost P∞
+t=0
+
+x⊤
+t Qrxt + u⊤
+t Rrut
+
+. For tracking
+tasks, the state xt in the penalty term is replaced by the
+tracking error et = xt −xref
+t . The second term provides sparse
+encouragement, defined as:
+rapproach =
+(
+rδ,
+if ∥xt∥∞≤δ
+0,
+otherwise
+Specifically, when the state approaches the equilibrium (i.e.,
+its infinity norm falls below a small threshold δ, such as 0.01),
+the environment provides a constant positive reward rδ (e.g.,
++1) to further incentivize convergence or minimize the steady-
+state tracking error. This reward design is intentionally parsi-
+monious and intuitive. Subsequent experiments demonstrate
+that under this straightforward scheme, our algorithm suc-
+cessfully achieves the control objectives across all benchmark
+environments.
+These six benchmark environments are constructed follow-
+ing the OpenAI Gym framework [40]. Notably, our implemen-
+tation of the Pendulum environment is significantly more rig-
+orous than the standard OpenAI Gym version. Specifically, we
+expand the initial state space to [−π, π]×[−10, 10] and the ac-
+tion range to [−5, 5], while introducing boundary-based termi-
+nation conditions and extending the maximum episode length
+to 1000 steps. These modifications increase the control diffi-
+culty, intentionally designed to highlight the performance dis-
+parities between different algorithms. Detailed specifications
+for this and other environments are provided in Appendix A.
+During each agent-environment interaction, the environment
+returns a standardized 5-tuple (xt, ut, rt, πϕ(ut|xt), xt+1),
+where the state transition from xt to xt+1 is updated using
+the standard explicit Euler integration method.
+B. Baseline Algorithms
+To evaluate the effectiveness of the proposed MSACL algo-
+rithm, we compare it against classic model-free RL algorithms,
+including SAC [19] and PPO [24], as well as state-of-the-
+art Lyapunov-based RL algorithms, specifically LAC [28]
+and POLYC [27]. While SAC and PPO have demonstrated
+superior performance across various benchmarks, they are
+evaluated here on stabilization and tracking tasks to pro-
+vide a performance baseline. LAC and POLYC incorporate
+Lyapunov-based constraints into standard RL frameworks to
+provide stability guarantees; these approaches serve as primary
+inspirations for our method.
+In the LAC algorithm, the authors replace the standard
+reward signal with a quadratic cost function, which is defined
+across environments as:
+ct = x⊤
+t Qcxt,
+where Qc is a positive definite matrix. Notably, this formula-
+tion considers only state-related penalties, whereas our reward
+definition rt explicitly accounts for both state deviations and
+control effort. By comparing against these baselines, we aim
+to demonstrate the advantages of MSACL in terms of stability
+metrics and convergence speed.
+To ensure a fair and consistent comparison, all algorithms
+are implemented within the General Optimal control Problem
+Solver (GOPS) framework [41], an open-source PyTorch-based
+RL library. Within this unified architecture, the actor and critic
+networks utilize identical structures consisting of multi-layer
+perceptrons (MLPs) with two hidden layers of 256 units each
+and ReLU activation functions. All actor networks employ
+stochastic policies parameterized by diagonal Gaussian distri-
+butions. Regarding the critic architectures: LAC utilizes only
+a Lyapunov network, while POLYC incorporates both a value
+function and a Lyapunov certificate. For fairness, SAC and
+LAC also implement clipped double Q-learning and delayed
+policy updates as discussed in Remark 1. Parameter updates
+for all algorithms are performed using the Adam optimizer.
+The core hyperparameter configurations are summarized in
+Table V-B, with full specifications available in our code
+repository, which will be publicly released.
+TABLE I
+HYPERPARAMETERS IN THE ALGORITHMS
+Hyperparameters
+Value
+Shared
+Actor learning rate
+3e −4
+Critic learning rate
+1e −3
+Discount factor (γ)
+0.99
+Policy delay update interval (d)
+2
+Target smoothing coefficient (τ)
+0.05
+Reward/Cost scale
+100
+Optimizer
+Adam (default β1 and β2)
+Maximum-entropy framework
+Learning rate of α
+1e −3
+Target entropy (H)
+H = −dim(U) = −m
+Off-policy
+Replay buffer warm size
+5 × 103
+Replay buffer size
+1 × 106
+Samples collected per iteration
+20
+Replay batch size
+256
+On-policy
+Sample batch size
+1600
+Replay batch size
+1600
+GAE factor
+0.95
+MSACL
+α1
+1
+α2
+2
+α3
+0.15 (0.125 is also acceptable)
+ωBnd in (12)
+1
+ωStab in (12)
+10
+ε in (17)
+0.1
+C. Performance Evaluation and Stability Analysis
+In this subsection, we present the training outcomes, eval-
+uate stability metrics under the learned policies, and visualize
+the obtained Lyapunov certificates. To ensure statistical sig-
+nificance, each algorithm was trained using five random seeds
+per benchmark. The training progress is illustrated in Fig. 4,
+utilizing the following performance metrics:
+• AMCR (Average Mean Cumulative Reward): The
+sample mean of the Mean Cumulative Reward (MCR)
+computed across multiple independent training trials.
+
+9
+The MCR is defined as the total undiscounted reward
+accumulated throughout an episode, normalized by the
+episode length to provide a consistent per-step measure
+of policy performance.
+• AMCC (Average Mean Cumulative Cost): The sample
+mean of the Mean Cumulative Cost (MCC) computed
+across multiple independent training trials. The MCC
+is defined as the total undiscounted cost accumulated
+throughout an episode, normalized by the episode length
+to quantify the average per-step magnitude of state devi-
+ations and control effort.
+The training curves demonstrate that MSACL outperforms
+or matches all baseline algorithms across all environments.
+Notably, the AMCR for MSACL remains positive and stable
+during the late training phase. Given our reward design, a
+positive MCR indicates that the system state has successfully
+entered the target δ-neighborhood. Higher reward values fur-
+ther imply faster convergence, as the agent spends a greater
+proportion of the episode receiving the positive reward rδ.
+For subsequent comparative analysis, we select the optimal
+policy model for each algorithm, defined as the specific model
+that achieved the highest MCR among the five independent
+training runs. These optimal policies are evaluated from 100
+fixed random initial states across all benchmarks. To rigorously
+assess stability and convergence, we utilize the following
+metrics across four target radii (0.2, 0.1, 0.05, and 0.01):
+• Reach Rate (RR): The percentage of trajectories that
+enter the specified radius.
+• Average Reach Step (ARS): The mean number of steps
+required to first enter the radius.
+• Average Hold Step (AHS): The mean number of steps
+the state remains within the radius after the first entry.
+The evaluation results are summarized in Table II.
+These results highlight the superiority of MSACL. Across
+all six environments, MSACL consistently achieves the highest
+AMCR. In terms of AMCC, MSACL attains the absolute
+minimum in the Pendulum, SingleTrackCar, and Quadrotor-
+Tracking tasks, while remaining highly competitive in others.
+Furthermore, MSACL achieves the highest RR across all radii.
+Most significantly, in the high-dimensional nonlinear Quadro-
+torTracking task, MSACL is the only method to achieve a
+100% reach rate at the 0.01 precision level, whereas baselines
+fail to meet this stringent requirement. These results under-
+score the robustness and precision of MSACL in complex
+control applications.
+(a) VanderPol
+(b) Pendulum
+(c) DuctedFan
+(d) Two-link
+(e) SingleCarTracking
+(f) QuadrotorTracking
+MSACL (Ours)
+SAC [19]
+LAC [28]
+PPO [24]
+POLYC [27]
+Fig. 4. Training performance across six benchmark environments. The results show the average MCR and MCC over five independent runs. Solid lines and
+shaded regions represent the mean and one standard deviation, respectively. The horizontal axis indicates the number of training steps.
+
+10
+TABLE II
+EXPERIMENTAL RESULTS OF BASELINE ALGORITHMS ACROSS BENCHMARK ENVIRONMENTS
+Benchmark
+Algorithm
+AMCR
+AMCC
+RR / ARS / AHS at different radii
+0.2
+0.1
+0.05
+0.01
+VanderPol
+MSACL
+33.2 ± 64.5
+31.0 ± 29.4
+1.0 / 57.6 / 943.2
+1.0 / 58.4 / 942.5
+1.0 / 58.8 / 942.1
+1.0 / 59.0 / 941.9
+SAC
+32.3 ± 64.4
+31.1 ± 29.5
+1.0 / 56.2 / 944.6
+1.0 / 58.9 / 942.0
+1.0 / 61.0 / 939.9
+1.0 / 67.6 / 933.3
+LAC
+21.2 ± 65.1
+31.1 ± 29.7
+1.0 / 73.1 / 927.8
+1.0 / 93.4 / 907.5
+1.0 / 112.0 / 888.9 1.0 / 168.6 / 832.3
+PPO
+27.1 ± 64.1
+30.8 ± 29.4
+1.0 / 65.6 / 935.3
+1.0 / 77.8 / 923.1
+1.0 / 87.6 / 913.4
+1.0 / 110.8 / 890.1
+POLYC
+32.3 ± 64.5
+30.8 ± 29.4
+1.0 / 59.3 / 941.6
+1.0 / 61.6 / 939.3
+1.0 / 63.2 / 937.8
+1.0 / 66.4 / 934.5
+Pendulum
+MSACL
+35.4 ± 360.1
+30.8 ± 171.7
+0.98 / 35.3 / 965.6 0.98 / 40.3 / 960.6 0.98 / 41.2 / 959.7 0.98 / 42.5 / 958.4
+SAC
+-544.4 ± 1073.4
+382.1 ± 640.0
+0.74 / 34.0 / 966.8 0.74 / 36.0 / 964.9 0.74 / 37.0 / 963.9 0.74 / 41.6 / 959.3
+LAC
+-392.6 ± 899.9
+269.2 ± 503.4
+0.78 / 37.6 / 963.3 0.78 / 51.0 / 950.0 0.78 / 64.6 / 936.4 0.78 / 111.6 / 889.4
+PPO
+-6443.4 ± 4827.7
+5843.8 ± 4912.2
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+POLYC
+-2576.9 ± 4404.2
+2379.5 ± 3986.4
+0.69 / 27.8 / 972.4 0.69 / 33.6 / 967.2 0.69 / 37.8 / 963.1 0.69 / 45.4 / 955.5
+Ducted Fan
+MSACL
+88.6 ± 3.5
+2.1 ± 1.3
+1.0 / 35.3 / 965.3
+1.0 / 52.7 / 948.0
+1.0 / 59.6 / 941.3
+1.0 / 68.9 / 932.0
+SAC
+-12.6 ± 433.8
+81.1 ± 347.0
+0.95 / 32.3 / 968.1 0.95 / 46.3 / 954.6 0.95 / 55.4 / 945.5 0.95 / 88.6 / 910.9
+LAC
+84.2 ± 4.0
+2.0 ± 1.3
+1.0 / 40.6 / 959.8
+1.0 / 58.7 / 941.8
+1.0 / 70.1 / 930.0
+1.0 / 102.0 / 898.8
+PPO
+-8.5 ± 372.7
+73.0 ± 285.4
+0.94 / 40.6 / 958.9 0.94 / 59.4 / 941.3 0.94 / 76.6 / 924.1 0.94 / 113.4 / 887.4
+POLYC
+82.3 ± 4.3
+2.4 ± 1.4
+1.0 / 44.8 / 955.3
+1.0 / 68.7 / 932.0
+1.0 / 87.4 / 913.1
+1.0 / 130.5 / 870.4
+Two-link
+MSACL
+89.0 ± 7.7
+0.4 ± 0.3
+1.0 / 14.5 / 986.3
+1.0 / 22.0 / 978.9
+1.0 / 27.9 / 973.0
+1.0 / 41.5 / 957.2
+SAC
+-159.6 ± 362.5
+179.4 ± 257.3
+0.67 / 12.4 / 988.4 0.67 / 18.4 / 982.4 0.67 / 24.3 / 976.6 0.67 / 36.9 / 964.0
+LAC
+82.5 ± 8.2
+0.3 ± 0.2
+1.0 / 14.4 / 986.5
+1.0 / 28.7 / 972.2
+1.0 / 45.9 / 955.0
+1.0 / 92.6 / 908.3
+PPO
+-676.9 ± 863.7
+472.7 ± 566.2
+0.48 / 12.4 / 988.5 0.48 / 18.1 / 982.6 0.48 / 24.2 / 976.7 0.48 / 46.9 / 954.0
+POLYC
+-172.0 ± 335.2
+190.6 ± 246.6
+0.60 / 14.8 / 939.0 0.60 / 22.8 / 978.1 0.60 / 28.9 / 972.0 0.60 / 40.2 / 960.7
+SingleCarTracking
+MSACL
+84.7 ± 32.7
+2.9 ± 14.1
+0.99 / 37.6 / 961.6 0.99 / 55.3 / 940.7 0.99 / 76.5 / 924.1 0.99 / 96.4 / 904.5
+SAC
+10.3 ± 164.9
+21.9 ± 50.3
+0.85 / 36.5 / 962.9 0.85 / 54.3 / 946.6 0.85 / 81.4 / 919.5 0.85 / 193.3 / 807.6
+LAC
+-350.5 ± 196.8
+94.5 ± 47.4
+0.17 / 14.2 / 986.7 0.17 / 51.2 / 949.6 0.17 / 107.5 / 891.00.17 / 221.1 / 763.4
+PPO
+10.2 ± 188.6
+21.5 ± 49.2
+0.85 / 38.6 / 961.8 0.85 / 61.2 / 937.6 0.85 / 80.6 / 919.1 0.85 / 102.7 / 894.4
+POLYC
+40.1 ± 152.8
+14.7 ± 39.9
+0.90 / 34.9 / 962.0 0.90 / 58.0 / 939.8 0.90 / 67.6 / 932.3 0.90 / 81.8 / 912.3
+QuadrotorTracking
+MSACL
+838.8 ± 1.5
+14.5 ± 2.1
+1.0 / 33.1 / 967.8
+1.0 / 34.0 / 966.9
+1.0 / 36.9 / 964.0
+1.0 / 49.7 / 619.8
+SAC
+-17263.8 ± 1380.0
+17246.4 ± 1379.1
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+LAC
+-51.1 ± 1.2
+32.7 ± 1.1
+1.0 / 471.9 / 20.6
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+PPO
+-12836.6 ± 4042.3
+12571.3 ± 4022.4
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+POLYC
+-17528.1 ± 2162.6
+17318.7 ± 2155.6
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+Note: The values for AMCR and AMCC represent the mean performance of the optimal policy (defined as the policy achieving the highest evaluation
+MCR) averaged over 100 independent trials, with ± denoting one standard deviation. Stability metrics (RR, ARS, and AHS) are evaluated across four
+distinct radii, where “–” indicates that the system failed to enter the specified radius within the episode duration. Bold entries highlight the superior results:
+for performance metrics, the maximum AMCR and minimum AMCC are bolded; for stability metrics, the highest RR is prioritized for bolding, with the
+shortest ARS and longest AHS selected in the event of identical RR values.
+Finally, we visualize the Lyapunov networks Vψ correspond-
+ing to the optimal policies. The learned Lyapunov certificates
+and their associated contour plots are shown in Fig. 5. For
+high-dimensional systems, the plots represent the relationship
+between Vψ and two specific state components while setting
+all other components to zero.
+Remark 4: Since MSACL is built upon the SAC framework,
+SAC serves as the primary baseline for our ablation study. As
+shown in Fig. 4 and Table II, the integration of the Lyapunov
+certificate significantly enhances both training performance
+and stability metrics compared to the standard SAC algorithm.
+This validates that embedding Lyapunov-based constraints into
+maximum entropy RL effectively yields neural policies with
+superior stability guarantees for deterministic control systems.
+D. Evaluation of Robustness and Generalization
+It is well known that neural policies, characterized by high-
+dimensional parameter spaces, are susceptible to overfitting
+within specific training environments. This can lead to de-
+graded robustness against stochastic noise and parametric vari-
+ations, as well as limited generalization to unseen scenarios. In
+this subsection, we evaluate the robustness and generalization
+capabilities of the policies trained via MSACL to demonstrate
+their applicability in real-world environments with inherent
+uncertainties.
+For stabilization tasks (VanderPol, Pendulum, DuctedFan,
+and Two-link), we introduce process noise ϵt ∼N(0, σenv) to
+the system dynamics, resulting in the perturbed form:
+xt+1 = f(xt, ut) + ϵt.
+Additionally, we modify key physical parameters of the
+systems to assess whether the MSACL-trained policies can
+maintain stability under environmental variations.
+For tracking tasks (SingleCarTracking and QuadrotorTrack-
+ing), we evaluate robustness by injecting dynamical noise
+and assess generalization by requiring the policies to track
+reference trajectories xref
+t
+that differ significantly from those
+encountered during training. The specific parameter modifica-
+tions and noise magnitudes utilized for these evaluations are
+detailed in Table III.
+The robustness testing results for the stabilization tasks are
+illustrated in Fig. 6. Despite the introduction of parametric
+perturbations and process noise, all system trajectories origi-
+
+11
+(a)
+(b)
+(c)
+(d)
+(e)
+(f)
+(g)
+(h)
+(i)
+(j)
+Fig. 5.
+Visualization of learned Lyapunov certificates and their corresponding contour plots across various benchmark environments: (a) VanderPol; (b)
+Pendulum; (c)–(e) DuctedFan (projections in the (x, y)-plane with θ = 0, (y, θ)-plane with x = 0, and (x, θ)-plane with y = 0); (f) Two-link; (g)
+SingleCarTracking; (h)–(j) QuadrotorTracking (projections in the (ex, ey)-plane with ez = 0, (ey, ez)-plane with ex = 0, and (ex, ez)-plane with ey = 0).
+TABLE III
+SYSTEM PARAMETERS AND NOISE MAGNITUDES
+Benchmarks
+System Parameters
+Noise Magnitude (σenv)
+VanderPol
+µ = 0.5, 1.5
+0.5, 0.8
+Pendulum
+L = 0.5, 1.0
+0.5, 1.0
+DuctedFan
+m = 5, 12
+0.1, 0.3
+Two-link
+l1 = 0.75, l2 = 1.5
+0.1, 0.2
+SingleCarTracking
+–
+0.1, 0.3
+QuadrotorTracking
+–
+0.01, 0.02
+nating from the specified initial states successfully converge
+to the neighborhood of the equilibrium xg = 0.
+The results for the tracking tasks are presented in Fig. 7 and
+Fig. 8. It is evident that the trained neural policies effectively
+mitigate noise interference within a reasonable range. In the
+SingleCarTracking environment, while the policy was trained
+on straight-line references, we evaluate its generalization using
+circular and sinusoidal trajectories. Experimental validation
+demonstrates excellent tracking performance; as shown in
+the position error plot in Fig. 7e, the tracking error exy =
+q
+e2x + e2y remains within 0.1 during the steady-state phase.
+For the QuadrotorTracking task, the policy was trained using
+a horizontal helical trajectory. During generalization testing,
+we evaluate the policy against two unseen trajectories: a ver-
+tical helix and a Lissajous curve, as shown in Fig. 8c and Fig.
+8d. Notably, the MSACL-trained policy demonstrates superior
+generalization, with the tracking error exyz =
+q
+e2x + e2y + e2z
+stabilizing around 0.02 in the later stages.
+Based on these results, we conclude that policies trained
+via the MSACL algorithm exhibit robust performance against
+moderate uncertainties and favorable generalization to unseen
+reference trajectories. However, our testing also reveals that
+the policies’ efficacy diminishes under extreme disturbances or
+environmental parameters that deviate substantially from the
+training distribution. In such cases of significant domain shift,
+the MSACL algorithm can be readily redeployed to retrain
+the policy, ensuring stable and high-precision control for the
+specific operational scenario.
+E. Sensitivity Analysis of the Multi-Step Horizon n
+In this subsection, we investigate the influence of the multi-
+step horizon parameter n on the performance of the MSACL
+algorithm across all benchmark environments. Following the
+evaluation protocol detailed in Section V-C, we utilize both
+performance metrics (AMCR and AMCC) and stability met-
+rics (RR, ARS, and AHS) to assess the policies trained under
+varying configurations of n. Specifically, we conduct 100 ran-
+domized experiments for each benchmark by generating and
+fixing a set of 100 random initial states. Policies trained with
+different n values interact with the environment starting from
+these fixed states to compute the aforementioned evaluation
+metrics.
+The results across all environments are summarized in Table
+IV. The experimental findings reveal a consistent trend: as n
+increases, the stabilization and tracking performance of the
+MSACL-trained policies generally improves. This improve-
+ment occurs because a larger n provides a longer-horizon
+trajectory during training, enabling the policy π to more
+accurately identify the stability direction, namely the descent
+direction of the Lyapunov certificate Vψ. This reduces the
+training bias and reinforces the stability guarantees for the
+resulting neural policy.
+Empirically, setting n = 20 yields satisfactory performance
+across all benchmark environments, suggesting it as a versatile
+default parameter. However, an excessively large n may not
+
+12
+(a)
+(b)
+(c)
+(d)
+Fig. 6. System trajectories under the neural policies in stabilization tasks subjected to environmental parametric uncertainties and process noise: (a) VanderPol
+with state variables x = [x, ˙x]⊤; (b) Pendulum with angular position θ and angular velocity ˙θ; (c) DuctedFan with coordinates x, y and orientation θ; (d)
+Two-link with joint angles q1 and q2. All trajectories exhibit robust convergence to the neighborhood of the equilibrium xg = 0 despite external disturbances.
+(a)
+(b)
+(c)
+(d)
+(e)
+Fig. 7. Robustness (a)–(b) and generalization (c)–(e) evaluation for the SingleCarTracking task: (a) Car trajectories versus the straight-line reference xref
+t
+=
+{[t, 0] ∈R2 | t ∈[0, 50]} under varying noise levels; (b) Evolution of the Euclidean position error exy =
+q
+e2x + e2y corresponding to (a); (c) Tracking
+performance for a circular reference trajectory {[8 cos(0.125t), 8 sin(0.125t)]⊤∈R2 | t ∈[0, 50]} using the policy trained on straight lines; (d) Tracking
+performance for a sinusoidal reference trajectory {[t, sin(0.2t)]⊤∈R2 | t ∈[0, 50]}; (e) Evolution of the position error exy for the circular and sinusoidal
+cases shown in (c) and (d). The results demonstrate robust convergence and effective generalization to unseen path geometries.
+(a)
+(b)
+(c)
+(d)
+(e)
+Fig. 8. Robustness (a)–(b) and generalization (c)–(e) evaluation for the QuadrotorTracking task: (a) Quadrotor trajectories versus the horizontal helical reference
+xref
+t
+= {[0.4t, 0.4 sin t, 0.6 cos t]⊤| t ∈[0, 40]} under varying noise levels; (b) Evolution of the position error exyz =
+q
+e2x + e2y + e2z corresponding
+to (a); (c) Tracking performance for a vertical helical reference {[0.5 cos t, 0.5 sin t, 0.3t]⊤∈R3 | t ∈[0, 40]} using the policy trained on the horizontal
+helix; (d) Tracking performance for a Lissajous reference trajectory {[0.8 sin(0.4t), 0.8 cos(0.4t), 0.4 sin(1.2t) + 1.0]⊤∈R3 | t ∈[0, 40]}; (e) Evolution
+of the position error exyz for the cases in (c) and (d). The results highlight the policy’s robust tracking capability under environmental noise and its effective
+generalization to geometrically distinct reference trajectories.
+always lead to optimal results. As analyzed in Section III-B,
+longer temporal horizons introduce greater cumulative vari-
+ance into the training data, which can distort the optimization
+landscape and result in suboptimal policies. Therefore, select-
+ing an appropriate n is essential to balancing the bias-variance
+trade-off. In summary, for the control tasks presented in this
+article, n = 20 delivers consistently robust results; for specific
+applications requiring peak performance, fine-tuning around
+this value is recommended to achieve the optimal balance
+between training bias and variance.
+VI. DISCUSSION AND CONCLUSION
+A. Discussion
+This subsection provides an analytical discussion on the
+functional roles of the various components within the MSACL
+framework. As highlighted in Remark 4, MSACL extends
+the Soft Actor-Critic (SAC) algorithm by integrating multi-
+step Lyapunov certificate learning, thereby establishing formal
+stability guarantees while preserving the exploration efficiency
+of maximum entropy reinforcement learning. In model-free
+stabilization and tracking tasks, conventional SAC, which
+
+13
+TABLE IV
+EXPERIMENTAL RESULTS OF MSACL ALGORITHM WITH DIFFERENT MULTI-STEP HORIZON PARAMETERS n
+Benchmark
+n Values
+AMCR
+AMCC
+RR / ARS / AHS at different radii
+0.2
+0.1
+0.05
+0.01
+VanderPol
+n = 1
+30.2 ± 64.5
+31.1 ± 29.5
+1.0 / 56.3 / 944.6
+1.0 / 61.9 / 939.0
+1.0 / 68.9 / 932.0
+1.0 / 88.2 / 912.7
+n = 5
+31.5 ± 64.5
+30.9 ± 29.4
+1.0 / 58.4 / 942.4
+1.0 / 63.4 / 937.5
+1.0 / 67.6 / 933.3
+1.0 / 78.7 / 922.2
+n = 10
+32.4 ± 64.6
+30.9 ± 29.4
+1.0 / 57.9 / 942.9
+1.0 / 61.4 / 939.5
+1.0 / 64.1 / 936.8
+1.0 / 68.9 / 932.0
+n = 15
+33.1 ± 64.4
+31.2 ± 29.5
+1.0 / 54.1 / 946.7
+1.0 / 55.1 / 945.8
+1.0 / 55.7 / 945.3
+1.0 / 57.0 / 943.9
+n = 20
+33.2 ± 64.5
+31.0 ± 29.5
+1.0 / 57.8 / 943.1
+1.0 / 58.7 / 942.2
+1.0 / 59.2 / 941.7
+1.0 / 59.5 / 941.4
+Pendulum
+n = 1
+-578.5 ± 1232.9
+444.2 ± 815.1
+0.77 / 37.1 / 963.5 0.77 / 42.4 / 958.6 0.77 / 44.4 / 956.5 0.77 / 48.8 / 952.1
+n = 5
+34.7 ± 360.0
+30.7 ± 171.8
+0.98 / 36.8 / 964.0 0.98 / 44.7 / 956.2 0.98 / 46.0 / 954.9 0.98 / 49.4 / 951.5
+n = 10
+35.7 ± 360.1
+31.0 ± 171.7
+0.98 / 34.9 / 966.0 0.98 / 35.6 / 965.4 0.98 / 36.1 / 964.9 0.98 / 38.5 / 962.3
+n = 15
+35.2 ± 360.0
+31.0 ± 171.7
+0.98 / 35.2 / 965.6 0.98 / 36.9 / 964.0 0.98 / 38.4 / 962.6 0.98 / 44.0 / 956.9
+n = 20
+35.8 ± 355.7
+30.3 ± 167.9
+0.98 / 38.0 / 962.8 0.98 / 39.3 / 961.6 0.98 / 40.7 / 960.2 0.98 / 44.1 / 956.8
+Ducted Fan
+n = 1
+-116.3 ± 584.8
+163.2 ± 463.3
+0.89 / 32.3 / 967.8 0.89 / 49.8 / 950.6 0.89 / 57.0 / 943.9 0.89 / 83.5 / 917.3
+n = 5
+87.4 ± 3.7
+2.0 ± 1.3
+1.0 / 35.5 / 965.2
+1.0 / 49.8 / 950.9
+1.0 / 57.9 / 942.9
+1.0 / 78.4 / 922.1
+n = 10
+88.6 ± 3.5
+2.1 ± 1.3
+1.0 / 35.3 / 965.3
+1.0 / 52.7 / 948.0
+1.0 / 59.6 / 941.3
+1.0 / 68.9 / 932.0
+n = 15
+88.1 ± 4.0
+2.0 ± 1.3
+1.0 / 36.1 / 964.6
+1.0 / 52.0 / 949.0
+1.0 / 61.4 / 939.5
+1.0 / 74.3 / 926.6
+n = 20
+73.7 ± 37.7
+4.4 ± 8.5
+0.95 / 56.3 / 944.2 0.95 / 79.2 / 921.6 0.95 / 94.5 / 906.4 0.95 / 127.0 / 873.9
+Two-link
+n = 1
+-208.6 ± 372.5
+216.0 ± 267.0
+0.60 / 13.8 / 987.2 0.60 / 22.3 / 976.7 0.60 / 29.6 / 971.3 0.60 / 40.4 / 960.5
+n = 5
+-142.4 ± 340.0
+167.6 ± 241.6
+0.67 / 13.7 / 987.0 0.67 / 20.3 / 980.4 0.67 / 24.7 / 976.1 0.67 / 29.9 / 971.0
+n = 10
+-163.8 ± 346.6
+183.1 ± 247.1
+0.64 / 10.7 / 990.2 0.64 / 16.4 / 984.5 0.64 / 23.2 / 977.6 0.64 / 37.0 / 963.9
+n = 15
+-131.0 ± 354.1
+158.3 ± 251.4
+0.71 / 12.1 / 988.7 0.71 / 18.5 / 982.3 0.71 / 24.8 / 976.1 0.71 / 40.6 / 960.3
+n = 20
+89.8 ± 7.5
+0.4 ± 0.2
+1.0 / 18.1 / 982.0
+1.0 / 25.0 / 975.8
+1.0 / 28.6 / 972.2
+1.0 / 35.2 / 965.7
+SingleTrackCar
+n = 1
+-51.0 ± 194.9
+46.4 ± 62.6
+0.64 / 32.0 / 964.0 0.64 / 64.6 / 931.1 0.64 / 79.7 / 921.2 0.64 / 92.1 / 908.8
+n = 5
+-40.2 ± 217.9
+35.0 ± 58.8
+0.74 / 31.6 / 968.7 0.74 / 56.1 / 943.8 0.74 / 78.9 / 920.9 0.74 / 113.0 / 887.8
+n = 10
+84.7 ± 32.7
+2.9 ± 14.1
+0.99 / 37.6 / 961.6 0.99 / 55.3 / 940.7 0.99 / 76.5 / 924.1 0.99 / 96.4 / 904.5
+n = 15
+67.5 ± 84.7
+8.8 ± 32.5
+0.95 / 35.2 / 964.8 0.95 / 57.8 / 938.7 0.95 / 82.6 / 917.0 0.95 / 109.1 / 891.7
+n = 20
+82.6 ± 55.1
+3.0 ± 15.6
+0.99 / 37.6 / 960.5 0.99 / 63.1 / 934.3 0.99 / 85.0 / 915.8 0.99 / 95.0 / 905.6
+QuadrotorTracking
+n = 1
+-12708.9 ± 645.4
+12582.7 ± 645.2
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+n = 5
+-4708.7 ± 3158.6
+4646.3 ± 3135.9
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+0.0 / – / –
+n = 10
+534.3 ± 5.0
+11.8 ± 0.9
+1.0 / 54.4 / 946.5
+1.0 / 66.2 / 934.7
+1.0 / 116.5 / 650.9
+0.0 / – / –
+n = 15
+858.5 ± 1.0
+10.8 ± 0.5
+1.0 / 31.3 / 969.6
+1.0 / 36.8 / 964.1
+1.0 / 41.2 / 959.7
+1.0 / 115.4 / 747.9
+n = 20
+838.5 ± 1.5
+14.7 ± 2.0
+1.0 / 33.1 / 967.8
+1.0 / 34.1 / 966.8
+1.0 / 37.0 / 963.9
+1.0 / 49.8 / 620.0
+lacks the structural guidance provided by Lyapunov theory,
+may fail to converge to stable policies under improper reward
+structures. Even with well-designed rewards, standard RL
+often requires exhaustive exploration of the action space to
+identify stabilizing directions, leading to prohibitive training
+times. To address these limitations, our approach introduces
+a Lyapunov network that serves as a stability-oriented critic,
+providing explicit directional guidance during policy updates
+by identifying action sequences that facilitate the descent of
+the Lyapunov certificate.
+The theoretical foundation of this mechanism is rooted in
+Lemma 1, which establishes the equivalence between the Lya-
+punov stability conditions and exponential state convergence.
+To ensure the Lyapunov certificate Vψ is learned accurately,
+we developed a training methodology that aligns theoretical
+requirements with empirical trajectories. Specifically, the in-
+troduction of Exponential Stability Labels (ESL) in Definition
+2 allows the algorithm to categorize trajectory segments as
+positive or negative samples based on their adherence to
+exponential decay criteria. This classification enables the con-
+struction of the loss function (11), which effectively bridges
+abstract stability conditions with observed system dynamics.
+The policy optimization process leverages this learned cer-
+tificate through the stability advantage mechanism defined in
+(17). This advantage function quantifies the rate of Lyapunov
+descent along trajectories, prioritizing policy updates that
+simultaneously ensure stability and accelerate convergence.
+Our experimental results confirm that this dual-objective op-
+timization yields policies that achieve both stability and rapid
+convergence across diverse and challenging benchmarks. A
+critical insight is that the efficacy of the policy is fundamen-
+tally tied to the fidelity of the learned Lyapunov certificate.
+The multi-step sampling strategy, combined with the ESL-
+based loss formulation, ensures that Vψ accurately reflects the
+theoretical stability criteria, providing reliable gradients for
+policy improvement.
+While developed for stabilization and tracking, the MSACL
+framework is highly extensible to other stability-critical ap-
+plications. Potential extensions include trajectory planning
+for autonomous vehicles [42], spacecraft proximity opera-
+tions [43], and robotic manipulation tasks requiring rigorous
+safety guarantees [44], [45]. The integration of Lyapunov-
+based guarantees within maximum entropy RL represents a
+significant step toward developing verifiable, learning-based
+control systems for real-world deployment.
+B. Conclusion
+This article presented the MSACL (Multi-Step Actor-Critic
+Learning with Lyapunov certificates) algorithm, a novel frame-
+work that integrates exponential stability guarantees into the
+maximum entropy RL paradigm. By embedding Lyapunov
+stability theory within the SAC architecture, MSACL achieves
+
+14
+stable control for model-free dynamical systems without sac-
+rificing the exploration benefits of entropy regularization.
+To rigorously evaluate the proposed methodology, we devel-
+oped six benchmark environments covering four stabilization
+and two tracking tasks. Comprehensive comparisons against
+established baselines demonstrate the consistent superiority
+of MSACL across both performance and stability metrics.
+Notably, these results were achieved using a simple reward
+structure that penalizes state deviations and control effort
+while providing sparse positive rewards near the equilibrium.
+Beyond standard performance, we conducted extensive robust-
+ness analyses against environmental uncertainties and gener-
+alization tests on unseen reference trajectories. The MSACL-
+trained neural policies exhibited remarkable resilience to dis-
+turbances and effective adaptation to geometrically distinct
+paths.
+A key algorithmic contribution is the systematic analysis
+of the multi-step horizon parameter n. We established that
+n = 20 serves as a robust default setting, effectively balancing
+the bias-variance trade-off in stability learning. This work
+advances the integration of formal stability guarantees within
+learning-based control, providing a foundation for verifiable
+policies in safety-critical applications. Future research will
+explore extensions to partially observable systems [46], [47],
+adaptive Lyapunov architectures [48], [49], and transfer learn-
+ing mechanisms for complex, cross-domain dynamical systems
+[50], [51].
+APPENDIX
+BENCHMARK ENVIRONMENTS INFORMATION
+This appendix provides a detailed description of the six
+nonlinear dynamical systems selected as benchmarks for this
+study: VanderPol, Pendulum, DuctedFan, Two-link, Single-
+CarTracking, and QuadrotorTracking. Widely recognized as
+canonical benchmarks in nonlinear control (NLC) [52]–[54],
+reinforcement learning (RL) [55], [56], and optimal control
+literature [57], these environments constitute a comprehensive
+testbed for evaluating the proposed methods. They encompass
+a broad spectrum of dynamic characteristics, ranging from
+self-sustaining oscillations and underactuated mechanics to
+complex tire–road friction interactions and rigid-body dynam-
+ics on the SE(3) manifold.
+To provide a unified evaluation framework, we categorize
+these benchmarks based on their control objectives: Stabi-
+lization and Tracking. The formal task definitions and their
+corresponding reward structures are detailed below.
+A. Unified Control Objectives
+Despite the distinct physical dynamics inherent to each
+system, the core control tasks are formulated using a consistent
+mathematical structure.
+a) Stabilization Tasks [55], [58], [59]: The first four
+systems (VanderPol, Pendulum, DuctedFan, and Two-link) are
+configured as stabilization tasks. For these systems, the control
+objective is to find a policy that generates a sequence of control
+inputs {ut}T −1
+t=0 to drive the system state xt from a randomly
+sampled initial state x0 toward a fixed equilibrium point xg
+(typically the origin, xg = 0) and maintain stability at this
+equilibrium for the duration of the episode.
+b) Tracking Tasks [54], [60], [61]: The remaining two
+systems (SingleCarTracking, and QuadrotorTracking) are for-
+mulated as trajectory tracking tasks. Here, the objective is
+defined in terms of the tracking error et = xt −xref
+t . The
+goal is to determine a control sequence such that the error
+trajectory {et}T
+t=0 converges to the zero-error state eg = 0,
+thereby ensuring that the system state xt accurately follows a
+time-varying reference trajectory xref
+t .
+B. Unified Reward Function Design
+To align the learning process with the aforementioned
+control objectives, we employ a consistent reward function
+structure across all six environments:
+rt = −
+ s⊤
+t Qrst + u⊤
+t Rrut
+
+|
+{z
+}
+Penalty
++ rapproach(st)
+|
+{z
+}
+Encouragement
+,
+where st represents the generalized state vector, defined as
+st = xt for stabilization tasks and st = et for tracking
+tasks. The matrices Qr and Rr are positive semi-definite
+weighting matrices that penalize state deviations and control
+effort, respectively.
+The specific parameter configurations for each environment,
+including the diagonal elements of Qr and Rr, are summa-
+rized in Table V. The term I(·) denotes the indicator function,
+which provides a sparse encouragement reward when the
+system enters a predefined tolerance region around the target
+state. For all environments, the state cost matrix Qc is simply
+defined as a identity matrix In of appropriate dimensions,
+where n denotes the dimension of state space.
+C. Details of VanderPol
+1) System Overview: The VanderPol oscillator, originally
+proposed by Balthasar van der Pol in 1920 [62], is a classic
+model describing self-sustaining oscillatory circuits charac-
+terized by nonlinear damping. This system serves as a fun-
+damental benchmark for electronic circuit stabilization (e.g.,
+vacuum tube oscillators), mechanical vibration control, and
+biological modeling, such as cardiac pacemaker dynamics
+[63]. In this study, we extend the autonomous system with
+a control input to evaluate stabilization performance within a
+nonlinear regime.
+2) Dynamics and Physical Parameters: The continuous-
+time dynamics of controlled VanderPol are governed by the
+following second-order nonlinear differential equations:
+˙x1 = x2,
+˙x2 = µ
+ 1 −x2
+1
+
+x2 −x1 + u,
+where x1 and x2 represent the oscillator displacement and
+velocity, respectively. The physical meanings of the variables
+are summarized in Table VI, and the specific parameter values
+and simulation settings used in our experiments are detailed
+in Table VII.
+
+15
+TABLE V
+REWARD FUNCTION PARAMETERS FOR ALL BENCHMARK SYSTEMS
+System
+State Penalty Qr (diag)
+Control Penalty Rr (diag)
+Encouragement (rapproach)
+VanderPol
+[2, 1]
+[0.1]
+I(∥xt∥∞≤10−2)
+Pendulum
+[2, 1]
+[0.1]
+I(∥xt∥∞≤10−2)
+DuctedFan
+[2, 2, 2, 1, 1, 1]
+[0.1, 0.1]
+I(∥xt∥∞≤10−2)
+Two-link
+[2, 2, 1, 1]
+[0.1, 0.1]
+I(∥xt∥∞≤10−2)
+SingleCarTracking
+[2, 2, 1, 1, 1, 1, 1]
+[0.1, 0.1]
+I(∥et∥∞≤10−2)
+QuadrotorTracking
+I12
+[10−4, 0.01, 0.01, 0.01]
+10(1 −∥et∥∞
+0.1
+) · I(∥et∥∞≤0.1)
+TABLE VI
+VARIABLE DEFINITIONS FOR CONTROLLED VANDERPOL
+Variable
+Physical Meaning
+x1
+Displacement of the oscillator (m)
+x2
+Velocity of the oscillator (m/s)
+˙x2
+Acceleration of the oscillator (m/s2)
+µ
+Nonlinear damping strength parameter (dimensionless)
+u
+Control input force applied to the oscillator (N)
+TABLE VII
+PARAMETER VALUES FOR CONTROLLED VANDERPOL
+Parameter
+Value
+µ (nonlinear strength)
+1.0 (dimensionless)
+Simulation time step (dt)
+0.01 s
+Control update interval
+5 simulation steps
+Maximum episode steps
+1000
+3) State and Action Spaces: For the reinforcement learn-
+ing formulation, the system state vector is defined as x =
+[x1, x2]⊤. To reflect the physical limits of the oscillator and
+ensure numerical stability during training, the state space
+is constrained to X = [−10, 10] × [−10, 10], where both
+displacement and velocity are bounded within the range of
+±10. The control objective is to drive the system from a
+random initial configuration to the equilibrium state (goal
+state) defined as xg = [0, 0]⊤, corresponding to the stable
+origin of the phase plane.
+The control action u is a one-dimensional continuous input
+restricted to the action space U = [−5, 5]. These bounds
+are selected to provide sufficient authority for stabilization
+while preventing excessively large inputs that could violate
+physical actuation constraints or lead to divergent gradients.
+At the start of each episode, the initial state x0 is sampled
+from a uniform distribution x0 ∼Uniform([−5, 5] × [−5, 5]).
+This initialization range is intentionally chosen to place the
+system within a significant nonlinear regime, ensuring that
+the controller must actively counteract the self-sustaining
+oscillations to achieve stabilization.
+D. Details of Pendulum
+1) System Overview: The Pendulum is a classic rigid-body
+system with a pivot point constrained to a vertical plane, where
+the primary control objective is to stabilize the system in an
+inverted (upright) position against gravity. Beyond its role
+as a fundamental pedagogical tool for illustrating nonlinear
+stability and feedback control [64], its underlying principles
+are essential for robotic locomotion in bipedal systems [65],
+aerospace attitude control, and industrial crane load stabiliza-
+tion [58].
+2) Dynamics and Physical Parameters: The continuous-
+time dynamics of the Pendulum are derived from Newtonian
+mechanics and are defined by the following equations of
+motion:
+˙θ = ˙θ,
+¨θ = mgL sin(θ) −b ˙θ + u
+mL2
+,
+where θ and ˙θ denote the angular displacement and angular ve-
+locity, respectively. The physical variables and their definitions
+are summarized in Table VIII, while the specific parameter
+values and simulation settings used in this study are provided
+in Table IX.
+TABLE VIII
+VARIABLE DEFINITIONS FOR PENDULUM
+Variable
+Physical Meaning
+θ
+Angular displacement of the pendulum (rad)
+˙θ
+Angular velocity of the pendulum (rad/s)
+¨θ
+Angular acceleration of the pendulum (rad/s2)
+m
+Mass of the pendulum bob (kg)
+g
+Gravitational acceleration (m/s2)
+L
+Length of the pendulum rod (m)
+b
+Damping coefficient of the pendulum joint (N·m·s/rad)
+u
+Control input torque applied to the pivot (N·m)
+TABLE IX
+PHYSICAL PARAMETER VALUES FOR PENDULUM
+Parameter
+Value
+g
+9.81 m/s2
+L
+0.5 m
+m
+0.15 kg
+b
+0.1 N·m·s/rad
+Simulation time step (dt)
+0.01 s
+Control update interval
+5 simulation steps
+Maximum episode steps
+1000
+3) State and Action Spaces: The system state vector is
+defined as x = [θ, ˙θ]⊤, with the state space constrained to
+X = [−π, π] × [−10, 10]. This range covers the full angular
+
+16
+displacement and accounts for physical angular velocity limits.
+The control objective is to drive the system to the unstable
+equilibrium point (upright position) defined as xg = [0, 0]⊤.
+The control action u is a one-dimensional continuous torque
+restricted to the action space U = [−5, 5]. These torque bounds
+are selected to ensure the system has sufficient authority
+for the swing-up maneuver while remaining within realistic
+actuation limits. At the start of each episode, the initial
+state x0 is uniformly sampled from the entire state space,
+x0 ∼Uniform([−π, π] × [−10, 10]), requiring the controller
+to handle both stabilization from near-upright positions and
+complex swing-up maneuvers from high-energy initial states.
+4) Comparison with OpenAI Gym Pendulum: Our Pendu-
+lum implementation is significantly more rigorous than the
+standard OpenAI Gym version [40]. Specifically, we expand
+the initial state space to the full range [−π, π] × [−10, 10]
+and increase the actuation limit to [−5, 5], whereas the Gym
+environment utilizes a narrower velocity initialization ([−1, 1])
+and limited torque range ([−2, 2]). Furthermore, we impose
+strict boundary-based termination and extend the episode
+horizon to T = 1000 steps. These more stringent constraints
+are intentionally designed to expose the limitations of standard
+RL baselines; for instance, while PPO converges readily in the
+Gym setting, it often fails to achieve robust stabilization in our
+high-energy regime.
+E. Details of DuctedFan
+1) System Overview: The DuctedFan system models the
+coupled translational and rotational dynamics of a ducted-
+fan aircraft under the influence of gravitational and control
+forces [66]. As a canonical benchmark for Vertical Takeoff and
+Landing (VTOL) research, it provides a rigorous platform for
+validating hover stabilization and attitude control algorithms
+[61], [67]. The system is underactuated and exhibits strong
+nonlinear coupling between its lateral displacement and angu-
+lar orientation.
+2) Dynamics and Physical Parameters: The continuous-
+time dynamics of the DuctedFan are derived from Newtonian
+mechanics and rigid-body dynamics, defined by the following
+state-space equations:
+˙x = ˙x,
+˙y = ˙y,
+˙θ = ˙θ,
+¨x = −mg sin(θ) −d ˙x + u1 cos(θ) −u2 sin(θ)
+m
+,
+¨y = mg(cos(θ) −1) −d ˙y + u1 sin(θ) + u2 cos(θ)
+m
+,
+¨θ = ru1
+J ,
+where u1 = f1 and u2 = f2−mg, with f1 and f2 representing
+the control forces applied perpendicular and parallel to the
+fan axis, respectively. The variable definitions and physical
+parameters used for the simulation are summarized in Table
+X and Table XI.
+TABLE X
+VARIABLE DEFINITIONS FOR DUCTEDFAN
+Variable
+Physical Meaning
+x, y
+Horizontal and vertical displacement (m)
+θ
+Angular orientation (rad)
+˙x, ˙y
+Horizontal and vertical velocity (m/s)
+˙θ
+Angular velocity (rad/s)
+m
+System mass (kg)
+g
+Gravitational acceleration (m/s2)
+r
+Moment arm of the control force (m)
+d
+Translational damping coefficient (N·s/m)
+J
+Moment of inertia (kg·m2)
+u1, u2
+Control force inputs (N)
+TABLE XI
+PHYSICAL PARAMETER VALUES FOR DUCTEDFAN
+Parameter
+Value
+g
+9.81 m/s2
+m
+8.5 kg
+r
+0.26 m
+d
+0.95 N·s/m
+J
+0.048 kg·m2
+Simulation time step (dt)
+0.01 s
+Control update interval
+5 simulation steps
+Maximum episode steps
+1000
+3) State and Action Spaces: The system state vector is
+defined as x = [x, y, θ, ˙x, ˙y, ˙θ]⊤. The admissible state space
+is X
+= [−5, 5]2 × [−π/2, π/2] × [−5, 5]3, which covers
+the translational workspace, the pitch angle range, and the
+respective velocity limits. The control objective is to stabilize
+the vehicle at the equilibrium state xg = [0, 0, 0, 0, 0, 0]⊤,
+corresponding to a steady hover at the origin.
+The control vector u = [u1, u2]⊤consists of two con-
+tinuous force inputs, with the action space defined as U =
+[−5, 5] × [−5, 5]. These bounds reflect physical actuation
+limits while ensuring sufficient control authority to coun-
+teract gravity and damping. At the start of each episode,
+the initial state x0 is sampled from a uniform distribution
+x0 ∼Uniform([−0.5, 0.5]6). This initialization provides a
+localized yet challenging set of starting conditions that require
+the controller to coordinate multi-axis forces to achieve precise
+stabilization.
+F. Details of Two-link
+1) System Overview: The Two-link system captures the
+rigid-body rotational dynamics of a serial two-link planar
+structure subject to gravitational effects and joint torque in-
+puts. This system serves as a representative benchmark for
+underactuated or fully actuated mechanical systems, where the
+nonlinear coupling between links presents a significant control
+challenge [59]. Key applications of this model include robotic
+manipulator trajectory tracking, humanoid robot joint coordi-
+nation, and the study of multi-degree-of-freedom Lagrangian
+systems [68].
+2) Dynamics and Physical Parameters: The continuous-
+time dynamics of the Two-link Planar Robot are derived
+
+17
+from Lagrangian mechanics and are expressed by the standard
+Euler-Lagrange equation:
+M(q)¨q + C(q, ˙q) ˙q + G(q) = u,
+where q = [θ1, θ2]⊤denotes the vector of joint angles, M(q)
+is the 2×2 symmetric positive-definite mass matrix, C(q, ˙q) is
+the Coriolis and centrifugal matrix, G(q) is the gravity vector,
+and u = [u1, u2]⊤is the control vector of joint torques. The
+explicit forms of these matrices are given by:
+M(q) =
+M11
+M12
+M21
+M22 ∈R2×2
+
+,
+C(q, ˙q) =
+−h ˙θ2
+−h( ˙θ1 + ˙θ2)
+h ˙θ1
+0
+
+,
+G(q) =
+
+−(m1lc1 + m2l1)g sin θ1 −m2lc2g sin(θ1 + θ2)
+−m2lc2g sin(θ1 + θ2)
+
+,
+where h = m2l1lc2 sin θ2. The individual elements of the mass
+matrix are defined as:
+M11 = I1 + I2 + m1l2
+c1 + m2(l2
+1 + l2
+c2 + 2l1lc2 cos θ2),
+M12 = M21 = I2 + m2(l2
+c2 + l1lc2 cos θ2),
+M22 = I2 + m2l2
+c2.
+The variable definitions and the specific physical parameters
+used in our simulation are summarized in Table XII and Table
+XIII, respectively.
+TABLE XII
+VARIABLE DEFINITIONS FOR TWO-LINK PLANAR ROBOT
+Variable
+Physical Meaning
+θ1, θ2
+Angular orientation of link 1 and link 2 (rad)
+˙θ1, ˙θ2
+Angular velocity of link 1 and link 2 (rad/s)
+¨θ1, ¨θ2
+Angular acceleration of link 1 and link 2 (rad/s2)
+l1, l2
+Length of link 1 and link 2 (m)
+m1, m2
+Mass of link 1 and link 2 (kg)
+lc1, lc2
+Distance from joint to center of mass (COM) (m)
+I1, I2
+Moment of inertia about the COM (kg·m2)
+u1, u2
+Torque input at joint 1 and joint 2 (N·m)
+TABLE XIII
+PHYSICAL PARAMETER VALUES FOR TWO-LINK PLANAR ROBOT
+Parameter
+Value
+g
+9.81 m/s2
+l1, l2
+1.0 m, 1.0 m
+m1, m2
+1.0 kg, 1.0 kg
+lc1, lc2
+0.5 m, 0.5 m
+I1, I2
+0.0833 kg·m2, 0.0833 kg·m2
+Simulation time step (dt)
+0.01 s
+Control update interval
+5 simulation steps
+Maximum episode steps
+1000
+3) State and Action Spaces: The system state vector is
+defined as x = [θ1, θ2, ˙θ1, ˙θ2]⊤. To incorporate physical
+constraints, the state space is bounded by X = [−π/2, π/2]2×
+[−20, 20]2, where the joint angles are limited to a ±π/2
+range and the angular velocities are capped at ±20 rad/s. The
+control objective is to achieve stabilization at the equilibrium
+state xg = [0, 0, 0, 0]⊤, representing the system at rest in the
+downward vertical position.
+The control action vector u = [u1, u2]⊤consists of contin-
+uous joint torques within the action space U = [−20, 20] ×
+[−20, 20]. These torque limits are established to prevent exces-
+sively high control efforts while providing sufficient authority
+to manage the gravitational and inertial coupling effects. For
+each training episode, the initial state x0 is sampled from
+a uniform distribution x0 ∼Uniform([−0.5, 0.5]4), ensuring
+that the controller begins each run in a neighborhood of the
+target equilibrium while requiring active correction to maintain
+stability.
+G. Details of SingleCarTracking
+1) System Overview: The SingleCarTracking environment
+is designed for high-fidelity ground vehicle trajectory . It uti-
+lizes a single-track (bicycle) model that incorporates both lat-
+eral and longitudinal dynamics of a rear-wheel-drive vehicle,
+accounting for nonlinear tire-road friction [69] and steering
+constraints. This benchmark is crucial for validating control
+strategies in autonomous driving [60], [70], such as path
+following and high-precision maneuvers in mobile robotics
+[10].
+2) Reference Trajectory and Tracking Error Formulation:
+In this study, the reference trajectory focuses on the spatial
+path in the 2D plane. Let pref
+t
+= [xref
+t , yref
+t ]⊤∈R2 denote the
+target position on the horizontal plane. While the full reference
+state xref
+t
+includes heading and velocity, the core objective
+is defined by the straight-line trajectory pref
+t
+= [t, 0]⊤for
+t ∈[0, 50]. The reference parameters are set to a longitudinal
+velocity vref = 1.0 m/s, zero acceleration aref = 0.0 m/s2, and
+a zero heading angle ψref = 0.0 with zero angular velocity
+ωref = 0.0 rad/s. A friction scaling factor µscale = 0.1 is applied
+to adjust tire nonlinearity.
+The physical state of the vehicle is described by the vector
+x = [x, y, δ, v, ψ, ˙ψ, β]⊤, representing position, steering angle,
+longitudinal speed, heading angle, yaw rate, and side-slip
+angle. For control purposes, we define the tracking error vector
+as e = [sxe, sye, δe, ve, ψe, ˙ψe, βe]⊤, where sxe = x −xref
+and sye = y −yref are the longitudinal and lateral position
+errors (also denoted as ex and ey respectively in the main
+text). The admissible error space E is constrained to [−1, 1]2×
+[−1.066, 1.066] × [−1, 1] × [−π/2, π/2]2 × [−π/3, π/3], re-
+flecting realistic tracking tolerances and physical actuation
+limits. The control objective is to maintain the system at the
+equilibrium error state eg = 0. At the start of each episode,
+the error is initialized via e0 ∼Uniform([−0.5, 0.5]7).
+3) Dynamics and Physical Parameters: The system dynam-
+ics are modeled as an affine nonlinear system ˙e = f(e) +
+g(e)u, where the control input u = [ ˙δ, along]⊤consists of
+the steering angular velocity and longitudinal acceleration,
+bounded by U = [−5, 5]2. To ensure numerical stability and
+physical accuracy across different speed regimes, the model
+transitions between a dynamic tire model and a kinematic
+bicycle model.
+a) Dynamic Model (|v|
+≥
+0.1m/s):
+In the high-
+speed
+regime,
+the
+drift
+vector
+field
+is
+defined
+as
+
+18
+f(e) = [v cos(ψe + βe) −vref + ωrefsye, v sin(ψe + βe) −
+ωrefsxe, 0, −aref, ˙ψe, f6(e), f7(e)]⊤. The nonlinear yaw and
+side-slip terms are:
+f6(e) =
+µm
+Iz(lf + lr)
+"
+−
+l2
+fCSfglr + l2
+rCSrglf
+v
+˙ψ
++ (lrCSrglf −lfCSfglr)βe + (lfCSfglr)δe
+#
+,
+f7(e) =
+µ(CSrglflr −CSfglrlf)
+v2(lf + lr)
+−1
+
+˙ψ
+−µ(CSrglf + CSfglr)
+v(lf + lr)
+βe + µCSfglr
+v(lf + lr)δe.
+where
+CSf = CSr = −tire p ky1
+tire p dy1
+The
+control
+gain
+matrix
+is
+g(e)
+=
+[02×2, [1, 0], [0, 1], 0, [0, g6,2(e)], [0, g7,2(e)]]⊤.
+The
+terms
+g6,2 and g7,2 account for CG height hs and vertical load
+shifts:
+g6,2(e) =
+µm
+Iz(lf + lr)
+"
+−
+−l2
+fCSfhs + l2
+rCSrhs
+v
+˙ψ
++ (lrCSrhs + lfCSfhs)βe −(lfCSfhs)δe
+#
+,
+g7,2(e) =µ(CSrhslr + CSfhslf)
+v2(lf + lr)
+˙ψ
+−µ(CSrhs −CSfhs)
+v(lf + lr)
+βe −µCSfhs
+v(lf + lr)δe.
+b) Kinematic Model (|v| < 0.1m/s): To avoid singu-
+larities at low speeds, the model simplifies to a kinematic
+representation where side-slip is negligible. Let L = lf + lr
+denote the wheelbase. The drift field f(e) and input matrix
+g(e) are expressed as:
+f(e) =
+h
+v cos(ψe + βe) −vref + ωrefsye,
+v sin(ψe + βe) −ωrefsxe,
+0,
+−aref,
+v cos(βe)
+L
+tan(δe) −ωref,
+0,
+0
+i⊤
+,
+g(e) =
+h
+02×2,
+[1, 0],
+[0, 1],
+0,
+cos(βe) tan(δe)
+L
+,
+β′
+e
+i⊤
+,
+where the side-slip rate auxiliary term is
+β′
+e = lr/(L cos2(δe))
+1 +
+ tan(δe) lr
+L
+2 .
+The system parameters are detailed in Tables XIV and XV.
+TABLE XIV
+VARIABLE DEFINITIONS FOR SINGLECARTRACKING
+Category
+Variable
+Physical Meaning
+True State
+x ∈R7
+x
+=
+[x, y, δ, v, ψ, ˙ψ, β]⊤: Position
+(x, y), steering angle, speed, heading, yaw
+rate, side-slip.
+Tracking Error
+e ∈R7
+e
+=
+[sxe, sye, δe, ve, ψe, ˙ψe, βe]⊤:
+Tracking errors relative to reference trajec-
+tory.
+Control
+u ∈R2
+u = [ ˙δ, along]⊤: Steering rate (rad/s) and
+longitudinal acceleration (m/s2).
+Parameters
+m, Iz, lf , lr, hs
+Mass, yaw inertia, distance to front/rear
+axles, and CG height.
+µ, Ktire
+Tire-road friction coefficient and tire stiff-
+ness parameters.
+TABLE XV
+PHYSICAL PARAMETER VALUES FOR SINGLECARTRACKING
+Parameter
+Value
+Parameter
+Value
+m
+1093 kg
+Iz
+1792 kg·m2
+lf, lr
+1.155 m, 1.423 m
+hs
+0.614 m
+δmax
+±1.066 rad
+along, max
+±5 m/s2
+tire p dy1
+1.0489
+tire p ky1
+-21.92
+dt
+0.01 s
+Horizon T
+1000
+H. Details of QuadrotorTracking
+1) System Overview: The QuadrotorTracking environment
+evaluates the 6-degree-of-freedom (6-DoF) rigid-body dynam-
+ics of a quadrotor UAV [71]. This benchmark incorporates
+complex rotor thrust-torque coupling and attitude kinematics
+defined on the special Euclidean group SE(3) [54]. It serves
+as a standard testbed for geometric control and reinforcement
+learning algorithms in high-agility scenarios [72], such as
+autonomous aerial inspection and precise path following [73],
+[74].
+2) Reference Trajectory and Tracking Error Formulation:
+The control objective is to track a time-varying reference
+trajectory that specifies position, velocity, and heading. Let
+pref
+t
+= [xref
+t , yref
+t , zref
+t ]⊤denote the desired 3D position at time
+step t. The benchmark utilizes a dynamic helical trajectory
+defined by:
+pref
+t
+= [0.4t, 0.4 sin(t), 0.6 cos(t)]⊤,
+vref
+t
+= [0.4, 0.4 cos(t), −0.6 sin(t)]⊤,
+where vref
+t
+is the reference velocity. The desired heading is
+determined by a rotating unit vector bref
+1,t = [cos(t), sin(t), 0]⊤.
+The system state is x = [x⊤
+p , v⊤, R, Ω⊤]⊤, where xp ∈R3
+is the position, v ∈R3 is the translational velocity, R ∈
+SO(3) is the rotation matrix, and Ω∈R3 is the body-frame
+angular velocity. Although R is a 3×3 matrix, it fundamentally
+represents three degrees of freedom (3-DoF). Thus for the sake
+of notational consistency, with a slight abuse of notation, we
+treat R as a three-dimensional vector, thereby concatenating
+it with x⊤
+p , v⊤, and Ω⊤to constitute the system state x.
+The tracking error e ∈R12 is defined by four components:
+position error ep = xp −pref
+t , velocity error ev = v −vref
+t , at-
+titude error eR, and angular velocity error eΩ. Following [54],
+the attitude error is computed via the skew-symmetric matrix
+
+19
+S = Rref⊤
+t
+R −R⊤Rref
+t , where eR = 0.5[S2,1, S0,2, S1,0]⊤,
+and Si,j denotes the (i, j)-th element of the S matrix. The
+angular velocity error is eΩ= Ω−R⊤Rref
+t Ωref
+t . The composite
+error vector e = [e⊤
+p , e⊤
+v , e⊤
+R, e⊤
+Ω]⊤is used as the input for the
+controller. At the start of each episode, the initial state x0 is
+uniformly randomly sampled to calculate e0, specifically
+
+
+
+
+
+
+
+x⊤
+p ∼Uniform
+ [−0.01, 0.01]3
+,
+v⊤∼Uniform
+ [−0.01, 0.01]3
+,
+vec(R −I3) ∼Uniform
+ [−0.01, 0.01]9
+, R is orthogonal,
+Ω⊤∼Uniform
+ [−0.01, 0.01]3
+.
+3) Dynamics and Physical Parameters: The continuous-
+time dynamics follow the Newton-Euler equations for rigid
+bodies:
+(
+˙xp = v,
+˙R = R[Ω]×,
+˙v = −g + F
+mb3,
+˙Ω= J−1(M −Ω× JΩ),
+where F is the total thrust and M = [Mx, My, Mz]⊤are
+the control moments.b1,b2 and b3 denote the desired x-axis,
+y-axis, and z-axis directions, respectively. The operator [·]×
+denotes the skew-symmetric mapping. The control action u =
+[F, Mx, My, Mz]⊤is derived from the individual rotor thrusts
+fi via the configuration matrix:
+
+
+F
+Mx
+My
+Mz
+
+=
+
+
+1
+1
+1
+1
+0
+−d
+0
+d
+d
+0
+−d
+0
+−ctf
+ctf
+−ctf
+ctf
+
+
+
+
+f1
+f2
+f3
+f4
+
+
+where d is the moment arm and ctf is the thrust-torque
+coefficient. Detailed parameter values are provided in Tables
+XVI and XVII.
+TABLE XVI
+VARIABLE DEFINITIONS FOR QUADROTORTRACKING
+Category
+Variable
+Physical Meaning
+True State
+x = [x⊤
+p , v⊤, R, Ω⊤]⊤
+3D
+position,
+velocity,
+rotation
+matrix elements, and angular ve-
+locity.
+Tracking Error
+e = [e⊤
+p , e⊤
+v , e⊤
+R, e⊤
+Ω]⊤
+Geometric tracking errors in po-
+sition, velocity, attitude, and an-
+gular rates.
+Control
+u = [F, Mx, My, Mz]⊤
+Total thrust (N) and three-axis
+body moments (N·m).
+Parameters
+m, J, d, ctf
+Mass, inertia matrix, rotor dis-
+tance, and torque coefficient.
+TABLE XVII
+PHYSICAL PARAMETER VALUES FOR QUADROTORTRACKING
+Parameter
+Value
+Parameter
+Value
+m
+4.34 kg
+g
+[0, 0, 9.8]⊤
+J
+diag(0.08, 0.09, 0.14)
+d
+0.315 m
+Fmax
+85.06 N
+Mmax
+±10 N·m
+dt
+0.01 s
+T
+1000
+REFERENCES
+[1] J. Kober, J. A. Bagnell, and J. Peters, “Reinforcement learning in robotics:
+A survey,” Int. J. Robot. Res., vol. 32, no. 11, pp. 1238–1274, 2013.
+[2] S. L¨ockel, J. Peters, and P. Van Vliet, “A probabilistic framework for
+imitating human race driver behavior,” IEEE Robot. Autom. Lett., vol. 5,
+no. 4, pp. 6089–6096, Oct. 2020.
+[3] Y. Zhu, R. Mottaghi, E. Kolve, J. J. Lim, A. Gupta, L. Fei-Fei, and
+A. Farhadi, “Target-driven visual navigation in indoor scenes using deep
+reinforcement learning,” in Proc. IEEE Int. Conf. Robot. Autom. (ICRA),
+2017, pp. 3357–3364.
+[4] J. Garcia and F. Fern´andez, “A comprehensive survey on safe reinforce-
+ment learning,” J. Mach. Learn. Res., vol. 16, no. 1, pp. 1437–1480,
+2015.
+[5] L. Brunke, M. Greeff, A. W. Hall, Z. Yuan, S. Zhou, J. Panerati, and A.
+P. Schoellig, “Safe learning in robotics: From learning-based control to
+safe reinforcement learning,” Annu. Rev. Control, Robot., Autom. Syst.,
+vol. 5, no. 1, pp. 411–444, 2022.
+[6] E. Altman, Constrained Markov Decision Processes. Boca Raton, FL,
+USA: CRC Press, 1999.
+[7] J. Achiam, D. Held, A. Tamar, and P. Abbeel, “Constrained policy
+optimization,” in Proc. 34th Int. Conf. Mach. Learn. (ICML), Sydney,
+Australia, 2017, pp. 22–31.
+[8] S. Bansal, M. Chen, S. Herbert, and C. J. Tomlin, “Hamilton-Jacobi
+reachability: A brief overview and recent advances,” in Proc. 56th IEEE
+Conf. Decis. Control (CDC), Melbourne, VIC, Australia, 2017, pp. 6942–
+6953.
+[9] J. F. Fisac, N. F. Lugovoy, V. Rubi´es-Royo, S. Ghosh, and C. J. Tomlin,
+“Bridging Hamilton-Jacobi safety analysis and reinforcement learning,”
+in Proc. IEEE Int. Conf. Robot. Autom. (ICRA), Montreal, QC, Canada,
+2019, pp. 8550–8556.
+[10] C. Dawson, S. Gao, and C. Fan, “Safe control with learned certificates: A
+survey of neural Lyapunov, barrier, and contraction methods for robotics
+and control,” IEEE Trans. Robot., vol. 39, no. 3, pp. 1749–1767, Jun.
+2023.
+[11] J. Choi, F. Casta˜neda, C. J. Tomlin, and K. Sreenath, “Reinforcement
+learning for safety-critical control under model uncertainty, using control
+Lyapunov functions and control barrier functions,” in Proc. Robot.: Sci.
+Syst. (RSS), 2020.
+[12] A. D. Ames, S. Coogan, M. Egerstedt, G. Notomista, K. Sreenath, and
+P. Tabuada, “Control barrier functions: Theory and applications,” in Proc.
+Eur. Control Conf. (ECC), Naples, Italy, 2019, pp. 3420–3431.
+[13] Y. Yang, Y. Jiang, Y. Liu, J. Chen, and S. E. Li, “Model-free safe
+reinforcement learning through neural barrier certificate,” IEEE Robot.
+Autom. Lett., vol. 8, no. 3, pp. 1295–1302, Jul. 2023.
+[14] P. Giesl and S. Hafstein, “Review on computational methods for Lya-
+punov functions,” Discrete Contin. Dyn. Syst., Ser. B, vol. 20, no. 8, pp.
+2291–2331, 2015.
+[15] F. Berkenkamp, M. Turchetta, A. Schoellig, and A. Krause, “Safe model-
+based reinforcement learning with stability guarantees,” in Adv. Neural
+Inf. Process. Syst. (NeurIPS), Long Beach, CA, USA, 2017, pp. 908–918.
+[16] S. M. Richards, F. Berkenkamp, and A. Krause, “The Lyapunov neural
+network: Adaptive stability certification for safe learning of dynamical
+systems,” in Proc. 2nd Conf. Robot. Learn. (CoRL), 2018, pp. 466–476.
+[17] Y. Chow, O. Nachum, E. Duenez-Guzman, and M. Ghavamzadeh, “A
+Lyapunov-based approach to safe reinforcement learning,” in Adv. Neural
+Inf. Process. Syst. (NeurIPS), Montreal, QC, Canada, 2018, pp. 8092–
+8101.
+[18] Y.-C. Chang, N. Roohi, and S. Gao, “Neural Lyapunov control,” in Adv.
+Neural Inf. Process. Syst. (NeurIPS), Vancouver, BC, Canada, 2019, pp.
+3245–3254.
+[19] T. Haarnoja, A. Zhou, K. Hartikainen, G. Tucker, S. Ha, J. Tan, V.
+Kumar, H. Zhu, A. Gupta, P. Abbeel, and S. Levine, “Soft actor-critic
+algorithms and applications,” arXiv preprint arXiv:1812.05905, 2018.
+[20] J. Duan, Y. Guan, S. E. Li, Y. Ren, Q. Sun, and B. Cheng, “Distributional
+soft actor-critic: Off-policy reinforcement learning for addressing value
+estimation errors,” IEEE Trans. Neural Netw. Learn. Syst., vol. 33, no.
+11, pp. 6584–6598, Nov. 2022.
+[21] J. Duan, W. Wang, L. Xiao, J. Gao, S. E. Li, C. Liu, Y.-Q. Zhang, B.
+Cheng, and K. Li, “Distributional soft actor-critic with three refinements,”
+IEEE Trans. Pattern Anal. Mach. Intell., vol. 47, no. 5, pp. 3935–3946,
+May 2025.
+[22] T. P. Lillicrap, J. J. Hunt, A. Pritzel, N. Heess, T. Erez, Y. Tassa, D.
+Silver, and D. Wierstra, “Continuous control with deep reinforcement
+learning,” arXiv preprint arXiv:1509.02971, 2016.
+
+20
+[23] J. Schulman, S. Levine, P. Abbeel, M. Jordan, and P. Moritz, “Trust
+region policy optimization,” in Proc. 32nd Int. Conf. Mach. Learn.
+(ICML), Lille, France, 2015, pp. 1889–1897.
+[24] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, “Prox-
+imal policy optimization algorithms,” arXiv preprint arXiv:1707.06347,
+2017.
+[25] S. Fujimoto, H. van Hoof, and D. Meger, “Addressing function approx-
+imation error in actor-critic methods,” in Proc. 35th Int. Conf. Mach.
+Learn. (ICML), Stockholm, Sweden, 2018, pp. 1587–1596.
+[26] G. Barth-Maron, M. W. Hoffman, D. Budden, W. Dabney, D. Horgan,
+D. TB, A. Muldal, N. Heess, and T. Lillicrap, “Distributed distributional
+deterministic policy gradients,” in Proc. Int. Conf. Learn. Represent.
+(ICLR), Vancouver, BC, Canada, 2018.
+[27] Y.-C. Chang and S. Gao, “Stabilizing neural control using self-learned
+almost Lyapunov critics,” in Proc. IEEE Int. Conf. Robot. Autom. (ICRA),
+Xi’an, China, 2021, pp. 1803–1809.
+[28] M. Han, L. Zhang, J. Wang, and W. Pan, “Actor-Critic reinforcement
+learning for control with stability guarantee,” IEEE Robot. Autom. Lett.,
+vol. 5, no. 4, pp. 6217–6224, Oct. 2020.
+[29] R. Munos, T. Stepleton, A. Harutyunyan, and M. Bellemare, “Safe and
+efficient off-policy reinforcement learning,” in Adv. Neural Inf. Process.
+Syst. (NIPS), vol. 29, 2016, pp. 1054–1062.
+[30] S. Fujimoto, D. Meger, and D. Precup, “Off-policy deep reinforcement
+learning without exploration,” in Proc. 36th Int. Conf. Mach. Learn.
+(ICML), Long Beach, CA, USA, 2019, pp. 2052–2062.
+[31] A. D. Ames, K. Galloway, K. Sreenath, and J. W. Grizzle, “Rapidly
+exponentially stabilizing control Lyapunov functions and hybrid zero
+dynamics,” IEEE Trans. Autom. Control, vol. 59, no. 4, pp. 876–891,
+2014.
+[32] S. Zhao, Mathematical Foundations of Reinforcement Learning. Berlin,
+Germany: Springer, 2025.
+[33] R. S. Sutton and A. G. Barto, Reinforcement Learning: An Introduction.
+Cambridge, MA, USA: MIT Press, 1998.
+[34] Q. Quan, K.-Y. Cai, and C. Wang, “Control with patterns: A D-learning
+method,” in Proc. Conf. Robot. Learn. (CoRL), Munich, Germany, 2024.
+[35] Z. Shen and Q. Quan, “Dopt: D-learning with off-policy target toward
+sample efficiency and fast convergence control,” in Proc. IEEE Int. Conf.
+Robot. Autom. (ICRA), 2025, pp. 9637–9643.
+[36] J. He, J. Liu, C. Y. Liu, R. Yan, C. Wang, P. Cheng, X. Zhang, F.
+Zhang, J. Xu, W. Shen, S. Li, L. Zeng, T. Wei, C. Cheng, B. An, Y. Liu,
+and Y. Zhou, “Skywork open reasoner 1 technical report,” arXiv preprint
+arXiv:2505.22312, 2025.
+[37] D. P. Kingma and J. Ba, “Adam: A method for stochastic optimization,”
+arXiv preprint arXiv:1412.6980, 2014.
+[38] S. Huang, R. F. J. Dossa, C. Ye, J. Braga, D. Chakraborty, K. Mehta,
+and J. G. M. Ara´ujo, “CleanRL: High-quality single-file implementations
+of deep reinforcement learning algorithms,” J. Mach. Learn. Res., vol.
+23, no. 274, pp. 1–18, 2022.
+[39] F. L. Lewis, D. Vrabie, and V. L. Syrmos, Optimal Control. Hoboken,
+NJ, USA: John Wiley & Sons, 2012.
+[40] G. Brockman, V. Cheung, L. Pettersson, J. Schneider, J. Schul-
+man, J. Tang, and W. Zaremba, “OpenAI Gym,” arXiv preprint
+arXiv:1606.01540, 2016.
+[41] W. Wang, Y. Zhang, J. Gao, Y. Jiang, Y. Yang, Z. Zheng, W. Zou, J.
+Li, C. Zhang, W. Cao, G. Xie, J. Duan, and S. E. Li, “GOPS: A general
+optimal control problem solver for autonomous driving and industrial
+control applications,” Commun. Transp. Res., vol. 3, p. 100096, 2023.
+[42] J. Lai, Z. Wu, Z. Ren, C. Chen, Q. Tan, and S. Xie, “A Lyapunov-based
+framework for trajectory planning of wheeled vehicle using imitation
+learning,” IEEE Trans. Autom. Sci. Eng., 2025, to be published.
+[43] H. Holt and R. Armellin, “Reinforcement learning enhanced LQR and
+control Lyapunov functions for spacecraft proximity operations,” IEEE
+Trans. Robot., 2025, to be published.
+[44] S. A. Khader, H. Yin, P. Falco, and D. Kragic, “Learning deep energy
+shaping policies for stability-guaranteed manipulation,” IEEE Robot.
+Autom. Lett., vol. 6, no. 4, pp. 8583–8590, Oct. 2021.
+[45] G. Mamakoukas, I. Abraham, and T. D. Murphey, “Learning stable
+models for prediction and control,” IEEE Trans. Robot., vol. 39, no. 3,
+pp. 2255–2275, Jun. 2023.
+[46] S. Omidshafiei, A. A. Agha-Mohammadi, C. Amato, S. Y. Liu, J. P. How,
+and J. Vian, “Decentralized control of multi-robot partially observable
+Markov decision processes using belief space macro-actions,” Int. J.
+Robot. Res., vol. 36, no. 2, pp. 231–258, 2017.
+[47] F. Gu, H. Yin, L. El Ghaoui, M. Arcak, P. Seiler, and M. Jin, “Recurrent
+neural network controllers synthesis with stability guarantees for partially
+observed systems,” in Proc. AAAI Conf. Artif. Intell., vol. 36, no. 5, Jun.
+2022, pp. 5385–5394.
+[48] S. Chen, M. Fazlyab, M. Morari, G. J. Pappas, and V. M. Preciado,
+“Learning Lyapunov functions for hybrid systems,” in Proc. 24th Int.
+Conf. Hybrid Syst.: Comput. Control (HSCC), Nashville, TN, USA, 2021,
+pp. 1–11.
+[49] A. Jena, D. Kalathil, and L. Xie, “Meta-learning-based adaptive stability
+certificates for dynamical systems,” in Proc. AAAI Conf. Artif. Intell., vol.
+38, no. 11, Mar. 2024, pp. 12801–12809.
+[50] Q. Zhang, C. Wu, H. Tian, Y. Gao, W. Yao, and L. Wu, “Safety
+reinforcement learning control via transfer learning,” Automatica, vol.
+166, p. 111714, 2024.
+[51] D. Chen, H. Wang, L. Cheng, and S. Gong, “Stability enhancement in
+reinforcement learning via adaptive control Lyapunov function,” arXiv
+preprint arXiv:2504.19473, 2025.
+[52] H. K. Khalil, Nonlinear Systems, 3rd ed. Upper Saddle River, NJ, USA:
+Prentice Hall, 2002.
+[53] M. W. Spong, “The swing up control problem for the Acrobot,” IEEE
+Control Syst. Mag., vol. 15, no. 1, pp. 49–55, Feb. 1995.
+[54] T. Lee, M. Leok, and N. H. McClamroch, “Geometric tracking control
+of a quadrotor UAV on SE(3),” in Proc. 49th IEEE Conf. Decis. Control
+(CDC), Atlanta, GA, USA, Dec. 2010, pp. 5420–5425.
+[55] A. G. Barto, R. S. Sutton, and C. W. Anderson, “Neuronlike adaptive
+elements that can solve difficult learning control problems,” IEEE Trans.
+Syst., Man, Cybern., vol. SMC-13, no. 5, pp. 834–846, Sep./Oct. 1983.
+[56] M. P. Deisenroth and C. E. Rasmussen, “PILCO: A model-based and
+data-efficient approach to policy search,” in Proc. 28th Int. Conf. Mach.
+Learn. (ICML), Bellevue, WA, USA, 2011, pp. 465–472.
+[57] P. Falcone, F. Borrelli, J. Asgari, H. E. Tseng, and D. Hrovat, “Predictive
+active steering control for autonomous vehicle systems,” IEEE Trans.
+Control Syst. Technol., vol. 15, no. 3, pp. 566–580, May 2007.
+[58] E. M. Abdel-Rahman, A. H. Nayfeh, and Z. N. Masoud, “Dynamics and
+control of cranes: A review,” J. Vib. Control, vol. 9, no. 7, pp. 863–908,
+2003.
+[59] M. W. Spong, S. Hutchinson, and M. Vidyasagar, Robot Modeling and
+Control, 2nd ed. Hoboken, NJ, USA: Wiley, 2020.
+[60] J. Kong, M. Pfeiffer, G. Schildbach, and F. Borrelli, “Kinematic and
+dynamic vehicle models for autonomous driving control design,” in Proc.
+IEEE Intell. Veh. Symp. (IV), Seoul, South Korea, 2015, pp. 1094–1099.
+[61] L. Marconi and R. Naldi, “Robust global trajectory tracking for a ducted-
+fan aerial vehicle,” Automatica, vol. 43, no. 11, pp. 1909–1920, 2007.
+[62] B. van der Pol, “A theory of the amplitude of free and forced triode
+vibrations,” Radio Rev., vol. 1, no. 1, pp. 701–710, 1920.
+[63] B. van der Pol and J. van der Mark, “The heartbeat considered as a
+relaxation oscillation,” Philos. Mag., vol. 6, no. 38, pp. 763–775, 1928.
+[64] K. Ogata, Modern Control Engineering, 5th ed. Upper Saddle River, NJ,
+USA: Prentice Hall, 2010.
+[65] S. Kajita, F. Kanehiro, K. Kaneko, K. Yokoi, and H. Hirukawa, “The 3D
+linear inverted pendulum mode: A simple modeling for a biped walking
+pattern generation,” in Proc. IEEE/RSJ Int. Conf. Intell. Robots Syst.
+(IROS), Maui, HI, USA, 2001, pp. 239–246.
+[66] M. B. Milam, R. Franz, J. E. Hauser, and R. M. Murray, “Receding
+horizon control of a ducted fan: Experimental results,” IEEE Trans.
+Control Syst. Technol., vol. 13, no. 1, pp. 49–57, Jan. 2005.
+[67] J.-M. Pflimlin, P. Binetti, P. Soueres, T. Hamel, and D. Trouchet,
+“Modeling and attitude control analysis of a ducted-fan micro aerial
+vehicle,” Control Eng. Pract., vol. 15, no. 10, pp. 1231–1245, 2007.
+[68] J.-J. E. Slotine and W. Li, “On the adaptive control of robot manipula-
+tors,” Int. J. Robot. Res., vol. 6, no. 3, pp. 49–59, 1987.
+[69] R. Rajamani, Vehicle Dynamics and Control, 2nd ed. New York, NY,
+USA: Springer, 2011.
+[70] B. R. Kiran, I. Sobh, V. Talpaert, P. Mannion, A. A. Al Sallab, S.
+Yogamani, and P. P’erez, “Deep reinforcement learning for autonomous
+driving: A survey,” IEEE Trans. Intell. Transp. Syst., vol. 23, no. 6, pp.
+4909–4926, Jun. 2022.
+[71] R. Mahony, V. Kumar, and P. Corke, “Multirotor aerial vehicles: Mod-
+eling, estimation, and control of quadrotor,” IEEE Robot. Autom. Mag.,
+vol. 19, no. 3, pp. 20–32, Sep. 2012.
+[72] J. Hwangbo, I. Sa, R. Siegwart, and M. Hutter, “Control of a quadrotor
+with reinforcement learning,” IEEE Robot. Autom. Lett., vol. 2, no. 4, pp.
+2096–2103, Oct. 2017.
+[73] M. Kamel, T. Stastny, K. Alexis, and R. Siegwart, “Model predictive
+control for trajectory tracking of unmanned aerial vehicles using robot
+operating system,” in Robot Operating System (ROS): The Complete
+Reference (Volume 2), A. Koubaa, Ed. Cham, Switzerland: Springer, 2017,
+pp. 3–39.
+[74] D. Mellinger and V. Kumar, “Minimum snap trajectory generation and
+control for quadrotors,” in Proc. IEEE Int. Conf. Robot. Autom. (ICRA),
+Shanghai, China, May 2011, pp. 2520–2525.

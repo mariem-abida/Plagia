@@ -1,0 +1,2250 @@
+MSched: GPU Multitasking via Proactive Memory Scheduling
+Weihang Shen, Yinqiu Chen, Rong Chen∗, Haibo Chen
+Institute of Parallel and Distributed Systems, Shanghai Jiao Tong University
+Abstract
+The limited HBM capacity has become the primary bottle-
+neck for hosting an increasing number of larger-scale GPU
+tasks. While demand paging extends capacity via host DRAM,
+it incurs up to 78× slowdown due to the massive working
+sets and poor locality of GPU workloads. We observe, how-
+ever, that GPU memory access patterns are inherently pre-
+dictable via kernel launch arguments and their asynchronous
+execution nature. Leveraging this, we propose MSched, an
+OS-level scheduler that extends GPU context switching to
+include proactive working set preparation, thereby coalescing
+fragmented, eventual, and expensive page faults into a single
+efficient migration. MSched employs a template-based ap-
+proach to predict working sets with near-perfect accuracy and
+proposes a co-design between task scheduler and memory
+manager to enforce a globally optimal page placement policy.
+Evaluation demonstrates that MSched outperforms demand
+paging by up to 11.05× for scientific and deep learning work-
+loads, and 57.88× for LLM under memory oversubscription.
+1
+Introduction
+Graphics Processing Units (GPUs) have emerged as the de-
+fault compute substrate across cloud [76, 82], edge [81], and
+personal devices [21, 35]. A growing range of computations
+are now routinely offloaded to GPUs, including media pro-
+cessing [26, 34], analytics [66], databases [10], and machine
+learning [28, 75]. This widespread adoption creates a press-
+ing demand for running multiple applications concurrently
+on a single GPU [28, 56, 78, 85]. For instance, on personal
+devices like AI PCs, users might be editing presentations with
+GPU-powered text completion and image generation in fore-
+ground, while AI agents and file indexing for RAG service
+run in background. Due to limited hardware resources, these
+applications must concurrently execute on the sole GPU. In
+the cloud, providers also seek to colocate multiple jobs on one
+GPU [5, 40, 75, 83] to maximize utilization and save costs.
+Prior research on GPU multitasking [13, 20, 28, 56, 74, 86]
+has primarily focused on compute scheduling, developing
+various techniques to multiplex GPU computation resources
+among tasks. These systems implicitly assume that the GPU’s
+high-bandwidth memory (HBM) can accommodate all con-
+current applications. However, an increasing number of ap-
+plications today become AI-powered and rely on GPU accel-
+eration [9, 59, 80]. Meanwhile, their memory footprints also
+∗Rong Chen is the corresponding author (rongchen@sjtu.edu.cn).
+ 0
+ 20
+ 40
+ 60
+ 80
+1
+2
+3
+4
+5
+6
+7
+8
+Thpt. (Tokens/s)
+Number of LLM Instances
+UM
+MSched
+Fig. 1: Comparison of total decoding throughput of multiple
+Llama3-8B (int8-quantized, 8.5 GB each) inference tasks using
+llama.cpp [23] on an NVIDIA RTX 5080 GPU (16 GB HBM) be-
+tween demand paging (UM [49]) and MSched.
+escalate rapidly, driven by exponentially growing model sizes
+and high-resolution, multi-modal inputs. This assumption of
+sufficient memory no longer holds in most cases. Over the
+past decade, the HBM capacity of GPUs in each class has
+only increased by several to tens of gigabytes [72, 73], thereby
+becoming the primary bottleneck for hosting an increasing
+number of larger-scale GPU applications concurrently.
+To handle GPU memory oversubscription, the conventional
+wisdom is to enable OS demand paging (e.g., Unified Mem-
+ory), spilling data to larger but slower backing storage such as
+host CPU DRAM or SSDs [3, 49]. When the system performs
+GPU context switching, it lazily swaps only the minimal exe-
+cution state (e.g., registers and on-chip shared memory) while
+deferring the working set transition. Memory swapping hap-
+pens when pages are actually accessed, using GPU virtual
+memory and page faults to passively migrate pages into HBM
+via interconnects like PCIe or NVLink C2C [47, 71].
+This lazy and passive mechanism is well-suited for tradi-
+tional CPU workloads, which typically exhibit random and
+unpredictable memory access patterns but have high tempo-
+ral locality and small working sets, thereby incurring an ac-
+ceptable overhead of occasional page faults. GPUs, however,
+violate these premises. GPU applications often have poor lo-
+cality and massive memory footprints, accessing gigabytes
+of data within short execution bursts [24, 33, 36]. Moreover,
+GPU page faults are far more expensive than on CPUs: a
+fault locks the TLB of the GPU compute unit (CU) [31, 55],
+stalling thousands of concurrent threads on that CU, and re-
+quires CPU intervention to resolve the fault. Our experiments
+in Fig. 1 quantify this pathology: simply applying demand
+paging to manage oversubscribed memory for concurrent
+applications (LLM inference) precipitates a staggering 78×
+slowdown. This collapse stems from severe page thrashing,
+which induces an average of 9,210 page faults per decoding
+1
+arXiv:2512.24637v1 [cs.OS] 31 Dec 2025
+
+step (12.7 ms). This suggests that this paradigm is ill-suited
+for supporting memory-demanding GPU multitasking.
+Opportunity. We observe that GPU applications have highly
+predictable memory access patterns, unlike CPU programs,
+which behave as black boxes to the OS. Most GPU kernels
+operate on data regions explicitly defined by their launch ar-
+guments (e.g., pointers, dimensions, and strides). Moreover,
+GPU kernels are launched asynchronously in a straightfor-
+ward sequence, making their complete execution order visible
+to the OS beforehand. This creates a natural opportunity to
+predict future memory accesses prior to execution.
+Key insight. This predictability motivates us to rethink the
+very definition of context switching for GPU multitasking. We
+argue that the notion of GPU “context” should expand beyond
+the minimal on-chip execution state to include its working set
+memory. As GPU multitasking workloads often have working
+sets that exceed HBM capacity, memory itself should also be
+proactively “scheduled”. In other words, instead of passively
+handling eventual and expensive page faults during execution,
+the system should eagerly and proactively prepare the future
+working set memory for the upcoming task as an integral part
+of the context switch routine.
+Our approach. We introduce MSched, the first OS-level
+scheduling system designed for GPU memory sharing among
+multiple concurrent tasks. MSched extends GPU memory
+with host DRAM and treats working set memory of a GPU
+task as a first-class citizen of its execution context. MSched
+achieves this through two core mechanisms. First, it intercepts
+GPU kernel arguments to build an online forecast of each
+task’s future memory accesses. Second, MSched uses this
+prediction to migrate the corresponding memory pages of
+the upcoming task into GPU HBM during context switching.
+This approach coalesces expensive, fragmented page faults
+into efficient, batched memory transfers, thereby significantly
+reducing the overhead of memory oversubscription.
+Challenges. Realizing this vision of extended context switch,
+however, is non-trivial. The key challenge lies in ensuring
+high prediction accuracy in both spatial and temporal as-
+pects. First, the prediction must be precise in determining the
+spatial regions of future memory accesses: over-prediction
+wastes valuable bandwidth on unnecessary data, while under-
+prediction triggers costly page faults that nullify the bene-
+fits of proactive memory scheduling. Second, according to
+Belady’s algorithm [8], the temporal sequence of memory
+accesses directly determines the optimal page placement pol-
+icy, which is the cornerstone of efficient memory scheduling.
+However, in multitasking scenarios, frequent context switches
+cause memory accesses from multiple concurrent tasks to in-
+terleave, making it difficult for the system to infer the exact
+timing of each access and thereby reduce data migration.
+MSched overcomes these challenges with two key mech-
+anisms: template-based memory prediction and a scheduler-
+memory co-design. To achieve spatial accuracy, we distill the
+memory access behaviors of modern GPU workloads into
+three fundamental templates. MSched automatically infers
+the mapping between kernel arguments and accessed mem-
+ory regions based on these templates, allowing it to precisely
+(0.25% false negative and 0.00% false positive) predict the
+working set of each kernel using online argument values. To
+resolve temporal interleaving, MSched exposes the sched-
+uler’s task timeline—a common scheduling primitive that
+describes future task order and timeslice allocation—to the
+memory manager. This enables the system to reconstruct a
+global memory access sequence, thereby enforcing optimal
+page placement policy aligned with the scheduler’s decisions.
+We evaluate MSched under multitasking memory over-
+subscription. For scientific computing and deep learning
+workloads, MSched improves total throughput by 11.05×,
+9.35×, and 7.52× over the native demand paging under 150%,
+200%, and 300% memory subscription, respectively. These
+speedups are magnified for memory-intensive LLM inference,
+reaching 57.88×, 44.79×, and 33.60×, effectively sustain-
+ing 74.09%, 58.23%, and 43.01% of in-HBM performance
+without oversubscription. Furthermore, MSched outperforms
+SUV [4], a demand paging optimization for single-task execu-
+tion, by 7.18× under 300% memory subscription. Compared
+to compute-only scheduling (XSched [56]), MSched reduces
+the P99 latency of real-time tasks by 4.06× while boosting the
+throughput of colocated best-effort tasks by 2.43×. We plan
+to open-source MSched to facilitate further development.
+2
+Background
+2.1
+Characterizing GPU Tasks
+Unlike general-purpose CPU workloads, which often exhibit
+complex and branching control flows, GPU tasks follow a
+structured, host-driven execution model. Typically, the host
+program allocates buffers in GPU memory to hold data such
+as inputs, outputs, model parameters, and intermediate results.
+It then transfers input data into these buffers via memory copy
+commands. Next, the host launches a series of GPU kernels
+to perform algorithmic computations on the data. Finally, the
+processed results are copied back to the host. From the OS
+perspective, a GPU task simply behaves as a sequence of
+memory copy and GPU kernel commands [56].
+A distinct feature of this model is the decoupling of com-
+mand launch and execution. Instead of executing immedi-
+ately, commands launched by the host CPU are pushed into a
+software-managed FIFO queue, allowing the host thread to
+proceed launching the next command. The GPU’s on-chip
+command processor, e.g., NVIDIA GPU System Processor
+(GSP) [77], then fetches and executes these commands from
+the queue in strict sequence. This asynchronous nature ex-
+poses a window of future commands—queued but not yet
+executed—offering the OS a unique opportunity to proac-
+tively analyze and predict the resource requirements of up-
+coming commands before they actually run on the GPU.
+2
+
+2.2
+Scheduling GPU Tasks
+To support multitasking, modern GPUs employ time-sharing
+scheduling to multiplex hardware resources among concur-
+rent GPU tasks. This approach has become the mainstream
+paradigm in GPU design and deployment due to its su-
+perior flexibility and robust fault and performance isola-
+tion [13, 20, 28, 74, 86]. In this model, the GPU acts as a
+preemptible resource, arbitrating execution among multiple
+tasks by performing context switching.
+GPU context switching. Analogous to CPUs, a GPU execu-
+tion context is traditionally defined as the minimal architec-
+tural states resident on the compute units (CUs) that must be
+saved and restored to ensure correct execution continuation.
+This includes register files, on-chip shared memory (scratch-
+pad), stack pointers, GPU page table bases, and control flow
+states (e.g., program counters, active masks, barrier states),
+with a total size of approximately 200KB per CU. Modern
+GPUs, such as NVIDIA GPUs after Pascal architecture and In-
+tel Xe GPUs, have natively supported preemption via context
+switching [17, 30, 42, 56] to schedule multiple tasks. When
+preemption is requested (e.g., time slice expiration), the GPU
+command processor broadcasts an interrupt to the CUs, imme-
+diately halting kernel execution and trapping into a software
+handler. The handler saves the context to GPU HBM and
+terminates the current kernel. The kernel of the subsequent
+task is then scheduled onto the CUs to restore its context and
+resume execution, thereby completing a typical GPU con-
+text switching operation. This mechanism has been adopted
+by state-of-the-art GPU multitasking systems [20, 56, 69] to
+enable flexible and preemptive GPU scheduling.
+2.3
+GPU Memory Multiplexing
+The untenable assumption of sufficient memory. While
+existing systems [20, 28, 56, 86] have effectively scheduled
+GPU compute resources across multiple tasks, they largely
+overlook the multiplexing of memory resources [78]. Most
+scheduling systems operate under an implicit assumption of
+sufficient memory: they assume that the aggregate memory
+footprint of all concurrent tasks can simultaneously reside in
+the GPU HBM. Under this premise, context switching merely
+involves saving and restoring the minimal architectural states
+(as described in §2.2), enabling the upcoming task to execute
+seamlessly as if it held exclusive access to the GPU.
+However, this assumption is becoming increasingly unten-
+able. On one hand, the ubiquity of AI-powered applications—
+ranging from background system agents to foreground in-
+teractive tools—has led to a surge in the number of tasks
+contending for the GPU [9, 59, 80]. On the other hand, the
+memory footprint of individual tasks is exploding. Modern
+GPU workloads, particularly large language models (LLMs),
+demand massive memory allocations not only for model pa-
+rameters but also for intermediates and caches. Consequently,
+the total memory demand of concurrent tasks frequently ex-
+ceeds the HBM capacity of even high-end GPUs, creating a
+barrier that simple compute scheduling cannot scale beyond.
+Demand paging as a workaround. To share the insufficient
+HBM across these memory-hungry tasks, the conventional
+solution [75] is to enable demand paging for GPUs, such as
+CUDA Unified Memory (UM) [49] and AMD HIP UM [3].
+This mechanism extends the GPU memory space with host
+CPU DRAM as a cheaper and larger backing storage. In
+this architecture, the GPU driver maintains a unified virtual
+address space where the physical pages are dynamically mi-
+grated between device HBM and host DRAM. When a run-
+ning kernel accesses a virtual page that is not resident in
+HBM, the GPU Memory Management Unit (MMU) raises
+a page fault, temporarily stalls the execution of the fault-
+ing compute unit and signals an interrupt to the CPU. The
+GPU driver on the CPU catches the interrupt and migrates
+the faulting page from host DRAM to HBM through high-
+bandwidth interconnects like PCIe or NVLink C2C [47, 71].
+If the HBM is already full, the driver must evict pages to
+free up space. Once the eviction and migration complete, the
+driver updates the GPU page table and resumes the stalled
+compute unit. By transparently and passively migrating pages
+upon access, demand paging can be directly integrated into
+existing scheduling systems and theoretically allows multiple
+memory-consuming tasks to oversubscribe GPU memory.
+3
+Rethinking GPU Context Switching
+While demand paging extends GPU memory beyond its phys-
+ical HBM capacity, its performance suffers from severe degra-
+dation in multitasking scenarios. Based on our experiments
+in Fig. 1, simply enabling demand paging (UM) for over-
+subscribed concurrent LLM inference tasks results in a 78×
+slowdown compared to running with sufficient HBM. This
+pathological degradation compels us to examine why this
+passive demand paging—effective in the CPU world—fails
+in the scenario of GPU multitasking. We identify three key
+limitations as follows.
+Lengthy control plane of GPU page faults. Unlike CPUs,
+GPU page faults are exorbitantly expensive due to hardware
+constraints. First, as mentioned in §2.3, resolving a GPU
+page fault necessitates intervention from the driver on the
+host CPU, entailing multiple interrupt round-trips across the
+PCIe bus. Our measurements on RTX 5080 GPU (PCIe 5.0)
+show that handling a single GPU page fault takes 31.79 µs,
+of which only 1.35 µs is spent on data transfer, while the
+remaining 96% is spent on control plane. Second, in terms
+of indirect overhead, a page fault triggered by a single GPU
+thread locks the TLB of the entire CU and prevents further
+address translations until the fault is resolved [31, 55], stalling
+thousands of concurrent GPU threads on that CU. The mas-
+sive parallelism of GPUs ironically amplifies the penalty of
+these stalls, causing severe underutilization of the hardware.
+Poor locality and large working set. Demand paging is
+specifically designed for workloads with strong temporal lo-
+3
+
+ 0
+ 2
+ 4
+ 6
+ 8
+ 10
+ 0
+ 10
+ 20
+ 30
+ 40
+memory footprint: 8.5GB
+Memory Access (GB)
+Timeline (milliseconds)
+weights (7.6GB)
+kvcache (0.5GB)
+activations (0.3GB)
+accessed by
+one kernel
+16KB
+4KB
+Fig. 2: GPU memory access pattern (sorted) of Llama3-8B (int8-
+quantized) inference with llama.cpp on an NVIDIA RTX 5080 GPU.
+cality and small active working sets that rarely exceed the
+physical memory capacity. However, GPU applications of-
+ten violate these premises. As illustrated in Fig. 2, typical
+GPU workloads (e.g., LLM inference) frequently touch mas-
+sive data, essentially their entire memory allocation (8.5 GB),
+within short periods (12.7 ms). Such streaming-like access
+pattern exhibits poor temporal locality and large working sets
+whose aggregate size across concurrent tasks easily surpasses
+HBM capacity. Consequently, demand paging triggers storms
+of page fault and severe memory thrashing, amplifying the
+fault handling overhead to a prohibitive level.
+Scheduling-induced task switching. Demand paging pas-
+sively ignores the complete working set shift introduced by
+context switching in multitasking scenarios. As a result, the
+incoming task is forced to fault in its working set page-by-
+page and cold start after every timeslice. Moreover, existing
+optimizations for demand paging [4, 29, 31, 33] focus solely
+on intra-task memory management while ignoring the impact
+of inter-task scheduling and context switches on memory be-
+havior. This oversight leads to severe page migration conflicts
+between tasks, preventing them from effectively scaling to
+multitasking workloads.
+Opportunity. GPU workloads have a fundamental charac-
+teristic: their memory access behaviors are inherently pre-
+dictable and explicitly exposed to the OS. First, GPU kernel
+launch arguments specify the memory buffers that the kernel
+will read from or write to. For example, a matrix multipli-
+cation kernel matmul(A, B, C,...) typically reads and
+multiplies the matrices stored in pointers A and B, writing the
+result to pointer C. Second, as mentioned in §2.1, a GPU task
+is composed of a well-defined sequence of kernels launched
+asynchronously, exposing a deterministic order of future ker-
+nel execution. This predictability empowers the OS to forecast
+the working set of GPU tasks ahead of execution.
+Extending GPU Context Switching. The predictability na-
+ture substantially changes the situation of GPU scheduling:
+it eliminates the uncertainty of memory access that compels
+CPUs to rely on demand paging. We argue that GPU memory
+management should no longer be a passive fault-handling
+manner but a proactive scheduling paradigm. Specifically,
+we propose to expand the definition of a GPU context switch
+to include the proactive restoration of working set memory.
+App code
+Original code
+MSched code
+Memory
+Analyzer
+Kernel Profiler
+Predictor
+intercept
+ GPU Driver
+pages
+App
+trace
+Offline
+Online
+Memory
+Manager
+madvise
+Scheduler
+f
+desc
+App
+... 
+policy
+latency
+timeline
+App
+Switcher
+migrate
+wset
+Fig. 3: Architecture and workflow of MSched.
+Instead of relying on page faults to trigger memory migration,
+the system should leverage the predictability to identify the
+memory required by the upcoming task and eagerly preload it
+into HBM before the task resumes execution. The benefits of
+this paradigm shift are twofold. First, it eliminates the control-
+plane overhead of handling massive page faults and the indi-
+rect cost from blocking thousands of other concurrent GPU
+threads. Second, it batches fragmented and page-by-page data
+movement into one complete and efficient operation. Our
+evaluation on an NVIDIA RTX 5080 GPU with PCIe 5.0×16
+interconnect highlights this disparity: while fine-grained mi-
+gration via page faults yields a meager effective throughput
+of 0.12 GB/s, batched transfer saturates the interconnect at
+41.7 GB/s—a 347× improvement in bandwidth efficiency.
+4
+MSched Overview
+Building on the idea of proactive memory scheduling and
+the augmented notion of context switching, we introduce
+MSched, the first OS-level scheduler tailored for multitasking
+GPU workloads under memory oversubscription. MSched
+extends GPU memory capacity by spilling inactive memory
+pages to host CPU DRAM and schedules data movement to
+keep the active task’s working set resident in GPU HBM. It
+first identifies the memory accesses of each task based on its
+kernel launch arguments. Next, unlike conventional demand
+paging, MSched proactively migrates memory during context
+switches: it evicts currently idle pages to host DRAM while
+simultaneously loading the next task’s working set into GPU
+HBM, enabling execution to proceed without page fault stalls.
+4.1
+Architecture and Workflow
+Fig. 3 illustrates the architecture and workflow of MSched. It
+consists of an offline part, which profiles the kernel execution
+latency and analyzes the argument-memory relationship, and
+an online part, which predicts and proactively schedules the
+memory for all running tasks in the system.
+Task analysis (Offline). During the offline phase, a kernel
+profiler measures the execution latency of every GPU ker-
+4
+
+nel in user applications. It also intercepts kernel arguments
+and records the memory addresses touched by each kernel. A
+memory analyzer then examines these arguments and mem-
+ory traces to construct a mapping between them based on a
+set of predefined templates. Subsequently, it generates a de-
+scription file that encapsulates kernel latencies and formulas
+for calculating memory regions. This offline phase can be
+integrated into the compiler or executed during installation.
+Memory scheduling (Online). The online part of MSched
+comprises four key modules: a predictor, a task scheduler, a
+memory manager, and a modified GPU driver.
+Predictor. The predictor is a dynamically linked library (DLL)
+that is preloaded into each GPU application process. It in-
+tercepts kernel launch APIs and their arguments, accurately
+predicting the memory pages each kernel will access based on
+the argument-memory mapping generated in the offline phase.
+The predicted memory access information is then attached to
+the kernel metadata and passed to the memory manager.
+Task scheduler (Extended). To schedule GPU tasks, MSched
+extends a GPU scheduler (XSched [56]) that enables pre-
+emptive GPU context switching among multiple tasks. When
+switching to a new task, the context switcher triggers the
+memory manager to perform proactive memory scheduling.
+Memory manager. Invoked by the scheduler upon context
+switching, the memory manager evicts pages to host CPU
+DRAM and follows the optimal replacement policy (OPT, i.e.,
+Belady’s algorithm [8]) to minimize the overall migration vol-
+ume. This process is guided by the predicted memory pages,
+profiled kernel latencies, and the scheduler’s task timeline.
+The manager then accurately populates the working set (wset)
+of the next task into GPU HBM via ioctl of the GPU driver.
+GPU driver (Extended). MSched modifies the kernel-mode
+GPU driver and implements a new madvise ioctl to enforce
+the OPT eviction sequence, and a migrate ioctl to proac-
+tively transfer memory between DRAM and HBM. MSched
+exploits the dual DMA engines widely available in modern
+GPUs [2, 7, 44] and the full-duplex bandwidth of PCIe inter-
+connect, enabling parallel page eviction and population.
+Transparency. It is important to note that MSched is imple-
+mented at the OS level, providing complete transparency to
+user applications. It requires neither application modifications
+nor access to kernel source code, ensuring full compatibility
+with closed-source platforms such as CUDA.
+4.2
+Challenges for Proactive Memory Scheduling
+Despite the simplicity of the idea, realizing such proac-
+tive memory scheduling and extended context switching is
+challenging, especially in achieving accurate memory pre-
+diction in both spatial and temporal dimensions. First, in
+terms of spatial accuracy, prediction must be precise in iden-
+tifying which memory pages will be accessed within the
+microsecond-scale window between kernel launch and ex-
+ecution. If the prediction fails to cover the entire working
+set (under-prediction), the system will fall back to inevitable
+and inefficient page faults. Conversely, over-prediction not
+only migrates superfluous data but, more critically, evicts
+pages that should have been retained for other tasks, caus-
+ing sustained performance degradation in subsequent tasks.
+Second, the system must infer the exact temporal order of
+future accesses under the interleaving of multiple concurrent
+tasks, which serves as the basis for the globally optimal page
+replacement policy (OPT). Although the execution latencies
+of individual kernels are deterministic [25, 28, 39], scheduler
+decisions significantly reshape the sequence in which mem-
+ory is consumed. Therefore, optimizing the global migration
+volume requires aligning eviction and placement with the
+plan of computation scheduler to avoid policy conflicts. We
+address these challenges through template-based memory pre-
+diction and a co-design between task scheduling and memory
+management, as detailed in the following two sections.
+5
+Memory Access Prediction
+The efficacy of MSched hinges on its ability to accurately
+identify the working set of each GPU task at runtime. The
+primary objective is to maximize prediction accuracy: mini-
+mizing the false negative rate (under-prediction) to prevent
+expensive page faults, while simultaneously minimizing the
+false positive rate (over-prediction) to avoid wasting intercon-
+nect bandwidth and polluting the limited GPU HBM with
+unused data. Furthermore, this prediction mechanism must be
+highly efficient, as the asynchronous time window between
+command launching and execution is typically microsecond-
+scale [27], leaving little budget for per-kernel analysis.
+A GPU task typically comprises memory copy commands
+and compute kernels. Predicting the memory footprint of copy
+commands is straightforward, as their semantics are explicitly
+defined by the API: the source, destination, and transfer size
+are provided as direct arguments. However, predicting the
+memory access of GPU kernels presents a significant chal-
+lenge. Due to the flexible programmability of GPUs, kernel
+semantics are opaque to the OS. Although the base addresses
+of data buffers are passed as kernel arguments, the actual
+range of memory accessed is implicitly determined by the
+kernel’s internal logic. Consequently, the crux of the problem
+lies in precisely inferring the memory access boundaries for
+arbitrary GPU kernels.
+5.1
+Naive Solution: Allocation-granularity Prediction
+Given that any memory region accessed by a kernel must
+have been allocated via GPU memory management APIs (e.g.,
+cudaMalloc), a naive solution [70] tracks all memory allo-
+cation and deallocation requests to maintain a map of valid
+memory buffers. Upon a kernel launch, the system checks
+each pointer argument. If a pointer falls within a known allo-
+cated buffer, the system conservatively predicts that the kernel
+will access the entire buffer.
+5
+
+Table 1: Comparison of kernel-level false negative rate (F-) and
+false positive rate (F+) between two prediction approaches. Models:
+ResNet152, VGG19, InceptionV3, DenseNet201, Llama3-8B.
+Application
+Model
+Allocation
+Template
+(F-)
+(F+)
+(F-)
+(F+)
+Rodinia
+/
+0.10
+31.16
+0.92
+0.00
+PyTorch/Train
+R
+0.00
+52.19
+0.52
+0.00
+PyTorch/Infer
+R
+0.03
+89.44
+0.17
+0.00
+V
+0.03
+78.32
+0.00
+0.00
+I
+0.02
+89.32
+0.23
+0.00
+D
+0.00
+90.84
+0.00
+0.00
+llama.cpp
+L
+0.04
+99.70
+0.00
+0.00
+While conceptually simple, this allocation-based approach
+suffers from severe over-prediction in practice due to two as-
+pects. Aggregated allocation: applications often consolidate
+multiple data objects into a single large contiguous buffer.
+For example, llama.cpp [23] in Fig. 2 allocates monolithic
+buffers for the entire model weights (7.6 GB) and activations
+(0.3 GB), subsequently slicing them for individual layers. Al-
+though a specific kernel only accesses a small, layer-specific
+slice (16 KB–60 MB), the OS perceives the kernel pointer
+as referencing the entire allocation. Similarly, modern deep
+learning frameworks like PyTorch [52, 78], TensorFlow [65],
+and JAX [64] also pre-allocate massive memory pools (often
+spanning GBs) to bypass the OS allocator and implement cus-
+tomized sub-allocation internally. Sparse access: even when a
+memory buffer is exclusively dedicated to a single data object,
+the kernel may only touch a fraction of it. A prime example
+is the KV cache in LLMs: while the buffer is allocated for the
+maximum context length, the inference kernel only accesses
+tokens up to the current sequence length (4 KB).
+Our empirical analysis in Table 1 confirms the inadequacy
+of this approach. While the false positive rate is 31% for scien-
+tific computing benchmarks, it surges to 80% on average for
+standard deep learning workloads. Most critically, for LLM
+inference, the false positive rate reaches an alarming 99.7%.
+This indicates that most of the memory pages predicted by this
+naive approach are not actually accessed, leading to gigabytes
+of unnecessary migration and HBM pollution.
+5.2
+Our Approach: Template-based Prediction
+We observe that beyond base pointers passed as kernel ar-
+guments, the size and structure of a kernel’s memory access
+region also inherently correlate with its launch arguments,
+including kernel calling arguments and launch configuration
+(e.g., grid and thread-block dimensions). Our approach, there-
+fore, analyzes the runtime history of kernel executions to
+discover the mapping between launch arguments and mem-
+ory access boundaries, and then encodes this mapping into
+concise formulas that can be efficiently evaluated online.
+Kernel profiler. To infer these mappings, we developed an of-
+Table 2: Typical memory access types in different GPU workloads.
+Application
+Model
+Fixed
+Linear
+Strided
+Others
+Rodinia
+/
+99.08
+0.00
+0.00
+0.92
+PyTorch/Train
+R
+84.94
+13.21
+1.33
+0.52
+PyTorch/Infer
+R
+83.96
+14.01
+1.86
+0.17
+V
+83.56
+6.69
+9.75
+0.00
+I
+69.50
+20.45
+9.82
+0.23
+D
+60.81
+34.24
+4.94
+0.00
+llama.cpp
+L
+59.84
+38.51
+1.65
+0.00
+fline kernel profiler based on NVBit [67], a binary instrumen-
+tation tool for GPU kernels. The profiler instruments every
+memory access instruction in the target kernel and records the
+accessed addresses to identify the memory regions the ker-
+nel touches. Meanwhile, it intercepts the kernel launch API
+to capture all corresponding launch arguments. We profile
+representative GPU workloads spanning scientific computing,
+deep learning inference and training, and LLMs.
+Access pattern templates. We analyze the memory traces
+collected by the profiler and classify the access behaviors
+of GPU kernels. The results summarized in Table 2 reveal
+that despite the algorithmic diversity of GPU kernels, their
+memory access patterns are highly structured. Common to all
+patterns is that the memory region begins with a base address
+provided by a specific pointer argument, while the spatial
+extent (i.e., size and shape) intrinsically follows one of the
+three fundamental templates listed below:
+• T1: Fixed-size access (∼77%). The size of the accessed
+region is fixed across all invocations of the kernel, either
+independent of the launch arguments, or determined by
+invariant arguments. This pattern is the most common,
+since kernels are often invoked in a consistent manner
+throughout the application’s lifecycle, with most launch
+arguments remaining unchanged.
+• T2: Linear-size access (∼18%). The accessed region is
+contiguous, but its size scales linearly with the product of
+specific launch arguments. This pattern is prevalent in ML
+workloads, where the number of elements or tensor dimen-
+sions are explicitly specified by arguments. For example,
+in kernel vector_add(A, B, C, N), the accessed sizes
+of buffers A, B, and C scale linearly with element count N,
+while in matrix_mul(A, B, C, M, N, K), they scale
+with dimensions M×K, K×N, and M×N, respectively.
+• T3: Strided access (∼5%). The access pattern consists of
+multiple discontiguous memory chunks separated by regu-
+lar strides, where the stride and chunk size are also linear
+to the product of specific launch arguments. This pattern
+typically arises in ML workloads, when kernels operate on
+specific dimensions of high-dimensional tensors.
+A single kernel may exhibit a combination of these three
+patterns. Together, our three templates cover nearly all mem-
+6
+
+ory access patterns found in typical GPU workloads. The
+remaining cases (less than 1%) arise from indirect memory
+access (pointer-chasing), where the base address originates
+from a value in GPU memory rather than from arguments—a
+behavior that is extremely rare in GPU workloads [27, 70].
+Memory analyzer. Motivated by these findings, we build
+an offline memory analyzer that consumes the profiled per-
+kernel memory traces and launch arguments, and derives the
+mapping between them according to the three templates. The
+analyzer first scans the kernel’s argument list to identify 64-
+bit integer values that appear as beginning addresses of the
+memory regions in the trace. Next, it attempts to match the
+spatial extent of these regions against the three templates in
+order. If the region size is invariant across all invocations
+of this kernel, it is classified as T1. Otherwise, the analyzer
+enumerates the remaining 64- and 32-bit integer arguments,
+as well as their combinations (products), to check for linear
+proportionality with the region’s size (T2) or stride (T3). Upon
+a successful match, the analyzer records the specific argument
+indices and the corresponding linear coefficients to formulate
+the prediction rules. Note that for C-style struct arguments,
+the analyzer slices them into 64- and 32-bit integers and treats
+each of them as an independent candidate. Since the total
+number of arguments is small (ranging from a few to dozens),
+the analysis can typically complete within seconds.
+Memory access prediction. We implemented an online pre-
+dictor as a preloaded DLL. It intercepts all GPU command
+launch APIs and utilizes the captured runtime launch argu-
+ments to evaluate the offline-derived prediction formulas,
+thereby calculating the precise memory access regions of
+each command (within a microsecond). The predictor then
+aligns these accessed regions to page boundaries, attaches the
+prediction results to the command metadata, and forwards
+them to the memory manager for proactive scheduling.
+Prediction accuracy. We evaluate the accuracy across scien-
+tific and ML workloads. While the naive allocation-based ap-
+proach captures all accesses, it incurs a high false positive rate
+due to coarse-grained prediction. In contrast, our template-
+based prediction achieves near-perfect coverage (0.25% av-
+erage false negative) with zero false positives. This ensures
+that MSched precisely identifies the actual working set with-
+out wasting resources on dormant data. Note that MSched
+retains demand paging as a fallback. The rare false negatives
+are handled transparently via standard page faults, ensuring
+execution correctness with negligible performance overhead.
+6
+Proactive Memory Scheduling
+6.1
+Task Scheduler
+To implement the extended context switch and proactive
+memory scheduling, MSched extends XSched [56], an open-
+source GPU scheduler. XSched leverages the GPU driver’s
+timeslice group (TSG) [43, 69] control interface to preemp-
+tively suspend the running task and perform context switch-
+ing to the next one based on a user-defined scheduling policy.
+MSched augments the context switch routine: upon suspend-
+ing the current task and saving its architectural state, the
+scheduler invokes the MSched memory manager. The man-
+ager then evicts inactive pages to create sufficient space and
+populates the predicted working set of the next task into
+HBM.
+However, achieving efficient memory scheduling requires
+not only spatially precise working set prediction, but also
+temporal accuracy, as the accessing order directly determines
+the optimal page placement. According to Belady’s algo-
+rithm [8], the theoretically optimal strategy (OPT) is to evict
+the page that will not be referenced for the longest time. The
+asynchronous and sequential nature of GPU tasks, combined
+with our template-based prediction technique, offers a unique
+opportunity to implement this policy—an objective that is
+elusive in the CPU world due to the opaque execution flows.
+Exploiting this opportunity is non-trivial under multitask-
+ing. While the execution latency of individual GPU com-
+mands (kernels and memory copies) is deterministic and sta-
+ble [25, 28, 39], context switching between tasks fundamen-
+tally alters the global execution timeline. The interleaving of
+commands from concurrent tasks disrupts the sequential con-
+tinuity observed in individual tasks. Consequently, without
+awareness of the scheduling plan, it is impossible to accu-
+rately predict the absolute timing of future memory accesses,
+thereby undermining the implementation of the OPT policy.
+Task scheduling timeline is the Rosetta Stone. To address
+this challenge, MSched co-designs the task scheduler and
+memory manager. We modified the scheduling policy module
+to expose its task scheduling timeline as an additional argu-
+ment when the context switcher invokes the memory manager.
+The task scheduling timeline is an ordered sequence of task
+entries and allocated timeslices akin to the run queue in OS
+schedulers [37, 63]. In MSched, this simple structure plays a
+pivotal role. It provides the ground truth for the future exe-
+cution timeline—which task will execute, for how long, and
+in what order. This enables the memory manager to deter-
+ministically resolve the global memory access sequence and
+enforce the optimal replacement policy, reducing overall mi-
+gration volume. Moreover, the timeline is easy to generate
+and effectively decouples the scheduling policy from memory
+management, allowing MSched to support diverse policies.
+6.2
+Memory Manager
+Armed with the requisite inputs—accurate working set from
+the predictor, command execution latency from the kernel
+profiler, and the task timeline from the scheduler—MSched
+is able to implement efficient proactive memory scheduling.
+Fig. 4 illustrates the memory scheduling logic of MSched.
+Distributed metadata management. To minimize runtime
+overhead, MSched adopts a distributed design. The memory
+manager is composed of a centralized coordinator daemon
+7
+
+timeline
+T1
+K5
+20ms
+T2
+K10
+10ms
+T3
+K1
+30ms
+latency
+pages
+..
+5us
+10us
+20us
+K1
+K2
+K8
+...
+T1
+T1
+...
+K1
+K2
+K8
+..
+page scheduling list
+access order
+evict order
+GPU Driver
+tail
+head
+evict
+eviction list
+...
+...
+...
+...
+...
+...
+...
+Memory Manager
+page
+madvise
+Fig. 4: The memory manager of MSched.
+and a per-process helper library. The helper, loaded into each
+application process, records each intercepted GPU command
+and its predicted working set (pages) into a process-local
+command queue. It also attaches the offline-profiled execu-
+tion latency to each command. This allows each helper to
+maintain a precise, local sequence of future memory accesses
+relative to its own execution flow, without flooding the central
+coordinator with fine-grained metadata.
+Driver support. MSched augments the ioctl interfaces of
+the GPU kernel-mode driver (KMD) to manipulate its internal
+LRU page eviction list. Under page faults with full HBM, the
+driver will evict pages from the list head. The new madvise
+interface allows userspace to move specific pages to the tail
+of the list, protecting them from immediate eviction. MSched
+also adds a migrate engine to the KMD. Upon a migrate
+call, the migrate engine evicts head pages of the eviction list to
+host CPU DRAM, freeing up enough space, then proactively
+populates the specified memory pages into GPU HBM.
+Enforcing the OPT memory scheduling. The coordinator
+resolves inter-task interleaving using the scheduler’s task time-
+line. Upon a context switch, the scheduler informs the coordi-
+nator of the current timeline, which includes ordered task IDs,
+currently executing commands, and allocated timeslices of
+each task. According to Belady’s OPT algorithm [8], the ideal
+eviction order is the reverse of the access order. Therefore, the
+coordinator iterates through the timeline in reverse order and,
+via shared-memory IPC, instructs each helper to madvise
+the pages accessed within its assigned timeslice. In the case of
+Fig. 4, the pages in the eviction list would eventually become,
+in order: unreferenced across the timeline (grey), Task3’s
+working set within 30 ms (orange), Task2’s working set in
+10 ms (pink), and Task1’s working set in 20 ms (cyan). Con-
+sequently, the list head naturally exposes the optimal eviction
+candidates (pages not needed for the longest time), while the
+near-term working set resides safely at the tail. Once ordered,
+the coordinator instructs the helper of the next-to-run task to
+call migrate to populate its immediate working set (cyan),
+while evicting idle pages (grey), completing a context switch
+augmented with memory scheduling.
+The optimal eviction order (i.e., page scheduling list in
+Fig. 4) is dynamic. First, the task timeline may reorder due to
+the policy’s decisions. Second, workloads like model training,
+iterative LLM decoding, and Mixture-of-Experts (MoE) mod-
+els intermittently launch new GPU commands, causing the
+...
+D2H
+H2D
+D2H
+H2D
+Kernel
+D2H
+D2H
+D2H
+H2D
+H2D
+D2H
+H2D
+H2D
+...
+...
+Kernel
+migration pipeline
+early start
+unmapping
+mapping
+Fig. 5: Page migration pipeline and early start optimizations.
+predicted memory page sets to evolve dynamically. Therefore,
+the memory manager must perform the complete procedure at
+every context switch to timely apply the latest page schedul-
+ing list to the driver’s eviction list. In practice, this frequency
+keeps the eviction order effectively optimal, as evidenced by
+the evaluation results with LLM decoding (Fig. 7 (d)) and
+DNN training (Fig. 13 (b)).
+6.3
+Page Migration Pipeline
+Since page eviction and population dominate the context
+switching latency, maximizing the migration throughput is
+critical. We observe that modern GPU architectures provide
+substantial hardware parallelism, featuring multiple Copy En-
+gines (CEs) capable of concurrent DMA operations [2, 7, 44].
+Furthermore, interconnects today like PCIe and NVLink-
+C2C support full-duplex communication [22], theoretically
+enabling parallel Device-to-Host eviction (D2H) and Host-to-
+Device population (H2D). However, we find that the standard
+migration mechanisms fail to exploit these capabilities, leav-
+ing significant bandwidth potential untapped.
+Fig. 5 illustrates the baseline migration workflow in the
+latest GPU drivers [48]. Swapping a page typically entails a
+serialized sequence of four operations: unmapping the victim
+page from the GPU page table using a specific command,
+evicting the victim page to the host (D2H) to reclaim space,
+populating the target page to the device (H2D), and finally
+establishing the new mapping. Consequently, the execution
+of subsequent compute kernels is strictly stalled until the
+migration of the entire working set completes.
+To maximize memory scheduling throughput, MSched im-
+plements an efficient page migration pipeline that exploits
+parallelism between CEs. Concretely, the migrate engine initi-
+ates the unmapping and D2H eviction of the first victim page
+on CE0. Once space is reclaimed, it immediately launches
+H2D population and mapping of the first target page on CE1
+while CE0 proceeds with unmapping and D2H for the second
+page. This forms a tight pipeline that performs eviction and
+population in parallel, effectively saturating the full-duplex
+interconnect bandwidth.
+Furthermore, MSched orders page migrations in the pre-
+dicted access order. This enables early execution: rather than
+stalling for the entire working set migration, the GPU compute
+kernel begins execution as soon as its immediate dependency
+pages are resident. To orchestrate the pipeline dependencies
+without incurring CPU intervention overhead, MSched uti-
+lizes hardware-supported synchronization primitives—GPU
+8
+
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+ 100 125 150 175 200 225 250 275 300
+Norm. Thpt. (%)
+Allocated Memory (%)
+UM
+MSched
+Ideal
+99.41
+ 0
+ 5
+ 10
+ 15
+ 20
+ 100 125 150 175 200 225 250 275 300
+Page Faults (x103)
+Allocated Memory (%)
+UM
+MSched
+ 0
+ 5
+ 10
+ 15
+ 20
+ 25
+ 100 125 150 175 200 225 250 275 300
+Migrated Mem. (GB)
+Allocated Memory (%)
+UM
+MSched
+Ideal
+Fig. 6: Comparison of (a) end-to-end throughput, (b) page fault count per task completion, and (c) memory migration volume per task
+completion, between native demand paging (UM), proactive memory scheduling (MSched), and theoretical optimal limit (Ideal).
+trackers and events (two kinds of semaphores on GPUs)—to
+enforce fine-grained signaling between CEs and CUs. This
+pipelined design improves hardware utilization and reduces
+the overhead of proactive memory scheduling.
+7
+Evaluation
+Experimental setup. The evaluation is mainly conducted on
+a server equipped with Intel Core Ultra 9 285K (24 cores),
+96 GB of DDR5 memory, and an NVIDIA RTX 5080 GPU
+(16 GB of HBM and PCIe 5.0×16). The system runs Ubuntu
+24.04 with NVIDIA driver 580.95.05 and CUDA toolkit 12.9
+installed. MSched extends XSched [56], an open-source GPU
+scheduler, and adopts its round-robin (RR) scheduling policy
+to multiplex all tasks in the system, matching the default time-
+sharing behavior of commodity GPUs. Note that MSched
+operates at OS-level and is fully transparent to applications,
+enabling proactive memory scheduling without any source
+code modifications or recompilation.
+7.1
+Effectiveness of Proactive Memory Scheduling
+Methodology. We first evaluate the mechanistic advantages of
+proactive memory scheduling over demand paging. We hand-
+craft two kinds of representative GPU tasks: a vector addition
+task that touches large memory regions within short bursts,
+and a matrix multiplication task which is compute-bound with
+high arithmetic intensity. We launch two processes for each
+type (four concurrent processes in total), continuously issuing
+tasks. By adjusting vector lengths and number of matrices
+to be computed, we precisely control the aggregate memory
+footprint and ensure equal memory consumption across all
+tasks. We compare MSched’s proactive scheduling against
+the native demand paging (CUDA UM) and an Ideal baseline,
+which represents the theoretical performance upper bound
+calculated using the strict OPT page replacement policy and
+the hardware’s actual performance metrics.
+Performance breakdown. Fig. 6 reports the end-to-end task
+throughput (normalized to exclusive in-HBM execution with-
+out oversubscription), the average number of page faults per
+task completion, and the average memory migration volume
+per task completion. As observed, demand paging exhibits a
+performance cliff immediately upon memory oversubscrip-
+tion (allocated memory over 100%), suffering a staggering
+16.2× throughput collapse. This stems from typical GPU
+Table 3: GPU task combinations tested in §7.2.
+Comb.
+Type
+Task
+A
+SciComp
+dwt2d, hotspot, cfd, nn
+B
+MultiDNN
+RNet, VGG, Inception, DNet
+C
+HybridDL
+RNet, VGG, Inception, DNet, Llama3
+D
+MultiLLM
+Llama3 (multiple instances)
+workloads’ poor locality and large working sets whose aggre-
+gate exceeds HBM capacity, inducing tens of thousands of
+page faults, severe thrashing, and a surge in total migration.
+Notably, the recorded migration volume for demand paging
+is not strictly equal to the product of fault counts and page
+size (4KB). This is because CUDA UM attempts to prefetch
+data without precise knowledge of the working set.
+In contrast, proactive memory scheduling delivers sub-
+stantial benefits. At 200% memory subscription, MSched
+achieves a 9.67× speedup over demand paging. Even un-
+der extreme pressure (300% usage), it retains 43.4% of the
+original in-HBM throughput. This performance gain is at-
+tributed to the elimination of page faults (only sporadic oc-
+currences) and the enforcement of the global OPT place-
+ment policy, which minimizes the total data movement.
+Moreover, MSched’s performance is close to the theoretical
+limit (Ideal), indicating efficient utilization of the hardware.
+Notably, without oversubscription (100%), MSched retains
+99.41% throughput, confirming its negligible runtime over-
+head (0.59%).
+7.2
+End-to-end Application Performance
+Workloads. We evaluate MSched against native demand pag-
+ing (UM) under real applications using four task combinations
+as listed in Table 3. A (SciComp): four representative scien-
+tific computing tasks from Rodinia [12] benchmark suite—
+2D discrete wavelet transform (dwt2d), thermal simulation
+(hotspot), fluid dynamics solver (cfd), and nearest neighbors
+search (nn). B (MultiDNN): inference tasks of four classic
+DNNs using PyTorch—ResNet152(RNet), VGG19, Incep-
+tionV3, and DenseNet201 (DNet). C (HybridDL): all tasks
+in B, combined with an LLM inference task (int8-quantized
+Llama3-8B via llama.cpp). D (MultiLLM): Multiple concur-
+rent Llama3-8B inference instances. Combinations A, B, and
+C are relatively compute-intensive, whereas D is memory-
+bound and sweeps large memory regions within short time
+9
+
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+A-Light A-Medium A-Heavy
+Norm. Throughput (%)
+UM
+MSched
+75.87
+58.36
+42.21
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+B-Light B-Medium B-Heavy
+UM
+MSched
+76.64
+55.37
+44.75
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+C-Light C-Medium C-Heavy
+Norm. Throughput (%)
+UM
+MSched
+76.12
+52.69
+43.98
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+D-Light D-Medium D-Heavy
+UM
+MSched
+74.09
+58.23
+43.01
+Fig. 7: Comparison of end-to-end throughput between UM and
+MSched under different workload setups and memory pressures.
+windows. Each kind of task runs as an independent process.
+For each combination, we measure the end-to-end perfor-
+mance under three memory oversubscription pressures: Light
+(total memory allocation = 150% of HBM capacity), Medium
+(200%), and Heavy (300%). We control the total memory
+footprints by scaling problem sizes (for combination A), ad-
+justing inference batch sizes (for B and C), and increasing the
+concurrent model instance count (for D). Across all testcases,
+we balance memory usage across tasks as evenly as possible.
+We then measure task completion throughput for A and DNN
+models, and decoding throughput for LLMs.
+Performance. Fig. 7 depicts the end-to-end throughput across
+all workload sets, normalized to in-HBM execution. Under
+memory oversubscription, the native demand paging suffers
+a catastrophic performance collapse. For the compute-heavy
+A, B, and C, throughput plummets to an average of 6.19% of
+in-HBM execution. The degradation is even more severe for
+the memory-intensive LLM workloads (D), where through-
+put drops to a mere 1.29%, rendering the GPU practically
+unusable due to severe page thrashing and IO stalls.
+In contrast, MSched consistently delivers superior perfor-
+mance across all workloads. For combinations A, B, and C,
+MSched achieves average speedups of 11.05×, 9.35×, and
+7.52× under Light, Medium, and Heavy memory pressures,
+respectively, compared to demand paging. For the LLM work-
+loads (D), the gains are even more pronounced, reaching
+57.88×, 44.79×, and 33.60× improvements. These results
+align with the micro-benchmark findings in Fig. 6 (a) and
+closely approach the theoretical optimal limit, confirming the
+fundamental advantages of proactive memory scheduling in
+supporting concurrent GPU tasks under memory pressure.
+7.3
+Ablation Study
+Impact of prediction accuracy. Table 1 in §5.2 evaluates the
+prediction accuracy of the naive allocation-granularity predic-
+1
+ 5
+ 10
+ 15
+D-Light D-Medium D-Heavy
+Norm. Migration
+Allocation
+Template
+4.77
+4.77
+12.27
+1
+ 5
+ 10
+ 15
+D-Light D-Medium D-Heavy
+Norm. Throughput
+Allocation
+Template
+5.17
+5.39
+15.67
+Fig. 8: Comparison of (a) memory migration volume and (b) end-
+to-end throughput between allocation-granularity prediction and
+template-based prediction under different memory pressures.
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+NVIDIA RTX 5080
+NVIDIA RTX 3080
+Bandwidth (GB/s)
+Page Fault
+Evict
+Populate
+Swap w/o Pipeline
+Swap w/ Pipeline
+0.12
+37.8
+45.6
+41.7
+63.5
+0.03
+23.4
+21.1
+22.2
+39.8
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+ 100
+ 150
+ 200
+ 250
+ 300
+Norm. Throughput (%)
+Allocated Memory (%)
+MSched
+w/o pipeline
+Fig. 9: (a) Page migration bandwidth using different methods on two
+different platforms, and (b) comparison of end-to-end throughput
+between with (w/) and without (w/o) pipelined migration.
+tion and our template-based prediction under different GPU
+workloads. While the naive solution maintains a low false neg-
+ative rate (covers almost all accesses), it suffers from a high
+false positive rate (most predicted memory are not actually
+accessed). In contrast, our approach attains near-perfect cov-
+erage with zero false positives due to strict template matching.
+Here, we quantify how this precision gap translates into mi-
+gration efficiency and application performance. We execute
+the LLM inference workloads (Combination D in §7.2) using
+both prediction strategies and measure the average memory
+migration volume per decode step and the overall throughput.
+As shown in Fig. 8, under Light and Medium memory
+pressures, the naive allocation-granularity prediction incurs a
+4.77× inflation in migration volume relative to our template-
+based method, resulting in 5.17× and 5.39× degradation
+in end-to-end throughput, respectively. This penalty arises
+primarily from excessive, erroneous preloading that wastes
+interconnect bandwidth. Furthermore, under Heavy pressure,
+this inefficiency compounds: migration inflation surges to
+12.27×. In this case, over-prediction pollutes the scarce HBM
+with useless data and displaces active working sets of subse-
+quent tasks, precipitating a cascade of eviction and repopu-
+lation thrashing. This effect is further amplified under high
+memory pressure. Consequently, the naive approach suffers a
+15.67× throughput drop, nearly erasing the benefits of proac-
+tive scheduling. These results underscore that precise working
+set prediction is indispensable—accuracy directly governs
+migration efficiency and ultimately determines system-level
+memory scheduling performance under oversubscription.
+Effectiveness of pipelined migration. We further analyze
+the impact of the page migration bandwidth between GPU
+HBM and host CPU DRAM on memory scheduling and eval-
+10
+
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+5
+10
+15
+20
+Norm. Throughput (%)
+Oversubscribed Memory (GB)
+RTX 5080
+RTX 3080
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+150
+200
+250
+300
+Allocated Memory (%)
+RTX 5080
+RTX 3080
+Fig. 10: Comparison of throughput under different oversubscribed
+volumes (a) and ratios (b) between RTX 5080 and RTX 3080.
+uate the efficacy of our pipelined migration mechanism. To
+demonstrate the generality of our approach across different
+platforms, we add a new testbed equipped with Intel Core
+i7-13700, 64 GB DDR4 memory, and an NVIDIA RTX 3080
+GPU (10 GB HBM, PCIe 4.0×16).
+We first measure the bandwidth of page eviction (D2H
+including unmapping), page population (H2D including map-
+ping), page swapping (evict then populate) through page
+faults, and proactive page swapping with and without our
+pipelined migration technique. As shown in Fig. 9 (a), the
+effective swap bandwidth without pipeline is limited to the av-
+erage of D2H and H2D, which is 41.7 GB/s on RTX 5080 and
+22.22 GB/s on RTX 3080. In contrast, our pipelined approach
+overlaps D2H and H2D to exploit the full-duplex interconnect,
+boosting the effective swap bandwidth to 63.5 GB/s (1.52×
+speedup) on RTX 5080 and 39.8 GB/s (1.79× speedup)
+on RTX 3080. Note that throughput on RTX 5080 is still
+far below the theoretical ceiling of the PCIe 5.0×16 link
+(64 GB/s×2). We identify a hardware bottleneck between the
+PCIe root complex and the DRAM in the host CPU. This is a
+known limitation in the chiplet design of recent Intel desktop
+CPUs [58], where the network on-chip (NoC) throttles the
+traffic between the IO die and the DDR5 controller. This issue
+is absent in other CPU families or server-grade platforms.
+Next, we assess the end-to-end impact using the same work-
+load from §7.1 on RTX 5080. As illustrated in Fig. 9 (b), the
+improved bandwidth translates directly to performance gains,
+which scale with memory oversubscription pressure: with
+pipelined migration, MSched achieves 1.27×, 1.39×, and
+1.51× speedups under 150%, 200%, and 300% subscription,
+respectively. These results highlight the criticality of migra-
+tion bandwidth for proactive scheduling. As links continue
+to scale, with PCIe bandwidth doubling per generation (PCIe
+7.0×16 with 256 GB/s×2), and new fabrics like CXL [19]
+and NVLink C2C (450 GB/s×2) [22, 47, 71] becoming avail-
+able, MSched will benefit proportionally, further improving
+practicality under aggressive memory oversubscription.
+Hardware differences. We evaluate MSched on the two
+testbeds—RTX 5080 (16GB, PCIe 5.0) and RTX 3080 (10GB,
+PCIe 4.0)—to illustrate how HBM capacity and interconnect
+bandwidth affect end-to-end performance. Using the work-
+loads from §7.1, Fig. 10 compares task throughput under
+varying oversubscribed volumes and ratios. Under equal over-
+ 0
+ 0.2
+ 0.4
+ 0.6
+ 0.8
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+madvise Lat. (ms)
+Number of Tasks
+150%
+200%
+300%
+Fig. 11: Control-plane overhead (madvise) of MSched under
+different task counts and memory allocation ratios.
+subscribed volume, RTX 5080 consistently outperforms RTX
+3080, and the gap widens as volume increases. As the total
+migration volume is directly related to the absolute oversub-
+scribed volume, this divergence stems primarily from the in-
+terconnect bandwidth disparity, matching the results in Fig. 9.
+Conversely, at equal oversubscription ratio, the two GPUs de-
+liver similar throughput. The absolute oversubscribed volume
+is smaller for RTX 3080 due to its smaller HBM capacity,
+partially masking its bandwidth disadvantage.
+7.4
+Overhead Analysis
+Beyond the data-plane cost of page migration,MSched in-
+troduces control-plane overhead, primarily incurred by the
+synchronous madvise calls of each task required to reorder
+the driver’s eviction list during context switching. Using the
+workload from §7.1, we measure the aggregate latency of
+madvises during a single context switch under varying task
+counts and memory allocations. As shown in Fig. 11, the
+latency scales linearly with the number of tasks. Since these
+handcrafted tasks exhibit constant memory access volume per
+timeslice, the number of pages to madvise per task remains
+constant, making the total overhead proportional to the task
+count. We also observe a slight latency increase under higher
+memory pressure, attributed to the slower page table lookups
+within the driver as the total number of allocated pages grows.
+Even so, within typical task-count ranges (tens of tasks or
+fewer), the overhead remains under 1 ms, which is negligible
+compared to the data migration latency.
+7.5
+Comparison with Existing Systems
+Paging optimization for single task. Existing OS-level opti-
+mizations for GPU demand paging target single-task execu-
+tion. We compare MSched against SUV [4], a state-of-the-art
+system that employs compile-time static analysis to identify
+data hotness, guiding memory placement and prefetching. Be-
+cause SUV relies on data structures of legacy GPU drivers
+incompatible with latest GPUs, we conduct this comparison
+on our RTX 3080 testbed. It is worth noting that SUV requires
+access to kernel source code, precluding support for common
+deep learning frameworks like PyTorch and llama.cpp which
+rely on closed-source kernel libraries (e.g., cuDNN, cuBLAS).
+Consequently, we employ the workloads described in §7.1.
+As shown in Fig. 12, SUV exhibits poor performance
+in multitasking workloads, even slightly worse than the na-
+11
+
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+ 100
+ 125
+ 150
+ 175
+ 200
+ 225
+ 250
+ 275
+ 300
+Norm. Thpt. (%)
+Allocated Memory (%)
+MSched
+Ideal
+UM
+SUV
+Fig. 12: Comparison of end-to-end throughput between MSched,
+SUV [4], and UM under different memory allocations on RTX 3080.
+tive demand paging. In contrast, MSched delivers substantial
+gains, achieving a 7.18× throughput improvement over SUV
+under 300% memory subscription. The gap stems from a
+fundamental limitation in single-task optimizations: they are
+oblivious to the drastic working set transitions induced by
+context switching. Without scheduling-aware coordination,
+per-task policies collide, causing severe migration conflicts
+and thrashing. MSched avoids this by inferring the cross-task
+memory access order using schedule timeline and enforcing a
+globally optimal, scheduling-aligned page placement policy.
+Compute-only scheduling. We finally compare MSched
+against XSched [56], representing systems that only sched-
+ule GPU computing resources. XSched is a state-of-the-art
+preemptive GPU task scheduler and delegates memory to de-
+mand paging under oversubscription. Beyond the throughput-
+oriented RR policy used earlier, MSched seamlessly supports
+other customized policies like the priority policy that targets
+latency. We emulate a typical cloud colocation scenario mix-
+ing Real-Time (RT) tasks which have strict SLOs and runs at
+high priority and Best-Effort (BE) tasks which improves GPU
+utilization at low priority and is preempted on RT arrivals. We
+configure two test cases: using ResNet152 inference as RT
+task, and either ResNet152 inference (testcase I) or training
+(testcase T) as BE task. We tune their batch sizes so that RT
+consumes 6GB memory and BE consumes 12GB.
+Fig. 13 shows the results. For RT tasks, MSched proactively
+restores the working set during context switching, eliminating
+cold-start page faults. Consequently, MSched reduces the P99
+latency of RT tasks by 4.06× on average compared to XSched,
+improving service quality. Also, MSched’s scheduling-aware
+OPT placement policy reduces data movement and boosts the
+throughput of BE tasks by 2.43× on average, thus increasing
+overall utilization of the GPU hardware. Notably, the speedup
+for training task is marginally lower than for inference (2.8%),
+primarily due to its intermittent command launching (§6.2).
+8
+Related Work
+GPU scheduling systems. Prior research has extensively
+explored GPU compute multiplexing techniques. For exam-
+ple, EffiSha [13], FLEP [74], PipeSwitch [5], REEF [28],
+XSched [56], and others [20, 50, 69, 86] introduce vari-
+ous GPU preemption mechanisms to enable low-latency
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+ 0
+ 100 200 300 400 500 600
+RT CDF (%)
+Latency (ms)
+MSched-I
+MSched-T
+XSched-I
+XSched-T
+ 0
+ 1
+ 2
+ 3
+ 4
+BE Speedup
+Inference
+Training
+2.47
+2.40
+Fig. 13: Comparison of (a) latency CDF of RT tasks and (b) through-
+put speedup of BE tasks between MSched and XSched [56] on
+RTX 5080 when inference (I) or training (T) serves as the BE task.
+task switching. Meanwhile, approaches such as NVIDIA
+MPS [46], MIG [45], libsmctrl [6], Baymax [14], Paella [40],
+Orion [61], SGDRC [84], and LithOS [18] improve GPU
+utilization through spatial sharing and enforce resource iso-
+lation. Other systems like Clockwork [25], TGS [75], and
+Shepherd [83] focus on GPU scheduling policies tailored for
+deep learning workloads. However, these compute-centric
+works either implicitly assume that the GPU HBM can ac-
+commodate the aggregate memory footprint of all concurrent
+tasks, or delegate memory oversubscription to the native de-
+mand paging mechanism which brings severe performance
+degradation. In contrast, MSched addresses this by treating
+task working set as a first-class citizen of the GPU context
+and proactively schedules memory across concurrent tasks.
+Demand paging optimizations for single GPU task. Prior
+work optimized GPU demand paging (typically CUDA UM)
+under memory oversubscription by exploiting program ac-
+cess characteristics to guide page eviction and prefetching.
+Examples include SUV [4], DeepUM [31], Sentinel [54],
+SwapAdvisor [29], and others [16, 24, 32]. Others, such as
+Forest [36], ETC [33], and SMC [41], redesign hardware to
+improve demand paging routine and introduce specialized
+units (e.g., memory compressors) to reduce page migration
+overhead. However, these systems are tailored for single-task
+execution and unaware of concurrency. Applying them in mul-
+titasking scenarios creates severe cross-task page conflicts and
+thrashing, as evidenced in Fig. 12. In comparison, MSched
+co-designs the scheduler and memory manager, leveraging the
+global task timeline to avoid inter-task conflicts and enforce
+optimal page placement policy.
+In-application GPU memory swapping. Prior work im-
+plemented numerous application-level swapping techniques
+to circumvent HBM constraints, offloading model parame-
+ters [5, 11, 25, 60, 68], KV cache [38], and tensors [51] to host
+CPU DRAM. Others spill GPU data to disk [1, 57, 79] or of-
+fload across network [15, 53, 62, 82]. Conversely, MSched op-
+erates at OS-level and is compatible with these in-application
+swapping solutions, as MSched can accurately identify the
+actually accessed memory during runtime.
+12
+
+9
+Conclusion
+This paper presents MSched, the first OS-level scheduler
+tailored for memory-oversubscribed GPU multitasking. By
+leveraging the memory predictability of GPU tasks, MSched
+extends GPU context switching to include proactive working
+set scheduling. Our experiments demonstrate its effectiveness
+on varying workloads.
+References
+[1] Keivan Alizadeh, Iman Mirzadeh, Dmitry Belenko, Karen
+Khatamifard, Minsik Cho, Carlo C Del Mundo, Mohammad
+Rastegari, and Mehrdad Farajtabar. 2024. LLM in a flash:
+Efficient Large Language Model Inference with Limited Mem-
+ory.
+arXiv:cs.CL/2312.11514
+https://arxiv.org/
+abs/2312.11514
+[2] AMD.
+2025.
+System
+direct
+memory
+access.
+https://rocm.docs.amd.com/en/docs-
+6.2.1/conceptual/gpu-memory.html#system-
+direct-memory-access
+[3] AMD. 2025.
+Unified memory management.
+https:
+//rocm.docs.amd.com/projects/HIP/en/docs-
+7.1.0/how-to/hip_runtime_api/memory_
+management/unified_memory.html
+[4] Pratheek B, Guilherme Cox, Jan Vesely, and Arkaprava Basu.
+2024. SUV: Static Analysis Guided Unified Virtual Memory.
+In 2024 57th IEEE/ACM International Symposium on Microar-
+chitecture (MICRO). 293–308.
+https://doi.org/10.
+1109/MICRO61859.2024.00030
+[5] Zhihao Bai, Zhen Zhang, Yibo Zhu, and Xin Jin. 2020.
+PipeSwitch: Fast Pipelined Context Switching for Deep Learn-
+ing Applications. In 14th USENIX Symposium on Operating
+Systems Design and Implementation (OSDI 20). USENIX
+Association, 499–514.
+https://www.usenix.org/
+conference/osdi20/presentation/bai
+[6] Joshua Bakita and James H. Anderson. 2023.
+Hardware
+Compute Partitioning on NVIDIA GPUs. In 2023 IEEE 29th
+Real-Time and Embedded Technology and Applications Sym-
+posium (RTAS). 54–66. https://doi.org/10.1109/
+RTAS58335.2023.00012
+[7] Joshua Bakita and James H. Anderson. 2024. Demystifying
+NVIDIA GPU Internals to Enable Reliable GPU Management.
+In 2024 IEEE 30th Real-Time and Embedded Technology and
+Applications Symposium (RTAS). 294–305. https://doi.
+org/10.1109/RTAS61025.2024.00031
+[8] L. A. Belady. 1966. A study of replacement algorithms for a
+virtual-storage computer. IBM Systems Journal 5, 2 (1966),
+78–101. https://doi.org/10.1147/sj.52.0078
+[9] J. Bieniek, M. Rahouti, and D. C. Verma. 2024. Generative AI
+in Multimodal User Interfaces: Trends, Challenges, and Cross-
+Platform Adaptability.
+arXiv:cs.HC/2411.10234 https:
+//arxiv.org/abs/2411.10234
+[10] Jiashen Cao, Rathijit Sen, Matteo Interlandi, Joy Arulraj, and
+Hyesoon Kim. 2023. GPU Database Systems Characterization
+and Optimization. Proc. VLDB Endow. 17, 3 (Nov. 2023),
+441–454.
+https://doi.org/10.14778/3632093.
+3632107
+[11] Shiyi Cao, Shu Liu, Tyler Griggs, Peter Schafhalter, Xiaox-
+uan Liu, Ying Sheng, Joseph E. Gonzalez, Matei Zaharia,
+and Ion Stoica. 2025.
+MoE-Lightning: High-Throughput
+MoE Inference on Memory-constrained GPUs. In Proceed-
+ings of the 30th ACM International Conference on Architec-
+tural Support for Programming Languages and Operating
+Systems, Volume 1 (ASPLOS ’25). Association for Comput-
+ing Machinery, New York, NY, USA, 715–730.
+https:
+//doi.org/10.1145/3669940.3707267
+[12] Shuai Che, Michael Boyer, Jiayuan Meng, David Tarjan,
+Jeremy W. Sheaffer, Sang-Ha Lee, and Kevin Skadron. 2009.
+Rodinia: A benchmark suite for heterogeneous computing.
+In Proceedings of the 2009 IEEE International Symposium
+on Workload Characterization (IISWC) (IISWC ’09). IEEE
+Computer Society, USA, 44–54. https://doi.org/10.
+1109/IISWC.2009.5306797
+[13] Guoyang Chen, Yue Zhao, Xipeng Shen, and Huiyang Zhou.
+2017. EffiSha: A Software Framework for Enabling Efficient
+Preemptive Scheduling of GPU. In Proceedings of the 22nd
+ACM SIGPLAN Symposium on Principles and Practice of
+Parallel Programming (PPoPP ’17). Association for Com-
+puting Machinery, New York, NY, USA, 3–16.
+https:
+//doi.org/10.1145/3018743.3018748
+[14] Quan Chen, Hailong Yang, Jason Mars, and Lingjia Tang.
+2016. Baymax: QoS Awareness and Increased Utilization for
+Non-Preemptive Accelerators in Warehouse Scale Computers.
+In Proceedings of the Twenty-First International Conference
+on Architectural Support for Programming Languages and
+Operating Systems (ASPLOS ’16). Association for Computing
+Machinery, New York, NY, USA, 681–696. https://doi.
+org/10.1145/2872362.2872368
+[15] Rongxin Cheng, Yuxin Lai, Xingda Wei, Rong Chen, and
+Haibo Chen. 2025. KunServe: Parameter-centric Memory
+Management for Efficient Memory Overloading Handling in
+LLM Serving. arXiv:cs.DC/2412.18169 https://arxiv.
+org/abs/2412.18169
+[16] Sangjin
+Choi,
+Taeksoo
+Kim,
+Jinwoo
+Jeong,
+Rachata
+Ausavarungnirun, Myeongjae Jeon, Youngjin Kwon, and
+Jeongseob Ahn. 2022.
+Memory Harvesting in Multi-
+GPU Systems with Hierarchical Unified Virtual Mem-
+ory.
+In
+2022
+USENIX
+Annual
+Technical
+Conference
+(USENIX ATC 22). USENIX Association, Carlsbad, CA,
+625–638. https://www.usenix.org/conference/
+atc22/presentation/choi-sangjin
+[17] Wonseok Choi and Youngjoo Shin. 2025. Vulnerable Intel
+GPU Context: Prohibit Complete Context Restore by Mod-
+ifying Kernel Driver. In Proceedings of the 20th ACM Asia
+Conference on Computer and Communications Security (ASIA
+CCS ’25). Association for Computing Machinery, New York,
+NY, USA, 1632–1642.
+https://doi.org/10.1145/
+3708821.3733885
+13
+
+[18] Patrick H. Coppock, Brian Zhang, Eliot H. Solomon, Vasilis
+Kypriotis, Leon Yang, Bikash Sharma, Dan Schatzberg,
+Todd C. Mowry, and Dimitrios Skarlatos. 2025.
+LithOS:
+An Operating System for Efficient Machine Learning on
+GPUs. In Proceedings of the ACM SIGOPS 31st Sympo-
+sium on Operating Systems Principles (SOSP ’25). Associ-
+ation for Computing Machinery, New York, NY, USA, 1–17.
+https://doi.org/10.1145/3731569.3764818
+[19] Debendra Das Sharma, Robert Blankenship, and Daniel Berger.
+2024. An Introduction to the Compute Express Link (CXL) In-
+terconnect. ACM Comput. Surv. 56, 11, Article 290 (July 2024),
+37 pages. https://doi.org/10.1145/3669900
+[20] Ruwen Fan, Tingxu Ren, Minhui Xie, Shiwei Gao, Jiwu Shu,
+and Youyou Lu. 2025. GPREEMPT: GPU Preemptive Schedul-
+ing Made General and Efficient. In 2025 USENIX Annual
+Technical Conference (USENIX ATC 25). USENIX Associ-
+ation, Boston, MA, 263–272.
+https://www.usenix.
+org/conference/atc25/presentation/fan
+[21] Ruibo Fan, Xiangrui Yu, Peijie Dong, Zeyu Li, Gu Gong,
+Qiang Wang, Wei Wang, and Xiaowen Chu. 2025.
+SpIn-
+fer: Leveraging Low-Level Sparsity for Efficient Large Lan-
+guage Model Inference on GPUs. In Proceedings of the
+Twentieth European Conference on Computer Systems (Eu-
+roSys ’25). Association for Computing Machinery, New York,
+NY, USA, 243–260.
+https://doi.org/10.1145/
+3689031.3717481
+[22] Luigi Fusco, Mikhail Khalilov, Marcin Chrapek, Giridhar
+Chukkapalli, Thomas Schulthess, and Torsten Hoefler. 2024.
+Understanding Data Movement in Tightly Coupled Heteroge-
+neous Systems: A Case Study with the Grace Hopper Super-
+chip.
+arXiv:cs.DC/2408.11556 https://arxiv.org/
+abs/2408.11556
+[23] ggml. 2025. llama.cpp.
+https://github.com/ggml-
+org/llama.cpp
+[24] Seokjin Go, Hyunwuk Lee, Junsung Kim, Jiwon Lee,
+Myung Kuk Yoon, and Won Woo Ro. 2023. Early-Adaptor:
+An Adaptive Framework for Proactive UVM Memory Manage-
+ment. In 2023 IEEE International Symposium on Performance
+Analysis of Systems and Software (ISPASS). 248–258. https:
+//doi.org/10.1109/ISPASS57527.2023.00032
+[25] Arpan Gujarati, Reza Karimi, Safya Alzayat, Wei Hao, Antoine
+Kaufmann, Ymir Vigfusson, and Jonathan Mace. 2020. Serv-
+ing DNNs like Clockwork: Performance Predictability from the
+Bottom Up. In 14th USENIX Symposium on Operating Systems
+Design and Implementation (OSDI 20). USENIX Association,
+443–462. https://www.usenix.org/conference/
+osdi20/presentation/gujarati
+[26] Robert Haase, Loic A. Royer, Peter Steinbach, Deborah
+Schmidt, Alexandr Dibrov, Uwe Schmidt, Martin Weigert,
+Nicola Maghelli, Pavel Tomancak, Florian Jug, and Eugene W.
+Myers. 2020. CLIJ: GPU-accelerated image processing for
+everyone. Nature Methods 17, 1 (Jan. 2020), 5–6.
+https:
+//doi.org/10.1038/s41592-019-0650-1
+[27] Mingcong Han, Weihang Shen, Guanwen Peng, Rong Chen,
+and Haibo Chen. 2024. Microsecond-scale Dynamic Validation
+of Idempotency for GPU Kernels. arXiv:cs.OS/2410.23661
+https://arxiv.org/abs/2410.23661
+[28] Mingcong Han, Hanze Zhang, Rong Chen, and Haibo
+Chen. 2022.
+Microsecond-scale Preemption for Concur-
+rent GPU-accelerated DNN Inferences. In 16th USENIX
+Symposium on Operating Systems Design and Implemen-
+tation (OSDI 22). USENIX Association, Carlsbad, CA,
+539–558. https://www.usenix.org/conference/
+osdi22/presentation/han
+[29] Chien-Chin Huang, Gu Jin, and Jinyang Li. 2020. SwapAdvi-
+sor: Pushing Deep Learning Beyond the GPU Memory Limit
+via Smart Swapping. In Proceedings of the Twenty-Fifth In-
+ternational Conference on Architectural Support for Program-
+ming Languages and Operating Systems (ASPLOS ’20). As-
+sociation for Computing Machinery, New York, NY, USA,
+1341–1355.
+https://doi.org/10.1145/3373376.
+3378530
+[30] Intel. 2025. Intel Graphics for Linux - Programmer’s Reference
+Manuals. https://www.intel.com/content/www/
+us/en/docs/graphics-for-linux/developer-
+reference/1-0/hardware-specs.html
+[31] Jaehoon Jung, Jinpyo Kim, and Jaejin Lee. 2023. DeepUM:
+Tensor Migration and Prefetching in Unified Memory. In Pro-
+ceedings of the 28th ACM International Conference on Archi-
+tectural Support for Programming Languages and Operating
+Systems, Volume 2 (ASPLOS 2023). Association for Comput-
+ing Machinery, New York, NY, USA, 207–221.
+https:
+//doi.org/10.1145/3575693.3575736
+[32] Jaehoon Jung, Daeyoung Park, Gangwon Jo, Jungho Park,
+and Jaejin Lee. 2021. SnuRHAC: A Runtime for Heteroge-
+neous Accelerator Clusters with CUDA Unified Memory. In
+Proceedings of the 30th International Symposium on High-
+Performance Parallel and Distributed Computing (HPDC
+’21). Association for Computing Machinery, New York,
+NY, USA, 107–120.
+https://doi.org/10.1145/
+3431379.3460647
+[33] Chen Li, Rachata Ausavarungnirun, Christopher J. Rossbach,
+Youtao Zhang, Onur Mutlu, Yang Guo, and Jun Yang. 2019.
+A Framework for Memory Oversubscription Management in
+Graphics Processing Units. In Proceedings of the Twenty-
+Fourth International Conference on Architectural Support for
+Programming Languages and Operating Systems (ASPLOS
+’19). Association for Computing Machinery, New York, NY,
+USA, 49–63. https://doi.org/10.1145/3297858.
+3304044
+[34] He Li, Kaoru Ota, Mianxiong Dong, Athanasios V. Vasi-
+lakos, and Koji Nagano. 2020. Multimedia Processing Pric-
+ing Strategy in GPU-Accelerated Cloud Computing. IEEE
+Transactions on Cloud Computing 8, 4 (2020), 1264–1273.
+https://doi.org/10.1109/TCC.2017.2672554
+14
+
+[35] Changyue Liao, Mo Sun, Zihan Yang, Jun Xie, Kaiqi Chen,
+Binhang Yuan, Fei Wu, and Zeke Wang. 2024. LoHan: Low-
+Cost High-Performance Framework to Fine-Tune 100B Model
+on a Consumer GPU.
+arXiv:cs.DC/2403.06504 https:
+//arxiv.org/abs/2403.06504
+[36] Mao Lin, Yuan Feng, Guilherme Cox, and Hyeran Jeon.
+2025.
+Forest: Access-aware GPU UVM Management. In
+Proceedings of the 52nd Annual International Symposium on
+Computer Architecture (ISCA ’25). Association for Comput-
+ing Machinery, New York, NY, USA, 137–152.
+https:
+//doi.org/10.1145/3695053.3731047
+[37] Linus Torvalds. 2025.
+Linux sched.h.
+https:
+//github.com/torvalds/linux/blob/master/
+kernel/sched/sched.h
+[38] Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun
+Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Rui
+Zhang, Kuntai Du, and Junchen Jiang. 2025. LMCache: An
+Efficient KV Cache Layer for Enterprise-Scale LLM Infer-
+ence.
+arXiv:cs.LG/2510.09665 https://arxiv.org/
+abs/2510.09665
+[39] Lingxiao Ma, Zhiqiang Xie, Zhi Yang, Jilong Xue, Youshan
+Miao, Wei Cui, Wenxiang Hu, Fan Yang, Lintao Zhang,
+and Lidong Zhou. 2020.
+Rammer: Enabling Holis-
+tic Deep Learning Compiler Optimizations with rTasks.
+In 14th USENIX Symposium on Operating Systems De-
+sign and Implementation (OSDI 20). USENIX Association,
+881–897. https://www.usenix.org/conference/
+osdi20/presentation/ma
+[40] Kelvin K. W. Ng, Henri Maxime Demoulin, and Vincent Liu.
+2023.
+Paella: Low-latency Model Serving with Software-
+defined GPU Scheduling. In Proceedings of the 29th Sym-
+posium on Operating Systems Principles (SOSP ’23). Associa-
+tion for Computing Machinery, New York, NY, USA, 595–610.
+https://doi.org/10.1145/3600006.3613163
+[41] Abdun Nihaal and Madhu Mutyam. 2024. Selective Memory
+Compression for GPU Memory Oversubscription Manage-
+ment. In Proceedings of the 53rd International Conference
+on Parallel Processing (ICPP ’24). Association for Comput-
+ing Machinery, New York, NY, USA, 189–198.
+https:
+//doi.org/10.1145/3673038.3673058
+[42] NVIDIA. 2016. Tuning CUDA Applications for Pascal: Com-
+pute Preemption. https://docs.nvidia.com/cuda/
+pascal-tuning-guide/index.html#compute-
+preemption
+[43] NVIDIA.
+2019.
+NVIDIA
+open-gpu-doc
+repository.
+https://github.com/NVIDIA/open-gpu-
+doc/blob/master/manuals/volta/gv100/dev_
+ram.ref.txt
+[44] NVIDIA. 2025.
+CUDA C++ Best Practices Guide.
+https://docs.nvidia.com/cuda/cuda-c-best-
+practices-guide/
+[45] NVIDIA. 2025.
+MIG User Guide.
+https:
+//docs.nvidia.com/datacenter/tesla/mig-
+user-guide/index.html
+[46] NVIDIA. 2025. Multi-Process Service.
+https://docs.
+nvidia.com/deploy/mps/index.html
+[47] NVIDIA. 2025. NVIDIA NVLink-C2C.
+https://www.
+nvidia.com/en-us/data-center/nvlink-c2c
+[48] NVIDIA. 2025.
+Open GPU Kernel Modules 580.95.05.
+https://github.com/NVIDIA/open-gpu-
+kernel-modules/tree/580.95.05
+[49] NVIDIA.
+2025.
+Unified
+Memory
+Programming.
+https://docs.nvidia.com/cuda/cuda-c-
+programming-guide/#unified-memory-
+programming
+[50] Jason Jong Kyu Park, Yongjun Park, and Scott Mahlke. 2015.
+Chimera: Collaborative Preemption for Multitasking on a
+Shared GPU. In Proceedings of the Twentieth International
+Conference on Architectural Support for Programming Lan-
+guages and Operating Systems (ASPLOS ’15). Association
+for Computing Machinery, New York, NY, USA, 593–606.
+https://doi.org/10.1145/2694344.2694346
+[51] Xuan Peng, Xuanhua Shi, Hulin Dai, Hai Jin, Weiliang Ma,
+Qian Xiong, Fan Yang, and Xuehai Qian. 2020. Capuchin:
+Tensor-based GPU Memory Management for Deep Learning.
+In Proceedings of the Twenty-Fifth International Conference
+on Architectural Support for Programming Languages and
+Operating Systems (ASPLOS ’20). Association for Computing
+Machinery, New York, NY, USA, 891–905. https://doi.
+org/10.1145/3373376.3378505
+[52] PyTorch.
+2025.
+PyTorch
+Memory
+management.
+https://docs.pytorch.org/docs/stable/
+notes/cuda.html#memory-management
+[53] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren,
+Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran
+Xu. 2025. Mooncake: Trading More Storage for Less Compu-
+tation — A KVCache-centric Architecture for Serving LLM
+Chatbot. In 23rd USENIX Conference on File and Storage Tech-
+nologies (FAST 25). USENIX Association, Santa Clara, CA,
+155–170. https://www.usenix.org/conference/
+fast25/presentation/qin
+[54] Jie Ren, Jiaolin Luo, Kai Wu, Minjia Zhang, Hyeran Jeon, and
+Dong Li. 2021. Sentinel: Efficient Tensor Migration and Allo-
+cation on Heterogeneous Memory Systems for Deep Learning.
+In 2021 IEEE International Symposium on High-Performance
+Computer Architecture (HPCA). 598–611. https://doi.
+org/10.1109/HPCA51647.2021.00057
+[55] Nikolay
+Sakharnykh.
+2017.
+Maximizing
+Uni-
+fied Memory Performance in CUDA.
+https:
+//developer.nvidia.com/blog/maximizing-
+unified-memory-performance-cuda
+15
+
+[56] Weihang Shen, Mingcong Han, Jialong Liu, Rong Chen,
+and Haibo Chen. 2025.
+XSched: Preemptive Schedul-
+ing for Diverse XPUs. In 19th USENIX Symposium
+on
+Operating
+Systems
+Design
+and
+Implementation
+(OSDI 25). USENIX Association, Boston, MA, 671–
+692.
+https://www.usenix.org/conference/
+osdi25/presentation/shen-weihang
+[57] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max
+Ryabinin, Daniel Y. Fu, Zhiqiang Xie, Beidi Chen, Clark Bar-
+rett, Joseph E. Gonzalez, Percy Liang, Christopher Ré, Ion
+Stoica, and Ce Zhang. 2023. FlexGen: High-Throughput Gen-
+erative Inference of Large Language Models with a Single
+GPU. arXiv:cs.LG/2303.06865 https://arxiv.org/
+abs/2303.06865
+[58] Anton Shilov and Aaron Klotz. 2025.
+Intel Arrow
+Lake
+processors
+bottleneck
+PCIe
+5.0
+NVMe
+SSDs
+by 16%, limiting peak speeds to 12 GB/s instead of
+14 GB/s.
+https://www.tomshardware.com/pc-
+components/cpus/intel-arrow-lake-
+processors-bottleneck-pcie-5-0-nvme-
+ssds-by-16-percent-limiting-peak-speeds-
+to-12gb-s-instead-of-14gb-s
+[59] Jason Ching Yuen Siu, Jieshan Chen, Yujin Huang, Zhen-
+chang Xing, and Chunyang Chen. 2023. Towards Real Smart
+Apps: Investigating Human-AI Interactions in Smartphone
+On-Device AI Apps.
+arXiv:cs.HC/2307.00756
+https:
+//arxiv.org/abs/2307.00756
+[60] Yixin Song, Zeyu Mi, Haotong Xie, and Haibo Chen. 2024.
+PowerInfer: Fast Large Language Model Serving with a
+Consumer-grade GPU. In Proceedings of the ACM SIGOPS
+30th Symposium on Operating Systems Principles (SOSP
+’24). Association for Computing Machinery, New York,
+NY, USA, 590–606.
+https://doi.org/10.1145/
+3694715.3695964
+[61] Foteini Strati, Xianzhe Ma, and Ana Klimovic. 2024. Orion:
+Interference-aware, Fine-grained GPU Sharing for ML Appli-
+cations. In Proceedings of the Nineteenth European Confer-
+ence on Computer Systems (EuroSys ’24). Association for
+Computing Machinery, New York, NY, USA, 1075–1092.
+https://doi.org/10.1145/3627703.3629578
+[62] Biao Sun, Ziming Huang, Hanyu Zhao, Wencong Xiao, Xinyi
+Zhang, Yong Li, and Wei Lin. 2024.
+Llumnix: Dynamic
+Scheduling for Large Language Model Serving. In 18th
+USENIX Symposium on Operating Systems Design and Imple-
+mentation (OSDI 24). USENIX Association, Santa Clara, CA,
+173–191. https://www.usenix.org/conference/
+osdi24/presentation/sun-biao
+[63] Andrew S. Tanenbaum and Herbert Bos. 2014. Modern Oper-
+ating Systems (4th ed.). Prentice Hall Press, USA.
+[64] The JAX Authors. 2024.
+JAX GPU memory alloca-
+tion.
+https://docs.jax.dev/en/latest/gpu_
+memory_allocation.html
+[65] The TensorFlow Authors. 2015.
+TensorFlow BFC Al-
+locator.
+https://github.com/tensorflow/
+tensorflow/blob/master/tensorflow/core/
+common_runtime/bfc_allocator.h
+[66] Bing Tian, Haikun Liu, Yuhang Tang, Shihai Xiao, Zhuohui
+Duan, Xiaofei Liao, Hai Jin, Xuecang Zhang, Junhua Zhu, and
+Yu Zhang. 2025. Towards High-throughput and Low-latency
+Billion-scale Vector Search via CPU/GPU Collaborative Filter-
+ing and Re-ranking. In 23rd USENIX Conference on File and
+Storage Technologies (FAST 25). USENIX Association, Santa
+Clara, CA, 171–185.
+https://www.usenix.org/
+conference/fast25/presentation/tian-bing
+[67] Oreste Villa, Mark Stephenson, David Nellans, and Stephen W.
+Keckler. 2019. NVBit: A Dynamic Binary Instrumentation
+Framework for NVIDIA GPUs. In Proceedings of the 52nd
+Annual IEEE/ACM International Symposium on Microarchi-
+tecture (MICRO-52). Association for Computing Machinery,
+New York, NY, USA, 372–383. https://doi.org/10.
+1145/3352460.3358307
+[68] Jiali Wang, Yankui Wang, Mingcong Han, and Rong Chen.
+2025.
+Colocating ML Inference and Training with Fast
+GPU Memory Handover. In 2025 USENIX Annual Techni-
+cal Conference (USENIX ATC 25). USENIX Association,
+Boston, MA, 1657–1675. https://www.usenix.org/
+conference/atc25/presentation/wang-jiali
+[69] Yidi Wang, Cong Liu, Daniel Wong, and Hyoseung Kim.
+2024.
+GCAPS: GPU Context-Aware Preemptive Priority-
+Based Scheduling for Real-Time Tasks. In 36th Euromicro
+Conference on Real-Time Systems (ECRTS 2024) (Leibniz In-
+ternational Proceedings in Informatics (LIPIcs)), Rodolfo Pel-
+lizzoni (Ed.), Vol. 298. Schloss Dagstuhl – Leibniz-Zentrum
+für Informatik, Dagstuhl, Germany, 14:1–14:25.
+https:
+//doi.org/10.4230/LIPIcs.ECRTS.2024.14
+[70] Xingda Wei, Zhuobin Huang, Tianle Sun, Yingyi Hao, Rong
+Chen, Mingcong Han, Jinyu Gu, and Haibo Chen. 2025.
+PhoenixOS: Concurrent OS-level GPU Checkpoint and Re-
+store with Validated Speculation. In Proceedings of the ACM
+SIGOPS 31st Symposium on Operating Systems Principles
+(SOSP ’25). Association for Computing Machinery, New York,
+NY, USA, 996–1013.
+https://doi.org/10.1145/
+3731569.3764813
+[71] Felix Werner, Marcel Weisgut, and Tilmann Rabl. 2025. To-
+wards Memory Disaggregation via NVLink C2C: Bench-
+marking CPU-Requested GPU Memory Access. In Proceed-
+ings of the 4th Workshop on Heterogeneous Composable and
+Disaggregated Systems (HCDS ’25). Association for Com-
+puting Machinery, New York, NY, USA, 8–14.
+https:
+//doi.org/10.1145/3723851.3723853
+[72] Wikipedia. 2025.
+List of AMD graphics processing
+units.
+https://en.wikipedia.org/wiki/List_
+of_AMD_graphics_processing_units
+[73] Wikipedia. 2025.
+List of Nvidia graphics processing
+units.
+https://en.wikipedia.org/wiki/List_
+of_Nvidia_graphics_processing_units
+16
+
+[74] Bo Wu, Xu Liu, Xiaobo Zhou, and Changjun Jiang. 2017.
+FLEP: Enabling Flexible and Efficient Preemption on GPUs.
+In Proceedings of the Twenty-Second International Conference
+on Architectural Support for Programming Languages and
+Operating Systems (ASPLOS ’17). Association for Computing
+Machinery, New York, NY, USA, 483–496. https://doi.
+org/10.1145/3037697.3037742
+[75] Bingyang Wu, Zili Zhang, Zhihao Bai, Xuanzhe Liu, and
+Xin Jin. 2023.
+Transparent GPU Sharing in Container
+Clouds for Deep Learning Workloads. In 20th USENIX
+Symposium on Networked Systems Design and Implemen-
+tation (NSDI 23). USENIX Association, Boston, MA,
+69–85.
+https://www.usenix.org/conference/
+nsdi23/presentation/wu
+[76] Yuxing Xiang, Xue Li, Kun Qian, Yufan Yang, Diwen Zhu,
+Wenyuan Yu, Ennan Zhai, Xuanzhe Liu, Xin Jin, and Jingren
+Zhou. 2025. Aegaeon: Effective GPU Pooling for Concur-
+rent LLM Serving on the Market. In Proceedings of the ACM
+SIGOPS 31st Symposium on Operating Systems Principles
+(SOSP ’25). Association for Computing Machinery, New York,
+NY, USA, 1030–1045.
+https://doi.org/10.1145/
+3731569.3764815
+[77] Joe Xie. 2016.
+NVIDIA RISC-V Story.
+https:
+//riscv.org/wp-content/uploads/2016/07/
+Tue1100_Nvidia_RISCV_Story_V2.pdf
+[78] Jiarong Xing, Yifan Qiao, Simon Mo, Xingqi Cui, Gur-Eyal
+Sela, Yang Zhou, Joseph Gonzalez, and Ion Stoica. 2025. To-
+wards Efficient and Practical GPU Multitasking in the Era of
+LLM. arXiv:cs.OS/2508.08448 https://arxiv.org/
+abs/2508.08448
+[79] Zhenliang Xue, Yixin Song, Zeyu Mi, Xinrui Zheng,
+Yubin
+Xia,
+and
+Haibo
+Chen.
+2024.
+PowerInfer-2:
+Fast Large Language Model Inference on a Smartphone.
+arXiv:cs.LG/2406.06282
+https://arxiv.org/abs/
+2406.06282
+[80] Jinrong Yang, Zimeng Wang, Rong Chen, and Haibo Chen.
+2025.
+A System-level Abstraction and Service for Flour-
+ishing AI-powered Applications. In Proceedings of the 16th
+ACM SIGOPS Asia-Pacific Workshop on Systems (APSys
+’25). Association for Computing Machinery, New York,
+NY, USA, 106–114.
+https://doi.org/10.1145/
+3725783.3764406
+[81] Chenyang Zhang, Feng Zhang, Kuangyu Chen, Mingjun Chen,
+Bingsheng He, and Xiaoyong Du. 2023. EdgeNN: Efficient
+Neural Network Inference for CPU-GPU Integrated Edge De-
+vices. In 2023 IEEE 39th International Conference on Data
+Engineering (ICDE). 1193–1207. https://doi.org/10.
+1109/ICDE55515.2023.00096
+[82] Dingyan Zhang, Haotian Wang, Yang Liu, Xingda Wei, Yizhou
+Shan, Rong Chen, and Haibo Chen. 2025. BLITZSCALE: fast
+and live large model autoscaling with O(1) host caching. In
+Proceedings of the 19th USENIX Conference on Operating
+Systems Design and Implementation (OSDI ’25). USENIX
+Association, USA, Article 16, 19 pages.
+[83] Hong Zhang, Yupeng Tang, Anurag Khandelwal, and Ion Sto-
+ica. 2023. SHEPHERD: Serving DNNs in the Wild. In 20th
+USENIX Symposium on Networked Systems Design and Im-
+plementation (NSDI 23). USENIX Association, Boston, MA,
+787–808. https://www.usenix.org/conference/
+nsdi23/presentation/zhang-hong
+[84] Yongkang Zhang, Haoxuan Yu, Chenxia Han, Cheng Wang,
+Baotong Lu, Yunzhe Li, Zhifeng Jiang, Yang Li, Xiaowen
+Chu, and Huaicheng Li. 2025. SGDRC: Software-Defined
+Dynamic Resource Control for Concurrent DNN Inference
+on NVIDIA GPUs. In Proceedings of the 30th ACM SIG-
+PLAN Annual Symposium on Principles and Practice of Par-
+allel Programming (PPoPP ’25). Association for Comput-
+ing Machinery, New York, NY, USA, 267–281.
+https:
+//doi.org/10.1145/3710848.3710863
+[85] Chen Zhao, Wu Gao, Feiping Nie, and Huiyang Zhou. 2022. A
+Survey of GPU Multitasking Methods Supported by Hardware
+Architecture. IEEE Transactions on Parallel and Distributed
+Systems 33, 6 (2022), 1451–1463.
+https://doi.org/
+10.1109/TPDS.2021.3115630
+[86] Wei Zhao, Anand Jayarajan, and Gennady Pekhimenko. 2025.
+Tally: Non-Intrusive Performance Isolation for Concurrent
+Deep Learning Workloads. In Proceedings of the 30th ACM
+International Conference on Architectural Support for Pro-
+gramming Languages and Operating Systems, Volume 1 (ASP-
+LOS ’25). Association for Computing Machinery, New York,
+NY, USA, 1052–1068.
+https://doi.org/10.1145/
+3669940.3707282
+17

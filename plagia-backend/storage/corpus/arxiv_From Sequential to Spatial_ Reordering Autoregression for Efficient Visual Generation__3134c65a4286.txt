@@ -1,0 +1,1119 @@
+From Sequential to Spatial: Reordering Autoregression
+for Efficient Visual Generation
+Siyang Wang1 Hanting Li2 Wei Li2 Jie Hu2 Xinghao Chen2 Feng Zhao1
+1University of Science and Technology of China
+2Huawei Noah’s Ark Lab
+{lihanting3,wei.lee,hujie23,xinghao}@huawei.com
+siyangw@mail.ustc.edu.cn, fzhao956@ustc.edu.cn
+Figure 1. Generated samples from RadAR-XL. We show samples at different aspect ratios (top) and zero-shot image editing results
+(bottom) including class-conditional editing and out-painting . Please zoom in for details.
+Abstract
+Inspired by the remarkable success of autoregressive mod-
+els in language modeling, this paradigm has been widely
+adopted in visual generation.
+However, the sequential
+token-by-token decoding mechanism inherent in traditional
+autoregressive models leads to low inference efficiency.In
+this paper, we propose RadAR, an efficient and paralleliz-
+able framework designed to accelerate autoregressive vi-
+sual generation while preserving its representational ca-
+pacity. Our approach is motivated by the observation that
+visual tokens exhibit strong local dependencies and spatial
+correlations with their neighbors—a property not fully ex-
+ploited in standard raster-scan decoding orders. Specifi-
+cally, we organize the generation process around a radial
+topology: an initial token is selected as the starting point,
+and all other tokens are systematically grouped into mul-
+tiple concentric rings according to their spatial distances
+from this center. Generation then proceeds in a ring-wise
+manner, from inner to outer regions, enabling the parallel
+prediction of all tokens within the same ring. This design
+not only preserves the structural locality and spatial coher-
+ence of visual scenes but also substantially increases par-
+allelizability. Furthermore, to address the risk of inconsis-
+tent predictions arising from simultaneous token generation
+with limited context, we introduce a nested attention mecha-
+1
+arXiv:2512.24639v1 [cs.CV] 31 Dec 2025
+
+nism. This mechanism dynamically refines implausible out-
+puts during the forward pass, thereby mitigating error ac-
+cumulation and preventing model collapse. By integrating
+radial parallel prediction with dynamic output correction,
+RadAR reduces the number of inference steps from 256 to
+only 13, achieving up to a 5.6× speedup on the ImageNet
+dataset and significantly improving generation efficiency.
+1. Introduction
+Autoregressive (AR) models demonstrate remarkable per-
+formance in language modeling [3, 10, 19, 42] and exhibit
+considerable potential for the development of artificial gen-
+eral intelligence. To extend the success of AR models from
+language to visual domain, researchers[11, 26] begin to ex-
+plore the application of AR models in image generation.
+Pioneering works such as VQVAE-2 [27] and Parti [44]
+establish the fundamental feasibility of autoregressive vi-
+sual generation by discretizing images into sequences of vi-
+sual tokens, with subsequent research efforts [31, 32, 41]
+progressively pushing the performance boundaries. These
+models not only achieve visual fidelity comparable to or
+surpassing contemporary state-of-the-art diffusion models
+but, more significantly, provide architectural foundations
+for unified multimodal understanding and generation. This
+progress enables the development of integrated models ca-
+pable of processing text, images, and video within a unified
+framework.
+However, these performance improvements
+come with considerable computational demands. In con-
+ventional autoregressive approaches for visual generation,
+two-dimensional images are typically flattened into one-
+dimensional sequences following raster-scan order and pro-
+cessed through sequential token prediction. This sequen-
+tial processing mechanism establishes a quadratic relation-
+ship between the number of required inference steps and the
+image resolution, imposing significant constraints on gen-
+eration efficiency. Consequently, deploying autoregressive
+models in practical scenarios faces substantial challenges,
+with generation speed becoming a major bottleneck hinder-
+ing their widespread application, especially in scenarios re-
+quiring high-throughput requirements.
+To address these efficiency limitations, the research com-
+munity develops various methods for accelerating sequence
+generation. Existing methods generally fall into two pri-
+mary categories. The first category attempts to break the
+strict sequential constraints of conventional autoregressive
+generation by allowing parallel prediction of multiple im-
+age tokens in a single inference step. The representative
+work MaskGIT [6] innovatively integrates masked model-
+ing strategies with non-autoregressive generation, achiev-
+ing significant acceleration by iteratively predicting and
+refining tokens at multiple masked positions.
+Similarly,
+PAR [39] further explores the potential of parallel decoding
+within random positions or block-constrained regions. Nev-
+ertheless, these methods still face limitations in the trade-
+off between generation quality and efficiency. The second
+category seeks breakthroughs from the perspective of fea-
+ture representation. Works represented by VAR [33] intro-
+duce multi-scale token representations, achieving an order-
+of-magnitude reduction in generation steps. However, this
+multi-scale token representation fundamentally differs in ar-
+chitecture from the universal flat token representation (e.g.,
+CLIP [25, 46], DINO [5, 21]), preventing direct utilization
+of general visual representations learned from large-scale
+vision-language pairs. This compatibility issue severely re-
+stricts the interoperability of such methods with modern
+multimodal systems [34, 40, 47], impeding their broad ap-
+plication in complex systems requiring collaboration with
+existing perceptual backbones.
+To systematically investigate more efficient visual de-
+coding mechanisms, this paper conducts an in-depth analy-
+sis of the attention distribution patterns in autoregressive vi-
+sual models. Our analysis reveals that visual content inher-
+ently exhibits strong locality. As shown in Fig. 2, although
+LlamaGen [31] is forced to follow the raster-scan sequence
+order during training, its attention distribution strongly re-
+flects the inherent two-dimensional spatial structure of vi-
+sual content. Specifically, when processing the current to-
+ken, LlamaGen allocates significant attention weights not
+only to temporally adjacent tokens in the sequence but also
+to tokens that are temporally distant yet spatially proximate
+in the original image structure. This observation empha-
+sizes the importance of modeling two-dimensional spatial
+relationships directly, beyond linear sequences. The con-
+ventional raster-scan order imposes a one-dimensional con-
+straint that conflict with natural visual structure, forcing the
+model to learn to compensate for this structural mismatch
+during training, ultimately degrading both generation effi-
+ciency and semantic consistency.
+Building on the above insights, we propose RadAR—a
+radial parallel autoregressive generative framework de-
+signed to maintain full representational capacity while
+achieving efficient inference. The framework establishes an
+initial token as the radial center and systematically parti-
+tions remaining tokens into concentric rings based on spa-
+tial distance.
+The generation process progresses ring by
+ring radially from the inside out, with all tokens within the
+same ring decoded in parallel. This design significantly en-
+hances parallelism while preserving the locality and spatial
+coherence of visual structures. However, parallel generation
+introduces critical challenges: when multiple tokens are
+decoded simultaneously without sufficient contextual con-
+straints, semantically inconsistent predictions are prone to
+occur. To address this, we further design a nested attention
+mechanism that operates at both inter-ring and intra-ring
+levels.
+By iteratively refining unreasonable outputs, this
+2
+
+Layer 1
+ Layer 10
+ Layer 20
+ Layer 30
+Figure 2. The distribution of attention scores across visual tokens in different layers of the LlamaGen-XL [31] . Slash lines indicate that
+significant attention scores are allocated to tokens at fixed intervals, corresponding to tokens in the same column of previous rows.
+mechanism effectively suppresses error propagation and en-
+hances generation robustness.
+Experimental results demonstrate that by integrating ra-
+dial parallel prediction with dynamic output correction,
+RadAR effectively addresses the speed limitations inherent
+in traditional autoregressive models. The proposed frame-
+work achieves a speedup of up to 5.6× on the ImageNet
+dataset, offering a scalable and high-performance solution
+for next-generation visual content synthesis.
+2. Related Work
+2.1. Autoregression in Language Modeling.
+The autoregressive modeling paradigm first emerges in the
+field of natural language processing (NLP) [3, 24, 37, 38,
+48], with the core idea of generating sequences by pre-
+dicting each element in a sequence based on the previous
+elements through conditional probabilities. However, this
+simple mechanism has demonstrated remarkable scalability
+across multiple dimensions. On one hand, it follows an ob-
+servable and reproducible scaling law, where every leap in
+computing power, parameters, and data volume brings pre-
+dictable performance gains. On the other hand, once the
+scale of parameters exceeds a critical threshold, the model
+suddenly emerges with zero-shot and few-shot generaliza-
+tion capabilities. Without fine-tuning for specific tasks, it
+can be applied to translation, question answering, reason-
+ing, code generation, and even multimodal understanding
+and generation, thereby opening unprecedented prospects
+for the development of general artificial intelligence.
+2.2. Autoregression in Visual Generation.
+Autoregression has been explored in the field of visual
+generation for many years.
+Early pixel-based meth-
+ods [7, 29] applied raster-scan order to directly convert two-
+dimensional images into one-dimensional pixel sequences
+for pixel-by-pixel prediction. This paradigm is inefficient
+in generation and often produces suboptimal and blurry re-
+sults due to the inherent redundancy of pixel information.
+The advent of token-based models marked a major break-
+through in visual autoregressive modeling, inspired by natu-
+ral language processing (NLP) [3]. Unlike pixel-level mod-
+els that directly handle raw visual data, this paradigm first
+compresses visual data into compact token sequences via
+discrete tokenizers [11, 36, 45], and quantizes them to the
+nearest codes in a fixed-size codebook to form compact to-
+ken sequences. It then autoregressively predicts these to-
+kens in raster scan order [17, 26, 44]. However, the im-
+provement in efficiency is still limited. Autoregressive vi-
+sual generative models trained with a next-token prediction
+targets require n2 sequential model forward passes to gen-
+erate an image represented by n × n tokens, leading to a
+significant reduction in generation efficiency. This issue is
+particularly prominent in high-resolution image [4] or video
+generation [14, 35], hindering their widespread application
+in real-world applications. To accelerate sequence gener-
+ation, researchers explore the parallel prediction methods.
+Parallel prediction can generally be divided into two cate-
+gories: raster-scan order and random-scan order. Among
+them, parallel prediction in raster-scan order targets a set
+of spatially regular tokens [12, 39]. Random-scan order is
+first proposed by MaskGIT [6], which employs a masked
+generation approach to generate next token set instead of
+next one token, substantially reducing the inference steps.
+However, when the number of inference steps is small, the
+generation quality of both types of efficient autoregressive
+methods becomes suboptimal. VAR is the first to break the
+limitation of inference steps on generation performance. By
+developing coarse-to-fine next-scale predictions, it transi-
+tions visual autoregressive modeling from the token level
+to the scale level, completing the generation process with
+only 10 steps. However, VAR relies on a multi-scale VQ-
+GAN [17, 27] that is tightly integrated with the generator
+and has been trained across a series of complex scales. Fur-
+thermore, the VAR generator is constrained by its complex
+and rigid multi-scale architecture.
+Modifying the output
+resolution or adjusting inference steps requires retraining
+both the tokenizer and generator, resulting in poor scalabil-
+3
+
+��
+��
+��
+��−�
+��
+��
+Autoregressive Transformer
+��
+��
+��
+��
+Generated area
+Expanded area
+Masked area
+��
+��
+��
+��
+Figure 3. Illustration of our radial-parallel autoregressive (RadAR) generation framework. (a) Model implementation. RadAR takes the
+output Ok−1 from step k−1 and then uses learnable parameters to fill the range to be expanded outside Ok−1, forming the input Ik for step
+k. For specific details on the extrapolation range, please refer to Algorithm 1. (b) Nested attention mask. For step k, green corresponds
+to the range where content has already been generated, and blue corresponds to the new unknown area expanded. The attention range is
+restricted to distinguish between the two purposes of error correction and content generation. Specifically, the newly expanded area in
+step k accesses the context information of all tokens from previous k −1 steps and step k to complete the generation purpose, while the
+generated area is restrict from accessing the expanded area.
+ity. Additionally, its specialized multi-scale tokenizer cre-
+ates compatibility barriers when integrating with large lan-
+guage models for multimodal unification, significantly lim-
+iting flexibility.
+3. Method
+Radial-Parallel Autoregressive Modeling. Our proposed
+parallel autoregressive method is illustrated in Fig. 3. Un-
+like the common raster order, the generation process is con-
+centric, akin to progressively adding borders from the cen-
+ter to the surroundings, starting from scratch. At step t, the
+model receives the already generated rectangular area and
+adds a border of a certain thickness around it. This border is
+filled with a learnable prompt vector p ∈Rc×1×1, and then
+the generated area along with the prompt is processed as the
+input for the current step. This concentric stacking mech-
+anism enables highly parallel expansion while maintaining
+strong spatial locality through radial dependencies. In the
+specific implementation, we first perform center cropping
+on the quantized latent feature fq to obtain N token sets
+{g1, g2, . . . , gN} with incrementally larger spatial ranges,
+where gk = {xi}n
+i=0. The spatial range represented by
+these token sets increases progressively, with the final gN
+matching the range of the original feature map Rc×h×w,
+that is, gN = fq. Algorithm 1 provides a detailed descrip-
+tion of the data preprocessing before autoregressive train-
+ing. The autoregressive likelihood function is reformulated
+as:
+p(g1, g2, . . . , gN) =
+N
+Y
+i=1
+p(gi|g1, g2, . . . , gi−1).
+(1)
+Crucially, our method enables dynamic context updating,
+allowing each generation step to optimize previously syn-
+thesized areas using the latest context information, thereby
+implementing an implicit error correction mechanism. This
+mitigates the accumulation of prediction errors common in
+parallel token generation, achieving an optimal balance be-
+tween parallelization efficiency (allowing concurrent gener-
+ation of spatially independent border segments) and main-
+tenance of generation quality. As a result, compared to tra-
+ditional parallel autoregressive methods, the number of de-
+coding steps required is significantly reduced while avoid-
+ing their characteristic error propagation issues.
+Nested Attention Mechanism. To address the distinct
+objectives of the already generated area, which requires
+minor corrections for potential generation errors, and the
+newly expanded area, which necessitates generating con-
+tent from scratch, we introduce the nested attention mech-
+anism as illustrated in Fig. 3. Specifically, causal attention
+is applied between steps to ensure the orderly progression
+of the autoregressive process, while bidirectional attention
+is employed within each step to maintain spatial consis-
+tency. Moreover, to prevent the error-prone newly expanded
+area from misleading the error correction decisions of the
+already generated area, causal attention is also maintained
+between the known and newly expanded areas within each
+step. During inference, KV-caching is used and no mask is
+needed. The experimental section compares the effects of
+using and not using this nested attention mechanism.
+Tokenizer Post-training. To mitigate the gap between
+the latent space sampled by the generator and the la-
+tent space seen during tokenizer training, we introduced a
+4
+
+Class 88
+ Steps
+Class 24
+Figure 4. Visualization of error correction. Earlier generation errors are gradually corrected by the subsequent generation process as the
+number of inference steps increases. Please zoom in for details.
+Algorithm 1 Radial-Parallel Autoregressive Encoding
+Input: raw image im, learnable vector p
+Parameter: steps N, current patch nums {Pi}N
+i=1
+Output: regression input token sets Rs and regression tar-
+get token sets Rgt
+1: f = E(im)
+2: fq = Q(f)
+3: i = 1
+4: while i < N + 1 do
+5:
+gi = crop(fq, Pi)
+6:
+Rgt = queue push(Rgt, gi)
+7:
+if i < N then
+8:
+Si+1 = repeat(p, Pi+1)
+9:
+Si+1 = center fill(Si+1, gi, Pi, Pi+1)
+10:
+Rs = queue push(Rs, Si+1)
+11:
+end if
+12: end while
+lightweight post-training phase. Deviating from the stan-
+dard teacher-forcing technique, the input for the next au-
+toregressive step is a composite of the output from the previ-
+ous autoregressive step and the ground-truth, amalgamated
+in a specified ratio. The loss function is composed of two
+parts and is represented as:
+Lvqgan = Lrecon + LGAN + Lpercp + Lvq, ,
+L = λ
+N
+N
+X
+n=1
+cos(f dec,l
+n
+, ϕ(f DINO
+n
+)) + Lvqgan.
+(2)
+where Lvqgan includes Lrecon (the reconstruction loss),
+Lpercp (the perceptual loss), LGAN (the adversarial loss),
+and Lvq (the codebook loss). To enable the tokenizer to gen-
+erate latent representations with greater semantic consis-
+tency, we introduce the semantic regularization loss. Here,
+N denotes the batch size, and n represents the image in-
+dex. An MLP is used to project the decoder feature f dec,l
+n
+to match the channel dimension of the feature from a pre-
+trained visual encoder (here DINOv2-B). The semantic reg-
+ularization loss aligns the features by computing the cosine
+similarity, thereby constraining the complexity of the la-
+tent space and preventing the tokenizer from learning overly
+complex latent dependencies.
+4. Experiments
+In this section, we first introduce the experimental setup, in-
+cluding datasets, metrics, baselines, and implementation de-
+tails. Then, we compare RadAR with state-of-the-art meth-
+ods, followed by ablation studies to analyze the effective-
+ness of each component and some zero-shot generation ex-
+periments to demonstrate the flexibility of RadAR.
+4.1. Experimental Settings
+Implementation Details. Our tokenizer is initialized with
+the pre-trained weights of llamaGen [31], with the code-
+book size set to 8912. It downsamples the input image at a
+fixed ratio of 16×16. We mainly follow the VQVAE training
+recipe of llamaGen and fine-tune on ImageNet-1K [8] with
+randomly sampled resolutions. RadAR is also trained on
+the ImageNet-1K [8] 256×256 dataset. The training pro-
+cess employs the AdamW optimizer [1] with β1 = 0.9,
+β2 = 0.95, and a weight decay rate of 0.05. The learn-
+ing rate is set to 1e-4, and the training epochs are uniformly
+set to 300 epochs.
+Baselines. We choose baseline methods from popular
+image generation models, including generative adversarial
+networks (GAN.) [2, 15, 30], diffusion models(Diff.) [9,
+23], masked-prediction models (Mask.)
+[6, 18, 20],visual
+autoregressive models (VAR.) [33, 43] and autoregressive
+models (AR.) [12, 31, 39]. These methods have achieved
+impressive results on various image generation tasks and
+5
+
+Table 1. Performance comparisons on class-conditional ImageNet 256×256 benchmark. Metrics are Frechet inception distance (FID),
+inception score (IS), precision and recall. “↓” or “↑” indicate lower or higher values are better. “Steps” denotes the number of model
+forward passes required to generate an image. MAR (step=10) is evaluated using code and pretrained weights from their official GitHub
+repository. Bold denotes the best, and underline denotes the second.
+Type
+Model
+Params
+Steps↓
+FID↓
+IS↑
+Precision↑
+Recall↑
+GAN
+BigGAN [2]
+112M
+1
+6.95
+224.5
+0.89
+0.38
+GigaGAN [15]
+569M
+1
+3.45
+225.5
+0.84
+0.61
+StyleGAN-XL [30]
+166M
+1
+2.30
+265.1
+0.78
+0.53
+Diff
+ADM-G [9]
+554M
+250
+4.59
+186.7
+0.82
+0.52
+ADM [9]
+554M
+250
+10.94
+101.0
+0.69
+0.63
+DiT-L/2 [22]
+458M
+250
+5.02
+167.2
+0.75
+0.57
+DiT-XL/2 [22]
+675M
+250
+2.27
+278.2
+0.83
+0.57
+Mask
+MaskGIT [6]
+227M
+8
+6.18
+182.1
+0.8
+0.51
+Open-MAGVIT2 [20]
+343M
+256
+3.08
+258.3
+0.85
+0.51
+MAR-H [18]
+943M
+10
+9.32
+207.4
+0.71
+0.47
+VAR
+VAR-d16 [33]
+310M
+10
+3.55
+280.4
+0.84
+0.51
+VAR-d20 [33]
+600M
+10
+2.95
+302.6
+0.83
+0.56
+FAR-B [43]
+208M
+10
+4.26
+248.9
+0.79
+0.51
+FAR-H [43]
+812M
+10
+3.21
+300.6
+0.81
+0.55
+AR
+LlamaGen-L [31]
+343M
+256
+3.80
+248.3
+0.83
+0.52
+LlamaGen-XL [31]
+775M
+256
+3.39
+227.1
+0.81
+0.54
+LlamaGen-XXL [31]
+1.4B
+256
+3.09
+253.6
+0.83
+0.53
+Parallelized
+AR
+PAR-L-4× [39]
+343M
+67
+4.32
+189.4
+0.87
+0.43
+PAR-XL-4× [39]
+775M
+67
+3.50
+234.4
+0.84
+0.49
+NAR-L [12]
+372M
+31
+3.06
+263.9
+0.81
+0.53
+NAR-XL [12]
+816M
+31
+2.70
+277.5
+0.81
+0.58
+RadAR
+310M
+10
+3.50
+307.9
+0.81
+0.50
+RadAR
+310M
+13
+3.36
+289.5
+0.84
+0.54
+RadAR
+610M
+10
+3.21
+291.4
+0.83
+0.52
+RadAR
+610M
+13
+2.97
+303.8
+0.85
+0.53
+serve as strong baselines for comparison. Since the predic-
+tion of our method is token-based and aligns with the ob-
+jectives of AR methods like LlamaGen [31], we take it as a
+strong baseline and primarily compare our method with it.
+Evaluation Metrics. We adopt four metrics for quan-
+titative evaluation: Frechet Inception Distance (FID) [13],
+Inception Score (IS) [28], Precision, and Recall [16]. Fol-
+lowing the standard protocols, we sample 50,000 images
+with trained models to evaluate.
+4.2. Class-conditional Image Generation
+In this section, we evaluate the performance of RadAR on
+the ImageNet, with the results shown in Table 1. We provide
+two scales of RadAR, L and XL. Compared with state-of-
+the-art models, RadAR shows significant competitiveness
+in multiple key metrics, including inference steps, FID, IS,
+precision, and recall. Among AR methods, RadAR sig-
+nificantly reduced the number of inference steps required
+for image generation. Specifically, compared with the 256
+steps required for the token-by-token generation process of
+LlamaGen and the 67 steps required for the parallel gen-
+eration mechanism of PAR, RadAR reduces the number of
+inference steps to approximately 10. This reduction is not
+only quantitative but also accompanied by improved gener-
+ation performance, making RadAR a leading candidate for
+efficient and high-quality image synthesis. Compared with
+the multi-scale VAR methods, although the FID and recall
+scores of RadAR are slightly lower than those of VAR, it
+achieves higher IS and Precision scores. This indicates that
+RadAR excels in generating images with higher perceptual
+quality and more accurate details, although it may sacrifice
+overall diversity and recall to some extent.
+Since RadAR’s prediction target is the ground-truth
+value, this design brings multiple benefits.
+On the one
+hand, RadAR can dynamically adjust the number of infer-
+ence steps according to the desired generation effect and
+6
+
+Figure 5. Zero-shot evaluation in downstream tasks containing out-painting and class-conditional editing. The results show that RadAR
+can generalize to novel downstream tasks without special design and finetuning. Please zoom in for details.
+computational efficiency. In contrast, methods that predict
+residuals, such as VAR, need to retrain the tokenizer and
+autoregressive generator if the number of inference steps is
+to be changed. This adaptability highlights RadAR’s strong
+generalization ability. On the other hand, this modeling ap-
+proach is highly consistent with the requirements of mul-
+timodal vision-language models (VLMs). By directly pre-
+dicting the ground-truth value, RadAR ensures that the gen-
+erated images are not only perceptually realistic but also se-
+mantically consistent with the input prompts. This seamless
+integration with VLMs is an advantage that residual mod-
+eling methods do not possess. Overall, RadAR achieves a
+balanced and advanced level in terms of inference efficiency
+and generation quality, making it a strong competitor in the
+field of autoregressive visual generation.
+4.3. Ablation Study
+Component-wise Ablations. In Table 2, we conduct com-
+prehensive ablation studies to investigate the effectiveness
+of our key designs on the ImageNet 256×256 dataset.
+Specifically, these include: 1) Nested Attention Mecha-
+nism (NAM): This attention mechanism disentangles the
+functions of error correction and ground-truth value predic-
+tion, thereby improving the FID score. 2) Random Dropout
+Sampling (RDS): This training sampling strategy not only
+enhances RadAR’s ability to perceive arbitrary inference
+ranges but also increases the flexibility of the model’s in-
+ference steps. 3) Random Noise Input (RNI): This tech-
+nique increases the model’s tolerant ability for deviations
+between generated results and ground-truth during infer-
+ence, thereby improving the score of IS. 4) Tokenizer Post-
+training (TPT): This mechanism effectively mitigates the
+gap between the latent space sampled by the generator and
+the latent space, resulting in significant improvement of
+Table 2. Ablations on the effectiveness of the proposed techniques.
+Specific meanings of the abbreviations are in the ablation part. We
+report the results with RadAR-XL.
+Ablations
+Metrics
+NAM
+RDS
+RNI
+TPT
+FID↓
+IS↑
+Pre↑
+Rec↑
+×
+×
+×
+×
+5.70
+255.0
+0.81
+0.41
+√
+×
+×
+×
+3.80
+271.0
+0.80
+0.50
+√
+√
+×
+×
+3.60
+295.4
+0.80
+0.52
+√
+√
+√
+×
+3.55
+297.6
+0.80
+0.52
+√
+√
+√
+√
+3.31
+299.4
+0.82
+0.53
+each evaluation metrics.
+Visualization of Error Correction. Autoregressive par-
+allel generation improves the efficiency of visual generation
+but also raises the probability of token errors. This is one
+of the primary reasons why the performance of previous
+methods drops sharply when the autoregressive steps are
+highly compressed. Unlike traditional autoregressive meth-
+ods, RadAR can adaptively detect and correct generation
+errors in the early stages of inference while generating new
+tokens. As shown in Fig. 4, as the number of inference steps
+increases, some minor errors in the early stages are identi-
+fied and corrected with the help of richer context informa-
+tion. For example, the parrot’s feathers become clearer, and
+the shapes of the owl’s eyes and beak become more normal.
+Initial Token Position.
+To evaluate the influence of
+initial token positions in the parallel generation, we con-
+duct ablation studies comparing different starting location
+configurations, with quantitative results presented in Ta-
+ble 3. The experiments demonstrate that initialization from
+the center position yields superior performance relative to
+edge-based initialization, which in turn surpasses corner-
+7
+
+Table 3. Ablations on the initial token position (RadAR-XL).
+Position
+center
+edge
+corner
+FID↓
+3.31
+3.45
+3.51
+IS↑
+299.4
+293.5
+288.4
+Table 4. Class-conditional image generation speed.
+Model
+Params
+Steps
+Throughput↑
+(img/s)
+IS↑
+VAR
+310M
+10
+112.4
+280.4
+LlamaGen
+343M
+256
+20.3
+248.3
+PAR
+343M
+67
+41.7
+189.4
+NAR
+372M
+31
+65.2
+263.9
+RadAR
+310M
+10
+113.6
+307.9
+based initialization. This observed hierarchy suggests that
+the performance advantage is closely associated with the
+symmetrical propagation of contextual information during
+inference.
+Beyond quantitative metrics, the center-token
+initialization strategy also enables the most balanced high-
+parallelism computation, as radial expansion originating
+from the center facilitates uniform distribution of compu-
+tational load across directional paths. These collective find-
+ings support the adoption of center-oriented initialization as
+the optimal configuration in the RadAR, effectively harmo-
+nizing generation quality with computational efficiency.
+Image Generation Speed.
+In Table 4, we compare
+the generation speed of different autoregressive models
+with similar numbers of parameters on ImageNet 256 ×
+256. The results demonstrate that RadAR achieves a maxi-
+mum speedup of approximately 5.6× relative to LlamaGen,
+while achieving generation efficiency comparable to VAR.
+More notably, RadAR maintains this competitive speed ad-
+vantage without sacrificing architectural compatibility with
+mainstream visual token representations. This represents a
+notable practical advantage over VAR, which necessitates
+substantial modifications to the token representation archi-
+tecture to attain similar efficiency improvements, conse-
+quently constraining its integration potential with existing
+multimodal systems. Collectively, these findings indicate
+that RadAR effectively mitigates the fundamental efficiency
+limitations of traditional autoregressive models while cir-
+cumventing the compatibility challenges associated with al-
+ternative parallel generation methodologies.
+The frame-
+work establishes an optimal balance between generation
+speed, output quality, and system integration flexibility, po-
+sitioning it as a viable solution for practical applications de-
+manding high-throughput visual content synthesis.
+4.4. Zero-shot Task Generalization
+Image Out-painting. We place the ground-truth tokens in
+the unmasked area and let the model generate the tokens in
+the masked area. Fig. 5 (top) shows a set of results from
+RadAR-XL. Without any fine-tuning, RadAR can success-
+fully complete the outpainting task, with natural transitions
+at the boundary junctions, demonstrating RadAR’s good
+generalization ability.
+Class-conditional
+Image
+Editing.
+Furthermore,
+RadAR is applied to the class-conditional image editing
+task. Similar to the outpainting task, we place the ground-
+truth tokens in the unmasked area. The difference is that we
+use specific class labels as conditional to guide the genera-
+tion of tokens in the masked area. The visualization results
+are shown in Fig. 5 (bottom), where RadAR can naturally
+blend images from different categories, once again demon-
+strating its powerful generation capability.
+Generate Images at high Resolution. In Fig. 6, we vi-
+sualize the result of zero-shot generation at high-resolution.
+We take low-resolution images as the input, and RadAR can
+generate high quality high-resolution images. Compared to
+VAR [33], which requires retraining the tokenizer and Au-
+toregressive generator completely, our RadAR, despite be-
+ing trained only at the 256×256 resolution, can accomplish
+this task without fine-tuning, thanks to its inherent capabil-
+ity of both generation and refinement.
+256px
+384px
+Figure 6. Visualization of Generation at high resolution. RadAR-
+XL (trained at 256px) is used. Zoom in for details.
+5. Conclusion
+In this paper, we introduce RadAR, which aims to ad-
+dress the limitations of traditional autoregressive models
+in terms of efficiency and flexibility. RadAR employs a
+unique inside-out, radial-parallel decoding strategy that en-
+sures spatial consistency. Moreover, RadAR can dynam-
+ically correct existing generation errors during the infer-
+ence process, thereby significantly reducing the number of
+inference steps required for image generation while main-
+taining high visual quality. Additionally, RadAR demon-
+strates strong generalization ability by successfully com-
+pleting zero-shot image-to-image generation tasks and gen-
+erating images with various aspect ratios, showing its com-
+petitiveness in the field of autoregressive visual generation.
+8
+
+References
+[1] Kingma DP Ba J Adam et al. A method for stochastic op-
+timization. arXiv preprint arXiv:1412.6980, 1412(6), 2014.
+5
+[2] Andrew Brock, Jeff Donahue, and Karen Simonyan. Large
+scale gan training for high fidelity natural image synthesis.
+In International Conference on Learning Representations,
+2018. 5, 6
+[3] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Sub-
+biah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakan-
+tan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Lan-
+guage models are few-shot learners. Advances in neural in-
+formation processing systems, 33:1877–1901, 2020. 2, 3
+[4] Shiyue Cao, Yueqin Yin, Lianghua Huang, Yu Liu, Xin
+Zhao, Deli Zhao, and Kaigi Huang. Efficient-vqgan: To-
+wards high-resolution image generation with efficient vision
+transformers. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 7368–7377, 2023. 3
+[5] Mathilde Caron, Hugo Touvron, Ishan Misra, Herv´e J´egou,
+Julien Mairal, Piotr Bojanowski, and Armand Joulin. Emerg-
+ing properties in self-supervised vision transformers. In Pro-
+ceedings of the IEEE/CVF international conference on com-
+puter vision, pages 9650–9660, 2021. 2
+[6] Huiwen Chang, Han Zhang, Lu Jiang, Ce Liu, and William T
+Freeman. Maskgit: Masked generative image transformer.
+In Proceedings of the IEEE/CVF conference on computer vi-
+sion and pattern recognition, pages 11315–11325, 2022. 2,
+3, 5, 6
+[7] Van den Oord. Conditional image generation with pixelcnn
+decoders. Adv. Neural Inf. Process. Syst., 29, 2016. 3
+[8] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li,
+and Li Fei-Fei. Imagenet: A large-scale hierarchical image
+database. In 2009 IEEE conference on computer vision and
+pattern recognition, pages 248–255. Ieee, 2009. 5
+[9] Prafulla Dhariwal and Alexander Nichol. Diffusion models
+beat gans on image synthesis. Advances in neural informa-
+tion processing systems, 34:8780–8794, 2021. 5, 6
+[10] Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Ab-
+hishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil
+Mathur, Alan Schelten, Amy Yang, Angela Fan, et al. The
+llama 3 herd of models. arXiv e-prints, pages arXiv–2407,
+2024. 2
+[11] Patrick Esser, Robin Rombach, and Bjorn Ommer. Taming
+transformers for high-resolution image synthesis.
+In Pro-
+ceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 12873–12883, 2021. 2, 3
+[12] Yefei He, Yuanyu He, Shaoxuan He, Feng Chen, Hong
+Zhou, Kaipeng Zhang, and Bohan Zhuang. Neighboring au-
+toregressive modeling for efficient visual generation. arXiv
+preprint arXiv:2503.10696, 2025. 3, 5, 6
+[13] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner,
+Bernhard Nessler, and Sepp Hochreiter. Gans trained by a
+two time-scale update rule converge to a local nash equilib-
+rium. Advances in neural information processing systems,
+30, 2017. 6
+[14] Wenyi Hong, Ming Ding, Wendi Zheng, Xinghan Liu,
+and Jie Tang.
+Cogvideo:
+Large-scale pretraining for
+text-to-video generation via transformers.
+arXiv preprint
+arXiv:2205.15868, 2022. 3
+[15] Minguk Kang, Jun-Yan Zhu, Richard Zhang, Jaesik Park,
+Eli Shechtman, Sylvain Paris, and Taesung Park.
+Scal-
+ing up gans for text-to-image synthesis. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 10124–10134, 2023. 5, 6
+[16] Tuomas Kynk¨a¨anniemi, Tero Karras, Samuli Laine, Jaakko
+Lehtinen, and Timo Aila. Improved precision and recall met-
+ric for assessing generative models. Advances in neural in-
+formation processing systems, 32, 2019. 6
+[17] Doyup Lee, Chiheon Kim, Saehoon Kim, Minsu Cho, and
+Wook-Shin Han.
+Autoregressive image generation using
+residual quantization. In Proceedings of the IEEE/CVF con-
+ference on computer vision and pattern recognition, pages
+11523–11532, 2022. 3
+[18] Tianhong Li, Yonglong Tian, He Li, Mingyang Deng, and
+Kaiming He. Autoregressive image generation without vec-
+tor quantization. Advances in Neural Information Processing
+Systems, 37:56424–56445, 2024. 5, 6
+[19] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao
+Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu
+Zhang, Chong Ruan, et al. Deepseek-v3 technical report.
+arXiv preprint arXiv:2412.19437, 2024. 2
+[20] Zhuoyan Luo, Fengyuan Shi, Yixiao Ge, Yujiu Yang, Limin
+Wang, and Ying Shan.
+Open-magvit2: An open-source
+project toward democratizing auto-regressive visual gener-
+ation. arXiv preprint arXiv:2409.04410, 2024. 5, 6
+[21] Maxime Oquab, Timoth´ee Darcet, Th´eo Moutakanni, Huy
+Vo, Marc Szafraniec, Vasil Khalidov, Pierre Fernandez,
+Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, et al.
+Dinov2: Learning robust visual features without supervision.
+arXiv preprint arXiv:2304.07193, 2023. 2
+[22] William Peebles and Saining Xie. Scalable diffusion models
+with transformers. In Proceedings of the IEEE/CVF inter-
+national conference on computer vision, pages 4195–4205,
+2023. 6
+[23] Alec Radford, Karthik Narasimhan, Tim Salimans, Ilya
+Sutskever, et al. Improving language understanding by gen-
+erative pre-training. 2018. 5
+[24] Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario
+Amodei, Ilya Sutskever, et al. Language models are unsu-
+pervised multitask learners. OpenAI blog, 1(8):9, 2019. 3
+[25] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry,
+Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning
+transferable visual models from natural language supervi-
+sion. In International conference on machine learning, pages
+8748–8763. PmLR, 2021. 2
+[26] Aditya Ramesh, Mikhail Pavlov, Gabriel Goh, Scott Gray,
+Chelsea Voss, Alec Radford, Mark Chen, and Ilya Sutskever.
+Zero-shot text-to-image generation. In International confer-
+ence on machine learning, pages 8821–8831. Pmlr, 2021. 2,
+3
+[27] Ali Razavi, Aaron Van den Oord, and Oriol Vinyals. Gener-
+ating diverse high-fidelity images with vq-vae-2. Advances
+in neural information processing systems, 32, 2019. 2, 3
+9
+
+[28] Tim Salimans, Ian Goodfellow, Wojciech Zaremba, Vicki
+Cheung, Alec Radford, and Xi Chen. Improved techniques
+for training gans. Advances in neural information processing
+systems, 29, 2016. 6
+[29] Tim Salimans, Andrej Karpathy, Xi Chen, and Diederik P
+Kingma.
+Pixelcnn++: Improving the pixelcnn with dis-
+cretized logistic mixture likelihood and other modifications.
+arXiv preprint arXiv:1701.05517, 2017. 3
+[30] Axel Sauer, Katja Schwarz, and Andreas Geiger. Stylegan-
+xl: Scaling stylegan to large diverse datasets. In ACM SIG-
+GRAPH 2022 conference proceedings, pages 1–10, 2022. 5,
+6
+[31] Peize Sun, Yi Jiang, Shoufa Chen, Shilong Zhang, Bingyue
+Peng, Ping Luo, and Zehuan Yuan. Autoregressive model
+beats diffusion: Llama for scalable image generation. arXiv
+preprint arXiv:2406.06525, 2024. 2, 3, 5, 6
+[32] Chameleon Team.
+Chameleon:
+Mixed-modal early-
+fusion foundation models,
+2024.
+URL https://arxiv.
+org/abs/2405.09818, 9(8), 2024. 2
+[33] Keyu Tian, Yi Jiang, Zehuan Yuan, Bingyue Peng, and Li-
+wei Wang. Visual autoregressive modeling: Scalable image
+generation via next-scale prediction. Advances in neural in-
+formation processing systems, 37:84839–84865, 2024. 2, 5,
+6, 8
+[34] Shengbang Tong, David Fan, Jiachen Li, Yunyang Xiong,
+Xinlei Chen, Koustuv Sinha, Michael Rabbat, Yann Le-
+Cun, Saining Xie, and Zhuang Liu.
+Metamorph: Multi-
+modal understanding and generation via instruction tuning.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 17001–17012, 2025. 2
+[35] Sergey Tulyakov, Ming-Yu Liu, Xiaodong Yang, and Jan
+Kautz.
+Mocogan: Decomposing motion and content for
+video generation. In Proceedings of the IEEE conference on
+computer vision and pattern recognition, pages 1526–1535,
+2018. 3
+[36] Aaron Van Den Oord, Oriol Vinyals, et al. Neural discrete
+representation learning. Advances in neural information pro-
+cessing systems, 30, 2017. 3
+[37] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszko-
+reit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia
+Polosukhin. Attention is all you need. In Proceedings of the
+31st International Conference on Neural Information Pro-
+cessing Systems, page 6000–6010, 2017. 3
+[38] Zhongwei Wan, Xin Wang, Che Liu, Samiul Alam, Yu
+Zheng, Jiachen Liu, Zhongnan Qu, Shen Yan, Yi Zhu,
+Quanlu Zhang, et al.
+Efficient large language models: A
+survey. arXiv preprint arXiv:2312.03863, 2023. 3
+[39] Yuqing Wang, Shuhuai Ren, Zhijie Lin, Yujin Han, Haoyuan
+Guo, Zhenheng Yang, Difan Zou, Jiashi Feng, and Xihui Liu.
+Parallelized autoregressive visual generation. In Proceedings
+of the Computer Vision and Pattern Recognition Conference,
+pages 12955–12965, 2025. 2, 3, 5, 6
+[40] Yecheng Wu, Zhuoyang Zhang, Junyu Chen, Haotian Tang,
+Dacheng Li, Yunhao Fang, Ligeng Zhu, Enze Xie, Hongxu
+Yin, Li Yi, et al. Vila-u: a unified foundation model inte-
+grating visual understanding and generation. arXiv preprint
+arXiv:2409.04429, 2024. 2
+[41] Jinheng Xie, Weijia Mao, Zechen Bai, David Junhao Zhang,
+Weihao Wang, Kevin Qinghong Lin, Yuchao Gu, Zhijie
+Chen, Zhenheng Yang, and Mike Zheng Shou.
+Show-o:
+One single transformer to unify multimodal understanding
+and generation. arXiv preprint arXiv:2408.12528, 2024. 2
+[42] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang,
+Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen
+Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv
+preprint arXiv:2505.09388, 2025. 2
+[43] Hu Yu, Hao Luo, Hangjie Yuan, Yu Rong, and Feng Zhao.
+Frequency autoregressive image generation with continuous
+tokens. arXiv preprint arXiv:2503.05305, 2025. 5, 6
+[44] Jiahui Yu, Yuanzhong Xu, Jing Yu Koh, Thang Luong, Gun-
+jan Baid, Zirui Wang, Vijay Vasudevan, Alexander Ku, Yin-
+fei Yang, Burcu Karagol Ayan, et al.
+Scaling autoregres-
+sive models for content-rich text-to-image generation. arXiv
+preprint arXiv:2206.10789, 2(3):5, 2022. 2, 3
+[45] Lijun Yu, Jos´e Lezama, Nitesh B Gundavarapu, Luca Ver-
+sari, Kihyuk Sohn, David Minnen, Yong Cheng, Vighnesh
+Birodkar, Agrim Gupta, Xiuye Gu, et al. Language model
+beats diffusion–tokenizer is key to visual generation. arXiv
+preprint arXiv:2310.05737, 2023. 3
+[46] Xiaohua Zhai, Basil Mustafa, Alexander Kolesnikov, and
+Lucas Beyer. Sigmoid loss for language image pre-training.
+In Proceedings of the IEEE/CVF international conference on
+computer vision, pages 11975–11986, 2023. 2
+[47] Yue Zhao, Fuzhao Xue, Scott Reed, Linxi Fan, Yuke Zhu,
+Jan Kautz, Zhiding Yu, Philipp Kr¨ahenb¨uhl, and De-An
+Huang. Qlip: Text-aligned visual tokenization unifies auto-
+regressive multimodal understanding and generation. arXiv
+preprint arXiv:2502.05178, 2025. 2
+[48] Hongjian Zhou, Fenglin Liu, Boyang Gu, Xinyu Zou, Jinfa
+Huang, Jinge Wu, Yiru Li, Sam S Chen, Peilin Zhou,
+Junling Liu, et al.
+A survey of large language models
+in medicine: Progress, application, and challenge.
+arXiv
+preprint arXiv:2311.05112, 2023. 3
+10

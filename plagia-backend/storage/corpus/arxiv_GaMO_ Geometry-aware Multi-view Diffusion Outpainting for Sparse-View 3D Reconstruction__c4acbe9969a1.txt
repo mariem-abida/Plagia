@@ -1,0 +1,2060 @@
+GaMO: Geometry-aware Multi-view Diffusion Outpainting for Sparse-View 3D
+Reconstruction
+Yi-Chuan Huang
+Hao-Jen Chien
+Chin-Yang Lin
+Ying-Huan Chen
+Yu-Lun Liu
+National Yang Ming Chiao Tung University
+Input Sparse Views
+Outpainted Views with Larger FOV
+3DGS
+GuidedVD-3DGS
+Difix3D
+Ours
+FSGS
+Multi-view Diffusion Outpainter
+Novel View Synthesis
+Novel View Synthesis
+3DGS 
+Reconstruction
+PSNR 21.92 | LPIPS 0.142
+PSNR 21.65 | LPIPS 0.171
+PSNR 20.42 | LPIPS 0.204
+PSNR 24.17 | LPIPS 0.165
+PSNR 25.48 | LPIPS 0.121
+Hole
+Ghosting
+Inconsistent
+Geometry
+Figure 1. Overview and comparison. (Top) Our method, GaMO (Geometry-aware Multi-view Diffusion Outpainter), expands sparse input
+views into wide-FOV outpainted views via a multi-view diffusion model, which are then used to refine 3D Gaussian Splatting (3DGS) [28]
+reconstruction, producing high-fidelity novel views with improved geometric consistency and visual clarity. (Bottom) Qualitative comparison
+with existing methods, including 3DGS [28], FSGS [117], Difix3D [81], and GuidedVD-3DGS [114]. Previous approaches suffer from
+holes, ghosting, or inconsistent geometry when trained with sparse inputs. In contrast, our method effectively mitigates these artifacts and
+achieves superior image quality.
+Abstract
+Recent advances in 3D reconstruction have achieved re-
+markable progress in high-quality scene capture from dense
+multi-view imagery, yet struggle when input views are limited.
+Various approaches, including regularization techniques, se-
+mantic priors, and geometric constraints, have been im-
+plemented to address this challenge. Latest diffusion-based
+methods have demonstrated substantial improvements by
+generating novel views from new camera poses to augment
+training data, surpassing earlier regularization and prior-
+based techniques. Despite this progress, we identify three
+critical limitations in these state-of-the-art approaches: inad-
+equate coverage beyond known view peripheries, geometric
+inconsistencies across generated views, and computation-
+ally expensive pipelines. We introduce GaMO (Geometry-
+aware Multi-view Outpainter), a framework that reformu-
+lates sparse-view reconstruction through multi-view out-
+painting. Instead of generating new viewpoints, GaMO ex-
+pands the field of view from existing camera poses, which
+1
+arXiv:2512.25073v1 [cs.CV] 31 Dec 2025
+
+inherently preserves geometric consistency while provid-
+ing broader scene coverage. Our approach employs multi-
+view conditioning and geometry-aware denoising strategies
+in a zero-shot manner without training. Extensive experi-
+ments on Replica and ScanNet++ demonstrate state-of-the-
+art reconstruction quality across 3, 6, and 9 input views,
+outperforming prior methods in PSNR and LPIPS, while
+achieving a 25× speedup over SOTA diffusion-based meth-
+ods with processing time under 10 minutes. Project page:
+https://yichuanh.github.io/GaMO/
+1. Introduction
+Reconstructing complete 3D scenes from limited input views
+is a fundamental problem with numerous tangible appli-
+cations, ranging from virtual property tours to immersive
+telepresence. However, it remains notoriously difficult, often
+resulting in broken geometry and visible visual artifacts. Pre-
+vious approaches attempted to address the sparsity of input
+views through regularization, semantic priors, or geometric
+constraints [22, 33, 54, 71, 97, 117]. These methods remain
+limited in handling unobserved regions.
+Recently, diffusion-based approaches [1, 81, 83, 85, 114]
+have generated novel views to improve the reconstruction
+quality for sparse observations. Nevertheless, these methods
+show three fundamental limitations: (1) novel view genera-
+tion mainly focuses on enhancing angular coverage of exist-
+ing geometry and often overlooks the extension beyond the
+periphery, leaving persistent holes and ghostings in the re-
+construction; (2) geometric and photometric inconsistencies
+across novel and input views inevitably become prominent
+as view overlap increases due to internal diffusion varia-
+tions; (3) novel view generation requires elaborate trajectory
+planning and camera pose sampling, making the process
+time-consuming.
+Fig. 2 shows that when using multi-view diffusion mod-
+els [3], adding more diffusion-generated novel views de-
+grades reconstruction quality, suggesting that sparse views
+alone can yield robust results. Increasing the number of novel
+views from 3 to 11 counterintuitively worsens both geometric
+accuracy (SSIM) and perceptual quality (LPIPS) by intro-
+ducing inconsistencies and artifacts into the reconstructed
+scene.
+We observe that outpainting, rather than novel view gener-
+ation, offers a more suitable paradigm for enhancing sparse-
+view 3D reconstruction. By generating missing content
+around existing input views, outpainting naturally preserves
+geometric consistency and avoids multi-view alignment chal-
+lenges. We propose GaMO (Geometry-aware Multiview
+Outpainting) to address the aforementioned limitations: (1) it
+expands the field of view(FOV) to cover unobserved regions,
+reducing holes and edge blur; (2) it utilizes existing view-
+points for content expansion rather than fusing information
+SSIM↑ 
+LPIPS↓
+Outpaint 0.860
+Baseline 0.817
+Novel 0.788
+3
+5
+7
+9
+11
+13
+1.0
+0.0
+Num of Views
+3
+5
+7
+9
+11
+13
+Num of Views
+0.817
+Outpaint 0.118
+Baseline 0.156
+Novel 0.176
+0.156
+3+2 views
+3 views
+3+6 views
+Input views
+Novel views
+GT
+1.0
+0.0
+Figure 2. Motivation: Outpainting vs. novel view generation.
+Using multi-view diffusion [3], we train 3DGS [28] with three
+strategies: interpolated novel views (green), 3-view baseline (blue),
+and outpainting (orange). Top: Visual comparison shows interpolat-
+ing additional novel views (3–11 total) introduces inconsistencies
+and artifacts. Bottom: Quantitative metrics (SSIM, LPIPS) show
+that adding novel views degrades quality due to inconsistencies,
+while outpainting consistently improves both geometric and per-
+ceptual quality.
+from multiple novel views in 3D space, preventing misalign-
+ment and ghosting artifacts; and (3) it completes reconstruc-
+tion efficiently in a single outpainting pass without complex
+trajectory planning, achieving a 25× speedup over video
+diffusion-based methods. Following [114, 115], we evaluate
+on Replica [63] and ScanNet++ [102] with improvements
+across all metrics.
+We summarize our contributions as follows:
+• We establish outpainting as a superior paradigm for sparse-
+view reconstruction, eliminating common issues including
+holes, ghosting artifacts, and geometric inconsistencies.
+• We develop a geometry-aware outpainting approach with
+novel conditioning and denoising strategies in zero-shot
+manner without finetuning.
+• We achieve state-of-the-art performance on Replica and
+ScanNet++ across 3, 6, and 9 input views, with substantial
+gains in geometric accuracy and perceptual quality, while
+reducing reconstruction time to under 10 minutes.
+2. Related Work
+Sparse-view 3D Gaussian Splatting. While 3DGS [28]
+achieves remarkable quality with dense inputs, sparse-
+view reconstruction remains challenging, particularly for
+indoor scenes [34]. Recent methods employ depth regular-
+ization [10, 33], proximity-guided unpooling [117], dual-
+field co-regularization [110], and robust handling of un-
+posed inputs [37]. Feed-forward approaches leverage cost
+volumes [5, 7], Gaussian bundle adjustment [12], or trans-
+former architectures [66, 76, 93]. Methods combining depth
+2
+
+priors include DN-Splatter [69] with depth and normal cues,
+SplatFields [52] regularizing spatial autocorrelation, and
+large model priors [17, 61, 74, 105]. While these methods
+regularize 3D representations, our work augments training
+data through geometry-aware outpainting for more complete
+scene coverage.
+Multi-view diffusion models for 3D. Multi-view diffusion
+enables consistent 3D generation through multi-view atten-
+tion [60], synchronized volume attention [46], orthogonal
+view generation [59], and cross-domain diffusion [47]. Re-
+cent advances enforce consistency via 3D feature unpro-
+jection [98], epipolar attention [20], depth-guided atten-
+tion [19], and differentiable rasterization [48]. Video dif-
+fusion models provide temporal consistency for multi-view
+synthesis [8, 15, 30, 70, 109]. Additional methods include
+mesh generation [92], epipolar constraints [35], combined
+2D-3D priors [42], correspondence-aware attention [65], and
+3D feature fields [4]. These methods generate novel views
+from different poses. Our work performs multi-view outpaint-
+ing to expand field-of-view of existing views, maintaining
+stronger geometric consistency for sparse-view scene recon-
+struction.
+Diffusion priors for 3D reconstruction. Diffusion mod-
+els provide learned priors through Score Distillation
+Sampling [36, 57, 78]. Improvements address over-
+smoothing [49], provide unified frameworks [50], and op-
+timize both 3D models and priors [9, 99]. Video diffusion
+serves as powerful priors [39, 51, 103]. Reconstruction meth-
+ods use multi-view conditioning [83], pseudo-observation
+enhancement [44], scene-grounding guidance [114], itera-
+tive refinement [45, 81, 85], and various coupling strate-
+gies [21, 43, 53, 91, 96]. Native 3D diffusion includes latent
+approaches [16, 31, 82, 84, 100] and RL finetuning [87].
+While these methods generate additional views or provide
+guidance, they face multi-view inconsistency. Our insight:
+diffusion models suit outpainting known views better than
+hallucinating novel perspectives, maintaining stronger geo-
+metric grounding.
+Geometry-aware generation. Geometric consistency lever-
+ages Pl¨ucker coordinates for camera conditioning [23, 26,
+90, 94, 111] and epipolar constraints or voxel represen-
+tations [68] for multi-view consistency [20, 29, 53, 79,
+89, 101]. Depth and normal conditioning proves criti-
+cal [11, 14, 19, 27, 47, 48, 56, 72]. Recent panoramic gener-
+ation [73, 113] and video outpainting [107] typically oper-
+ate in 2D or single-view scenarios. Our approach uniquely
+combines multi-view outpainting with geometry awareness
+through coarse 3DGS rendering, opacity-based masking, and
+noise resampling for consistent, geometrically plausible FOV
+expansion.
+Outpainting and FOV expansion. Diffusion-based out-
+painting includes panoramic methods [13, 25, 58, 86, 104,
+108, 113] and restoration tasks [41, 67]. For 3D scenar-
+ios, methods employ visibility-aware inpainting [40, 80],
+video diffusion priors [40], NeRF-guided training [106], iter-
+ative 3DGS updates [107], and multi-view SDS [6]. General
+sparse-view baselines include feed-forward prediction [5, 7],
+regularized optimization [55, 88], and NeRF-based meth-
+ods [38, 54, 64, 71, 97]. These works require per-scene fine-
+tuning or focus on single-view outpainting. Our method
+performs zero-shot multi-view outpainting using pre-trained
+MVGenMaster [3] with geometry-aware mechanisms ensur-
+ing cross-view consistency without scene-specific training.
+3. Preliminaries
+3D Gaussian Splatting (3DGS) [28] uses a collection of
+anisotropic 3D Gaussian primitives to present a scene. Each
+Gaussian is defined by its center position µ ∈R3, a 3D co-
+variance matrix Σ, an opacity value α ∈[0, 1], and spherical
+harmonic coefficients for view-dependent color. The covari-
+ance matrix is decomposed into a scaling vector s ∈R3 and
+rotation quaternion q ∈R4 as Σ = RSST RT , where R is
+derived from q and S = diag(s). The Gaussian function is:
+G(x) = exp
+
+−1
+2(x −µ)T Σ−1(x −µ)
+
+.
+(1)
+To render a given viewpoint, 3DGS projects each 3D
+Gaussian onto the 2D image plane, obtaining a 2D Gaussian
+G′(u), where u is pixel coordinates. The color of pixel u is
+computed via α-blending of ordered Gaussians:
+C(u) =
+X
+i∈N
+ciσi
+i−1
+Y
+j=1
+(1 −σj),
+(2)
+where N denotes the set of Gaussians overlapping pixel
+u, sorted in depth order, ci represents the color of the i-th
+Gaussian, and σi = αiG′
+i(u) is the opacity contribution.
+Diffusion Models generate samples through a learned de-
+noising process that reverses a forward noising process.
+The forward process gradually adds Gaussian noise to data
+x0 over T timesteps: xt = √¯αtx0 + √1 −¯αtϵ, where
+ϵ ∼N(0, I) and ¯αt is a predefined noise schedule. The
+reverse process learns to denoise xt back to x0 by training a
+neural network ϵθ to predict the noise at each timestep. The
+training objective is the simplified loss function:
+Lsimple = Et,x0,ϵ
+
+∥ϵ −ϵθ(xt, t, c)∥2
+,
+(3)
+where c represents conditioning information, and the model
+learns to minimize the mean squared error between the true
+noise ϵ and the predicted noise. During inference, samples
+are generated by iteratively denoising from pure noise xT ∼
+N(0, I) using the DDIM [62] sampling process.
+3
+
+Sparse Input
+(a) Coarse 3D 
+Initialization
+Coarse Geometry Prior
+(c) Refined Reconstruction
+Outpainted View
+Multi-view
+Diffusion Model
+Novel View
+(b) GaMO: Geometry-aware 
+Multi-view Outpainter
+outpainted training 
+view with larger FOV
+3DGS
+Coarse view
+Figure 3. Overview of Our Pipeline. Given sparse input views,
+our method follows a three-stage process. (a) Coarse 3D Initial-
+ization: We obtain geometry priors from initial 3D reconstruction,
+including an opacity mask and coarse render that provide essential
+structural cues. (b) GaMO: Geometry-aware Multi-view Out-
+painter: Using the geometry priors, GaMO generates outpainted
+views with enlarged FOV via a multi-view diffusion model. (c)
+Refined Reconstruction: The outpainted views are used to refine
+the 3D reconstruction, resulting in improved completeness and con-
+sistency.
+4. Method
+As shown in Fig. 2, outpainting existing input views is more
+effective than generating novel views from new camera
+poses. To address challenges in sparse-view 3D reconstruc-
+tion, we perform geometry-aware outpainting by leverag-
+ing multi-view diffusion models. By expanding the field-
+of-view (FOV) of input images, our method simultaneously
+fills holes, fixes blurred boundaries, and preserves geometric
+consistency without modifying existing content, resulting
+in a significantly simpler and faster reconstruction process.
+As illustrated in Fig. 3, our pipeline consists of three stages:
+coarse 3D initialization to obtain geometry priors (Sec. 4.1),
+geometry-aware multi-view outpainting to generate enlarged
+FOV views (Sec. 4.2), and refined 3D reconstruction using
+the outpainted views (Sec. 4.3).
+4.1. Coarse 3D Initialization
+To ensure geometric consistency in the diffusion model, we
+use DUSt3R [75] to generate an initial point cloud and train
+a coarse 3DGS model to capture the scene geometry. Using
+this coarse model, we identify outpainting regions by render-
+ing an opacity mask with a FOV wider than the input views.
+We also render a coarse color image to provide appearance
+priors for the outpainting process in Sec. 4.2.
+Opacity Mask. We enlarge the FOV by reducing the focal
+lengths with a scaling ratio Sk < 1 (i.e., f ′
+x = fx × Sk,
+f ′
+y = fy × Sk). For each target outpainted view, we first
+render an opacity map O by α-blending the opacity values
+of the Gaussians:
+O(u) =
+X
+i∈N
+σi
+i−1
+Y
+j=1
+(1 −σj),
+(4)
+where σi = αiG′
+i(u) denotes the opacity contribution of
+the i-th Gaussian at pixel u. The opacity mask M is then
+obtained by thresholding the opacity map with M = I(O <
+ηmask), where ηmask is a threshold value and I(·) is the indi-
+cator function. Regions where M = 1 correspond to areas
+with low opacity that require outpainting.
+Coarse Rendering. We render a color image Icoarse with
+the enlarged FOV from the coarse 3DGS model. This coarse
+rendering serves as a reference that provides geometric and
+appearance priors to the diffusion model, maintaining con-
+sistency between outpainted and existing scene content.
+4.2. GaMO: Geometry-aware Multi-view Diffusion
+Outpainter
+Our geometry-aware outpainting method operates through
+three key components: (1) multi-view conditioning that pro-
+vides structural and appearance guidance; (2) mask latent
+blending that integrates coarse geometry priors during de-
+noising; and (3) iterative mask scheduling with noise resam-
+pling that ensure smooth transitions. The model operates in
+latent space using DDIM sampling [62] for efficient denois-
+ing.
+Multi-View Conditioning. Given a set of sparse input RGB
+images {Ii}N
+i=1 and their corresponding camera parameters
+{Πi}N
+i=1, our model generates outpainted views conditioned
+on camera representations, geometric correspondences, and
+appearance features, as illustrated in Fig. 4(a).
+For camera representation, we employ Pl¨ucker ray embed-
+dings [95] that provide dense 6D ray parameterizations for
+each pixel, compactly encoding both ray origin and direction
+for geometry-aware reasoning. The embedding of each input
+view Pr is derived from its corresponding camera param-
+eters Πr, while the embedding of the outpainted view P∗
+t
+uses the same camera parameters with scaled focal lengths
+(f ′
+x, f ′
+y) to align with the enlarged FOV.
+For geometric correspondence, we warp input RGB im-
+ages and Canonical Coordinate Maps (CCM) to align with
+the expanded FOV by unprojecting pixels to 3D and repro-
+jecting onto the outpainted camera plane, producing Cwarp
+r→t
+and Iwarp
+r→t. We then downsample the original inputs by fac-
+tor Sk and place them at the center of the warped features,
+creating augmented signals Iaug
+r→t and Caug
+r→t where the center
+preserves exact input information while the periphery retains
+warped geometric structure to guide outpainting.
+For appearance features, the input RGB images are en-
+coded through a variational autoencoder (VAE) to obtain
+clean latent features zr. The noisy latent features zt are
+randomly generated and will be denoised to generate the
+outpainted views.
+All
+conditioning
+signals
+are
+processed
+through
+lightweight convolutional encoders. For input views,
+Pl¨ucker ray embeddings Pr, CCM Cr, and RGB images
+4
+
+Coarse render
+Coarse 
+Geometry Prior
+Mask Latent Blending
+Denoising Step
+Opacity Mask
+𝑡!
+𝑡"
+𝑡#
+Noise 
+Resampling
+Plücker ray*
+CCM
+RGB pixel
+CNN
+CNN
+Plücker ray
+Clean latent
+Noisy latent
+Augmented CCM
+Augmented RGB
+Dilation iter = 2
+Dilation iter = 1
+Dilation iter = 0
+Coarse latent
+Mask latent
+Noisy 
+Coarse latent
+Noisy latent
+Blended latent
+(a) Multi-view 
+Diffusion Conditioning 
+(b) Denoising Process
+(c) Outpainted Views
+Sparse Input
+Small FOV
+Large FOV
+Figure 4. Overview of GaMO (Geometry-aware Multi-view Diffusion Outpainter). (a) Multi-view Diffusion Conditioning: Sparse input
+views are encoded into clean latents and combined with multi-view conditions, including Pl¨ucker ray embeddings for input views (Pr) and
+the target view with enlarged FOV (P∗
+t ), along with original and augmented Canonical Coordinate Map (CCM) and RGB, to provide both
+geometric and appearance cues for diffusion model conditioning. (b) Denoising Process: Coarse geometry priors (opacity mask and coarse
+render) guide the denoising through mask latent blending performed at multiple timesteps (t1, t2, ..., tN) with progressive dilation and noise
+resampling, generating outpainted views with enlarged FOV (c).
+Ir are jointly added to the clean latent features zr. For
+the target outpainted view, P∗
+t , Caug
+r→t, and Iaug
+r→t are jointly
+added to the noisy latent features zt. We then condition
+the pre-trained diffusion model with the fused features to
+generate outpainted view latents in a zero-shot manner:
+pθ(zt|zr, Pr, Cr, Ir, P∗
+t , Caug
+r→t, Iaug
+r→t),
+(5)
+where θ denotes the pre-trained model [3] parameters. These
+multi-view conditions ensure that the diffusion process main-
+tains geometric consistency across views, even under an
+enlarged FOV.
+Denoising Process with Mask Latent Blending. As the
+central component of our geometry-aware framework, mask
+latent blending integrates coarse geometry priors from the
+coarse 3D initialization (Sec. 4.1) into the diffusion loop.
+As outlined in Alg. 1, this process ensures that outpainted
+content respects existing scene structures while generating
+plausible peripheral regions. Fig. 4(b) shows that the opac-
+ity mask M and coarse rendering Icoarse provide consistent
+structural guidance throughout denoising.
+At selected denoising timesteps {t1, t2, ..., tN}, we per-
+form mask latent blending between the denoised latent and
+the coarse geometry prior. To ensure both latents share the
+same noise level, we add noise to the coarse latent, which is
+obtained by encoding the coarse rendering into latent space,
+before blending them using a latent-space mask Mlatent. The
+mask evolution is controlled by iterative mask scheduling
+(Sec. 4.2):
+zblend
+tk
+= (1 −M(k)
+latent) ⊙zcoarse
+tk
++ M(k)
+latent ⊙ztk,
+(6)
+where ztk is the denoised latent, zcoarse
+tk
+is the coarse latent
+Algorithm 1 Geometry-aware Multi-view Outpainter
+1: Input: Coarse render Icoarse, opacity mask M
+2: Output: Outpainted views {Sout
+j }M
+j=1
+3: Setup: Noise schedule Σ = {σ1, . . . , σT }
+4: Setup: latent blending iterations {t1, t2, . . . , tN}
+5: Setup: resampling iterations R
+6: zcoarse ←Encode(Icoarse)
+7: zT ∼N(0, I)
+8: for s = T, . . . , 1 do
+9:
+zs−1 = Denoise(zs, conditions)
+▷Eq. (5)
+10:
+if s ∈{t1, t2, . . . , tN} then
+11:
+zcoarse
+s−1 = AddNoise(zcoarse, σs−1)
+12:
+zblend
+s−1 = IMS(M, zs−1, zcoarse
+s−1 )
+▷Eq. (6)
+13:
+zs−1 = zblend
+s−1
+14:
+for r in R do
+15:
+ˆz0 = Predict(zs−1)
+16:
+zresamp
+s
+←AddNoise(ˆz0, σs)
+▷Eq. (7)
+17:
+zs−1 ←Denoise(zresamp
+s
+, conditions)
+18:
+end for
+19:
+end if
+20: end for
+21: {Sout
+j }M
+j=1 = Decode(z0)
+with matching noise level (Alg. 1, line 11), M(k)
+latent is the
+dilated mask at iteration k, and ⊙denotes element-wise
+multiplication.
+Iterative Mask Scheduling and Noise Resampling. To
+gradually integrate generated content with the existing ge-
+ometric structure, Iterative Mask Scheduling progressively
+adjusts M(k)
+latent over iterations k to control the ratio between
+outpainting and known coarse regions. The mask dilation
+is progressively reduced as denoising proceeds, allowing
+5
+
+Table 1. Quantitative comparison on Replica [63] and ScanNet++ [102] datasets with 6 input views. 3DGS-based methods (3DGS,
+FSGS, Difix3D, GenFusion, GuidedVD-3DGS, Ours) use DUSt3R [75] initialization, while InstantSplat uses MASt3R [32].
+Method
+Replica Dataset [63]
+ScanNet++ Dataset [102]
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+FID ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+FID ↓
+3DGS [28]
+24.74
+0.862
+0.124
+79.19
+21.71
+0.818
+0.186
+117.30
+FSGS [117]
+23.91
+0.846
+0.145
+91.19
+21.69
+0.801
+0.298
+188.89
+InstantSplat [12]
+23.09
+0.849
+0.141
+85.93
+21.19
+0.811
+0.193
+117.89
+Difix3D [81]
+21.86
+0.811
+0.188
+93.28
+20.62
+0.764
+0.244
+118.85
+GenFusion [85]
+23.98
+0.855
+0.142
+80.83
+21.96
+0.808
+0.218
+125.20
+GuidedVD-3DGS [114]
+25.67
+0.861
+0.147
+76.26
+22.98
+0.815
+0.204
+122.70
+Ours
+25.84
+0.877
+0.109
+72.95
+23.41
+0.835
+0.181
+108.06
+the model to first explore peripheral content and later refine
+geometry within coarse regions.
+To maintain smooth transitions across blended regions,
+we perform noise resampling after each blending operation.
+After blending, we perform noise resampling R times on
+the blended latent to eliminate boundary artifacts and ensure
+smooth integration between the coarse geometry and gen-
+erated content (Alg. 1, lines 14–17). Specifically, we first
+predict the clean latent ˆz0 from the blended latent, then add
+noise back to the current timestep tk:
+zresamp
+tk
+=
+p
+¯αtkˆz0 +
+p
+1 −¯αtkϵ,
+(7)
+where ˆz0 is the predicted clean latent from zblend
+tk
+and ϵ ∼
+N(0, I) denotes sampled Gaussian noise. This resampling
+prevents boundary artifacts and ensures smooth blending.
+This framework ensures that outpainted regions seam-
+lessly blend with known content while maintaining geomet-
+ric plausibility, with the coarse 3DGS geometry providing
+structural guidance throughout the generation process. Im-
+portantly, it requires only inference without fine-tuning the
+backbone diffusion model.
+4.3. 3DGS Refinement with Outpainted Views
+Given the original input views {Igt
+i }N
+i=1 and the generated
+outpainted views {Sout
+j }M
+j=1 from Sec. 4.2, we refine the
+3DGS model by jointly optimizing with both sets of views.
+During training, we sample either an input view or an out-
+painted view for supervision at each iteration.
+Loss for Input Views. We employ the standard 3DGS re-
+construction loss [28] to ensure accurate reconstruction of
+the observed regions:
+Linput = (1 −λs)L1(Ii, Igt
+i ) + λsLD-SSIM(Ii, Igt
+i ),
+(8)
+where Ii denotes the rendered image from input viewpoint,
+Igt
+i
+is the ground truth input view, and λs is a weighting
+factor that balances the L1 loss and structural similarity loss.
+Loss for Outpainted Views. Relying solely on reconstruc-
+tion loss fails to fill unobserved regions and causes arti-
+facts. We incorporate perceptual loss [24] LLPIPS to provide
+balanced gradients across outpainted and original regions,
+effectively guiding training while maintaining perceptual
+consistency. The loss is:
+Lrecon = (1 −λs)L1(Sj, Sout
+j ) + λsLD-SSIM(Sj, Sout
+j ),
+Loutpainted = Lrecon(Sj, Sout
+j ) + λpercLLPIPS(Sj, Sout
+j ),
+(9)
+where Sj is the rendered outpainted image and Sout
+j
+is the
+generated outpainted image.
+5. Experiments
+5.1. Experimental Setups
+Datasets and Evaluation Protocol. We evaluate on
+Replica [63] and ScanNet++ [102], following prior
+works [114, 115]. Experiments use 6 input views per scene
+by default, and we additionally test 3 and 9 views for sparsity
+analysis. We further include Mip-NeRF 360 [2] for general-
+ization (see supplementary material). Evaluation uses stan-
+dard metrics: PSNR, SSIM [77], LPIPS [112], and FID [18].
+Baselines. We compare against several state-of-the-art
+sparse-view reconstruction methods: (1) vanilla 3DGS; (2)
+FSGS [117], using depth-guided Gaussian unpooling; (3)
+InstantSplat [12], employing MASt3R priors and self-
+supervised bundle adjustment; (4) Difix3D [81], applying
+single-step diffusion refinement; (5) GenFusion [85], inte-
+grating reconstruction and video diffusion via cyclical fusion;
+and (6) GuidedVD-3DGS [114], leveraging video diffusion
+and evaluated using the authors’ official implementation and
+settings. For fair comparison, all methods except InstantSplat
+use DUSt3R [75] for initialization.
+Implementation Details. For coarse initialization, we train
+3DGS for 10,000 iterations with λs = 0.2 and opacity thresh-
+old ηmask = 0.6. For outpainting, we use the multi-view dif-
+fusion model [3] with focal-length scaling Sk = 0.6, DDIM
+sampling [62] with T = 50 steps, and perform latent blend-
+ing at timesteps t1 = 0.7T, t2 = 0.5T, t3 = 0.3T with
+noise resampling R = 3. Input and outpainted views share
+the same resolution (differing only in FOV), with dimensions
+6
+
+3DGS
+FSGS
+InstantSplat
+Diﬁx3D
+GuidedVD-3DGS
+Ours
+GT
+GenFusion
+Figure 5. Qualitative comparison on Replica [63] and ScanNet++ [102] datasets with 6 sparse views. 3DGS-based methods use
+DUSt3R [75] initialization, while InstantSplat uses MASt3R [32]. Our method produces better coverage (fewer black holes), better geometric
+consistency (less ghosting), and fewer artifacts compared to baselines. White boxes highlight challenging regions. Best viewed zoomed in.
+set as multiples of 64. Before refinement, we alpha-blend
+downscaled inputs at the center. For refinement, we optimize
+3DGS for 3,000 iterations (3 views) or 7,000 iterations (6/9
+views) with λperc = 0.1, alternating supervision between
+input and outpainted views.
+5.2. Comparisons
+Quantitative Results. Tab. 1 show that our method achieves
+superior performance across all metrics on both datasets. On
+Replica, we achieve a PSNR of 25.84 dB, outperforming
+GuidedVD-3DGS by 0.17 dB while significantly improving
+perceptual quality with 25.9% lower LPIPS and 4.3% lower
+FID. On ScanNet++, our method obtains 23.41 dB PSNR and
+0.835 SSIM, with 11.3% and 11.9% improvements in LPIPS
+and FID over GuidedVD-3DGS. Notably, our approach is
+25× faster than GuidedVD-3DGS , while delivering better
+results.
+Qualitative Results. Fig. 10 shows visual comparisons on
+representative scenes. Our method produces more complete
+reconstructions by effectively addressing the key challenges
+in sparse-view reconstruction: reducing black holes in un-
+observed regions, minimizing rendering artifacts, and im-
+proving geometric consistency. These results demonstrate
+the effectiveness of GaMO in generating high-quality out-
+painted views that enhance 3D reconstruction.
+5.3. Ablation Studies
+We conduct comprehensive ablation studies on Replica and
+ScanNet++ datasets with 6 input views. To separately as-
+sess the outpainted view quality and novel view synthesis
+performance, we center crop the input images to 0.6× of
+their original size. For each ablation, we provide quantitative
+results and visual comparisons, where numbered configu-
+rations (e.g., “1.”) in figures correspond to table rows, and
+letters (e.g., (a), (b)) denote different visual comparison as-
+pects.
+Latent Blending Strategies. Tab. 2 and Fig. 6 present abla-
+tion results on our latent blending design. Augmenting the
+warped features with downscaled reference RGB and CCM
+(rows 1-2) prevents incorrect hallucinations in known regions
+(a). Mask latent blending (rows 2-3) prevents severe geomet-
+ric misalignment (b, red circle) and improves PSNR by 0.66
+dB. Hard masking (rows 4-5) produces sharper boundaries
+(c) with 0.64 dB gain over soft masking. Finally, noise re-
+sampling (rows 3 vs. 5) reduces blending artifacts by 0.24
+dB, generating more coherent results (d).
+Mask Blending Scheduling. Tab. 3 and Fig. 7 present abla-
+tion results on mask blending scheduling strategies. Single-
+step blending (row 1) is insufficient as coarse geometry is
+easily washed out during denoising, while multi-step blend-
+ing (row 2) better preserves geometric cues (a-top). Blending
+at every step (row 3) achieves slightly higher PSNR/SSIM
+but causes blurred boundaries (a-bottom) and increases de-
+noising time, making the range-based approach preferable.
+Finally, Iterative Mask Scheduling (rows 2 vs. 4) substan-
+tially improves perceptual quality through progressive mask
+dilation, providing better geometric guidance and smoother
+transitions for more coherent details (b).
+3DGS Refinement Components. Tab. 4 and Fig. 8 present
+ablation results on 3DGS refinement components. Point
+cloud re-initialization using outpainted views (rows 1 vs. 3)
+enables the successful generation of Gaussian points in out-
+painted regions (a). Perceptual loss (rows 2 vs. 3) effectively
+fills holes and reduces artifacts by providing better gradient
+7
+
+Table 2. Ablation on latent blending strategies. Impact of aug-
+mented condition, hard/soft mask blending, and noise resampling
+on outpainting and 3DGS refinement quality. Evaluated on cropped
+views from Replica [63] and ScanNet++ [102].
+Cropped Input Views
+Outpainted view
+Novel view
+#
+Aug.
+Hard
+Soft
+Noise
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+1
+18.97
+0.776
+0.210
+22.37
+0.821
+0.197
+2
+✓
+19.11
+0.779
+0.207
+22.53
+0.822
+0.192
+3
+✓
+✓
+19.77
+0.797
+0.199
+23.52
+0.839
+0.174
+4
+✓
+✓
+✓
+19.37
+0.797
+0.196
+23.22
+0.840
+0.173
+5*
+✓
+✓
+✓
+✓
+20.01
+0.800
+0.190
+23.53
+0.839
+0.172
+3. w/o noise res.
+5. w/ noise res.
+Coarse render
+4. Soft mask
+5. Hard mask 
+2. w/o blending
+3. w/ blending
+1. w/ warped cond. 2. w/ aug. cond.
+Coarse render
+(a) Augmented Condition
+(b) Mask Latent Blending
+(c) Soft / Hard Mask Blending
+(d) Noise Resampling
+Coarse render
+Coarse render
+Figure 6. Qualitative ablation on outpainting components. (a)
+Augmented conditioning aligns outpainted and known regions. (b)
+Mask latent blending provides essential geometric guidance. (c)
+Hard masks provide more accurate boundary information than soft
+masks. (d) Noise resampling eliminates blending boundary artifacts.
+Red circles highlight problem regions. White boxes show zoom-ins.
+Corresponds to Tab. 2
+Table 3. Ablation on mask blending scheduling. Comparison of
+blending at different timesteps: tk (single-step), t1→tN (multi-step),
+All (every step), and IMS (Iterative Mask Scheduling). Our full
+method (row 4*) combines multi-step blending with progressive
+IMS, achieving the best perceptual quality. Time (s) denotes gener-
+ation time for all outpainted views.
+Cropped Input Views
+Outpainted view
+Novel view
+#
+tk
+t1→tN
+All
+IMS
+PSNR↑
+SSIM↑
+LPIPS↓
+Time (s)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+1
+✓
+20.09
+0.804
+0.198
+85
+23.38
+0.837
+0.176
+2
+✓
+19.85
+0.799
+0.173
+93
+23.53
+0.839
+0.179
+3
+✓
+20.31
+0.809
+0.201
+167
+23.67
+0.842
+0.178
+4*
+✓
+✓
+20.07
+0.801
+0.169
+93
+23.65
+0.839
+0.171
+guidance for outpainted regions (b), producing cleaner and
+more realistic renderings.
+6. Conclusion
+We introduce GaMO, establishing outpainting as a more
+suitable paradigm for novel view generation in sparse-view
+3D reconstruction. By extending existing views rather than
+generating new perspectives, our approach preserves geo-
+metric consistency while providing broader spatial coverage,
+1. 𝑡!
+2. 𝑡" −𝑡#
+2. w/o IMS
+4. w/ IMS
+Coarse render
+2. 𝑡" −𝑡# 
+3. All iterations
+(a) Mask Blending Iteration 
+(b) Iteratively Mask Scheduling
+Coarse render
+Coarse render
+Figure 7. Ablation on mask blending scheduling strategies. (a)
+Comparing mask blending at different timesteps: single step tk,
+multi-step t1→tN , and all iterations. (b) Our Iterative Mask Schedul-
+ing (IMS) progressively shrinks the region requiring outpainting,
+producing more plausible and coherent details with better align-
+ment. Corresponds to Tab. 3.
+Table 4. Ablation on 3DGS refinement components. Impact of
+point re-initialization and perceptual loss on reconstruction quality.
+Both components contribute to improved novel view synthesis, with
+row 3* (our full method) achieving the best perceptual quality.
+Replica & ScanNet++
+Novel view
+#
+Point re-init.
+Percep. Loss
+PSNR↑
+SSIM↑
+LPIPS↓
+1
+✓
+24.80
+0.860
+0.140
+2
+✓
+25.14
+0.857
+0.139
+3*
+✓
+✓
+24.93
+0.861
+0.135
+(b) Perceptual Loss
+GT
+2. w/o Perc. Loss 3. w/ Perc. Loss
+(a) Point Re-Initialization
+1. w/o Point Re-init. 3. w/ Point Re-init.
+GT
+Figure 8. Qualitative ablation on 3DGS refinement. (a) Point
+cloud re-initialization from outpainted views enables successful
+Gaussian generation in outpainted regions. (b) Perceptual loss en-
+hances detail recovery in outpainted regions. White boxes show
+zoom-ins. Corresponds to Tab. 4.
+effectively mitigating holes and artifacts in generation-based
+methods. Extensive experiments demonstrate significant im-
+provements over state-of-the-art with a 25× speedup and
+superior reconstruction quality. Our method also exhibits
+strong zero-shot generalization, establishing outpainting as
+a more principled and efficient approach for sparse-view 3D
+reconstruction.
+Limitations. GaMO cannot recover occluded content in-
+visible from all input views. Performance depends on input
+view distribution, as clustered or misaligned views yield poor
+results. Future work could explore adaptive outpaint scale
+selection and hybrid approaches for challenging scenarios.
+8
+
+Acknowledgements. This research was funded by the Na-
+tional Science and Technology Council, Taiwan, under
+Grants NSTC 112-2222-E-A49-004-MY2 and 113-2628-
+E-A49-023-. The authors are grateful to Google, NVIDIA,
+and MediaTek Inc. for their generous donations. Yu-Lun Liu
+acknowledges the Yushan Young Fellow Program by the
+MOE in Taiwan.
+References
+[1] Titas Ancikeviˇcius, Zexiang Xu, Matthew Fisher, Paul Hen-
+derson, Hakan Bilen, Niloy J Mitra, and Paul Guerrero. Ren-
+derdiffusion: Image diffusion for 3d reconstruction, inpaint-
+ing and generation. In CVPR, 2023. 2
+[2] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 5470–5479, 2022. 6, 14, 16
+[3] Chenjie Cao, Chaohui Yu, Shang Liu, Fan Wang, Xiangyang
+Xue, and Yanwei Fu. Mvgenmaster: Scaling multi-view
+generation from any image via 3d priors enhanced diffusion
+model. In Proceedings of the Computer Vision and Pattern
+Recognition Conference, pages 6045–6056, 2025. 2, 3, 5, 6,
+14, 16, 17
+[4] Eric R Chan, Koki Nagano, Matthew A Chan, Alexander W
+Bergman, Jeong Joon Park, Axel Levy, Miika Aittala, Shalini
+De Mello, Tero Karras, and Gordon Wetzstein. Generative
+novel view synthesis with 3d-aware diffusion models. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 4217–4229, 2023. 3
+[5] David Charatan, Sizhe Lester Li, Andrea Tagliasacchi, and
+Vincent Sitzmann. pixelsplat: 3d gaussian splats from image
+pairs for scalable generalizable 3d reconstruction. In Pro-
+ceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 19457–19467, 2024. 2, 3
+[6] Honghua Chen, Chen Change Loy, and Xingang Pan. Mvip-
+nerf: Multi-view 3d inpainting on nerf scenes via diffusion
+prior. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition, pages 5344–5353,
+2024. 3
+[7] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang,
+Marc Pollefeys, Andreas Geiger, Tat-Jen Cham, and Jianfei
+Cai. Mvsplat: Efficient 3d gaussian splatting from sparse
+multi-view images. In European Conference on Computer
+Vision, pages 370–386. Springer, 2024. 2, 3
+[8] Yuedong Chen, Chuanxia Zheng, Haofei Xu, Bohan Zhuang,
+Andrea Vedaldi, Tat-Jen Cham, and Jianfei Cai.
+Mvs-
+plat360: Feed-forward 360 scene synthesis from sparse
+views. Advances in Neural Information Processing Systems,
+37:107064–107086, 2024. 3
+[9] Zixuan Chen, Ruijie Su, Jiahao Zhu, Lingxiao Yang, Jian-
+Huang Lai, and Xiaohua Xie. Vividdreamer: Towards high-
+fidelity and efficient text-to-3d generation. arXiv preprint
+arXiv:2406.14964, 2024. 3
+[10] Jaeyoung Chung, Jeongtaek Oh, and Kyoung Mu Lee.
+Depth-regularized optimization for 3d gaussian splatting
+in few-shot images. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+811–820, 2024. 2
+[11] Yiquan Duan, Xianda Guo, and Zheng Zhu. Diffusiondepth:
+Diffusion denoising approach for monocular depth estima-
+tion. In European Conference on Computer Vision, pages
+432–449. Springer, 2024. 3
+[12] Zhiwen Fan, Wenyan Cong, Kairun Wen, Kevin Wang, Jian
+Zhang, Xinghao Ding, Danfei Xu, Boris Ivanovic, Marco
+Pavone, Georgios Pavlakos, et al. Instantsplat: Unbounded
+sparse-view pose-free gaussian splatting in 40 seconds.
+arXiv preprint arXiv:2403.20309, 2(3):4, 2024. 2, 6, 15
+[13] Mengyang Feng, Jinlin Liu, Miaomiao Cui, and Xuansong
+Xie. Diffusion360: Seamless 360 degree panoramic im-
+age generation based on diffusion models. arXiv preprint
+arXiv:2311.13141, 2023. 3
+[14] Xiao Fu, Wei Yin, Mu Hu, Kaixuan Wang, Yuexin Ma, Ping
+Tan, Shaojie Shen, Dahua Lin, and Xiaoxiao Long. Ge-
+owizard: Unleashing the diffusion priors for 3d geometry
+estimation from a single image. In European Conference on
+Computer Vision, pages 241–258. Springer, 2024. 3
+[15] Ruiqi
+Gao,
+Aleksander
+Holynski,
+Philipp
+Henzler,
+Arthur Brussee, Ricardo Martin-Brualla, Pratul Srinivasan,
+Jonathan T Barron, and Ben Poole. Cat3d: Create anything
+in 3d with multi-view diffusion models. arXiv preprint
+arXiv:2405.10314, 2024. 3
+[16] Xianglong He, Junyi Chen, Sida Peng, Di Huang, Yang-
+guang Li, Xiaoshui Huang, Chun Yuan, Wanli Ouyang, and
+Tong He. Gvgen: Text-to-3d generation with volumetric rep-
+resentation. In European Conference on Computer Vision,
+pages 463–479. Springer, 2024. 3
+[17] Zongqi He, Zhe Xiao, Kin-Chung Chan, Yushen Zuo, Jun
+Xiao, and Kin-Man Lam. See in detail: Enhancing sparse-
+view 3d gaussian splatting with local depth and semantic
+regularization. In ICASSP 2025-2025 IEEE International
+Conference on Acoustics, Speech and Signal Processing
+(ICASSP), pages 1–5. IEEE, 2025. 3
+[18] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bern-
+hard Nessler, and Sepp Hochreiter. Gans trained by a two
+time-scale update rule converge to a local nash equilibrium.
+In Advances in Neural Information Processing Systems,
+2017. 6
+[19] Hanzhe Hu, Zhizhuo Zhou, Varun Jampani, and Shubham
+Tulsiani. Mvd-fusion: Single-view 3d via depth-consistent
+multi-view generation. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 9698–9707, 2024. 3
+[20] Zehuan Huang, Hao Wen, Junting Dong, Yaohui Wang,
+Yangguang Li, Xinyuan Chen, Yan-Pei Cao, Ding Liang, Yu
+Qiao, Bo Dai, et al. Epidiff: Enhancing multi-view synthesis
+via localized epipolar-constrained diffusion. In Proceed-
+ings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 9784–9794, 2024. 3
+[21] Mude Hui, Zihao Wei, Hongru Zhu, Fei Xia, and Yuyin Zhou.
+Microdiffusion: Implicit representation-guided diffusion for
+3d reconstruction from limited 2d microscopy projections.
+In Proceedings of the IEEE/CVF Conference on Computer
+9
+
+Vision and Pattern Recognition, pages 11460–11469, 2024.
+3
+[22] Ajay Jain, Matthew Tancik, and Pieter Abbeel. Putting nerf
+on a diet: Semantically consistent few-shot view synthesis.
+In ICCV, 2021. 2
+[23] Chenhao Ji, Chaohui Yu, Junyao Gao, Fan Wang, and
+Cairong Zhao.
+Campvg: Camera-controlled panoramic
+video generation with epipolar-aware diffusion.
+arXiv
+preprint arXiv:2509.19979, 2025. 3
+[24] Justin Johnson, Alexandre Alahi, and Li Fei-Fei. Perceptual
+losses for real-time style transfer and super-resolution. In
+European Conference on Computer Vision (ECCV), pages
+694–711. Springer, 2016. 6
+[25] Nikolai Kalischek, Michael Oechsle, Fabian Manhardt,
+Philipp Henzler, Konrad Schindler, and Federico Tombari.
+Cubediff: Repurposing diffusion-based image models for
+panorama generation. In The Thirteenth International Con-
+ference on Learning Representations, 2025. 3
+[26] Yash Kant, Aliaksandr Siarohin, Ziyi Wu, Michael
+Vasilkovsky, Guocheng Qian, Jian Ren, Riza Alp Guler,
+Bernard Ghanem, Sergey Tulyakov, and Igor Gilitschenski.
+Spad: Spatially aware multi-view diffusers. In Proceed-
+ings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 10026–10038, 2024. 3
+[27] Bingxin Ke, Anton Obukhov, Shengyu Huang, Nando Met-
+zger, Rodrigo Caye Daudt, and Konrad Schindler. Repurpos-
+ing diffusion-based image generators for monocular depth
+estimation. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 9492–9502,
+2024. 3
+[28] Bernhard Kerbl, Georgios Kopanas, Thomas Leimk¨uhler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4):139–1,
+2023. 1, 2, 3, 6, 14, 15, 16, 17
+[29] Orest Kupyn, Fabian Manhardt, Federico Tombari, and
+Christian Rupprecht. Epipolar geometry improves video
+generation models. arXiv preprint arXiv:2510.21615, 2025.
+3
+[30] Jeong-gi Kwak, Erqun Dong, Yuhe Jin, Hanseok Ko, Shweta
+Mahajan, and Kwang Moo Yi. Vivid-1-to-3: Novel view
+synthesis with video diffusion models. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 6775–6785, 2024. 3
+[31] Yushi Lan, Fangzhou Hong, Shuai Yang, Shangchen Zhou,
+Xuyi Meng, Bo Dai, Xingang Pan, and Chen Change Loy.
+Ln3diff: Scalable latent neural fields diffusion for speedy 3d
+generation. In European Conference on Computer Vision,
+pages 112–130. Springer, 2024. 3
+[32] Vincent Leroy, Yohann Cabon, and J´erˆome Revaud. Ground-
+ing image matching in 3d with mast3r. In Proceedings of the
+European Conference on Computer Vision (ECCV), 2024. 6,
+7
+[33] Jiahe Li, Jiawei Zhang, Xiao Bai, Jin Zheng, Xin Ning,
+Jun Zhou, and Lin Gu. Dngaussian: Optimizing sparse-
+view 3d gaussian radiance fields with global-local depth
+normalization. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 20775–
+20785, 2024. 2
+[34] Ming-Feng Li, Yueh-Feng Ku, Hong-Xuan Yen, Chi Liu,
+Yu-Lun Liu, Albert YC Chen, Cheng-Hao Kuo, and Min
+Sun. Genrc: Generative 3d room completion from sparse
+image collections. In European Conference on Computer
+Vision, pages 146–163. Springer, 2024. 2
+[35] Peng Li, Yuan Liu, Xiaoxiao Long, Feihu Zhang, Cheng
+Lin, Mengfei Li, Xingqun Qi, Shanghang Zhang, Wei Xue,
+Wenhan Luo, et al. Era3d: High-resolution multiview diffu-
+sion using efficient row-wise attention. Advances in Neural
+Information Processing Systems, 37:55975–56000, 2024. 3
+[36] Yixun Liang, Xin Yang, Jiantao Lin, Haodong Li, Xiao-
+gang Xu, and Yingcong Chen. Luciddreamer: Towards high-
+fidelity text-to-3d generation via interval score matching.
+In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 6517–6526, 2024. 3
+[37] Chin-Yang Lin, Cheng Sun, Fu-En Yang, Min-Hung Chen,
+Yen-Yu Lin, and Yu-Lun Liu. Longsplat: Robust unposed
+3d gaussian splatting for casual long videos. In Proceedings
+of the IEEE/CVF International Conference on Computer
+Vision, pages 27412–27422, 2025. 2
+[38] Chin-Yang Lin, Chung-Ho Wu, Chang-Han Yeh, Shih-Han
+Yen, Cheng Sun, and Yu-Lun Liu. Frugalnerf: Fast conver-
+gence for extreme few-shot novel view synthesis without
+learned priors. In Proceedings of the Computer Vision and
+Pattern Recognition Conference, pages 11227–11238, 2025.
+3
+[39] Fangfu Liu, Wenqiang Sun, Hanyang Wang, Yikai Wang,
+Haowen Sun, Junliang Ye, Jun Zhang, and Yueqi Duan.
+Reconx: Reconstruct any scene from sparse views with video
+diffusion model. arXiv preprint arXiv:2408.16767, 2024. 3
+[40] Kunhao Liu, Ling Shao, and Shijian Lu. Novel view ex-
+trapolation with video diffusion priors.
+arXiv preprint
+arXiv:2411.14208, 2024. 3
+[41] Kuan-Hung Liu, Cheng-Kun Yang, Min-Hung Chen, Yu-
+Lun Liu, and Yen-Yu Lin. Corrfill: Enhancing faithfulness
+in reference-based inpainting with correspondence guidance
+in diffusion models. In 2025 IEEE/CVF Winter Conference
+on Applications of Computer Vision (WACV), pages 1618–
+1627. IEEE, 2025. 3
+[42] Minghua Liu, Ruoxi Shi, Linghao Chen, Zhuoyang Zhang,
+Chao Xu, Xinyue Wei, Hansheng Chen, Chong Zeng, Ji-
+ayuan Gu, and Hao Su. One-2-3-45++: Fast single image to
+3d objects with consistent multi-view generation and 3d dif-
+fusion. In Proceedings of the IEEE/CVF conference on com-
+puter vision and pattern recognition, pages 10072–10083,
+2024. 3
+[43] Minghua Liu, Chong Zeng, Xinyue Wei, Ruoxi Shi, Linghao
+Chen, Chao Xu, Mengqi Zhang, Zhaoning Wang, Xiaoshuai
+Zhang, Isabella Liu, et al. Meshformer: High-quality mesh
+generation with 3d-guided reconstruction model. Advances
+in Neural Information Processing Systems, 37:59314–59341,
+2024. 3
+[44] Xinhang Liu, Jiaben Chen, Shiu-Hong Kao, Yu-Wing Tai,
+and Chi-Keung Tang.
+Deceptive-nerf/3dgs: Diffusion-
+generated pseudo-observations for high-quality sparse-view
+reconstruction. In European Conference on Computer Vi-
+sion, pages 337–355. Springer, 2024. 3
+10
+
+[45] Xi Liu, Chaoyi Zhou, and Siyu Huang.
+3dgs-enhancer:
+Enhancing unbounded 3d gaussian splatting with view-
+consistent 2d diffusion priors. Advances in Neural Informa-
+tion Processing Systems, 37:133305–133327, 2024. 3
+[46] Yuan Liu, Cheng Lin, Zijiao Zeng, Xiaoxiao Long, Lingjie
+Liu, Taku Komura, and Wenping Wang. Syncdreamer: Gen-
+erating multiview-consistent images from a single-view im-
+age. arXiv preprint arXiv:2309.03453, 2023. 3
+[47] Xiaoxiao Long, Yuan-Chen Guo, Cheng Lin, Yuan Liu,
+Zhiyang Dou, Lingjie Liu, Yuexin Ma, Song-Hai Zhang,
+Marc Habermann, Christian Theobalt, et al. Wonder3d:
+Single image to 3d using cross-domain diffusion. In Pro-
+ceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 9970–9980, 2024. 3
+[48] Yuanxun Lu, Jingyang Zhang, Shiwei Li, Tian Fang, David
+McKinnon, Yanghai Tsin, Long Quan, Xun Cao, and Yao
+Yao. Direct2. 5: Diverse text-to-3d generation via multi-view
+2.5 d diffusion. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 8744–
+8753, 2024. 3
+[49] Artem Lukoianov, Haitz S´aez de Oc´ariz Borde, Kristjan
+Greenewald, Vitor Guizilini, Timur Bagautdinov, Vincent
+Sitzmann, and Justin M Solomon. Score distillation via
+reparametrized ddim. Advances in Neural Information Pro-
+cessing Systems, 37:26011–26044, 2024. 3
+[50] David McAllister, Songwei Ge, Jia-Bin Huang, David
+Jacobs, Alexei Efros, Aleksander Holynski, and Angjoo
+Kanazawa. Rethinking score distillation as a bridge between
+image distributions. Advances in Neural Information Pro-
+cessing Systems, 37:33779–33804, 2024. 3
+[51] Luke Melas-Kyriazi, Iro Laina, Christian Rupprecht, Na-
+talia Neverova, Andrea Vedaldi, Oran Gafni, and Filippos
+Kokkinos. Im-3d: Iterative multiview diffusion and recon-
+struction for high-quality 3d generation. arXiv preprint
+arXiv:2402.08682, 2024. 3
+[52] Marko Mihajlovic, Sergey Prokudin, Siyu Tang, Robert
+Maier, Federica Bogo, Tony Tung, and Edmond Boyer. Splat-
+fields: Neural gaussian splats for sparse 3d and 4d recon-
+struction. In European Conference on Computer Vision,
+pages 313–332. Springer, 2024. 3
+[53] Norman M¨uller, Katja Schwarz, Barbara R¨ossle, Lorenzo
+Porzi, Samuel Rota Bulo, Matthias Nießner, and Peter
+Kontschieder. Multidiff: Consistent novel view synthesis
+from a single image. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+10258–10268, 2024. 3
+[54] Michael Niemeyer, Jonathan T Barron, Ben Mildenhall,
+Mehdi SM Sajjadi, Andreas Geiger, and Noha Radwan. Reg-
+nerf: Regularizing neural radiance fields for view synthesis
+from sparse inputs. In CVPR, 2022. 2, 3
+[55] Avinash Paliwal, Wei Ye, Jinhui Xiong, Dmytro Kotovenko,
+Rakesh Ranjan, Vikas Chandra, and Nima Khademi Kalan-
+tari. Coherentgs: Sparse novel view synthesis with coherent
+3d gaussians. In European Conference on Computer Vision,
+pages 19–37. Springer, 2024. 3
+[56] Suraj Patni, Aradhye Agarwal, and Chetan Arora. Ecodepth:
+Effective conditioning of diffusion models for monocular
+depth estimation. In Proceedings of the IEEE/CVF Confer-
+ence on Computer Vision and Pattern Recognition, pages
+28285–28295, 2024. 3
+[57] Ben Poole, Ajay Jain, Jonathan T Barron, and Ben Milden-
+hall. Dreamfusion: Text-to-3d using 2d diffusion. arXiv
+preprint arXiv:2209.14988, 2022. 3
+[58] Hao Shi, Yu Li, Kailun Yang, Jiaming Zhang, Kunyu Peng,
+Alina Roitberg, Yaozu Ye, Huajian Ni, Kaiwei Wang, and
+Rainer Stiefelhagen. Fishdreamer: Towards fisheye semantic
+completion via unified image outpainting and segmentation.
+arXiv preprint arXiv:2303.13842, 2023. 3
+[59] Ruoxi Shi, Hansheng Chen, Zhuoyang Zhang, Minghua Liu,
+Chao Xu, Xinyue Wei, Linghao Chen, Chong Zeng, and
+Hao Su. Zero123++: a single image to consistent multi-view
+diffusion base model. arXiv preprint arXiv:2310.15110,
+2023. 3
+[60] Yichun Shi, Peng Wang, Jianglong Ye, Mai Long, Kejie
+Li, and Xiao Yang. Mvdream: Multi-view diffusion for 3d
+generation. arXiv preprint arXiv:2308.16512, 2023. 3
+[61] Meng-Li Shih, Ying-Huan Chen, Yu-Lun Liu, and Brian
+Curless.
+Prior-enhanced gaussian splatting for dynamic
+scene reconstruction from casual video.
+arXiv preprint
+arXiv:2512.11356, 2025. 3
+[62] Jiaming Song, Chenlin Meng, and Stefano Ermon. Denois-
+ing diffusion implicit models. In International Conference
+on Learning Representations, 2021. 3, 4, 6
+[63] Julian Straub, Thomas Whelan, Lingni Ma, Yufan Chen,
+Erik Wijmans, Simon Green, Jakob J Engel, Raul Mur-Artal,
+Carl Ren, Shobhit Verma, et al. The replica dataset: A digital
+replica of indoor spaces. arXiv preprint arXiv:1906.05797,
+2019. 2, 6, 7, 8, 14, 15, 17
+[64] Chih-Hai Su, Chih-Yao Hu, Shr-Ruei Tsai, Jie-Ying Lee,
+Chin-Yang Lin, and Yu-Lun Liu. Boostmvsnerfs: Boosting
+mvs-based nerfs to generalizable view synthesis in large-
+scale scenes. In ACM SIGGRAPH 2024 Conference Papers,
+pages 1–12, 2024. 3
+[65] Shitao Tang, Fuyang Zhang, Jiacheng Chen, Peng Wang, and
+Yasutaka Furukawa. Mvdiffusion: Enabling holistic multi-
+view image generation with correspondence-aware diffusion.
+Advances in Neural Information Processing Systems, 2023.
+3
+[66] Shengji Tang, Weicai Ye, Peng Ye, Weihao Lin, Yang Zhou,
+Tao Chen, and Wanli Ouyang. Hisplat: Hierarchical 3d gaus-
+sian splatting for generalizable sparse-view reconstruction.
+arXiv preprint arXiv:2410.06245, 2024. 2
+[67] Shr-Ruei Tsai, Wei-Cheng Chang, Jie-Ying Lee, Chih-Hai
+Su, and Yu-Lun Liu. Lightsout: Diffusion-based outpainting
+for enhanced lens flare removal.
+In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 6353–6363, 2025. 3
+[68] Tao Tu, Shun-Po Chuang, Yu-Lun Liu, Cheng Sun, Ke
+Zhang, Donna Roy, Cheng-Hao Kuo, and Min Sun. Im-
+geonet: Image-induced geometry-aware voxel representation
+for multi-view 3d object detection. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 6996–7007, 2023. 3
+[69] Matias Turkulainen, Xuqian Ren, Iaroslav Melekhov, Otto
+Seiskari, Esa Rahtu, and Juho Kannala. Dn-splatter: Depth
+11
+
+and normal priors for gaussian splatting and meshing. In
+2025 IEEE/CVF Winter Conference on Applications of Com-
+puter Vision (WACV), pages 2421–2431. IEEE, 2025. 3
+[70] Vikram Voleti, Chun-Han Yao, Mark Boss, Adam Letts,
+David Pankratz, Dmitry Tochilkin, Christian Laforte, Robin
+Rombach, and Varun Jampani. Sv3d: Novel multi-view
+synthesis and 3d generation from a single image using la-
+tent video diffusion. In European Conference on Computer
+Vision, pages 439–457. Springer, 2024. 3
+[71] Guangcong Wang, Zhaoxi Chen, Chen Change Loy, and
+Ziwei Liu. Sparsenerf: Distilling depth ranking for few-shot
+novel view synthesis. In ICCV, 2023. 2, 3
+[72] Ning-Hsu Albert Wang and Yu-Lun Liu. Depth anywhere:
+Enhancing 360 monocular depth estimation via perspective
+distillation and unlabeled data augmentation. Advances in
+Neural Information Processing Systems, 37:127739–127764,
+2024. 3
+[73] Qian Wang, Weiqi Li, Chong Mou, Xinhua Cheng, and Jian
+Zhang. 360dvd: Controllable panorama video generation
+with 360-degree video diffusion model. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 6913–6923, 2024. 3
+[74] Qisen Wang, Yifan Zhao, Jiawei Ma, and Jia Li. How to use
+diffusion priors under sparse views? Advances in Neural
+Information Processing Systems, 37:30394–30424, 2024. 3
+[75] Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris
+Chidlovskii, and Jerome Revaud. Dust3r: Geometric 3d
+vision made easy. In Proceedings of the IEEE/CVF Confer-
+ence on Computer Vision and Pattern Recognition, pages
+20697–20709, 2024. 4, 6, 7, 14
+[76] Yunsong Wang, Tianxin Huang, Hanlin Chen, and Gim Hee
+Lee. Freesplat: Generalizable 3d gaussian splatting towards
+free view synthesis of indoor scenes. Advances in Neural
+Information Processing Systems, 37:107326–107349, 2024.
+2
+[77] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P
+Simoncelli. Image quality assessment: from error visibil-
+ity to structural similarity. IEEE Transactions on Image
+Processing, 13(4):600–612, 2004. 6
+[78] Zhengyi Wang, Cheng Lu, Yikai Wang, Fan Bao, Chongx-
+uan Li, Hang Su, and Jun Zhu. Prolificdreamer: High-fidelity
+and diverse text-to-3d generation with variational score dis-
+tillation. Advances in neural information processing systems,
+36:8406–8441, 2023. 3
+[79] Zhen Wang, Qiangeng Xu, Feitong Tan, Menglei Chai,
+Shichen Liu, Rohit Pandey, Sean Fanello, Achuta Kadambi,
+and Yinda Zhang. Mvdd: Multi-view depth diffusion mod-
+els. In European Conference on Computer Vision, pages
+236–253. Springer, 2024. 3
+[80] Chung-Ho Wu, Yang-Jung Chen, Ying-Huan Chen, Jie-Ying
+Lee, Bo-Hsu Ke, Chun-Wei Tuan Mu, Yi-Chuan Huang,
+Chin-Yang Lin, Min-Hung Chen, Yen-Yu Lin, et al. Aurafu-
+sion360: Augmented unseen region alignment for reference-
+based 360deg unbounded scene inpainting. In Proceedings
+of the Computer Vision and Pattern Recognition Conference,
+pages 16366–16376, 2025. 3
+[81] Jay Zhangjie Wu, Yuxuan Zhang, Haithem Turki, Xuanchi
+Ren, Jun Gao, Mike Zheng Shou, Sanja Fidler, Zan Gojcic,
+and Huan Ling. Difix3d+: Improving 3d reconstructions
+with single-step diffusion models. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages
+26024–26035, 2025. 1, 2, 3, 6, 15
+[82] Kailu Wu, Fangfu Liu, Zhihan Cai, Runjie Yan, Hanyang
+Wang, Yating Hu, Yueqi Duan, and Kaisheng Ma. Unique3d:
+High-quality and efficient 3d mesh generation from a single
+image. Advances in Neural Information Processing Systems,
+37:125116–125141, 2024. 3
+[83] Rundi Wu, Ben Mildenhall, Philipp Henzler, Keunhong Park,
+Ruiqi Gao, Daniel Watson, Pratul P Srinivasan, Dor Verbin,
+Jonathan T Barron, Ben Poole, et al. Reconfusion: 3d re-
+construction with diffusion priors. In Proceedings of the
+IEEE/CVF conference on computer vision and pattern recog-
+nition, pages 21551–21561, 2024. 2, 3
+[84] Shuang Wu, Youtian Lin, Feihu Zhang, Yifei Zeng, Jingxi
+Xu, Philip Torr, Xun Cao, and Yao Yao. Direct3d: Scalable
+image-to-3d generation via 3d latent diffusion transformer.
+Advances in Neural Information Processing Systems, 37:
+121859–121881, 2024. 3
+[85] Sibo Wu, Congrong Xu, Binbin Huang, Andreas Geiger,
+and Anpei Chen. Genfusion: Closing the loop between
+reconstruction and generation via videos. In Proceedings of
+the Computer Vision and Pattern Recognition Conference,
+pages 6078–6088, 2025. 2, 3, 6, 15, 16
+[86] Tianhao Wu, Chuanxia Zheng, and Tat-Jen Cham. Panodiffu-
+sion: 360-degree panorama outpainting via diffusion. arXiv
+preprint arXiv:2307.03177, 2023. 3
+[87] Desai Xie, Jiahao Li, Hao Tan, Xin Sun, Zhixin Shu, Yi
+Zhou, Sai Bi, S¨oren Pirk, and Arie E Kaufman. Carve3d: Im-
+proving multi-view reconstruction consistency for diffusion
+models with rl finetuning. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 6369–6379, 2024. 3
+[88] Chao Xu, Ang Li, Linghao Chen, Yulin Liu, Ruoxi Shi, Hao
+Su, and Minghua Liu. Sparp: Fast 3d object reconstruction
+and pose estimation from sparse views. In European Con-
+ference on Computer Vision, pages 143–163. Springer, 2024.
+3
+[89] Chenfeng Xu, Huan Ling, Sanja Fidler, and Or Litany. 3diff-
+tection: 3d object detection with geometry-aware diffusion
+features. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 10617–
+10627, 2024. 3
+[90] Dejia Xu, Weili Nie, Chao Liu, Sifei Liu, Jan Kautz,
+Zhangyang Wang, and Arash Vahdat.
+Camco: Camera-
+controllable 3d-consistent image-to-video generation. arXiv
+preprint arXiv:2406.02509, 2024. 3
+[91] Haiyang Xu, Yu Lei, Zeyuan Chen, Xiang Zhang, Yue Zhao,
+Yilin Wang, and Zhuowen Tu. Bayesian diffusion models for
+3d shape reconstruction. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 10628–10638, 2024. 3
+[92] Jiale Xu, Weihao Cheng, Yiming Gao, Xintao Wang,
+Shenghua Gao, and Ying Shan. Instantmesh: Efficient 3d
+mesh generation from a single image with sparse-view large
+reconstruction models. arXiv preprint arXiv:2404.07191,
+2024. 3
+12
+
+[93] Jiale Xu, Shenghua Gao, and Ying Shan. Freesplatter: Pose-
+free gaussian splatting for sparse-view 3d reconstruction. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 25442–25452, 2025. 2
+[94] Yinghao Xu, Hao Tan, Fujun Luan, Sai Bi, Peng Wang, Ji-
+ahao Li, Zifan Shi, Kalyan Sunkavalli, Gordon Wetzstein,
+Zexiang Xu, et al. Dmv3d: Denoising multi-view diffu-
+sion using 3d large reconstruction model. arXiv preprint
+arXiv:2311.09217, 2023. 3
+[95] Yinghao Xu, Hao Tan, Fujun Luan, Sai Bi, Peng Wang, Ji-
+ahao Li, Zifan Shi, Kalyan Sunkavalli, Gordon Wetzstein,
+Zexiang Xu, and Kai Zhang. Dmv3d: Denoising multi-view
+diffusion using 3d large reconstruction model. In Interna-
+tional Conference on Learning Representations, 2024. 4
+[96] Yuxuan Xue, Xianghui Xie, Riccardo Marin, and Gerard
+Pons-Moll. Human-3diffusion: Realistic avatar creation via
+explicit 3d consistent diffusion models. Advances in Neural
+Information Processing Systems, 37:99601–99645, 2024. 3
+[97] Jiawei Yang, Marco Pavone, and Yue Wang. Freenerf: Im-
+proving few-shot neural rendering with free frequency regu-
+larization. In CVPR, 2023. 2, 3
+[98] Jiayu Yang, Ziang Cheng, Yunfei Duan, Pan Ji, and Hong-
+dong Li. Consistnet: Enforcing 3d consistency for multi-
+view images diffusion. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 7079–7088, 2024. 3
+[99] Xiaofeng Yang, Yiwen Chen, Cheng Chen, Chi Zhang, Yi
+Xu, Xulei Yang, Fayao Liu, and Guosheng Lin. Learn to
+optimize denoising scores: A unified and improved diffu-
+sion prior for 3d generation. In European Conference on
+Computer Vision, pages 136–152. Springer, 2024. 3
+[100] Xiuyu Yang, Yunze Man, Junkun Chen, and Yu-Xiong Wang.
+Scenecraft: Layout-guided 3d scene generation. Advances in
+Neural Information Processing Systems, 37:82060–82084,
+2024. 3
+[101] Weicai Ye, Chenhao Ji, Zheng Chen, Junyao Gao, Xiaoshui
+Huang, Song-Hai Zhang, Wanli Ouyang, Tong He, Cairong
+Zhao, and Guofeng Zhang. Diffpano: Scalable and con-
+sistent text to panorama generation with spherical epipolar-
+aware diffusion. Advances in Neural Information Processing
+Systems, 37:1304–1332, 2024. 3
+[102] Chandan Yeshwanth, Yueh-Cheng Liu, Matthias Nießner,
+and Angela Dai. Scannet++: A high-fidelity dataset of 3d in-
+door scenes. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 12–22, 2023. 2, 6, 7,
+8, 14, 15
+[103] Taoran Yi, Jiemin Fang, Junjie Wang, Guanjun Wu, Lingxi
+Xie, Xiaopeng Zhang, Wenyu Liu, Qi Tian, and Xinggang
+Wang. Gaussiandreamer: Fast generation from text to 3d
+gaussians by bridging 2d and 3d diffusion models. In Pro-
+ceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 6796–6807, 2024. 3
+[104] Hang Yu, Ruilin Li, Shaorong Xie, and Jiayan Qiu. Shadow-
+enlightened image outpainting.
+In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 7850–7860, 2024. 3
+[105] Hanyang Yu, Xiaoxiao Long, and Ping Tan. Lm-gaussian:
+Boost sparse-view 3d gaussian splatting with large model
+priors. arXiv preprint arXiv:2409.03456, 2024. 3
+[106] Rui Yu, Jiachen Liu, Zihan Zhou, and Sharon X Huang. Nerf-
+enhanced outpainting for faithful field-of-view extrapolation.
+In 2024 IEEE International Conference on Robotics and
+Automation (ICRA), pages 16826–16833. IEEE, 2024. 3
+[107] Zhongrui Yu, Martina Megaro-Boldini, Robert W Sumner,
+and Abdelaziz Djelouah. Unboxed: Geometrically and tem-
+porally consistent video outpainting. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages
+7309–7319, 2025. 3
+[108] Xiaoding Yuan, Shitao Tang, Kejie Li, and Peng Wang. Cam-
+freediff: Camera-free image to panorama generation with
+diffusion model. In Proceedings of the Computer Vision and
+Pattern Recognition Conference, pages 16408–16417, 2025.
+3
+[109] Haiyu Zhang, Xinyuan Chen, Yaohui Wang, Xihui Liu, Yun-
+hong Wang, and Yu Qiao. 4diffusion: Multi-view video
+diffusion model for 4d generation. Advances in Neural In-
+formation Processing Systems, 37:15272–15295, 2024. 3
+[110] Jiawei Zhang, Jiahe Li, Xiaohan Yu, Lei Huang, Lin Gu,
+Jin Zheng, and Xiao Bai. Cor-gs: sparse-view 3d gaussian
+splatting via co-regularization. In European Conference on
+Computer Vision, pages 335–352. Springer, 2024. 2
+[111] Jason Y Zhang, Amy Lin, Moneish Kumar, Tzu-Hsuan
+Yang, Deva Ramanan, and Shubham Tulsiani. Cameras
+as rays: Pose estimation via ray diffusion. arXiv preprint
+arXiv:2402.14817, 2024. 3
+[112] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. In Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition,
+2018. 6
+[113] Shaofeng Zhang, Jinfa Huang, Qiang Zhou, Zhibin Wang,
+Fan Wang, Jiebo Luo, and Junchi Yan. Continuous-multiple
+image outpainting in one-step via positional query and a
+diffusion-based approach. arXiv preprint arXiv:2401.15652,
+2024. 3
+[114] Yingji Zhong, Zhihao Li, Dave Zhenyu Chen, Lanqing Hong,
+and Dan Xu.
+Taming video diffusion prior with scene-
+grounding guidance for 3d gaussian splatting from sparse
+inputs. In Proceedings of the Computer Vision and Pattern
+Recognition Conference, pages 6133–6143, 2025. 1, 2, 3, 6,
+14, 15, 16
+[115] Yingji Zhong, Kaichen Zhou, Zhihao Li, Lanqing Hong,
+Zhenguo Li, and Dan Xu. Empowering sparse-input neural
+radiance fields with dual-level semantic guidance from dense
+novel views. arXiv preprint arXiv:2503.02230, 2025. 2, 6
+[116] Jensen Zhou, Hang Gao, Vikram Voleti, Aaryaman Va-
+sishta, Chun-Han Yao, Mark Boss, Philip Torr, Christian
+Rupprecht, and Varun Jampani. Stable virtual camera: Gen-
+erative view synthesis with diffusion models. arXiv preprint
+arXiv:2503.14489, 2025. 14, 16, 17
+[117] Zehao Zhu, Zhiwen Fan, Yifan Jiang, and Zhangyang Wang.
+Fsgs: Real-time few-shot view synthesis using gaussian
+splatting. In European conference on computer vision, pages
+145–163. Springer, 2024. 1, 2, 6, 15
+13
+
+A. Overview
+This supplementary material provides extended technical
+details, additional experiments, and complementary analy-
+sis for GaMO. Section B presents the full implementation
+of our proposed Iterative Mask Scheduling (IMS), includ-
+ing blending strategy and scheduling behavior. Section C
+reports additional quantitative comparisons on Replica [63]
+and ScanNet++ [102] under 3-, 6-, and 9-view settings, while
+Section D provides further qualitative comparisons across
+the same input-view regimes. Section E evaluates GaMO on
+Mip-NeRF 360 [2] scenes to demonstrate generalization to
+outdoor and unbounded environments. Section F compares
+our geometry-aware outpainting design against two multi-
+view diffusion baselines, Stable-Virtual Camera [116] and
+MVGenMaster [3], and includes reconstructed results after
+refinement. Section G offers a stage-wise runtime analysis
+measured on a single NVIDIA RTX 4090 GPU, showing that
+GaMO reconstructs a 6-view scene in under nine minutes.
+Finally, Section H discusses failure cases and visualizations
+that illustrate remaining challenges such as heavy occlusions.
+B. Iterative Mask Scheduling Implementation
+To maximize the utilization of coarse geometry during out-
+painting while preserving the generative diversity of the
+diffusion model, we introduce an Iterative Mask Scheduling
+(IMS) strategy. This approach dynamically adjusts the mask
+region throughout the denoising process, enabling the model
+to freely hallucinate missing content in early timesteps while
+progressively aligning with the coarse initialization in later
+stages.
+Design Rationale. As demonstrated in the ablation studies
+in the main paper (Tab. 3), we found that applying mask
+latent blending at specific denoising steps yields significantly
+better results than continuous blending throughout the entire
+denoising process. Based on these findings, we strategically
+select three representative timesteps corresponding to the
+early, middle, and late stages of denoising to participate
+in the latent blending process. At each stage, we employ
+progressively shrinking mask sizes to control the degree of
+interference with the denoising process: larger masks in early
+stages allow more freedom for generation, while smaller
+masks in later stages enforce stronger alignment with coarse
+geometry.
+Implementation Details. As illustrated in Fig. 9, we gener-
+ate three mask levels through morphological dilation:
+M(k)
+latent = Dilate(M↓
+base, kernel = 5, iterations = k −15
+10
+),
+(10)
+where M↓
+base denotes the downsampled base mask from the
+coarse geometry opacity map, aligned to the latent space
+resolution of 64×48 via adaptive max pooling. The Dilate(·)
+operation applies iterative max pooling with 5 × 5 kernel
+t1
+t2
+t3
+Coarse render
+Opacity mask
+Figure 9. Iterative Mask Scheduling visualization. Top: coarse
+render and opacity mask derived from coarse 3D initialization.
+Bottom: progressive mask shrinking at three denoising steps (t =
+35, 25, 15) with 2, 1, and 0 dilation iterations, respectively.
+to expand the masked region. During the denoising process
+from t = 50 to t = 0, we apply M(35)
+latent at t = 35, M(25)
+latent at
+t = 25, and M(15)
+latent at t = 15, as visualized in Fig. 9. This
+staged approach balances generative freedom with geometric
+consistency, as validated by our ablation experiments.
+C. More Quantitative Comparison
+We provide additional quantitative results on Replica [63]
+and ScanNet++ [102] datasets with varying numbers of input
+views (3, 6, and 9 views), as shown in Tab. 5 and Tab. 6.
+We focus our comparison on 3DGS [28] and GuidedVD-
+3DGS [114], a competitive state-of-the-art diffusion-based
+method.
+Evaluation Protocol. For Replica, we follow the evaluation
+protocol from [114] for all three view settings. For Scan-
+Net++, the 6-view setting follows [114], while the 3-view
+and 9-view settings use manually selected views to maxi-
+mize spatial coverage. All methods use DUSt3R [75] for
+point cloud initialization.
+Results. Our method consistently outperforms baselines
+across most metrics and view settings. On Replica, we
+achieve the best SSIM and LPIPS scores across all view
+counts. On ScanNet++, we obtain superior performance
+across all metrics in all view settings. Notably, our method
+maintains competitive quality with GuidedVD-3DGS [114]
+while being significantly faster (approximately 6-9 minutes
+vs. 3+ hours).
+D. More Qualitative Comparison
+We provide additional qualitative results across 3-, 6-, and 9-
+view settings on Replica [63] and ScanNet++ [102] datasets,
+as shown in Fig. 10. We compare against 3DGS [28],
+14
+
+Table 5. Quantitative comparison on Replica [63] with 3, 6, and 9 input views.
+Method
+Replica (3 views)
+Replica (6 views)
+Replica (9 views)
+PSNR
+SSIM
+LPIPS
+Time
+PSNR
+SSIM
+LPIPS
+Time
+PSNR
+SSIM
+LPIPS
+Time
+3DGS [28]
+20.39
+0.818
+0.154
+1m28s
+24.41
+0.862
+0.124
+1m51s
+26.09
+0.890
+0.100
+1m53s
+GuidedVD-3DGS [114]
+24.22
+0.845
+0.155
+3h32m
+25.67
+0.861
+0.147
+3h38m
+25.81
+0.862
+0.144
+3h46m
+Ours
+23.81
+0.855
+0.122
+6m43s
+25.84
+0.877
+0.109
+8m23s
+27.50
+0.900
+0.095
+9m12s
+Table 6. Quantitative comparison on ScanNet++ [102] with 3, 6, and 9 input views.
+Method
+ScanNet++ (3 views)
+ScanNet++ (6 views)
+ScanNet++ (9 views)
+PSNR
+SSIM
+LPIPS
+Time
+PSNR
+SSIM
+LPIPS
+Time
+PSNR
+SSIM
+LPIPS
+Time
+3DGS [28]
+16.60
+0.710
+0.313
+1m32s
+21.71
+0.808
+0.186
+1m54s
+24.55
+0.845
+0.155
+2m01s
+GuidedVD-3DGS [114]
+19.93
+0.759
+0.297
+3h20m
+22.98
+0.815
+0.204
+3h27m
+24.65
+0.843
+0.159
+3h54m
+Ours
+20.00
+0.765
+0.268
+6m21s
+23.41
+0.835
+0.181
+8m38s
+25.17
+0.860
+0.152
+9m21s
+3DGS
+GuidedVD-3DGS
+Ours
+3 views
+FSGS
+InstantSplat
+Difix3D
+6 views
+9 views
+GenFusion
+Figure 10. Qualitative comparison on Replica [63] and ScanNet++ [102] with 3, 6, and 9 sparse views. Our method produces better
+coverage, geometric consistency, and fewer artifacts compared to baselines. White boxes highlight challenging regions. Best viewed zoomed
+in.
+FSGS [117], InstantSplat [12], DiFix3D [81], GenFu-
+sion [85], and GuidedVD-3DGS [114] using the same base-
+line configurations as described in the main paper.
+As illustrated in Fig 10, even with extremely sparse in-
+puts (3 views), our method produces reasonable content
+and geometry while maintaining consistency. Compared to
+baselines, our approach demonstrates better scene coverage
+with fewer missing regions (black holes), improved geomet-
+ric consistency with reduced ghosting artifacts, and overall
+higher visual quality. These improvements are particularly
+evident in challenging regions highlighted by white boxes.
+15
+
+MVGenMaster
+GaMO (Ours)
+SEVA
+Outpainted Views
+Novel View
+Input Views
+MVGenMaster
+GaMO (Ours)
+SEVA
+Figure 11. Comparison of outpainting using adapted multi-view diffusion models. Top: input views. Middle: outpainted views generated
+by adapted SEVA [116], MVGenMaster [3], and our GaMO. Bottom: novel views after 3DGS refinement using the generated outpainted
+views. Adapted multi-view diffusion models suffer from multi-view inconsistency, resulting in noisy reconstructions, while our method
+produces consistent outpainted views that improve reconstruction quality.
+E. Evaluation on Mip-NeRF 360
+We evaluate the generalization ability of our method on the
+Mip-NeRF 360 [2] dataset, which contains nine large-scale
+scenes, including both outdoor and indoor environments with
+diverse camera trajectories. Following the evaluation proto-
+col of GenFusion [85], we report the averaged performance
+across all nine scenes.
+All methods are initialized with DUSt3R for fair com-
+parison, and we use the same reconstruction pipeline as
+described in the main paper.
+Results. As shown in Tab. 7, our method achieves the
+highest average performance across all metrics, outperform-
+ing 3DGS, GenFusion, and GuidedVD-3DGS in PSNR,
+SSIM, and LPIPS. Although GenFusion benefits from large-
+scale diffusion priors and sometimes generates smooth struc-
+tures, it often suffers from texture flattening and degraded
+geometric fidelity.
+Qualitative results in Fig. 12 further illustrate these differ-
+ences. GuidedVD-3DGS frequently produces floating splats
+and large holes due to view-coverage gaps in 360-degree
+scenes. GenFusion can inpaint missing areas but tends to
+oversmooth background textures. In contrast, our method
+maintains background completeness and structural plausibil-
+ity, preserves high-frequency details across both outdoor and
+indoor scenes, and remains consistent even for far-distance
+regions, demonstrating strong robustness to large-scale 360-
+degree environments.
+F. Outpainting Comparison Using Multi-View
+Diffusion Models
+We compare our method against adapted multi-view dif-
+fusion models for outpainting. Specifically, we adapt
+SEVA [116] and MVGenMaster [3] by modifying the cam-
+Table 7. Quantitative comparison on Mip-NeRF 360 [2] (9
+scenes). Results are averaged over all nine scenes.
+Method
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+3DGS [28]
+15.30
+0.342
+0.459
+GenFusion [85]
+16.40
+0.384
+0.497
+GuidedVD-3DGS [114]
+13.89
+0.273
+0.640
+GaMO (Ours)
+16.80
+0.393
+0.436
+3DGS
+GenFusion
+Ours
+GuidedVD-3DGS
+Figure 12. Qualitative results on Mip-NeRF 360. 360-degree
+scenes pose significant challenges for GuidedVD-3DGS due to
+wide view coverage and large unobserved regions. In contrast, our
+method consistently produces more complete and geometrically
+coherent reconstructions across both outdoor and indoor scenes,
+demonstrating stronger robustness to diverse scene layouts and
+scales.
+era intrinsics to generate outpainted versions of the input
+views with extended FOV. These outpainted input views are
+16
+
+Table 8. Outpainting Comparison Using Multi-View Diffusion
+Models. 3D reconstruction quality on Replica [63] dataset (6 views)
+after refinement with outpainted views from different methods.
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+3DGS [28]
+24.41
+0.862
+0.124
+SEVA [116]
+22.11
+0.799
+0.247
+MVGenMaster [3]
+23.37
+0.820
+0.175
+GaMO (Ours)
+25.84
+0.877
+0.109
+Table 9. Runtime breakdown on Replica 6 / office 2. All timings
+are measured on a single NVIDIA RTX 4090 GPU.
+Stage
+Time (s)
+Time (min)
+Coarse 3DGS init. & render
+118
+1.97
+Multi-view outpainting
+93
+1.55
+3DGS refine (train + render)
+280
+4.67
+Total
+491
+8.18
+then used to train 3DGS for improved novel view synthesis.
+As shown in Fig. 11, SEVA produces highly noisy novel
+views after 3DGS refinement due to severe multi-view in-
+consistency caused by lack of geometric constraints. While
+MVGenMaster incorporates additional geometric mecha-
+nisms (e.g., multi-view conditioning), it still suffers from
+inconsistency issues that introduce artifacts in the refined
+reconstruction. In contrast, our GaMO effectively addresses
+the multi-view inconsistency problem, providing consistent
+outpainted views across multiple viewpoints that success-
+fully refine 3DGS quality without introducing additional
+noise or artifacts. Quantitative results are provided in Tab. 8.
+G. Runtime Analysis
+We report the end-to-end runtime of our pipeline on a rep-
+resentative indoor scene (Replica 6, office 2) with 6 input
+views at 512×384 resolution, evaluated on a single NVIDIA
+RTX 4090 GPU. The pipeline consists of three main stages:
+coarse 3DGS reconstruction and rendering, multi-view dif-
+fusion outpainting, and the final 3DGS refinement stage that
+incorporates DUSt3R point cloud initialization and refined
+3DGS training. A detailed runtime breakdown is summa-
+rized in Tab. 9.
+H. Failure Cases
+While our method demonstrates strong performance across
+a wide range of scenarios, it remains limited in scenes con-
+taining severe occlusions. This limitation is inherent to all
+methods that generate novel views for 3D reconstruction;
+current multi-view diffusion models face the same challenge,
+as even densely sampled novel viewpoints struggle to recon-
+struct regions that are severely occluded by obstacles. As
+shown in Fig. 13, such heavily occluded areas remain chal-
+3DGS
+GuidedVD-3DGS
+Ours
+Input
+Figure 13. Failure cases in heavily occluded regions. Due to se-
+vere occlusions in the scene, certain regions are never observed
+across all input views. Both outpainting (ours) and novel view
+generation methods struggle to reconstruct these completely un-
+observed areas. Red boxes highlight the occluded regions where
+reconstruction fails.
+lenging for both geometry-aware outpainting and multi-view
+diffusion methods.
+Potential Solutions. A promising direction to address
+viewpoint-specific occlusions is to generate outpainted views
+from alternative camera perspectives with geometry-aware
+mechanisms, such as bird’s-eye or top-down views with a
+larger FOV. By generating content from drastically differ-
+ent viewing angles, these views could potentially observe
+regions that are occluded from the original camera poses,
+thereby providing complementary supervision for the oc-
+cluded areas.
+17

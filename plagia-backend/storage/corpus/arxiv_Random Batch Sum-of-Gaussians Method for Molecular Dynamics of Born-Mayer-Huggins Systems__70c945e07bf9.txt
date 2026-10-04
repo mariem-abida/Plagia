@@ -1,0 +1,1551 @@
+Random Batch Sum-of-Gaussians Method for Molecular Dynamics of
+BornMayerHuggins Systems
+Chen Chena, Jiuyang Lianga, Zhenli Xua, Qianru Zhangb
+aSchool of Mathematical Sciences, Shanghai Jiao Tong University, Shanghai 200240, China
+bHangzhou Huawei Enterprise Communication Technology Co., Ltd., Hangzhou 310056, China
+Abstract
+The BornMayerHuggins (BMH) potential, which combines Coulomb interactions with dispersion and
+short-range exponential repulsion, is widely used for ionic materials such as molten salts. However, large-
+scale molecular dynamics simulations of BMH systems are often limited by computation, communication,
+and memory costs. We recently proposed the random batch sum-of-Gaussians (RBSOG) method, which
+accelerates Coulomb calculations by using a sum-of-Gaussians (SOG) decomposition to split the potential
+into short- and long-range parts and by applying importance sampling in Fourier space for the long-range
+part. In this work, we extend the RBSOG to BMH systems and incorporate a random batch list (RBL)
+scheme to further accelerate the short-range part, yielding a uniﬁed framework for efﬁcient simulations
+with the BMH potential. The combination of the SOG decomposition and the RBL enables an efﬁcient and
+scalable treatment of both long- and short-range interactions in BMH system, particularly the RBL well
+handles the medium-range exponential repulsion and dispersion by the random batch neighbor list. Error
+estimate is provided to show the theoretical convergence of the RBL force. We evaluate the framework
+on molten NaCl and mixed alkali halide with up to 5 × 106 atoms on 2048 CPU cores. Compared to the
+Ewald-based particle-particle particle-mesh method and the RBSOG-only method, our method achieves
+approximately 4 ∼10× and 2× speedups while using 1000 cores, respectively, under the same level of
+structural and thermodynamic accuracy and with a reduced memory usage. These results demonstrate the
+attractive performance of our method in accuracy and scalability for MD simulations with long-range inter-
+actions.
+Keywords: BornMayerHuggins potential, molten salts, molecular dynamics simulations,
+sum-of-Gaussians, random batch list
+1. Introduction
+Molten alkali halides, inorganic liquids composed of alkali-metal cations and halide anions, are im-
+portant electrolytes and heat-transfer ﬂuids in advanced energy systems due to their high thermal stability,
+strong ionic conductivity, and chemical durability. Since their early use as reactor coolants at Oak Ridge
+National Laboratory in the 1960s [1, 2], molten salts have remained central to Generation-IV reactor de-
+signs, motivating extensive computational studies to understand the structure and transport properties of
+molten salts [3, 4]. Due to experimental challenges such as corrosion, extreme temperatures, and high
+costs, molecular dynamics (MD) simulation plays a central role in predicting the atomic-scale structure,
+transport, and thermodynamic properties of these systems [5, 6, 7, 8].
+Molten alkali halides are dense ionic liquids in which long-range electrostatics, short-range Pauli repul-
+sion, and dispersion all matter. To reproduce the experimental structure and transport, dedicated force ﬁelds
+are required. The Born-Mayer-Huggins (BMH) pairwise potential [9, 10] is often employed for the task:
+UBMH(rij) = qiq j
+rij
++ Ai j exp
+ σij −rij
+ρ
+!
+−Ci j
+r6
+i j
+−Dij
+r8
+ij
+.
+(1)
+Email address: ronnie7@sjtu.edu.cn (Chen Chen)
+arXiv:2512.24970v1 [physics.comp-ph] 31 Dec 2025
+
+Here, rij denotes the distance between ions i and j; qi is the ionic charge; the exponential term models
+short-range Pauli repulsion with amplitude Aij, range parameter ρ, and σi j := σi + σ j being the addition
+of ionic radii; and the last two terms describe dipoledipole and dipolequadrupole dispersion with coefﬁ-
+cients Ci j and Dij. Despite their broad use in molten-salt MD simulations [11, 12, 13], large-scale BMH
+simulations remain computationally costly. Several fundamental bottlenecks hinder large-scale BMH sim-
+ulations. The long-range Coulomb term, typically handled by communication-intensive Ewald-type solvers
+with fast Fourier transforms (FFTs) [14, 15], introduces signiﬁcant scalability limitations [16]. Meanwhile,
+the exponential repulsion and dispersion terms exhibit slow algebraic decay, representing a medium-range
+interaction that requires a large real-space cutoff and converges slowly in Fourier space. Moreover, peri-
+odic fast multipole methods (FMMs) [17, 18] further introduce complexity by splitting the periodic system
+into nearﬁeld and farﬁeld regions; the nearﬁeld interactions must be evaluated over the 27 neighboring im-
+age cells, which is itself computationally costly. Recently proposed dual-space multilevel kernel-splitting
+(DMK) framework [19] and Ewald summation with prolates (ESP) method [20] provide promising alterna-
+tives, but have not yet been adapted to BMH systems. These factors collectively limit both the accessible
+time scale and system size in BMH-based MD simulations.
+In recent years, stochastic algorithms have emerged and improved scalability by replacing global kernel
+sums with unbiased mini-batch estimators, and their accuracy has been rigorously established for interact-
+ing particle systems [21, 22, 23, 24, 25]. For electrostatics, random batch Ewald (RBE) [26, 27, 28] avoids
+global FFTs via importance sampling while keeping linear scaling. Since the construction of an SOG
+approximation has been extensively studied [29, 30, 31], the random batch sum-of-Gaussians (RBSOG)
+method [32, 33] has been proposed to replace the Ewald split with a sum-of-Gaussians (SOG) decomposi-
+tion of 1/r, removing the discontinuity of the Ewald split and further reducing batch size. However, the other
+terms of the BMH potential (exponential repulsion and dispersion) can remain the dominant cost because
+of their medium-range nature, creating a bottleneck that is not addressed by long-range solvers alone. The
+random batch list (RBL) scheme, developed to accelerate the short-range potentials such as the Lennard-
+Jones (LJ) potential [34] and the embedded atom potential [35], reduces the neighborlist cost by randomly
+sampling particles within a cutoff radius. The improved random batch Ewald (IRBE) approach [36] com-
+bines RBE with the LJ-based RBL. Notably, the RBMD package [37] implements the IRBE on GPUCPU
+heterogeneous architectures, enabling efﬁcient all-atom simulations of up to ten million particles on a sin-
+gle GPU. However, IRBE has not been applied to BMH systems and does not take advantage of the more
+efﬁcient SOG decomposition. A linear-scaling method that treats all components of the BMH potential in
+a stochastic framework is of great signiﬁcance for practical simulations.
+In order to overcome the challenge of handling medium-range interactions in BMH systems, we propose
+a uniﬁed framework, the improved random batch sum-of-Gaussians (IRBSOG) method, which seamlessly
+couples the RBSOG and RBL schemes. The key contributions of this work are threefold. First, we develop
+an integrated approach for the BMH potential in which the Coulomb kernel is split via a sum-of-Gaussians
+(SOG) approximation, with the long-range part efﬁciently evaluated via RBSOG in Fourier space using ran-
+dom batch importance sampling, while the short-range residual, together with the exponential repulsion and
+dispersion terms, is handled by a core-shell RBL scheme in real space. This synergistic combination specif-
+ically targets the multi-scale nature of the BMH potential, enabling scalable and accurate treatment of both
+interaction regimes. Second, recognizing that short-range interactions in BMH systems exhibit slower de-
+cay and require larger cutoffs compared to Lennard-Jones-type potentials, we systematically investigate and
+optimize the RBL implementation under these conditions. An adaptive, species-dependent cutoff strategy
+is introduced to account for size differences between alkali-metal cations and halogen anions, effectively
+reducing neighbor counts and memory usage. Third, we performed systematic MD simulations across a
+range of BMH systemsincluding molten NaCl and mixed alkali halidesto thoroughly validate the accuracy,
+scalability, and transferability of our approach. The proposed IRBSOG framework achieves O(N) complex-
+ity with signiﬁcantly reduced communication and memory overhead compared to both the particle-particle
+particle-mesh (PPPM) and the RBSOG-only methods. In large-scale benchmarks, it reproduces key struc-
+tural, dynamical, and thermodynamic properties while delivering up to an order-of-magnitude speedup over
+PPPM and a roughly twofold improvement over RBSOG-only simulations for systems of up to 5 × 106
+atoms on 2048 CPU cores.
+The remainder of this paper is organized as follows. In Section 2, we present the theoretical foundation
+2
+
+of the SOG decomposition and describe the new framework for the BMH potential. Section 3 validates the
+accuracy and performance through systematic simulations of molten NaCl and alkali binary halide systems.
+Conclusion remarks are provided in Section 4.
+2. Method
+In this section, we introduce a uniﬁed framework for accelerating MD simulations with the BMH po-
+tential. Section 2.1 proposes a new decomposition of the BMH kernel using the SOG approximation of
+Coulomb kernel. Section 2.2 details the framework and its implementation. Section 2.4 presents complex-
+ity and convergence analysis.
+2.1. SOG decomposition of the BMH potential
+Consider a system of N charged particles located at positions {ri = (xi, yi, zi)}N
+i=1 with charges {qi}N
+i=1 in
+a cuboid box of side length Lx, Ly, and Lz. We assume the charge neutrality condition, PN
+i=1 qi = 0. Periodic
+boundary conditions are imposed to mimic bulk environments. The total energy of the system is given by
+U = 1
+2
+N
+X
+i, j=1
+X
+n∈Z3
+′UBMH
+
+|rij + n ◦L|
+
+,
+(2)
+where UBMH is given by Eq. (1), rij = ri −r j, L = (Lx, Ly, Lz), the prime indicates that n = 0 is excluded
+when i = j, and “◦” denotes elementwise multiplication. The exponential repulsion and dispersion terms in
+UBMH decay rapidly and are evaluated in real space with a cutoff rc. In contrast, the Coulomb contribution
+is only conditionally convergent, so direct truncation is not valid; in mainstream MD packages it is typically
+treated by FFT-based mesh-Ewald methods [14, 15].
+Here, we treat the Coulomb part of the BMH potential with an SOG decomposition instead of the classi-
+cal Ewald decomposition, following the idea of the RBSOG [32]. We start from the integral representation
+of a power-law kernel:
+1
+r2α =
+1
+Γ(α)
+Z ∞
+−∞
+e−eτr2+ατdτ,
+(3)
+where α > 0 and Γ(·) denotes the Gamma function. Setting α = 1/2 gives the representation of the 1/r
+kernel. Introducing the change of variables τ = ln(x2/2s2) and using geometrically distributed quadrature
+nodes x = b−m yields the bilateral SOG approximation (BSA):
+1
+r ≈2 ln b
+√
+2πs2
+∞
+X
+m=−∞
+b−me−
+r2
+2b2ms2 ,
+(4)
+where b > 1 is a constant and s controls the bandwidth of Gaussians. A key property of Eq. (4) is a uniform
+pointwise relative error bound (b →1 for all r > 0) [38]:
+1 −2r ln b
+√
+2πs2
+∞
+X
+m=−∞
+b−me−
+r2
+2b2m s2
+ ≲2
+√
+2e−π2
+2 ln b .
+(5)
+Other kernel-independent SOG methods [29, 39] can also be used to construct SOG approximations of 1/r.
+By using the BSA, the so-called u-series method [40] splits 1/r into short- and long-range parts,
+1
+r →N s
+b(r) + F s
+b (r),
+(6)
+where the long-range part
+F s
+b (r) =
+M
+X
+m=0
+wme−
+r2
+2b2m s2
+(7)
+3
+
+is the BSA series truncated to 0 ≤m ≤M with wm =
+√
+2 ln b/( √πbms), and the short-range component is
+N s
+b(r) =
+
+1
+r −F s
+b (r),
+if r < rc,
+0,
+if r ≥rc,
+(8)
+with cutoff rc chosen as the smallest root of r F s
+b (r) = 1 to ensure continuity of the potential. For MD, one
+typically enforces C1 continuity (continuous force) via
+1
+r2c
+−∂rF s
+b (r)
+r=rc = 0.
+(9)
+For ﬁxed b and s, this can be satisﬁed by adjusting the coefﬁcient of the narrowest Gaussian
+w0 =
+1
+e−r2c/(2b2ms2)
+" 1
+rc
+−F s
+b (rc)
+#
+,
+(10)
+and then solving the potential-continuity condition to determine rc. This redeﬁnition of the narrowest
+Gaussian weight is necessary to avoid large local errors. Thanks to the increased smoothness of the resulting
+splitting, the SOG decomposition can achieve accuracy comparable to Ewald-based methods with reduced
+computational cost, while maintaining long-term energy stability in NVE simulations [33, 40]. Moreover,
+Gaussian functions are separable and can be expressed as products of one-dimensional functions, a property
+that can be exploited to reduce the number of sequential communication stages in FFT-based acceleration
+by roughly a factor of two [40]. These features have motivated the adoption of SOG-based decompositions
+in a range of applications, including quantum mechanics/molecular mechanics calculations [41], machine-
+learning force ﬁelds [42], and Schrödinger equation solvers [43].
+In this work, we build on the idea of u-series to split the BMH energy into short- and long-range parts:
+U = UN + UF ,
+(11)
+where the long-range part
+UF = 1
+2
+X
+n
+′ X
+i,j
+qiq jF s
+b
+ri j + n ◦L
+
+
+(12)
+is a sum of SOG series, and the remaining short-range part is given by
+UN = 1
+2
+X
+n
+′ X
+i, j
+
+qiq j N s
+b
+ rij + n ◦L
+ + BBMH
+ ri j + n ◦L
+
+.
+(13)
+The function BBMH(r) contains the exponential repulsion and dispersion terms,
+BBMH(r) = Ai j exp
+ σij −r
+ρ
+!
+−Ci j
+r6 −Di j
+r8 .
+(14)
+Then the short-range force exerted on the ith particle is expressed by
+FN,i =
+X
+j∈I(i)
+qiqj
+
+1
+r3
+ij
+−
+M
+X
+m=0
+wm
+b2ms2 e−r2
+ij/(2b2ms2)
++ Aij
+ρrij
+e
+σij−rij
+ρ
+−6Cij
+r8
+i j
+−8Dij
+r10
+ij
+ri j.
+(15)
+After this split, the short-range part can be truncated at a cutoff rc, while the smooth long-range part is
+evaluated in Fourier space.
+Let us deﬁne the Fourier transform pairs as
+bf(k) :=
+Z
+Ω
+f(r)e−ik·rdr
+(16)
+4
+
+and
+f(r) = 1
+V
+X
+k
+bf(k)eik·r,
+(17)
+where k = 2π(mx/Lx, my/Ly, mz/Lz) and m = (mx, my, mz) ∈Z3. By applying the Poisson summation
+formula to Eq. (12), the long-range BMH energy can be split into three parts:
+UF = U*
+F + U0
+F −Uself
+F ,
+(18)
+where
+U*
+F =
+X
+|k|,0
+b
+F s
+b (k)|ρ(k)|2
+2V
+(19)
+is the contribution from non-zero modes,
+U0
+F = lim
+k→0
+b
+F s
+b (k)|ρ(k)|2
+2V
+(20)
+is the zero-mode contribution, and the last term Uself
+F
+is added to remove the unwanted self interaction.
+Here,
+b
+F s
+b (k) = (2π)3/2
+M
+X
+m=0
+wmb3ms3e−b2ms2k2/2
+(21)
+is the Fourier transform of F s
+b (r) with k = |k|, and
+ρ(k) :=
+N
+X
+i=1
+qieik·ri
+(22)
+denotes the charge structure factor. In this paper, we assume tinfoil boundary conditions so that U0
+F ≡0.
+More detailed discussions regarding the zero-mode term can be found in the literature [32]. The long-range
+force acting on the ith particle is given by
+FF ,i = −∇riUF = −
+X
+k,0
+qik
+V
+b
+F s
+b (k)Im
+
+e−ik·riρ(k)
+
+.
+(23)
+Note that the last term in Eq. (18) has no contribution to the force, i.e. ∇riUself
+F
+= 0, since the particle
+number is typically invariant in the MD simulations.
+2.2. The IRBSOG method
+In this section, we introduce the improved random-batch sum-of-Gaussians (IRBSOG) method to sim-
+plify the calculation of the BMH potential. Based on the SOG-split formulation, the short-range and long-
+range forces are treated separately using tailored random-batch type algorithms.
+To accelerate the short-range force FN,i = −∇riUBMH
+N
+, we adopt the RBL framework [34] with a dual-
+cutoff scheme. As illustrated in the inset of Fig. 1, the neighbor list of each particle is split into a core-shell
+structure with radii rcore < rshell. The short-range force is decomposed as FN,i = Fi,core + Fi,shell, where the
+core contribution is computed by direct summation:
+Fi,core =
+X
+rij<rcore
+fij,
+(24)
+where fij is the force exerted by particle j on particle i. In the shell region, we randomly sample a mini-batch
+B(i) of PR neighbors of particle i to construct a stochastic estimator:
+F∗
+i,shell = Nshell
+PR
+X
+j∈B(i)
+fij,
+(25)
+where Nshell is the number of neighbors with rcore < rij < rshell (and fi j = 0 otherwise). A momentum
+5
+
+Figure 1: Schematic of the IRBSOG method and the Born-Mayer-Huggins (BMH) potential decomposition. The total BMH potential
+(red solid line) is decomposed into components handled by distinct algorithms. The Coulomb potential is split into a short-range part
+N s
+b(r) (orange dashed line) and a long-range part F s
+b (r) (green dot-dashed line). The short-range non-Coulombic BMH terms
+BBMH(r) (blue dot-dashed line) is also illustrated. The upper inset shows the core-shell structure of short-range and the lower one
+shows the importance sampling of long-range.
+correction term Fcorr is applied to ensure the conservation of total momentum:
+Fcorr = 1
+N
+N
+X
+i
+(Fi,core + F∗
+i,shell),
+(26)
+which is a random variable with zero mean and bounded variance. The ﬁnal approximation for the short-
+range force is
+F∗
+N,i = Fi,core + F∗
+i,shell −Fcorr.
+(27)
+This RBL scheme is essential for overcoming the memory-bound bottleneck of classical neighbor-list al-
+gorithms: it avoids scanning all neighbors in the shell region and instead evaluates forces for only a small
+subset, greatly reducing the computational and memory cost with minimal impact on accuracy.
+The long-range force FF ,i is evaluated in Fourier space using the RBSOG idea [32]. Starting from its
+exact spectral representation (Eq. (23)), the Fourier transform b
+F s
+b (k) is still an SOG, which is summable
+and can be normalized as a discrete probability distribution. One can regard the sum as an expectation over
+the distribution
+P(k) :=
+k2 b
+F s
+b (k)
+S
+,
+(28)
+where the sum is deﬁned by S := P
+k,0 k2 b
+F s
+b (k). The distribution Eq. (28) is an SOG scaled by k2, and can
+be efﬁciently sampled by the Metropolis-Hastings (MH) algorithm [44]; see [32] for details. At each MD
+step, a ﬁxed mini-batch PF is picked and sampled frequencies {kp, p = 1, . . . , PF} are drawn from P(k).
+The long-range force is then approximated as an expectation over P(k),
+F∗
+F ,i = −S qi
+PFV
+PF
+X
+p=1
+kp Im
+
+e−ikp·riρ(kp)
+
+|kp|2
+.
+(29)
+This replaces FFT by a stochastic approximation, resulting in a cheaper version compared to lattice-based
+Ewald-type methods.
+6
+
+In practice, we use the stochastic estimators F∗
+N,i and F∗
+F ,i for the short- and long-range forces FN,i
+and FF ,i, respectively. This combined approach leverages the strengths of both batch methods: the RBL
+efﬁciently handles the complex, consolidated short-range interactions in real space, while the RBSOG ef-
+ﬁciently handles the smooth, long-range interactions in Fourier space. Their synergistic integration within
+the SOG-split framework is the foundation of our uniﬁed O(N) algorithm. A sketch map of the resulting
+IRBSOG method is shown in Fig. 1.
+2.3. Convergence analysis of IRBSOG-based simulations
+We analyze the convergence of the IRBSOG-based MD simulations. Let Ftotal
+i
+be the exact total non-
+bonded force on particle i under the full BMH potential, and let F∗
+i = F∗
+N,i + F∗
+F ,i be its stochastic approxi-
+mation produced by IRBSOG. We deﬁne the force ﬂuctuation
+χi := Ftotal
+i
+−F∗
+i .
+(30)
+Since the random mini-batches used in real space (RBL) and Fourier space (RBSOG) are independent, the
+covariance term vanishes and we have
+var[χi] = var[F∗
+N,i] + var[F∗
+F ,i].
+(31)
+The variance of the RBSOG estimator F∗
+F ,i has been analyzed in Ref. [32]; we restate the main bound in
+Lemma 2.1. Theorem 2.2 then combines the Fourier-space bound with a novel real-space bound for RBL,
+showing that F∗
+i is an unbiased estimator of Ftotal
+i
+and that the variance decays as the batch sizes increase.
+Lemma 2.1. Under the Debye–Hückel (DH) assumption, the variance of the long-range force approxima-
+tion F∗
+F ,i satisﬁes
+var[F∗
+F ,i] ≤SCq2
+i
+PFV
+M
+X
+m=0
+wm,
+(32)
+where C is the constant in the DH bound, qi is the charge of particle i, V is the system volume, PF is the
+Fourier-space batch size, and wm are the Gaussian weights used in Eq. (7). Consequently, var[F∗
+F ,i] =
+O(1/PF), and this bound is independent of the system size N and the number of Gaussians M.
+Theorem 2.2. Let the number density ρr = N/V be ﬁxed. The force ﬂuctuation χi satisﬁes
+Eχi = 0.
+(33)
+Moreover, under the DH assumption,
+var[χi] = O
+ 1
+PF
++ 1
+PR
+!
+,
+(34)
+where PF and PR are the batch sizes used in Fourier space and real space calculations, respectively.
+Proof. The proof can be obtained by extending the random-batch analysis in Refs. [26, 34]. We ﬁrst note
+that Eχi = 0 holds because both F∗
+N,i and F∗
+F ,i are constructed as unbiased estimators of their corresponding
+exact contributions. For the variance, Lemma 2.1 gives
+var[F∗
+F ,i] = O(1/PF).
+(35)
+It remains to bound var[F∗
+N,i] for the RBL estimator.
+We split the short-range variance into the SOG residual, the exponential repulsion, and the dispersion
+contributions:
+var[F∗
+N,i] ≤var[F∗
+Coulomb,i] + var[F∗
+rep,i] + var[F∗
+disp,i].
+(36)
+We ﬁrst consider the variance of the shortrange SOG residual force. Starting from the expression for the
+7
+
+approximate force, we obtain
+var[F∗
+Coulomb,i] ≲(Nshell −PR)
+PR
+Z rshell
+rcore
+4πρrr2
+
+1
+r2 −
+M
+X
+m=0
+wmr
+b2ms2 e−
+r2
+2b2m s2
+
+2
+dr
+= (Nshell −PR)
+PR
+Z rshell
+rcore
+4πρr
+r2
+1 −
+√
+2r3 ln b
+√πs3
+M
+X
+m=0
+1
+b3m e−
+r2
+2b2ms2
+
+2
+dr.
+(37)
+For the truncated series, we decompose the error into the bilateral-series error and the positive/negative
+tails:
+1 −
+√
+2r3 ln b
+√πs3
+M
+X
+m=0
+1
+b3m e−
+r2
+2b2m s2
+ ≤
+1 −
+√
+2r3 ln b
+√πs3
+∞
+X
+m=−∞
+1
+b3m e−
+r2
+2b2m s2
+ +
+
+√
+2r3 ln b
+√πs3
+∞
+X
+m=M+1
+1
+b3m e−
+r2
+2b2m s2
+
++
+
+√
+2r3 ln b
+√πs3
+−1
+X
+m=−∞
+1
+b3m e−
+r2
+2b2m s2
+ .
+(38)
+The ﬁrst term is the relative error of BSA for the 1/r3 kernel, which has a uniform error bound as b →1
+similar to Eq. (5) [40]:
+1 −
+√
+2r3 ln b
+√πs3
+∞
+X
+m=−∞
+1
+b3m e−
+r2
+2b2m s2
+ ≲4
+√
+2
+ 9
+4 +
+π2
+(ln b)2
+!1/2
+e−π2
+2 ln b .
+(39)
+The last two terms represent the truncation errors from the positive and negative tails of the BSA, respec-
+tively, and can be bounded as follows. For the positive tail, using e−
+r2
+2b2ms2 ≤1 gives
+
+√
+2r3 ln b
+√πs3
+∞
+X
+m=M+1
+1
+b3m e−
+r2
+2b2m s2
+ ≤
+√
+2r3 ln b
+√πs3
+· b−3M
+b3 −1.
+(40)
+For the negative tail, letting j = −m ≥1, we have
+
+√
+2r3 ln b
+√πs3
+−1
+X
+m=−∞
+1
+b3m e−
+r2
+2b2ms2
+ =
+√
+2r3 ln b
+√πs3
+∞
+X
+j=1
+b3 je−r2b2j
+2s2 .
+(41)
+This series decays doubly exponentially in j. A convenient bound is obtained by isolating the ﬁrst term and
+bounding the remainder via
+
+√
+2r3 ln b
+√πs3
+−1
+X
+m=−∞
+1
+b3m e−
+r2
+2b2ms2
+ ≤
+√
+2r3 ln b
+√πs3
+b3e−r2b2
+2s2 +
+1
+2 ln b
+ 2s2
+r2
+!3/2
+Γ
+ 3
+2, r2b2
+2s2
+!,
+(42)
+where Γ(s, x) =
+R ∞
+x ts−1e−tdt is the upper incomplete Gamma function. For typical values of r (r ≥rcore > 0)
+and b > 1, the term r2b2/2s2 is large and the incomplete Gamma function admits the asymptotic approxi-
+mation Γ(3/2, r2b2/2s2) ≈
+p
+r2b2/2s2e−r2b2/2s2. Consequently, the negative tail bound decays exponentially
+with r2 and is negligible in the integration over [rcore, rshell]. Substituting the bounds in Eq. (39) and (40)
+8
+
+into the variance integral yields
+var[F∗
+Coulomb,i] ≲(Nshell −PR)
+PR
+Z rshell
+rcore
+4πρr
+r2
+1 −
+√
+2r3 ln b
+√πs3
+M
+X
+m=0
+1
+b3m e−
+r2
+2b2m s2
+
+2
+dr
+≲(Nshell −PR)
+PR
+Z rshell
+rcore
+4πρr
+r2
+· 2
+" 
+72 + 32π2
+(ln b)2
+!
+e−π2
+ln b +
+2(ln b)2
+πs6(b3 −1)2 b−6Mr6
+#
+dr
+= (Nshell −PR)
+PR
+8πρr
+" 
+72 + 32π2
+(ln b)2
+!
+e−π2
+ln b
+Z rshell
+rcore
+r−2dr +
+2(ln b)2
+πs6(b3 −1)2 b−6M
+Z rshell
+rcore
+r4dr
+#
+= (Nshell −PR)
+PR
+8πρr
+" 
+72 + 32π2
+(ln b)2
+!
+e−π2
+ln b
+ 1
+rcore
+−
+1
+rshell
+!
++
+2(ln b)2
+5πs6(b3 −1)2
+
+r5
+shell −r5
+core
+
+b−6M
+#
+.
+(43)
+Then considering the variance of the exponential repulsion force, one can obtain:
+var[F∗
+rep,i] ≲(Nshell −PR)
+PR
+Z rshell
+rcore
+4πρrr2
+ Aij
+ρ
+!2
+e2σij/ρe−2r/ρdr ≲C1(Nshell −PR)
+PR
+ρre−2rcore/ρ,
+(44)
+where C1 is a constant depending only on the BMH parameters. Finally, the variance of the dispersion force
+can be bounded by the following:
+var[F∗
+disp,i] ≲(Nshell −PR)
+PR
+Z rshell
+rcore
+4πρrr2
+ 6Cij
+r7
++ 8Dij
+r9
+!2
+dr ≲C2(Nshell −PR)
+PR
+ρrr−11
+core,
+(45)
+where C2 is another constant depending only on the BMH parameters.
+Since the constants C, C1, and C2 are all independent of N and M, combining the results of the short-
+range force approximation in Eqs. (43), (44) and (45), we can conclude that the variance of FN,i scales as
+O(1/PR) and we complete the proof.
+We now analyze the convergence of IRBSOG-based MD. Let ∆t be the step size of MD time integration.
+Under the canonical (NVT) ensemble, a thermostat is generally used to sample correct ensemble distribu-
+tion, such as the Langevin thermostat [45] and the Nosé–Hoover (NH) thermostat [46]. We consider the
+Langevin thermostat for convenience in analysis. Let (ri, vi) be the solution of the underdamped Langevin
+equations of motion,
+dri = vi dt,
+m dvi = (Ftotal
+i
+−γvi) dt +
+p
+2γkBT dWi,
+(46)
+where kB is the Boltzmann constant, γ is the friction coefﬁcient, and Wi are independently identically
+distributed Wiener processes. Let (r∗
+i , v∗
+i ) be the solutions with the force Ftotal
+i
+approximated by F∗
+i , the
+force calculated by IRBSOG, with the same initial data. The following Theorem indicates that the IRBSOG
+accurately captures ﬁnite-time dynamics despite the random batch approximation of the force under the
+Langevin thermostat. The proof of this theorem can be obtained by following previous work [21, 47], and
+we will not present it here.
+Theorem 2.3. Suppose that the forces Ftotal
+i
+are bounded and Lipschitz and Eχi = 0. Under the synchro-
+nization coupling assumption that the same initial values as well as the same Wiener process Wi are used,
+then for any ﬁnite T > 0, there exists C(T) > 0 such that
+sup
+t∈[0,T]
+v
+u
+t
+1
+N
+N
+X
+i=1
+E
+
+|ri −r∗
+i |2 + |vi −v∗
+i |2
+≤C(T)
+√
+Λ∆t,
+(47)
+where Λ = maxi(E|χi|2) is an upper bound for the variance of the random approximation.
+By Theorem 2.2, we have Λ = O(1/PR + 1/PF). For long-time simulations, a uniform-in-time error
+estimate can be derived in a manner similar to [48] for systems with regular force ﬁelds. We note that
+Theorem 2.3 assumes the force to be bounded and Lipschitz continuous, whereas the Coulomb kernel has a
+9
+
+singularity at the origin. Nevertheless, we expect that the error bound in Eq. (47) remains valid in practice.
+This is because the BMH potential includes both LennardJonestype interactions and a strong short-range
+exponential repulsion, which prevent particles from approaching arbitrarily close, so that the singularity
+does not occur during the simulation. A fully rigorous justiﬁcation of this argument remains difﬁcult and
+highly nontrivial. For simulations in the microcanonical (NVE) ensemble, random-batch-type methods can
+be combined with a weakly coupled thermal bath to improve long-time energy stability [49]. For further
+discussion of other thermostats and ensembles, we refer the reader to [26, 32].
+2.4. Implementation details and complexity analysis
+We have implemented the IRBSOG method in a high-performance MD code that uses distributed mem-
+ory parallelism and vectorization. The code is built on the Message Passing Interface (MPI) and AVX-512
+single-instruction multiple-data (SIMD) instructions. For short-range forces in the core region, we set an
+additional inner cutoff radius rin < rcore. For 0 < r < rin, forces are computed using Taylor expansions;
+for rin < r < rcore, we use a bitmask-based table-lookup technique [50] with linear interpolation between
+tabulated points. For the long-range approximation in Eq. (29), the sampled Fourier modes and particle
+positions are vectorized when evaluating the structure factors ρ(k) from local atoms on each MPI rank.
+A single global all-reduce then assembles the complete structure factors. The approximate force F∗
+F ,i for
+each particle is then computed from these structure factors. For better demonstration of the performance of
+IRBSOG, other LAMMPS components, including domain decomposition, ghost-atom communication, and
+neighbor lists construction with the multiple-page data structure, remain unchanged.
+We analyze the per-step computational complexity and memory use of IRBSOG. Without loss of gener-
+ality, assume a uniform particle density ρr = N/V. For the long-range part, with a ﬁxed Fourier mini-batch
+size PF = O(1), the computational cost is O(PFN) and the memory storage is O(PF) (the number of Fourier
+modes involved in the calculation). By comparison, FFT-based methods require O(N log N) work and
+O(N) memory usage. For the short-range part, the per-particle neighbor list size (and both complexity and
+memory usage) required in the classical cutoff approach scales as O(4πr3
+cρr/3). IRBSOG reduces this to
+O(4πr3
+coreρr/3 + PR), where PR is the shell mini-batch size. If one safely adopts rc = rshell, rshell/rcore = 2
+and an appropriate PR, both the memory usage and the runtime for the short-range part are reduced by about
+one order of magnitude. Since short-range calculations are often memory-bound, IRBSOG is expected to
+be more efﬁcient than the original RBSOG, in which only the long-range part is accelerated. The above
+analysis indicates that IRBSOG achieves an overall linear computational complexity.
+3. Numerical Examples
+In this section, we perform all-atom simulations with the IRBSOG-based MD under the NVT ensemble
+to validate both the accuracy and efﬁciency of the proposed method, with two benchmark systems including
+the molten NaCl and the molten alkali binary halide systems. All the simulations were conducted by our
+method implemented in the LAMMPS [51] (version 21Nov2023), and were performed on the Siyuan Mark-
+I cluster at Shanghai Jiao Tong University, which comprises 936 nodes with 2 Intel Xeon ICX Platinum 8358
+CPU (26 GHz, 32 cores) and 512 GB memory per node.
+3.1. Accuracy comparison in molten NaCl systems
+We compare IRBSOG and PPPM for molten NaCl systems governed by the BMH potential. Simulations
+use a cubic box with 8192 ions (4096 Na+ and 4096 Cl−). After a 50 ps equilibration in the isothermal-
+isobaric (NPT) ensemble at 0 GPa and 1100 K, we perform 1 ns production run in the NVT ensemble with
+a Nosé-Hoover thermostat [46], saving data every 100 steps. The time step is ∆t = 1 f s. For PPPM, we set
+the Ewald splitting parameter α = 0.09, yielding a predicted relative error of 10−5. Short-range interactions
+are truncated at rc = 10 ˚A. The BMH parameters provided by Tosi and Fumi [52, 53] are used throughout
+(summarized in Table 1).
+10
+
+Table 1: BMH potential parameters for molten NaCl.
+Na-Na
+Na-Cl
+Cl-Cl
+A/eV
+0.303
+0.242
+0.182
+σ/ ˚A
+2.340
+2.755
+3.170
+C/eV· ˚A6
+1.049
+6.991
+72.40
+D/eV· ˚A8
+0.499
+8.676
+145.427
+ρ/ ˚A
+0.317
+0.317
+0.317
+We evaluate accuracy using the mean-square displacement (MSD) and radial distribution function
+(RDF). For IRBSOG, we set rcore = 5 ˚A and rshell = 10 ˚A, giving about 120 particles in the shell region
+per ion. Figs. 2 (a-b) show the MSD of Na and the Na-Na RDF, respectively. We test four combinations of
+batch sizes for IRBSOG: (PR, PF) = (20, 50), (30, 50), (20, 100), and (30, 100). As PR and PF increase, the
+MSD and RDF generated by the IRBSOG converge to those of PPPM; with PR = 30 and PF = 100, results
+of IRBSOG and PPPM are statistically indistinguishable. The agreement holds across multiple time scales,
+showing that IRBSOG reproduces the dynamics of system well.
+(c)
+1100
+1500
+0
+0.5
+1
+1.5
+PPPM
+IRBSOG
+(d)
+1100
+1500
+0
+0.2
+0.4
+0.6
+0.8
+1
+0
+2
+4
+6
+8
+10
+0
+0.5
+1
+1.5
+2
+2.5
+(b)
+101
+102
+103
+104
+105
+106
+10-2
+100
+102
+104
+(a)
+Figure 2: (a) Na MSD and (b) Na-Na RDF of molten NaCl systems governed by the BMH potential. IRBSOG results with
+shell-region batch size PR ∈{20, 30} and Fourier-space batch size PF ∈{50, 100} are compared with PPPM. Panels (c) and (d)
+compare viscosity and thermal conductivity of NaCl at 1100 K and 1500 K: IRBSOG with PR = 30, PF = 100 (orange) versus
+PPPM (blue).
+We further assess accuracy in ﬂuid mechanics and thermodynamics by computing the viscosity and
+thermal conductivity. Viscosity is the internal resistance to ﬂow and is obtained from the GreenKubo
+relation in equilibrium [54]:
+η = lim
+τ→∞
+1
+kBTV
+Z τ
+0
+⟨S xy(t) · S xy(0)⟩dt,
+(48)
+where V is the system volume and T the temperature. The xy-component of the stress tensor, S xy(t), is
+11
+
+calculated by
+S xy =
+N
+X
+i=1
+mivxivyi + 1
+2
+X
+j,i
+xi j fy(ri j)
+,
+(49)
+with mi the mass of ion i, vxi and vyi its velocity components, xij the x-component of ri j = ri −rj, and fy(ri j)
+the y-component of the pair force fij on ion i from ion j. Thermal conductivity λ is also computed via the
+Green-Kubo formula:
+λ = lim
+τ→∞
+V
+3kBT 2
+Z τ
+0
+⟨J(0) · J(t)⟩dt,
+(50)
+where the heat ﬂux J(t) is
+J(t) = 1
+V
+
+N
+X
+i=1
+¯eivi(t) + 1
+2
+N
+X
+i,j=1
+i<j
+
+Fij(t) · (vi(t) + v j(t)
+
+rij(t)
+
+,
+(51)
+with ¯ei the per-atom energy. As shown in Fig. 2(cd), IRBSOG with PR = 30 and PF = 100 yields viscosity
+and thermal conductivity for molten NaCl at 1100 K and 1500 K that are statistically indistinguishable from
+PPPM with 10−5 accuracy. This indicates that a modest batch size sufﬁces for IRBSOG to produce accurate
+MD results. For reference, IRBE [36] requires a Fourier-space batch size of PF = 200, twice that of the
+IRBSOG in simulating BMH systems, when simulating pure water and ionic liquid systems. The factor of
+two speedup comes from replacing the Ewald decomposition with the SOG decomposition.
+3.2. Time performance in large-scale simulations
+We compare PPPM, RBSOG and IRBSOG in LAMMPS on the molten NaCl system described above.
+To ensure a fair comparison, we set the target relative force error to 10−5 and the real-space cutoff to 10 ˚A
+for all three methods. For RBSOG, we use PF = 100 as the Fourier-space batch size. For IRBSOG, we
+set rcore = 5 ˚A, rshell = 10 ˚A, and batch sizes PR = 30 and PF = 100, as validated in Section 3.1. Each
+run is 10000 steps, and we report the average CPU time per step. Fig. 3 shows the results as a function
+of the number of particles, using 1000 CPU cores. All three methods show the expected closed-to-linear
+complexity. IRBSOG is the fastest across all tested system sizes: it achieves approximately an order-of-
+magnitude speedup over PPPM and is roughly twice as fast as the RBSOG method.
+Next, we compare IRBSOG with PPPM on strong and weak parallel scalability, where results are shown
+in Figs. 4a-d. With one node, the per-step CPU time of IRBSOG is already much lower than that of PPPM.
+As node count increases, IRBSOG shows even much better strong-scaling: at 16 nodes IRBSOG still attains
+about 90% strong scaling, while PPPM drops to ∼40%. IRBSOG also maintains near-ideal weak scaling:
+its efﬁciency stays close to 100% across the tested node counts, whereas PPPM declines quickly. At 16
+nodes, IRBSOG is at ∼98% weak scaling and PPPM is below 50%. To test performance on large-scale
+systems, we measure CPU time for a NaCl system with N = 1.024 × 106. Using ∼1000 cores, IRBSOG
+achieves an order-of-magnitude speedup over PPPM for the total CPU time, demonstrating its attractive
+efﬁciency and scalability.
+In Table 2, we break down the CPU time of the short- and long-range parts for IRBSOG and PPPM and
+report the corresponding speedup factors. With 100 CPU cores, IRBSOG attains speedups of 1.82 (short-
+range) and 16.34 (long-range), and the wall-clock times of these two parts are comparable within IRBSOG.
+When the core count increases to 1000, the short-range speedup remains similar, whereas the long-range
+speedup rises to 22.72, indicating lower communication overhead and better strong scaling for IRBSOG.
+For the short-range BMH term, we use the same cutoff, rc = 10 Å, for both methods. Although increasing
+rc could in principle shift more work to the real-space part and better balance PPPM, it also enlarges the
+neighbor list and memory storage, which limits the accessible system size. Even with such tuning, our tests
+suggest that IRBSOG would still deliver about a 34× speedup while using less memory usage.
+3.3. Tests on molten alkali binary halide systems
+Molten alkali binary halides, although composed of only three ionic species, show complex thermody-
+namic and transport behavior beyond that of simple molten salts or dilute electrolytes. Key propertiesin-
+cluding melting point, viscosity, and electrical conductivitycan vary nonmonotonically with composition,
+12
+
+104
+105
+106
+107
+10-5
+10-4
+10-3
+10-2
+10-1
+100
+PPPM
+RBSOG
+IRBSOG
+Figure 3: The CPU time per step of the PPPM, RBSOG with PF = 100 and IRBSOG with PR = 30, PF = 100 against increasing
+number of particles using 1000 CPU Cores. The dashed lines show the linear ﬁtting of data.
+0
+5
+10
+15
+10-3
+10-2
+10-1
+(a)
+PPPM
+IRBSOG
+0
+5
+10
+15
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1
+1.1
+(b)
+0
+5
+10
+15
+10-3
+10-2
+10-1
+(c)
+0
+5
+10
+15
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1
+1.1
+(d)
+Figure 4: CPU time and strong/weak scalability for the IRBSOG and PPPM, using up to 16 nodes with 128 CPU core per node. (a-b)
+present the strong scalability results with a ﬁxed total particle number of 221184. (c-d) present the weak scalability results with an
+average of 1024 particles per core.
+reﬂecting strong ionion correlations and composition-dependent structural reorganization in the melt. Ac-
+curately capturing these effects is therefore a stringent test for interatomic models used at high temperature.
+13
+
+Table 2: Average CPU time (ms) per step for Pair, Kspace and Total as a function of different number of CPU cores produced by the
+IRBSOG (PR = 30 and PF = 100) with rcore = 5 ˚A and rshell = 10 ˚A, the PPPM with rc = 10 ˚A and the optimal PPPM with rc = 12 ˚A
+for the NaCl system with N = 1.024 × 106. The memory usage (Mbytes) using 100 CPU cores is also listed.
+Number of CPU Cores
+Memory
+100
+500
+1000
+Pair
+Kspace
+Total
+Pair
+Kspace
+Total
+Pair
+Kspace
+Total
+RBSOG
+58.42
+26.01
+84.43
+12.91
+5.25
+18.16
+6.37
+2.67
+9.04
+20.32
+PPPM
+79.94
+312.02
+391.96
+15.90
+89.75
+105.65
+8.12
+58.62
+66.74
+49.64
+optimal PPPM
+132.18
+187.11
+319.29
+26.43
+48.35
+74.78
+13.52
+33.41
+46.93
+43.86
+To assess the performance of the IRBSOG method, we conduct MD simulations of the LiClNaCl mix-
+ture over a wide range of compositions. The potential parameters are summarized in Table 3. For IRBSOG,
+we set rcore = 5 Å, rshell = 10 Å, and use batch sizes PR = 30 and PF = 100. Figure 5 shows the RDFs for
+six representative compositions. IRBSOG reproduces composition-dependent shifts in peak positions and
+changes in coordination features across the ﬁrst and second shells, as well as medium-range correlations.
+These results indicate that IRBSOG maintains accuracy and transferability for chemically mixed molten
+salts in which cross-species interactions play a central role.
+Table 3: BMH potential parameters for molten LiCl-NaCl.
+Li-Li
+Li-Na
+Na-Na
+Li-Cl
+Na-Cl
+Cl-Cl
+A/eV
+0.4225
+0.334
+0.2640625
+0.29046875
+0.21125
+0.1584375
+σ/ ˚A
+1.632
+1.986
+2.340
+2.401
+2.755
+3.170
+C/eV· ˚A6
+0.045625
+0.218875
+1.05
+1.25
+7.00
+71.328
+D/eV· ˚A8
+0.01875
+0.0968
+0.50
+1.50
+8.6875
+143.281
+ρ/ ˚A
+0.3170
+0.3185
+0.3200
+0.3215
+0.3230
+0.3261
+0
+5
+10
+15
+0
+0.5
+1
+1.5
+2
+(b)
+0
+5
+10
+15
+0
+0.5
+1
+1.5
+2
+(c)
+0
+5
+10
+15
+0
+0.5
+1
+1.5
+2
+(d)
+0
+5
+10
+15
+0
+0.5
+1
+1.5
+2
+2.5
+3
+3.5
+(e)
+0
+5
+10
+15
+0
+1
+2
+3
+4
+5
+(f)
+0
+5
+10
+15
+0
+0.5
+1
+1.5
+2
+(a)
+PPPM
+IRBSOG
+Figure 5: The RDFs of Cl-Cl(a), Li-Li(b), Na-Na(c), Cl-Li(d) and Na-Cl(e), and the visual model of LiCl-NaCl(f) at 1100 K where
+the purple, red and green balls represent Na, Li and Cl, respectively. We use the IRBSOG with PR = 30 and PF = 100 compared to
+the PPPM.
+14
+
+4. Conclusion
+In this work, we develop an IRBSOG method for MD simulations of BMH systems. The IRBSOG
+framework adopts a decomposition strategy based on an SOG decomposition of the Coulomb kernel. It is
+a stochastic scheme that couples random mini-batch sampling for short-range neighbor interactions with
+random-batch importance sampling for the long-range component, leading to a total computational com-
+plexity O(N). Compared with FFT-accelerated mesh Ewald methods and other random-batch approaches,
+IRBSOG exhibits improved computational efﬁciency and reduced memory consumption. Numerical sim-
+ulations of molten NaCl and alkali binary halide systems demonstrate its accuracy and scalability. In ad-
+dition, the method can be naturally extended to quasi-two-dimensional systems with planar interfaces and
+dielectric mismatch [55], which will be investigated in future work.
+Acknowledgments
+The work of C.C., J.L. and Z.X. was supported by the National Natural Science Foundation of China
+(grants No. 12426304, 12325113 and 12401570) and the Science and Technology Commission of Shang-
+hai Municipality (grant No. 23JC1402300). The authors would like to thank the support from the SJTU
+Kunpeng & Ascend Center of Excellence.
+References
+[1] P. N. Haubenreich, J. R. Engel, B. E. Prince, and H. C. Claiborne, “MSRE design and operations
+report. Part III. Nuclear analysis,” tech. rep., Oak Ridge National Lab., Oak Ridge, TN, USA, 1964.
+[2] P. N. Haubenreich and J. R. Engel, “Experience with the molten-salt reactor experiment,” Nucl. Appl.
+Technol., vol. 8, no. 2, pp. 118–136, 1970.
+[3] R. S. DeFever, H. Wang, Y. Zhang, and E. J. Maginn, “Melting points of alkali chlorides evaluated for
+a polarizable and non-polarizable model,” J. Chem. Phys., vol. 153, no. 1, p. 011101, 2020.
+[4] D. D. Siemer, “Why the molten salt fast reactor (MSFR) is the “best” Gen IV reactor,” Energy Sci.
+Eng., vol. 3, no. 2, pp. 83–97, 2015.
+[5] J. Wang, Z. Sun, G. Lu, and J. Yu, “Molecular dynamics simulations of the local structures and
+transport coefﬁcients of molten alkali chlorides,” J. Phys. Chem. B, vol. 118, no. 34, pp. 10196–10206,
+2014.
+[6] J. Wang, J. Wu, Z. Sun, G. Lu, and J. Yu, “Molecular dynamics study of the transport properties and
+local structures of molten binary systems (Li, Na) Cl,(Li, K) Cl and (Na, K) Cl,” J. Mol. Liq., vol. 209,
+pp. 498–507, 2015.
+[7] X. Yang, C. Ji, J. Liu, Y. Ma, and B. Cao, “New insights into the heat capacity enhancement of
+nano-SiO2 doped alkali metal chloride molten salt for thermal energy storage: A molecular dynamics
+study,” J. Energy Storage, vol. 63, p. 107015, 2023.
+[8] F. Song, L. Liu, Y. Wang, J. Fan, and X. Zhao, “Molecular dynamic investigation on the thermophys-
+ical properties of binary molten carbonate mixtures,” J. Mol. Liq., vol. 363, p. 119922, 2022.
+[9] M. Born and J. E. Mayer, “Zur gittertheorie der ionenkristalle,” Z. Phys., vol. 75, no. 1, pp. 1–18,
+1932.
+[10] M. L. Huggins, “Lattice energies, equilibrium distances, compressibilities and characteristic frequen-
+cies of alkali halide crystals,” J. Chem. Phys., vol. 5, no. 2, pp. 143–148, 1937.
+[11] T. Porter, M. M. Vaka, P. Steenblik, and D. Della Corte, “Computational methods to simulate molten
+salt thermophysical properties,” Commun. Chem., vol. 5, no. 1, p. 69, 2022.
+15
+
+[12] A. Galashev, O. Rakhmanova, K. Abramova, K. Katin, M. Maslov, O. Tkacheva, A. Rudenko,
+A. Kataev, and Y. Zaikov, “Molecular dynamics and experimental study of the effect of CeF3 and
+NdF3 additives on the physical properties of FLiNaK,” J. Chem. Phys. B, vol. 127, no. 5, pp. 1197–
+1208, 2023.
+[13] J. D. Shore, D. Perchak, and Y. Shnidman, “Simulations of the nucleation of AgBr from solution,” J.
+Chem. Phys., vol. 113, no. 15, pp. 6276–6284, 2000.
+[14] R. W. Hockney and J. W. Eastwood, Computer Simulation Using Particles. CRC Press, 1988.
+[15] T. Darden, D. York, L. Pedersen, et al., “Particle mesh Ewald: An N · log(N) method for Ewald sums
+in large systems,” J. Chem. Phys., vol. 98, pp. 10089–10092, 1993.
+[16] A. Ayala, S. Tomov, M. Stoyanov, and J. Dongarra, “Scalability issues in FFT computation,” in Inter-
+national Conference on Parallel Computing Technologies, pp. 279–287, Springer, 2021.
+[17] W. Yan and M. Shelley, “Flexibly imposing periodicity in kernel independent FMM: A multipole-to-
+local operator approach,” J. Comput. Phys., vol. 355, pp. 214–232, 2018.
+[18] R. Pei, T. Askham, L. Greengard, and S. Jiang, “A fast method for imposing periodic boundary con-
+ditions on arbitrarily-shaped lattices in two dimensions,” J. Comput. Phys., vol. 474, p. 111792, 2023.
+[19] S. Jiang and L. Greengard, “A dual-space multilevel kernel-splitting framework for discrete and con-
+tinuous convolution,” Commun. Pure Appl. Math., vol. 78, no. 5, pp. 1086–1143, 2025.
+[20] J. Liang, L. Lu, A. Barnett, L. Greengard, and S. Jiang, “Accelerating fast Ewald summation with
+prolates for molecular dynamics simulations,” arXiv preprint arXiv:2505.09727, 2025.
+[21] S. Jin, L. Li, and J.-G. Liu, “Random batch methods (RBM) for interacting particle systems,” J.
+Comput. Phys., vol. 400, p. 108877, 2020.
+[22] S. Jin, L. Li, X. Ye, and Z. Zhou, “Ergodicity and long-time behavior of the random batch method for
+interacting particle systems,” Math. Models Methods Appl. Sci., vol. 33, no. 01, pp. 67–102, 2023.
+[23] X. Ye and Z. Zhou, “Error analysis of time-discrete random batch method for interacting particle
+systems and associated mean-ﬁeld limits,” IMA J. Numer. Anal., vol. 44, no. 3, pp. 1660–1698, 2024.
+[24] Z. Cai, J.-G. Liu, and Y. Wang, “Convergence of random batch method with replacement for interact-
+ing particle systems,” arXiv preprint arXiv:2407.19315, 2024.
+[25] H. Lin, Y. Shi, and S. Dai, “Hybrid random batch idea and nonlinear conjugate gradient method for
+accelerating charged polymer dynamics simulation,” J. Math. Chem., vol. 62, no. 3, pp. 555–578,
+2024.
+[26] S. Jin, L. Li, Z. Xu, and Y. Zhao, “A random batch Ewald method for particle systems with Coulomb
+interactions,” SIAM J. Sci. Comput., vol. 43, no. 4, pp. B937–B960, 2021.
+[27] J. Liang, P. Tan, Y. Zhao, L. Li, S. Jin, L. Hong, and Z. Xu, “Superscalability of the random batch
+Ewald method,” J. Chem. Phys., vol. 156, no. 1, p. 014114, 2022.
+[28] J. Liang, P. Tan, L. Hong, S. Jin, Z. Xu, and L. Li, “A random batch Ewald method for charged
+particles in the isothermal–isobaric ensemble,” J. Chem. Phys., vol. 157, no. 14, p. 144102, 2022.
+[29] L. Greengard, S. Jiang, and Y. Zhang, “The anisotropic truncated kernel method for convolution with
+free-space Green’s functions,” SIAM J. Sci. Comput., vol. 40, no. 6, pp. A3733–A3754, 2018.
+[30] J. Liang, Z. Gao, and Z. Xu, “A kernel-independent sum-of-gaussians method by de la Vallée-Poussin
+sums,” Adv. Appl. Math. Mech., vol. 13, no. 5, pp. 1126–1141, 2021.
+[31] G. Beylkin and L. Monzón, “On approximation of functions by exponential sums,” Appl. Comput.
+Harmon. Anal., vol. 19, no. 1, pp. 17–48, 2005.
+16
+
+[32] J. Liang, Z. Xu, and Q. Zhou, “Random batch sum-of-gaussians method for molecular dynamics
+simulations of particle systems,” SIAM J. Sci. Comput., vol. 45, no. 5, pp. B591–B617, 2023.
+[33] C. Chen, J. Liang, and Z. Xu, “Random batch sum-of-Gaussians algorithm for molecular dynamics
+simulations of Yukawa systems in three dimensions,” J. Comput. Phys., vol. 531, p. 113922, 2025.
+[34] J. Liang, Z. Xu, and Y. Zhao, “Random-batch list algorithm for short-range molecular dynamics sim-
+ulations,” J. Chem. Phys., vol. 155, no. 4, p. 044108, 2021.
+[35] J. Zhang, J. Huang, and Z. Yang, “Random batch list method for metallic system with embedded atom
+potential,” arXiv preprint arXiv:2503.17435, 2025.
+[36] J. Liang, Z. Xu, and Y. Zhao, “Improved random batch Ewald method in molecular dynamics simula-
+tions,” J. Phys. Chem. A, vol. 126, no. 22, pp. 3583–3593, 2022.
+[37] W. Gao, T. Zhao, Y. Guo, J. Liang, H. Liu, M. Luo, Z. Luo, W. Qin, Y. Wang, Q. Zhou, et al., “RBMD:
+A molecular dynamics package enabling to simulate 10 million all-atom particles in a single graphics
+processing unit,” Commun. Comput. Phys., vol. 39, no. 1, pp. 296–322, 2026.
+[38] G. Beylkin and L. Monzón, “Approximation by exponential sums revisited,” Appl. Comput. Harmon.
+Anal., vol. 28, no. 2, pp. 131–149, 2010.
+[39] Z. Gao, J. Liang, and Z. Xu, “A kernel-independent sum-of-exponentials method,” J. Sci. Comput.,
+vol. 93, no. 2, p. 40, 2022.
+[40] C. Predescu, A. K. Lerer, R. A. Lippert, B. Towles, J. Grossman, R. M. Dirks, and D. E. Shaw, “The
+u-series: A separable decomposition for electrostatics computation with improved accuracy,” J. Chem.
+Phys., vol. 152, no. 8, p. 084113, 2020.
+[41] T. Laino, F. Mohamed, A. Laio, and M. Parrinello, “An efﬁcient real space multigrid QM/MM elec-
+trostatic coupling,” J. Chem. Theory Comput., vol. 1, no. 6, pp. 1176–1184, 2005.
+[42] Y. Ji, J. Liang, and Z. Xu, “Machine-learning interatomic potentials for long-range systems,” Phys.
+Rev. Lett, vol. 135, no. 17, p. 178001, 2025.
+[43] Q. Zhou, T. Wu, J. Liu, Q. Sun, H. Xie, and Z. Xu, “Sum-of-Gaussians tensor neural networks for
+high-dimensional Schrödinger equation,” arXiv preprint arXiv:2508.10454, 2025.
+[44] N. Metropolis, A. W. Rosenbluth, M. N. Rosenbluth, A. H. Teller, and E. Teller, “Equation of state
+calculations by fast computing machines,” J. Chem. Phys., vol. 21, no. 6, pp. 1087–1092, 1953.
+[45] D. Frenkel and B. Smit, Understanding Molecular Simulation: From Algorithms to Applications.
+Elsevier, 2001.
+[46] W. G. Hoover, “Canonical dynamics: Equilibrium phase-space distributions,” Phys. Rev. A, vol. 31,
+no. 3, p. 1695, 1985.
+[47] S. Jin, L. Li, and J.-G. Liu, “Convergence of the random batch method for interacting particles with
+disparate species and weights,” SIAM J. Numer. Anal., vol. 59, no. 2, pp. 746–768, 2021.
+[48] S. Jin, L. Li, and Y. Sun, “On the random batch method for second order interacting particle systems,”
+Multiscale Model. Sim., vol. 20, no. 2, pp. 741–768, 2022.
+[49] J. Liang, Z. Xu, and Y. Zhao, “Energy stable scheme for random batch molecular dynamics,” J. Chem.
+Phys., vol. 160, no. 3, p. 034101, 2024.
+[50] D. Wolff and W. Rudd, “Tabulated potentials in molecular dynamics simulations,” Comput. Phys.
+Commun., vol. 120, no. 1, pp. 20–32, 1999.
+17
+
+[51] A. P. Thompson, H. M. Aktulga, R. Berger, D. S. Bolintineanu, W. M. Brown, P. S. Crozier, P. J.
+In’t Veld, A. Kohlmeyer, S. G. Moore, T. D. Nguyen, et al., “LAMMPS-a ﬂexible simulation tool
+for particle-based materials modeling at the atomic, meso, and continuum scales,” Comput. Phys.
+Commun., vol. 271, p. 108171, 2022.
+[52] F. Fumi and M. Tosi, “Ionic sizes and born repulsive parameters in the NaCl-type alkali halidesI: The
+Huggins-Mayer and Pauling forms,” J. Phys. Chem. Solids, vol. 25, no. 1, pp. 31–43, 1964.
+[53] M. Tosi and F. Fumi, “Ionic sizes and born repulsive parameters in the NaCl-type alkali halidesII: The
+generalized Huggins-Mayer form,” J. Phys. Chem. Solids, vol. 25, no. 1, pp. 45–52, 1964.
+[54] B. Dünweg, V. Lobaskin, K. Seethalakshmy-Hariharan, and C. Holm, “Colloidal electrophoresis: scal-
+ing analysis, Green–Kubo relation, and numericalresults,” J. Phys-Condens. Mat., vol. 20, no. 40,
+p. 404214, 2008.
+[55] Z. Gan, X. Gao, J. Liang, and Z. Xu, “Random batch Ewald method for dielectrically conﬁned
+Coulomb systems,” SIAM J. Sci. Comput., vol. 47, no. 4, pp. B846–B874, 2025.
+18

@@ -1,0 +1,1540 @@
+Semi-overlapping MAB best arm identification
+Semi-overlapping multi-bandit best arm identification
+for sequential support network learning
+András Antos
+antos@mit.bme.hu
+Department of Artificial Intelligence and Systems Engineering
+Budapest University of Technology and Economics
+Budapest, Hungary
+András Millinghoffer
+milli@mit.bme.hu
+Department of Artificial Intelligence and Systems Engineering
+Budapest University of Technology and Economics
+Budapest, Hungary
+E-Group ICT Software Zrt.
+Budapest, Hungary
+Péter Antal
+antal@mit.bme.hu
+Department of Artificial Intelligence and Systems Engineering
+Budapest University of Technology and Economics
+Budapest, Hungary
+E-Group ICT Software Zrt.
+Budapest, Hungary
+Abstract
+Many modern AI and ML problems require evaluating partners’ contributions through
+shared yet asymmetric, computationally intensive processes and the simultaneous selection
+of the most beneficial candidates. Sequential approaches to these problems can be unified
+under a new framework, Sequential Support Network Learning (SSNL), in which the goal
+is to select the most beneficial candidate set of partners for all participants using trials;
+that is, to learn a directed graph that represents the highest-performing contributions. We
+demonstrate that a new pure-exploration model, the semi-overlapping multi-(multi-armed)
+bandit (SOMMAB), in which a single evaluation provides distinct feedback to multiple
+bandits due to structural overlap among their arms, can be used to learn a support network
+from sparse candidate lists efficiently.
+We develop a generalized GapE algorithm for SOMMABs and derive new exponen-
+tial error bounds that improve the best known constant in the exponent for multi-bandit
+best-arm identification. The bounds scale linearly with the degree of overlap, revealing
+significant sample-complexity gains arising from shared evaluations.
+From an application point of view, this work provides a theoretical foundation and
+improved performance guarantees for sequential learning tools for identifying support net-
+works from sparse candidates in multiple learning problems, such as in multi-task learning
+(MTL), auxiliary task learning (ATL), federated learning (FL), and in multi-agent systems
+(MAS).
+Keywords:
+multi-armed bandit, overlapping multi-bandit, best arm identification, multi-
+task learning, federated learning, multi-agent systems
+1
+arXiv:2512.24959v1 [cs.LG] 31 Dec 2025
+
+Antos et al
+1 Introduction
+Multi-Armed Bandits (MAB) is a widely used model today. Its best arm identification (BAI)
+setting (Audibert et al., 2010; Bubeck et al., 2011) is a pure exploration problem, distinct
+from the original MAB problem to maximize the cumulative reward (see e.g., Robbins, 1952;
+Auer et al., 2002).
+The core objective of BAI is to formulate a strategy that recommends the most beneficial
+one from K possible options. The well-established MAB/BAI model has been motivated by
+the fact that the efficient allocation of trial resources is a critical aspect, given the significant
+computational, statistical, ethical, financial, and security/privacy-related budgetary limita-
+tions of trials in numerous domains. The uniform exploration of options could result in the
+inefficient utilization of trial resources, potentially leading to suboptimal option selection.
+Therefore, it is imperative to employ effective strategies for the distribution of trials across
+options, thereby ensuring the efficacy of the developed strategy. To evaluate a MAB strat-
+egy, usually either the reward of the recommended arm or the probability of error (i.e., not
+selecting the best arm) is used.
+To address the best arm identification problem, two algorithms were given by Audibert
+et al. (2010): 1) the Upper Confidence Bounds (UCB-E) method with a parameter, whose
+optimal value depends on the complexity of the problem, and 2) the parameter-free Succes-
+sive Rejects (SR) method. Both these algorithms are shown to be nearly optimal, that is,
+their error probability decreases exponentially in the number of pulls.
+BAI has been utilized, for example, in the context of function learning (Maron and
+Moore, 1993; Madani et al., 2004; Krueger et al., 2015; Mohr and van Rijn, 2021); in the
+feature subset selection problem Gaudel and Sebag (2010); Chaudhry and Lee (2018), and
+it is intensively used in hyper-parameter learning based on the results from random(ized)
+trials corresponding to train-test-validation splits Li et al. (2018). New class of applications
+of BAI in artificial intelligence are the selection of the best set of (1) jointly learnable tasks
+in multi-task learning (MTL) (Caruana, 1997; Standley et al., 2020; Fifty et al., 2021),
+(2) beneficial tasks for a target task in auxiliary task learning (ATL) (Guo et al., 2019;
+Millinghoffer et al., 2024), (3) contributing clients in federated learning (FL) (Zhu et al.,
+2024), and (4) agents forming the most capable auxiliary coalition for an agent to assist in
+complex problem solving (Larsson et al., 2021; Zhang and et al., 2024; Cohen and Agmon,
+2024, 2025) (for a summary of application domains, see Table 1). In these problems, the
+optimal option does not necessarily comprise all other entities (tasks, clients, or agents,
+respectively), because some of the entities may exert a deleterious effect on another, for
+instance, due to disparities in the sample distributions available for the entities.
+Duality and the support network learning problem
+In these applications, another
+important property is the donor-recipient duality, in which entities serving as recipients
+(targets) may also act as donors (contributors) for others.
+Indeed, in many real-world
+problems, we may observe (complete) entity duality denoting a setting in which all entities
+in the problem simultaneously play the role of both a donor and a recipient. A further
+practically important property arises from the mandatory joint evaluation of participating
+entities, which implies computational and even implementation coupling. The condition
+relational duality formalizes the complete form of this property, which requires that if a set
+S is considered as a candidate donor set for an entity a, then for any b ∈S the corresponding
+2
+
+Semi-overlapping MAB best arm identification
+variant set S \ {b} ∪{a} is available as a candidate donor set for b, ensuring structural
+coherence of candidate relations across entities. By strong duality, we mean the combination
+of entity and relational duality.
+This donor-recipient duality naturally leads to a joint
+selection problem, where we must determine the most beneficial set of donors for each
+(recipient) entity.
+We refer to this problem class as sequential support network learning
+(SSNL), where each entity aims to identify the most beneficial set of contributors using
+optionally computationally coupled trials in a sequential learning framework. The solution
+for a SSNL problem can be represented by a directed graph with edges pointing to recipients
+from donors in the optimal support sets.
+Towards multi-bandits
+The support network learning problem can be viewed as a weakly
+coupled joint selection problem, which suggests using multi-bandits, a generalization of
+MABs, as follows. We assume the existence of M entities, each characterized by distinct
+joint learning properties and for entity m, Km candidates (options, arms) of beneficial en-
+tity subsets. The objective is to identify the optimal option for each entity. Certainly, if
+the number of options were allowed to be exponential in M the problem easily becomes in-
+tractable; thus, in practice, that must be assumed to be limited. We refer to this assumption
+as the candidate lists are sparse. Subsequently, it is necessary to solve M MAB problems
+in parallel, while constrained by the total available resources. It is possible that a greater
+quantity of resources will be required to identify the best option for one node than for an-
+other. Therefore, employing a uniform or other arbitrary strategy generally will not result
+in optimal performance. This problem structure is formulated by Gabillon et al. (2011b,a)
+as the multi-bandit/multi-MAB (MMAB) best arm identification / pure exploration over M
+MABs.
+There are multiple ways to evaluate a MMAB strategy. Three of them are the ones
+based on
+1. the average of the rewards of the recommended arms over the bandits,
+2. the average error probability over the bandits,
+3. the maximum error probability over the bandits.
+The UCB-E and Successive Rejects algorithms above, being designed for a single MAB,
+are not obvious to extend to MMAB problems. By Gabillon et al. (2011b), studying the
+MMAB problem in the fixed budget setting, the Gap-based Exploration (GapE) algorithm
+has been proposed, which focuses on the gap of the arm, that is, the difference between
+the mean value of the arm and that of the best arm (in the same bandit). They prove
+an upper-bound on the error probability for GapE, which decreases exponentially with the
+budget (see Proposition 2), and they also report numerical simulations.
+From duality to the semi-overlapping property
+The duality properties in support
+network learning formalized the underlying reality of joint computational evaluations in the
+learning process. Note that this does not mean hard constraints for the optimal support net-
+work. In multi-bandits the shared computations manifest as computationally coupled arms:
+evaluating the usefulness of auxiliary entities for a given recipient using a randomized trial,
+i.e., pulling an arm in one bandit, overlaps computationally with evaluating the usefulness of
+this recipient for the entities referred to as auxiliary, i.e., pulling an arm in another bandit.
+3
+
+Antos et al
+On the other hand, the resulting contribution scores themselves (i.e., the output of these
+arms in distinct bandits) typically differ. Later we will formalize these properties together
+as the semi-overlapping property of arms. In the pairwise case, it means that evaluating the
+usefulness of node a for node b shares computation with the evaluation of the usefulness of
+b for a, even though these contribution scores can be asymmetric (see Fig. 1).
+4
+
+Semi-overlapping MAB best arm identification
+Figure 1: Overview of the Semi-Overlapping Multi-bandit (SOMMAB) formulation under
+donor–recipient duality. (A) A priori candidate sets: for each entity a, b, c, d, we
+specify the initially admissible donor sets, which do not need to satisfy strong
+duality. In this example, the empty set is always included and the complete set
+is also a candidate for an entity. (B) Candidate sets under strong duality: en-
+forcing complete entity duality and relational duality expands the candidate sets.
+In particular, if a set is admissible for one entity, then for each of its members,
+the corresponding role-swapped variant is also admissible, yielding a structurally
+consistent family of candidate sets across all entities. (C) SOMMAB: each entity
+induces a local MAB problem, where arms correspond to its admissible candidate
+donor sets. In a SOMMAB, arms may be semi-overlapping (SO) across entities,
+as different MABs may mutually share arms corresponding to role-swapped vari-
+ants of candidate sets. The dual nature of SO arms is expressed using the plate
+notation: the cost of pulling a SO arm is a single cost for all corresponding MAB,
+whereas the random rewards are MAB-specific. Synchronized sequential learning
+proceeds in parallel across MABs for the entities, with trials corresponding to
+selecting and evaluating candidate donor sets. (D) Solution representation: once
+learning converges, each entity selects its best-performing donor set, resulting in a
+directed support network. Multi-node donor sets induce multiple incoming edges
+to a recipient, and sets of directed edges to a recipient represent learned con-
+tribution relationships. This network compactly summarizes the outcome of the
+SOMMAB learning process. Note that the support network may contain cycles,
+contribution scores can be asymmetric (α ̸= β), and contribution scores corre-
+spond to donor sets, as in the case of δ for the {b →d, c →d} arc-connected edge
+set (or, with hypergraph representation, {b, c} →d hyperedge).
+5
+
+Antos et al
+A key question in these diverse learning problems characterized by SSNL with strong
+duality is the following:
+In order to identify the most beneficial candidate sets for all entities, how can we efficiently
+use sequential randomized computationally shared trials that provide per-entity feedback of
+the joint supports of the co-evaluated participants in the trial?
+In this paper, firstly we extend the MMAB model introducing the notion of semi-over-
+lapping arms set motivated above, which consists of arms belonging to different bandits and
+overlapping in the sense that they are “pulled together”, however, the reward distributions
+and the actual reward responses are not necessarily the same for these arms. Then, we gen-
+eralize the GapE algorithm and the corresponding upper-bound by Gabillon et al. (2011b)
+mentioned above for this semi-overlapping setting, also improving the constant in the expo-
+nent by more than a factor of 3.5, and by another factor of r for r-order semi-overlapping
+multi-bandits (SOMMAB).
+Organization of the paper: Section 2 summarizes the related works, Section 3 introduces
+formally the MMAB problem, Section 4 describe the (generalized) GapE algorithm, Section 5
+gives the error probability bounds with a proof, which is also fixed, clarified and somewhat
+streamlined in comparison with the proof by Gabillon et al. (2011b), Section 6 presents
+applications of SSNL, Section 7 contains the discussion and conclusion, Section 8 summarizes
+possible future work, finally, some details of the proof are given in the Appendix.
+2 Related work
+Multi-armed bandits and best-arm identification
+The classical MAB problem was
+introduced in the context of sequential experimental design by Robbins (1952), with later
+developments focusing on regret minimization and upper confidence bound (UCB) strate-
+gies (Auer et al., 2002). In contrast, BAI considers pure exploration, where the goal is to
+identify the optimal arm rather than maximize cumulative reward. Fixed-budget and fixed-
+confidence formulations have been extensively studied, with algorithms such as UCB-E and
+SR shown to be at least nearly optimal (up to logarithmic factors in K) (Audibert et al., 2010;
+Bubeck et al., 2011). Furthermore, Gabillon et al. (2013) presented the UGapEb(0, 1, n, a)
+algorithm with also a parameter, whose optimal value depends on the complexity and with
+a bound that exhibits an exponent that is superior to that of the UCB-E algorithm. Our
+work follows this pure-exploration line for MMABs.
+Multi-bandits, overlapping and semi-overlapping (structured) MMABs
+Multi-
+bandit (or multi-task bandit) problems consider several bandits that must be solved in
+parallel under a shared sampling budget.
+Gabillon et al. (2011b,a) introduced a multi-
+bandit BAI framework and the GapE algorithm, and established exponential error bounds
+governed by a global complexity measure aggregating per-bandit gaps.
+A version of the MMAB setting, the (fully) overlapping multi-bandit together with appli-
+cations, was introduced by Scarlett et al. (2019), where the same arm may belong to multiple
+bandits, thereby coupling the bandit problems. When such an arm is pulled, it returns one
+reward response from its single reward distribution relevant in each of these bandits. Here,
+we have to find the best arm in each bandit when arm sets may overlap.
+Our SOMMAB model is closest in spirit to these works, but also allows for asymmet-
+ric overlap: structurally linked arms may have distinct reward distributions, and a single
+6
+
+Semi-overlapping MAB best arm identification
+evaluation provides different information to each bandit. We show that this more general
+structure still admits GapE-type algorithms, and prove improved error exponents exploiting
+structural overlap across bandits and analyzing how such structure affects the achievable
+error exponents that scale with the degree of overlap.
+Combinatorial bandits and Monte Carlo Tree Search
+Combinatorial bandits pro-
+vide a principled framework for subset-level decision making under limited evaluation bud-
+gets (Cesa-Bianchi et al., 2009; Chen et al., 2014; Rejwan and Mansour, 2020).
+In this
+setting, each action corresponds to selecting a subset (a “super-arm”) from a ground set,
+and the learner receives linear/additive feedback on the chosen subset — enabling gradual
+discovery of high-reward candidates via structured exploration and exploitation.
+By contrast, Monte Carlo Tree Search (MCTS) offers a general-purpose heuristic for
+exploring exponentially large decision trees through repeated random simulations, combined
+with upper-confidence–based selection strategies (e.g., the UCT rule) to balance exploration
+and exploitation (Kocsis and Szepesvári, 2006; Browne et al., 2012; Świechowski et al., 2023).
+See, for example, applications of MCTS by Gaudel and Sebag (2010); Chaudhry and Lee
+(2018) in a closely related problem of feature subset selection (FSS). Similar to MABs in
+FSS (Liu et al., 2021), our approach focuses on selection from an arbitrary, well-defined,
+sparse candidate list of contributor sets, allowing non-additive, interaction-driven reward
+structures.
+Structure learning and sparse candidate methods
+In probabilistic graphical model
+learning, structure search over directed acyclic graphs is another instance of a high-dimensional,
+combinatorial optimization problem, although contrary to influence or causal diagrams, there
+is no ’hard’ acyclicity constraint in the support network, only shared computational evalua-
+tions of candidates presents a ’soft’ cost for the sequential learning process itself. However,
+our approach shares the two-stage perspective of The Sparse Candidate method (Friedman
+et al., 1999): it restricts the set of potential donors for each variable and then searches over
+this reduced space.
+Computational efficiency of joint evaluations
+Computational aspects of joint evalu-
+ations have also motivated substantial work in multitask learning, such as the Task Affinity
+Grouping method (Fifty et al., 2021; Millinghoffer et al., 2024).
+Task selection in multi-task and auxiliary task learning
+Multi-task learning fre-
+quently grapples with negative transfer effects, that is, the intricate, complex pattern of
+beneficial-detrimental effects of certain tasks on others (Caruana, 1997; Xu et al., 2017;
+Zhang et al., 2022). It is by no surprise as the nature of transfer learning is multi-factorial
+and transfer effects can be attributed to (1) data representativity, (2) misaligned latent rep-
+resentations, (3) restrictive model learning capacity and (4) optimization bias;thus transfer
+effects are contextual and depend on the sample sizes, task similarities, sufficiency of hidden
+representations and model, and stages of the optimization (Ben-David et al., 2010; Pentina
+and Lampert, 2017; Xin et al., 2022). The auxiliary task learning approach suggests select-
+ing the beneficial auxiliary task subsets for each target task (Guo et al., 2019; Shi et al.,
+2010; Standley et al., 2020; Fifty et al., 2021; Song et al., 2022; Dery et al., 2022; Jiang
+et al., 2024; Li et al., 2024). However, evaluation of candidate auxiliary task subsets can be
+computationally demanding and leads to loss of statistical power, which could be mitigated
+7
+
+Antos et al
+by the application of MABs using task representations and carefully constructed candidate
+task subsets (Du et al., 2023; Mukherjee et al., 2024; Sessa et al., 2024; Millinghoffer et al.,
+2024).
+Client selection in federated learning
+Federated learning emerged from a distributed,
+yet centrally aggregated approach for learning from horizontally- and/or vertically-partitioned,
+but i.i.d. datasets (Wright and Yang, 2004; Ma and Sivakumar, 2006; Yang and Wright, 2006;
+Samet and Miri, 2009). Heterogeneity of partners in the mainstream formalization of fed-
+erated learning became pivotal, and a large body of work has examined client selection and
+scheduling strategies to accelerate convergence, reduce communication, and improve fairness
+under heterogeneous data and system conditions (Liu et al., 2020; Lin et al., 2025; Gupta
+et al., 2025; Zhu et al., 2024; Ami et al., 2025; Trindade and da Fonseca, 2024; Nagalapatti
+and Narayanam, 2021; Qu et al., 2022). Recent hierarchical/personalized FL frameworks
+further emphasize structured interactions among clients (Huang and Li, 2021; Tarzanagh
+et al., 2022; Zhang et al., 2023; Luo et al., 2023; Shen et al., 2025a,b; Zhang et al., 2025;
+Wu et al., 2022). Our work provides a complementary, pure-exploration viewpoint, in which
+client selection is reinterpreted as sequential identification of beneficial candidates under a
+shared evaluation budget. Contrary to hierarchical FL, which aims to find, through a parti-
+tioning of partners defined by similar distributions, ’undirected’, homogeneously beneficial
+coalitions for each coalition member, the SSNL formalization aims to find the most beneficial
+partner set for each participant.
+Partner selection in multi-agent systems and multi-agent RL
+In multi-agent sys-
+tems (MAS), coalition formation and partner selection have been extensively studied, often
+using cooperative game theory or learning-based mechanisms. Recent work on cooperative
+MAS investigates how agents form, adapt, and evaluate coalitions under communication,
+incentive, and strategic constraints (Ota et al., 2022; Jiang and Wu, 2022; Chen et al., 2024,
+2025; Chaudhury et al., 2022; Donahue and Kleinberg, 2021).
+These approaches typically assume symmetric or mutually agreed coalitions and often
+aim at stable or optimal coalition structures. By contrast, SSNL explicitly models asym-
+metric donor–recipient relationships between partners, and SOMMAB fully represents and
+levarages the semi-overlapping evaluation pattern. This shifts the focus from equilibrium
+coalition states to the sequential identification of beneficial asymmetric coalitions under
+limited samples and computation, linking coalition formation in MAS with best-arm iden-
+tification and structured pure exploration.
+Finally, credit assignment learning in multi-agent reinforcement learning (MARL) pro-
+vides a generalized, quantitative perspective to multi-bandit formulations by studying how
+multiple learning agents coordinate, compete, and transfer influence through structured in-
+teractions and shared environments (Hernandez-Leal et al., 2020). Recent MARL works on
+cooperative games, value decomposition, and population-based training naturally instantiate
+asymmetric contribution flows between agents, closely aligning with the support networks
+studied in this paper (Yang et al., 2020; Zhou et al., 2020; Gorsane et al., 2022; Bettini et al.,
+2024).
+Dataset selection
+If, in federated learning (FL), clients each possess multiple local datasets,
+the partner selection problem becomes even more complex: rather than selecting a single
+8
+
+Semi-overlapping MAB best arm identification
+client as a whole, the learning system must evaluate and choose among potentially many
+dataset contributions per client. In such scenarios, each dataset offered by a client may vary
+in relevance, size, and distributional alignment with the global task, and the usefulness of
+a client is no longer a single scalar but a composition of contributions from its constituent
+datasets. This exacerbates the selection challenge because a naive choice of clients may
+inadvertently favor those with many weak datasets over those with fewer but highly in-
+formative ones.
+Formal dataset selection approaches from the broader machine learning
+literature, which frame dataset choice as an optimization problem over expected utility or
+distributional matching, provide valuable tools for quantifying dataset usefulness and can be
+integrated with client selection strategies to better balance contribution quality and quantity
+(Huang et al., 2023; Fan and Barzilay, 2025; Xie et al., 2023).
+3 Multi-Bandit Problem Setup
+Now we define the MMAB BAI problem more formally and introduce the notation used in
+this paper. Let the number of MABs be denoted by M and, for simplicity, the number of
+arms for each MAB by K. The reward distribution of arm k of bandit m is denoted by
+νmk. It is bounded in [0, b] and has mean µmk. Usually, m, p, or q will denote MAB indices,
+and k, i, or j denote arm indices. It is assumed, that each bandit m has a unique best arm
+k∗
+m := arg max1≤k≤K µmk, and µ∗
+m := µmk∗m = max1≤k≤K µmk denotes the mean reward of
+k∗
+m. In bandit m, the gap for arm k is defined as ∆mk = | maxj̸=k µmj −µmk|. That is,
+∆mk = µ∗
+m −µmk for suboptimal arms, while the gap of k∗
+m, ∆mk∗m = µ∗
+m −maxj̸=k∗m µmj is
+the same as that of a second best arm.
+The distributions {νmk} are not known to a forecaster, who, at each round t = 1, . . . , n,
+pulls a bandit-arm pair I(t) = (m, k) and observes a sample drawn from the distribution
+νI(t) independently from the past (given I(t)). The sth sample observed from νmk will be
+denoted by Xmk(s), and the number of times that the pair (m, k) has been pulled by the
+end of round t is denote by Tmk(t). The forecaster estimates each µmk by computing the
+average of the samples observed over time, that is, by
+bµmk(t) =
+1
+Tmk(t)
+Tmk(t)
+X
+s=1
+Xmk(s).
+(1)
+At the end of final round n, the forecaster specifies an arm with the highest estimated
+mean for each bandit m, that is, outputs Jm(n) ∈arg maxk bµmk(n). The error probability
+and the simple regret of recommending Jm(n) is em(n) := P (Jm(n) ̸= k∗
+m) and rm(n) :=
+µ∗
+m −µmJm(n), respectively. Recalling the three performance measures mentioned in Sec. 1,
+which are to be minimized, the first one corresponds to the expectation (w.r.t. the samples)
+of the average regret incurred by the forecaster
+r(n) := E
+"
+1
+M
+M
+X
+m=1
+rm(n)
+#
+= 1
+M
+M
+X
+m=1
+ µ∗
+m −EµmJm(n)
+
+,
+the second one is the average error probability
+e(n) := 1
+M
+M
+X
+m=1
+em(n) = 1
+M
+M
+X
+m=1
+P (Jm(n) ̸= k∗
+m) ,
+9
+
+Antos et al
+while the third one corresponds to the maximum (worst case) error probability
+ℓ(n) := max
+m em(n) = max
+m P (Jm(n) ̸= k∗
+m) .
+Gabillon et al. (2011b) gives the rationale of these measures in applications. It is easy to
+see that the three measures are related through
+minm,k̸=k∗m ∆mk
+M
+· ℓ(n) ≤
+min
+m,k̸=k∗m
+∆mk · e(n) ≤r(n) ≤be(n) ≤bℓ(n),
+thus bounding one of these measures also gives control for the other two. Thus the bounds
+both by Gabillon et al. (2011b) and in this paper apply to ℓ(n).
+In this paper, we extend MMABs allowing the bandits to have semi-overlapping arms:
+Definition 1 A set of semi-overlapping arms (i.e, an evaluation group) consists of multiple
+arms belonging to different bandits that are “overlapping” in the sense that they are “pulled
+together”, that is, their joint trial consumes one pull from the budget, however, the reward
+distributions and the actual reward responses are not necessarily the same for these arms.
+Here it is assumed for simplicity that such sets are pairwise disjoint.
+An MMAB with semi-overlapping arms is a semi-overlapping multi-bandit (SOMMAB).
+For any r ≥2 integer, an r-order SOMMAB is one, where each arm belongs to a set of
+semi-overlapping arms and the size of each maximal set of semi-overlapping arms is at least
+r. Moreover, we can call all MMAB a 1-order semi-overlapping MMAB.
+Note that when a set of semi-overlapping arms is pulled then for all arms in the set, the
+corresponding Tmk(t)’s are increased simultaneously, that is, in case of semi-overlapping, the
+sum of Tmk(t)’s may exceed t. Namely, for r-order semi-overlapping multi-bandit, the sum
+of Tmk(t) is at least rt.
+Also note that for SSNL, the different sets of semi-overlapping arms are disjoint and
+correspond to the sets of nodes trialed together. Thus if always at least r entities are trialed
+together, that is, each candidate contributor set has at least size r −1, then the SSNL
+problem corresponds to an r-order SOMMAB. Therefore, we call it an r-order SSNL.
+4 The GapE Algorithm
+Using the definition of bµmk(t), the estimated gaps are defined in an analogous way as ∆mk:
+b∆mk(t) = | max
+j̸=k bµmj(t) −bµmk(t)|.
+(2)
+We have slightly generalized the Gap-based Exploration (GapE) algorithm by Gabillon
+et al. (2011b). In particular, instead of one pull for each arm in the initialization phase, the
+algorithm takes a new parameter l, and it applies l initializing pulls per arm. Also, to make
+it aligned with SOMMABs, we detailed how GapE should handle semi-overlapping arms if
+any. The clarified pseudo-code of this generalized GapE(l) algorithm is shown in Figure 2.
+Based on the estimated gaps instead of the means, GapE handles the M-bandit problem
+somewhat like a single-bandit problem with MK arms is handled by UCB-E. At time step
+t, an index Bmk(t) is computed for each pair (m, k) by GapE based on the samples up to
+10
+
+Semi-overlapping MAB best arm identification
+Parameters: number of rounds n, exploration parameter a, maximum range
+b, uniform exploration length l
+Initialize: draw each bandit-arm pair (m, k) * l-times
+for t = lMK set all Tmk(t) = l, calculate bµmk(t) as in (1)
+calculate all b∆mk(t) as in (2)
+for t = 1, 2, . . . , n do
+Compute Bmk(t) = −b∆mk(t −1) + b
+q
+a
+Tmk(t−1) for all bandit-arm pairs
+(m, k)
+Draw I(t) ∈arg maxmk Bmk(t) *
+Observe XI(t)(TI(t)(t −1) + 1) ∼νI(t)
+Update TI(t)(t) = TI(t)(t −1) + 1 and bµI(t)(t) as in (1)
+Update all b∆mk(t) as in (2) for all bandit involved by semi-overlapping
+end for
+Return: Jm(n) ∈arg maxk∈{1,...,K} bµmk(n), ∀m ∈{1, . . . , M}
+* Whenever the drawn arm is part of an evaluation group, I(t) should represent
+the entire group, that is, all arms in it receive a reward and their corresponding
+Tmk(t), bµmk(t), and all affected b∆mk(t) are updated.
+Figure 2: The pseudo-code of the generalized Gap-based Exploration (GapE(l)) algorithm.
+time t −1. Then the pair (m, k) with the highest Bmk(t) is selected as I(t) (together with
+arms in the same semi-overlapping set as I(t), if any). Similarly to UCB methods of Auer
+et al. (2002), Bmk has two terms. The first one is the negative of the estimated gap for the
+bandit-arm pair (since the gap is to be minimized), while the second one is a confidence
+radius based exploration term pushing GapE to pull arms that have been underexplored.
+This way, GapE tends to balance between pulling arms with less estimated gap and smaller
+number of samples. The exploration tendency of GapE can be tuned by the exploration
+parameter a.
+When the time horizon n is known, both Proposition 2 and Theorem 3 in Section 5
+suggest that a should be set as a = C n−MK
+H
+, where C stands for appropriate constants
+specified in the results, respectively, and
+H =
+X
+m,k
+b2
+∆2
+mk
+is the complexity of the MMAB problem introduced by Gabillon et al. (2011b) (see further
+discussion by Gabillon et al., 2011b, Section 3.1 and in Section 5 below). As pointed out by
+Gabillon et al. (2011b, Section 3), this algorithm differs from most usual bandit strategies
+in that the index Bmk for one arm depends explicitly on the samples from the other arms,
+as well. Due to this, the analysis of GapE is much more complicated. See also the thorough
+comparison of the GapE and UCB-E algorithms and for an explanation on why the gaps
+are crucial instead of means in the multi-bandit case by Gabillon et al. (2011b, Section 3).
+Note that the idea of GapE is extended by Gabillon et al. (2011b, Section 3.2) also into a
+more involved algorithm, GapE-variance (GapE-V), which takes into account the variances
+11
+
+Antos et al
+of the arms, as well, and exponential upper-bound on GapE-V’s error probability is also
+provided.
+Since the good range of the exploration parameter a in both GapE and GapE-V depends
+on the problem complexity H, which is usually unknown in advance, adaptive versions of
+GapE (somewhat similarly to Adaptive UCB-E of Audibert et al., 2010) and GapE-V are
+also given there. Moreover, the performance of GapE, GapE-V and their adaptive versions
+are evaluated by Gabillon et al. (2011b, Section 4, Appendix A) on several synthetic prob-
+lems, which demonstrates that these algorihms outperform benchmark strategies (Uniform,
+Uniform+UCB-E).
+5 Error probability bounds
+First we present the upper-bound on the error probability ℓ(n) of GapE by Gabillon et al.
+(2011b, Section 3.1) for (non-overlapping) MMABs:
+Proposition 2 If we run GapE with parameters l = 1 and 0 < a ≤4 n−MK
+9H
+, then its
+probability of error satisfies
+ℓ(n) ≤P (∃m : Jm(n) ̸= k∗
+m) ≤2MKn exp
+
+−a
+64
+
+,
+in particular for a = 4 n−MK
+9H
+, we have ℓ(n) ≤2MKn exp
+ −n−MK
+144H
+
+.
+Gabillon et al. (2011b) give also some remarks about the bound above, the relation of the
+complexity H to the complexity Hm of each individual bandit and to the complexity Hmk of
+each individual arm in each bandit, the comparison of GapE with the static allocation strat-
+egy (achieving at most MK exp(−n/H) error probability), and with the Uniform and com-
+bined Uniform+UCB-E allocation strategies (achieving at most MK exp(−n/(MK maxm,k Hmk))
+and 2MKn exp(−(n −MK)/(18M maxm Hm)) error probability, respectively).
+As stated by Gabillon et al. (2011b): “the constants in the analysis are not accurate.”
+In this paper, we could improve the constant in the exponent above by more than a factor
+of 3.5 (for l = 152, and by more than a factor of 2.4 for l = 1) taking it much closer to the
+constant 1/18 in the bound for the single-MAB algorithm UCB-E by Audibert et al. (2010),
+and by another factor of r for r-order semi-overlapping multi-bandits:
+Theorem 3 If we run GapE with parameters 1 ≤l ≤152 and 0 < a ≤
+n−MK+1
+(1+2c)2H−Qc for a
+SOMMAB, where Qc
+def
+= 3(1 + 5c)(1 + c)/4,
+c def
+=
+1
+2
+p
+3ρ + ρ2 + 2ρ + 1
+and
+ρ def
+=
+s
+min
+
+l
+l −1, 2
+
+,
+then for n ≥lMK, its probability of error satisfies
+ℓ(n) ≤P (∃m : Jm(n) ̸= k∗
+m) ≤2MKne−2ac2,
+in particular for a =
+n−MK+1
+(1+2c)2H−Qc , we have
+ℓ(n) ≤2MKn exp
+
+−
+2(n −MK + 1)
+(1/c + 2)2H −Qc/c2
+
+.
+12
+
+Semi-overlapping MAB best arm identification
+Especially,
+ℓ(n) < 2MKn exp
+
+−n −MK + 1
+41H −36
+
+,
+if l = 152.
+For r-order semi-overlapping MMABs, if we run GapE with a =
+rn−MK+1
+(1+2c)2H−Qc and l =
+152, we have
+ℓ(n) ≤2MKn exp
+
+−
+2(rn −MK + 1)
+(1/c + 2)2H −Qc/c2
+
+< 2MKn exp
+
+−rn −MK + 1
+41H −36
+
+.
+Remark 4 (Choice of l) Despite the apparent complexity of the formulae defining c, it is
+actually a rather flat function of l taking values in the interval (1/9, 1/7). For the natural
+l = 1 choice, one could use, for example, simply c = 6/53 instead, when Theorem 3 implies
+for n ≥MK,
+ℓ(n) < 2MKn exp
+
+−n −MK + 1
+59H −50
+
+.
+In this investigation, however, our objective was to identify the optimal exponent achievable
+with this proof technique by adjusting l. Nonetheless, the optimal selection of l = 152 may
+initially appear enigmatic. This choice is presumably an artifact stemming from the involved
+technique. On the one hand, as l/(l −1), and thus ρ approaches 1, the exponent that could
+be achieved in the bound decreases. On the other hand, when l is excessively large, the base
+step of the induction in the proof is invalid. It is evident that the assumption of an unlimited
+l is not a reasonable one, as it would result in a uniform arm sampling instead of any bandit
+strategy. The choice of l that yields the true optimal minimax rate is not necessarily identical
+to the above choice.
+Example 1 (Comparison) It is our understanding that Theorem 3 leads to the best avail-
+able bound for the MMAB problem.1 To compare this bound to the ones by Gabillon et al.
+(2011b), as an example, examine a realistic situation, where the maximum of the complexi-
+ties is 5 times their average, that is, M maxm Hm/H ≈5. Then, for the exponents,
+* the bound for Uniform+UCB-E yields −(n −MK)/90H,
+* the GapE bound by Gabillon et al. (2011b) yields the weeker −(n −MK)/144H, while
+* our new GapE bound yields −(n −MK)/59H (l = 1), or even −(n −MK)/41H (for
+l = 152 and n ≥152MK).
+Also, in the setting, where M = K = 2, H = 25 and n = 20000, the GapE bound by Gabil-
+lon et al. (2011b) yields the useless 160000 exp(−4999/900) = 61923%, while our new GapE
+bound yields 160000 exp(−19997/1425) = 12.873% (l = 1), or even 160000 exp(−19997/989) =
+0.02648% (l = 152).
+Moreover, numerical simulations by Gabillon et al. (2011b) suggest that the optimal value
+of aH/n is typically in range [2, 8]. Observe, that for large n, Proposition 2 allows aH/n to
+be increased up to 0.44, whereas Theorem 3 allows it up to 0.66 for l = 1. While this suggest
+an improving trend, also indicates room for further improvement.
+1. The UGapEb algorithm for single MABs is extended to MMABs by Gabillon et al. (2013, Appendix B),
+and it is mentioned that their bound could be stated similarly for MMABs. However, upon communica-
+tion with the authors, it was revealed that no formal proof exists; only intuition for possibly extending
+the single MAB proof for MMABs.
+13
+
+Antos et al
+Remark 5 For (massively overlapping) SOMMABs, the number n of pulls in the exponent
+is somewhat weak, and instead we could expect intuitively the total sample size P
+m,k Tmk(n)
+there. However, this sum is not known in advance, so we cannot set the parameter a depend-
+ing on it. On the other hand, the best lower bound for this sum that is known in advance, is
+rn for r-order SOMMABs, and that is exactly what we have at the end of Theorem 3.
+Remark 6 (M-order semi-overlapping) For the M-order semi-overlapping case, where
+the pull of each of the K semi-overlapping arm sets (recall that these are disjoint), actually
+allows a trial in each bandit, the bound takes the form ℓ(n) < 2MKn exp
+
+−n−K
+41H/M
+
+, with the
+complexity being the average complexity over the bandits. This makes sense considering that
+this configuration is equivalent to a single MAB with K arms that possess M-dimensional
+vector values, where we have to find the best values dimension-wise. See Section 6 for the
+relevance of approximately M-order semi-overlapping for SSNL.
+We have also fixed some flaws, clarified numerous details and slightly streamlined pre-
+sentation of the original proof by Gabillon et al. (2011b):
+Proof [of Theorem 3.] If 2ac2 ≤log(2MKn), the bound on the probability is trivial. If the
+Theorem holds for b = 1, then the algorithm fed by the normed inputs Xmk(t)/b and run
+by b = 1 would make the same draws and same returns, so the Theorem follows for any b.
+Thus w.l.o.g. we assume 2ac2 > log(2MKn) and b = 1.
+Define R (t) def
+=
+p
+a/t for t > 0, and recall that
+I(t) ∈arg max
+mk
+
+−b∆mk(t −1) + R (Tmk(t −1))
+
+.
+Step 1. Let us consider the following event:
+E = {∀m ∈{1, . . . , M}, ∀k ∈{1, . . . , K}, ∀t ∈{1, . . . , n}, |bµmk(t) −µmk| < cR (Tmk(t))}
+From Chernoff-Hoeffding’s inequality and the union bound, we have
+P
+ ξC
+≤2MKne−2ac2.
+Now we would like to prove that on E, we find the best arm for all the bandits, i.e., Jm(n) =
+k∗
+m, ∀m ∈{1, . . . , M}. All statements below are meant on E. Since Jm(n) is the empirical
+best arm of bandit m, we should prove that for any k′ ∈{1, . . . , K}, k′ ̸= k∗
+m implies
+bµmk′(n) < bµmk∗m(n). This follows if we prove that for any (m, k), cR (Tmk(n)) ≤∆mk/2,
+since then upper- and lower-bounding the bµ’s by definition of E,
+bµmk∗m(n) −bµmk′(n) > µmk∗m −cR
+ Tmk∗m(n)
+
+−µmk′ −cR (Tmk′(n))
+≥∆mk′ −∆mk∗m/2 −∆mk′/2
+≥∆mk′ −∆mk′/2 −∆mk′/2 = 0.
+Moreover, the desired cR (Tmk(n)) ≤∆mk/2 is equivalent to Tmk(n) ≥4ac2
+∆2
+mk .
+Step 2. In this step, we show that in GapE, for any bandits (m, q) and arms (k, j), and
+for any t ≥lMK, the following relation between the number of pulls of the arms holds
+−∆mk + (1 + 2c)R (max(Tmk(t) −1, 1)) ≥−∆qj + 1 −c
+2
+R (Tqj(t)) .
+(3)
+14
+
+Semi-overlapping MAB best arm identification
+We prove this inequality by induction on t.
+Base step. Recall that ρ =
+p
+min(l/(l −1), 2) ∈(1,
+√
+2] for l ≥1 and c =
+1
+2√
+3ρ+ρ2+2ρ+1 ∈
+(1/9, 1/7), and that
+2ac2 > log(2MKn) ≥log(2MKMKl) ≥log(32l)
+(4)
+for n ≥lMK, M, K ≥2. We know that after the first lMK rounds of the GapE algorithm,
+all the arms have been pulled l-times, i.e., Tmk(lMK) = l, ∀m, k. Thus, for t = lMK,
+inequality (3) is equivalent to
+(2 + 4c)ρ −1 + c
+2
+ra
+l =
+ 1 + 2c
+√
+l −1 −1 −c
+2
+√
+l
+ √a ≥∆mk −∆qj
+for l ≥2,
+(5)
+and to
+1 + 5c
+2
+√a ≥∆mk −∆qj
+for l = 1.
+The latter holds, since (4) yields √ac >
+q
+5
+2 log 2 if l = 1, and thus 1+5c
+2
+√a > 5
+2
+q
+5
+2 log 2 >
+1 ≥∆mk −∆qj.
+For the l ≥2 case, we prove in Appendix A the following
+Lemma 7 For ρ > 1, 2ρ −1 > (11 −4ρ)c.
+The inequality in this lemma can be rearranged as (2 + 4c)ρ −1 + c > 12c, leading to
+(2 + 4c)ρ −1 + c
+2
+ra
+l > 6c
+ra
+l .
+Since, by (4), 36ac2 > 18 log(32l) > l for l ≤152, we have 6c
+p
+a/l > 1, which, together
+with ∆mk −∆qj ≤1, implies (5).
+Inductive step. Let us assume that (3) holds at time t −1 and we pull arm i of bandit p
+at time t, i.e., I(t) = (p, i) and Tpi(t) ≥l + 1. So at time t, the inequality (3) trivially holds
+for every choice of m, q, k, and j, except when (m, k) = (p, i) ̸= (q, j). As a result, in the
+inductive step, we only need to prove that the following holds for any q ∈{1, . . . , M} and
+j ∈{1, . . . , K}
+−∆pi+(1+2c)R (Tpi(t) −1) = −∆pi+(1+2c)R (max(Tpi(t) −1, 1)) ≥−∆qj+(1−c)R (Tqj(t)) /2.
+(6)
+for (q, j) ̸= (p, i). Since arm i of bandit p has been pulled at time t, we have that for any
+bandit-arm pair (q, j)
+−b∆pi(t −1) + R (Tpi(t −1)) ≥−b∆qj(t −1) + R (Tqj(t −1)) .
+(7)
+To prove (6), we first prove an upper-bound for −b∆pi(t−1) and a lower-bound for −b∆qj(t−1):
+Lemma 8 For c ≤1/3,
+−b∆pi(t−1) ≤−∆pi+2cR (Tpi(t) −1)
+and
+−b∆qj(t−1) ≥−∆qj−
+
+21 + 2c
+1 −c ρ + 1
+
+cR (Tqj(t)) .
+(8)
+15
+
+Antos et al
+We report the proofs of Lemma 8 in Appendix A. The inequality (6), and as a result, the
+inductive step is proved by replacing −b∆pi(t−1) and −b∆qj(t−1) in (7) from (8) and under
+the condition that
+
+21 + 2c
+1 −c ρ + 1
+
+c ≤1 + c
+2
+,
+or equivivalenly
+(8ρ −1)c2 + (4ρ + 2)c −1 ≤0.
+This condition is satisfied, since c is just the higher root of the polynomial above.
+Step 3. In order to prove the condition of Tmk(n) in Step 1, let us assume that arm
+k of bandit m has been pulled less than a(1−c)2
+4∆2
+mk
+times at time t = n (at the end), which is
+equvivalent to −∆mk + 1−c
+2 R (Tmk(n)) > 0. From this inequality and (3), we have −∆qj +
+(1 + 2c)R (Tqj(n) −1) > 0, or equivalently Tqj(n) < a(1+2c)2
+∆2
+qj
++ 1 for any pair (q, j). We
+also know that P
+q,j Tqj(n) ≥n (with equality if there is no semi-overlapping). From these,
+taking the assumption on Tmk(n) and ∆2
+mk ≤1 into account, we deduce that
+n−(MK−1) <
+X
+q,j
+a(1 + 2c)2
+∆2
+qj
+−a(1 + 2c)2
+∆2
+mk
++a(1 −c)2
+4∆2
+mk
+= a(1+2c)2H−aQc
+∆2
+mk
+≤((1+2c)2H−Qc)a,
+where Qc = 3(1+5c)(1+c)/4. So, if we select a such that n−MK +1 ≥((1+2c)2H −Qc)a,
+we have a contradiction, refuting the assumption above that Tmk(n) < a(1−c)2
+4∆2
+mk , which means
+that Tmk(n) ≥4ac2
+∆2
+mk for any pair (m, k), when c ≤1/5. The condition for a in the theorem
+comes from our choice of a above in this step.
+For an r-order semi-overlapping multi-bandit, we also know that P
+q,j Tqj(n) ≥rn, thus
+the inequality above becomes
+rn −(MK −1) < ((1 + 2c)2H −Qc)a,
+so if we choose a =
+rn−MK+1
+(1+2c)2H−Qc , we must have the desired Tmk(n) >
+4ac2
+∆2
+mk for any pair
+(m, k), yielding
+ℓ(n) ≤2MKn exp
+
+−
+2(rn −MK + 1)
+(1/c + 2)2H −Qc/c2
+
+< 2MKn exp
+
+−rn −MK + 1
+41H −36
+
+for l = 152. This concludes the proof.
+6 Applications of sequential support network learning
+The SSNL appears in many recent applications, such as task selection in auxiliary task
+learning, client selection in federated learning, and agent selection in multi-agent systems
+(see Table 1)..
+16
+
+Semi-overlapping MAB best arm identification
+Table 1: Sequential support network learning in practice: entities, relationships, and trial
+mechanisms in various application domains.
+Problem
+Entity
+Option
+Trial
+Multi-Task Learning
+Task
+Multi-output model
+Empirical estimate of com-
+posite error using random re-
+sampling
+Auxiliary Task Learning
+Task
+Auxiliary task set
+Empirical estimate of target
+task error using random re-
+sampling
+Federated Learning
+Client
+Collaborating clients
+Empirical estimate of target
+client error using random re-
+sampling
+Multi-Agent Systems
+Agent
+Agent coalition
+Empirical estimate of target
+agent’s score using random-
+ized problem solving
+In these applications, a usual heuristic for the construction of candidate sets is based on
+top-down approaches, that is, filtering entities with detrimental effects. Consequently, the
+size of each candidate set, and thus the order of the SSNL, can be close to the number M
+of entities. For such scenarios, the following consequence of Theorem 3 is especially useful:
+Corollary 9 If in r-order SSNL with M entities, we run GapE with a =
+rn−MK+1
+(1+2c)2H−Qc and
+l = 152, we have
+ℓ(n) < 2MKn exp
+
+−rn −MK + 1
+41H −36
+
+,
+where K is the (maximal) number of candidates for a node.
+Thus when r is close to M, in line with Remark 6, the exponent of the bound can take the
+form rn/M−K
+41H/M
+≈
+n−K
+41H/M with the complexity being the average complexity over the entities.
+For the specific applications above, the SSNL realization and MMAB model are detailed
+as follows.
+6.1 Multi-task learning and auxiliary task learning
+In the MTL/ATL approach, tasks correspond to bandits, arms are a priori defined candidate
+auxiliary task sets for each task, and pulls are evaluations of the performance of the joint
+model, including the target task and the auxiliary task set corresponding to the pulled arm,
+which evaluation may use a “k-fold” cross-validation.
+6.2 Federated learning
+In the FL framework, the multi-bandit model is applied as follows: separate bandits corre-
+spond to clients or partners in FL, arms are a priori defined candidate partners sets for each
+partners, and pulls are standard FL evaluations using “k-fold” cross-validation and multiple
+hypothesis testing correction. This application also utilizes the client-edge-cloud compute
+17
+
+Antos et al
+continuum (Liu et al., 2020; Lin et al., 2025; Gupta et al., 2025): the cloud server at a higher
+layer can run the MMAB algorithm to orchestrate the joint learning of auxiliary partner
+sets for each partner, whereas edge nodes at lower layers can do the evaluations by running
+the standard elementary FL schemes for each partner.
+6.3 Coalition Learning in Multi-agent systems
+SSNL is also close to the learning of cooperations in multi-agent systems, optimizing statisti-
+cal, computational, and communication aspects (Ota et al., 2022; Jiang and Wu, 2022; Chen
+et al., 2024, 2025; Chaudhury et al., 2022). However, in our approach, auxiliary partner se-
+lection is asymmetric, resembling the selection of an optimal tool set for an agent, and each
+partner can separately select its auxiliary partner set to improve its performance (Larsson
+et al., 2021; Zhang and et al., 2024; Cohen and Agmon, 2024, 2025); see game-theoretic
+analysis of dependencies by Donahue and Kleinberg (2021).
+The multi-bandit model is applied as follows: agents correspond to bandits, arms are
+a priori defined candidate agent sets for each agent, and pulls are evaluations of the joint
+cooperation (problem solving) with stochastic elements.
+7 Discussion and Conclusion
+We demonstrated that a broad class of modern learning problems, where entities contribute
+to and benefit from others, and where contributions can be explored through weakly coupled
+shared sequential evaluations, can be cast as instances of a newly introduced framework,
+Sequential support network Learning (SSNL). Conceptually, SSNL concerns the identification
+and evaluation of beneficial auxiliary interactions among entities and can be viewed as
+learning a directed graph encoding the most supportive relations.
+We showed that the SSNL problem can be solved efficiently by formulating it as a semi-
+overlapping multi-bandit (SOMMAB) pure-exploration problem. In this model, each candi-
+date set corresponds to an arm, and structurally coupled evaluations induce semi-overlapping
+pulls in which a single evaluation provides distinct information to multiple bandits. This
+abstraction captures the essential asymmetry and shared computational structure of SSNL
+while retaining the tractability of classical best-arm identification.
+Building on this foundation, we established new exponential error bounds for SOMMABs
+under a generalized GapE algorithm. The bounds significantly improve the constants known
+for non-overlapping multi-bandit BAI and scale linearly with the degree of overlap. These
+results show that even partial structural coupling across bandits can meaningfully reduce
+sample complexity, providing theoretical justification for exploiting shared evaluations in
+distributed learning systems.
+We further outlined realizations of the SOMMAB abstraction in several prominent learn-
+ing paradigms—including multi-task learning (MTL), auxiliary task learning (ATL), feder-
+ated learning (FL), and coalition formation in multi-agent systems (MAS). These instan-
+tiations illustrate that semi-overlapping evaluation is a recurring structural feature across
+disparate machine learning applications. In particular, the SSNL–SOMMAB formulation
+yields a new architectural lens for federated learning that aligns naturally with emerging
+cloud–edge infrastructures: the SOMMAB algorithms provide a principled mechanism for
+18
+
+Semi-overlapping MAB best arm identification
+cloud-level orchestration of the exploration of auxiliary collaborations across clients with
+evaluations at the edge layers.
+8 Future Work
+Several directions emerge naturally from this work. Immediate theoretical challenges are as
+follows:
+• GapE with variance A variant of GapE, the GapE-V algorithm taking into account
+the variances of the arms is also proposed by Gabillon et al. (2011b), along with a
+corresponding bound, which may be improved and extended to semi-overlapping case
+similarly as Proposition 2.
+• Adaptive algorithms Adaptive versions of both GapE and GapE-V are also proposed
+by Gabillon et al. (2011b) without proofs, where the complexity measures of the multi-
+bandit problem are estimated on the fly, so they do not need to be known in advance
+for tuning the exploration parameter a. Giving bounds for the performance of these
+adaptive variants is a challenging problem.
+• (ϵ, m)-best arm identification Two common generalizations of the MAB/BAI prob-
+lem are as follows:
+- Rather than identifying the optimal arm, for given ϵ, the objective is to identify an
+arm whose mean is closer than ϵ to that of the optimal one.
+- For given m, the objective is to identify the best m arm, rather than the single best.
+The combination of these two generalizations gives rise to the (ϵ, m)-best arm identi-
+fication problem, as introduced by Gabillon et al. (2011b), and for which GapE and
+Theorem 3 may be extended.
+Extending SOMMAB beyond fixed sparse candidate sets is another important avenue.
+One natural extension is to remove the fixed-candidate constraint and move toward open-
+ended coalition optimization. This requires navigating a combinatorial space of exponen-
+tially many coalitions. We propose to incorporate Monte Carlo Tree Search (MCTS) (Kocsis
+and Szepesvári, 2006; Gaudel and Sebag, 2010; Chaudhry and Lee, 2018; Browne et al., 2012)
+as a meta-level selection mechanism over the support network.
+Additional open problems include incorporating stochastic or adversarial overlap pat-
+terns, handling partial observability across bandits, and integrating privacy or commu-
+nication constraints that arise in distributed or federated environments.
+Each of these
+generalizations would further broaden the applicability of SSNL/SOMMABs and deepen
+the theoretical foundations of structured pure-exploration algorithms for cooperative agent
+learning.
+Acknowledgments and Disclosure of Funding
+This research was supported by the National Research, Development, and Innovation Fund
+of Hungary under Grant OTKA-K139330, TKP2021-EGA-02, and the European Union
+19
+
+Antos et al
+project RRF-2.3.1-21-2022-00004 within the framework of the Artificial Intelligence National
+Laboratory.
+Appendix A. Proofs of Lemmata in Theorem 3
+In this appendix we prove the lemmata in the proof of Theorem 3:
+Proof [of Lemma 7.] Substituting c > 0, it is to show that
+(2ρ −1)(2
+p
+3ρ + ρ2 + 2ρ + 1) = (2ρ −1)/c > 11 −4ρ,
+or equivivalently,
+(2ρ −1)
+p
+3ρ + ρ2 > 6 −2ρ −2ρ2.
+This would follow from
+(2ρ −1)
+p
+3ρ + ρ2 > |6 −2ρ −2ρ2|,
+which, when squared, becomes
+(2ρ −1)2(3ρ + ρ2) > (6 −2ρ −2ρ2)2.
+After some algebra, this is equivalent to (ρ + 4)(ρ −1) > 0, which clearly holds for ρ > 1.
+Proof [of Lemma 8.] We denote by bµ∗
+m(t) and bk∗
+m(t) the estimated mean and the index
+of an (arbitrarily chosen) expirically best arms of bandit m after round t (i.e., bµ∗
+m(t) =
+bµmbk∗m(t)(t) = max1≤k≤K bµmk(t), bk∗
+m(t) ∈arg max1≤k≤K bµmk(t)). Also, by µ+
+m = µmk+
+m and
+k+
+m the mean and the index of an (arbitrarily chosen) second best arms of bandit m, and by
+bµ+
+m(t) = bµmbk+
+m(t)(t) and bk+
+m(t) the estimated mean and the index of an (arbitrarily chosen)
+empirically second best arms of bandit m after round t. (If the empirically best arm is
+not unique then the empirically best arms and the empirically second best arms constitute
+the same set, and bµmbk+
+m(t)(t) = bµmbk∗m(t)(t), however, bk+
+m(t) ̸= bk∗
+m(t) is chosen. Note that
+bµmbk∗m(t)(t), µmk+
+m, and bµmbk+
+m(t)(t) are unambiguous, but µmbk∗m(t), bµmk+
+m(t), and µmbk+
+m(t) may
+be arbitrarily chosen from multiple values.)
+Upper Bound in (8)
+Here we prove that
+−b∆pi(t −1) ≤−∆pi + 2cR (Tpi(t) −1) ,
+where arm i of bandit p is the arm pulled at time t. This means that Tpi(t −1) = Tpi(t) −1.
+Each T, µ, bµ, ∆, b∆, k∗, bk∗, k+ and bk+ refers for bandit p below, so we supress the indices p
+for these values here. Also, each T, bµ, b∆, bk∗and bk+ refers to time t −1 below, so we omit
+the argument t −1 for these values here. Thus, we prove b∆i ≥∆i −2cR (Ti). Observe that,
+since arm i of bandit p is pulled at time t, from (7) we have all of
+−b∆i + R (Ti) ≥−b∆bk+ + R
+ Tbk+
+
+,
+(9)
+−b∆i + R (Ti) ≥−b∆bk∗+ R
+ Tbk∗
+
+, and
+(10)
+−b∆i + R (Ti) ≥−b∆k∗+ R (Tk∗) .
+(11)
+20
+
+Semi-overlapping MAB best arm identification
+We consider the following four cases and use 0 ≤c ≤1 throughout:
+Case 1. i = bk∗and i = k∗:
+Now we have
+b∆i = bµi −bµbk+
+≥µi −µbk+ −cR
+ Tbk+
+
+−cR (Ti)
+(a)
+≥µi −µbk+ −2cR (Ti)
+≥µi −µk+ −2cR (Ti) = ∆i −2cR (Ti) .
+(a) By definition b∆i = b∆bk+, thus (9) gives R (Ti) ≥R
+ Tbk+
+
+.
+Case 2. i = bk∗and i ̸= k∗: Now we have b∆i ≥0 obviously, while
+∆i −2cR (Ti) = (1 −c)(∆i −cR (Ti)) + c(∆i −(1 + c)R (Ti))
+(b)
+≤(1 −c)(∆i −cR (Ti)) −c(1 −c)R (Tk∗)
+= (1 −c)(µk∗−µi −cR (Ti) −cR (Tk∗))
+≤(1 −c)(bµk∗−bµbk∗)
+(on E)
+≤0.
+(by definition of bµbk∗).
+(b) is proven using (11) and i = bk∗̸= k∗, implying
+bµi + R (Ti) ≥bµbk+ + R (Ti) ≥bµk∗+ R (Tk∗) ,
+which, using bounds on E, further implies
+µi + (1 + c)R (Ti) ≥µk∗+ (1 −c)R (Tk∗) .
+Rearranging ∆i −(1 + c)R (Ti) ≤−(1 −c)R (Tk∗).
+Case 3. i ̸= bk∗and i = k∗:
+Now we have
+b∆i = bµbk∗−bµi
+≥bµk∗−bµbk∗
+≥µk∗−µbk∗−cR
+ Tbk∗
+
+−cR (Ti)
+(c)
+≥µk∗−µk+ −cR (Ti) −cR (Ti) = ∆i −2cR (Ti) .
+(c) By definition b∆i ≥b∆bk∗, thus (10) gives R (Ti) ≥R
+ Tbk∗
+
+.
+Case 4. i ̸= bk∗and i ̸= k∗: Now we have
+b∆i = bµbk∗−bµi ≥bµk∗−µi −cR (Ti) ≥µk∗−µi −cR (Ti) −cR (Tk∗) .
+(12)
+Recall that by (11)
+bµi −bµbk∗+ R (Ti) ≥−b∆k∗+ R (Tk∗) .
+(13)
+21
+
+Antos et al
+If k∗= bk∗, (13) can be written as
+bµi + R (Ti) ≥bµbk+ + R (Tk∗) .
+By i ̸= bk∗and definition of bk+, bµbk+ ≥bµi, which gives R (Ti) ≥R (Tk∗) and thus b∆i ≥
+∆i −2cR (Ti) from (12).
+If k∗̸= bk∗, (13) can be written as
+bµi + R (Ti) ≥bµk∗+ R (Tk∗)
+which, using bounds on E, implies
+µi + (1 + c)R (Ti) ≥µk∗+ (1 −c)R (Tk∗) ,
+and rearranging −R (Tk∗) ≥∆i
+1−c −1+c
+1−cR (Ti). Plugging this into (12) we have
+b∆i ≥∆i −cR (Ti) + c∆i
+1 −c −c1 + c
+1 −cR (Ti) = ∆i −2cR (Ti)
+1 −c
+.
+Now if ∆i −2cR (Ti) ≥0 then the r.h.s. is lower bounded by ∆i −2cR (Ti) as required. If
+∆i −2cR (Ti) < 0, we are done due to b∆i ≥0.
+Lower Bound in (8)
+Here we prove that
+−b∆qj(t −1) ≥−∆qj −(2ρ(1 + 2c)/(1 −c) + 1)cR (Tqj(t))
+for all bandits q ∈{1, . . . , M} and all arms j ∈{1, . . . , K}, such that the arm j of bandit q
+is not the one pulled at time t, i.e., (q, j) ̸= (p, i). This means that Tqj(t −1) = Tqj(t).
+In a manner akin to the proof for the upper-bound in Part 1, each T, µ, bµ, ∆, b∆, k∗,
+bk∗, k+ and bk+ refers for bandit q below, so we supress the indices q for these values here.
+Also, each T, bµ, b∆, bk∗and bk+ refers to time t −1 below, so we omit the argument t −1 for
+these values here. Thus, we prove b∆j ≤∆j + (2ρ(1 + 2c)/(1 −c) + 1)cR (Tj). Observe that,
+from the inductive assumption, we have all of
+−∆j + (1 + 2c)R (max(Tj −1, 1)) ≥−∆k+ + (1 −c)R (Tk+) /2,
+(14)
+−∆j + (1 + 2c)R (max(Tj −1, 1)) ≥−∆k∗+ (1 −c)R (Tk∗) /2, and
+(15)
+−∆j + (1 + 2c)R (max(Tj −1, 1)) ≥−∆bk∗+ (1 −c)R
+ Tbk∗
+
+/2.
+(16)
+We consider the following four cases:
+Case 1. j = bk∗and j = k∗:
+Now we have
+b∆j = bµj −bµbk+
+≤µj −bµk+ + cR (Tj)
+≤µj −µk+ + cR (Tk+) + cR (Tj)
+(e)
+≤∆j + 2c(1 + 2c)ρR (Tj) /(1 −c) + cR (Tj) = ∆j + (2ρ(1 + 2c)/(1 −c) + 1)cR (Tj) .
+22
+
+Semi-overlapping MAB best arm identification
+(e) By definition ∆k+ = ∆j, thus (14) gives 2(1 + 2c)R (max(Tj −1, 1)) /(1 −c) ≥
+R (Tk+). Finally, we have
+R2(max(Tj−1, 1)) =
+a
+max(Tj −1, 1) =
+Tj
+max(Tj −1, 1)
+a
+Tj
+≤
+la
+max(l −1, 0.5)Tj
+= (ρR (Tj))2,
+(17)
+which gives the result.
+Case 2. j = bk∗and j ̸= k∗:
+Now we have
+b∆j = bµj −bµbk+
+≤bµj −bµk∗
+≤µj −µk∗+ cR (Tk∗) + cR (Tj)
+(f)
+≤∆j + 2c(1 + 2c)ρR (Tj) /(1 −c) + cR (Tj) = ∆j + (2ρ(1 + 2c)/(1 −c) + 1)cR (Tj) .
+(f) By definition ∆k∗≤∆j, thus (15) gives 2(1+2c)R (max(Tj −1, 1)) /(1−c) ≥R (Tk∗).
+The claim follows using (17).
+Case 3. j ̸= bk∗and j = k∗: Now we have
+b∆j = bµbk∗−bµj
+≤µbk∗−µk∗+ cR (Tj) + cR
+ Tbk∗
+
+(g)
+≤−∆bk∗+ 2c/(1 −c)
+ ∆bk∗−∆j
+
++ cR (Tj) + 2c(1 + 2c)ρR (Tj) /(1 −c)
+≤−(1 −2c/(1 −c))∆bk∗−2c/(1 −c)∆j + cR (Tj) + 2c(1 + 2c)ρR (Tj) /(1 −c)
+(h)
+≤∆j + cR (Tj) + 2c(1 + 2c)ρR (Tj) /(1 −c) = ∆j + (2ρ(1 + 2c)/(1 −c) + 1)cR (Tj) .
+(g) (16) can be rearranged as
+cR
+ Tbk∗
+
+≤2c/(1 −c)
+ ∆bk∗−∆j
+
++ 2c(1 + 2c)R (max(Tj −1, 1)) /(1 −c).
+(18)
+The claim follows using (18) and (17).
+(h) This passage is true when 0 ≤2c/(1 −c) ≤1, i.e., when 0 ≤c ≤1/3.
+Case 4. j ̸= bk∗and j ̸= k∗: Now we have
+b∆j = bµbk∗−bµj ≤µbk∗−µj + cR (Tj) + cR
+ Tbk∗
+
+.
+(19)
+If bk∗= k∗, we may write (19) as
+b∆j = −bµj + bµbk∗
+≤−µj + µbk∗+ cR (Tj) + cR
+ Tbk∗
+
+≤∆j + cR (Tj) + cR
+ Tbk∗
+
+(i)
+≤∆j + cR (Tj) + 2c(1 + 2c)ρR (Tj) /(1 −c) = ∆j + (2ρ(1 + 2c)/(1 −c) + 1)cR (Tj) .
+23
+
+Antos et al
+(i) By definition ∆bk∗= ∆k∗≤∆j, thus (16) gives 2(1 + 2c)R (max(Tj −1, 1)) /(1 −c) ≥
+R
+ Tbk∗
+
+. The claim follows using (17).
+Now if bk∗̸= k∗, we may write (19) as
+b∆j = bµbk∗−bµj
+≤µbk∗−µj + cR (Tj) + cR
+ Tbk∗
+
+≤∆j −∆bk∗+ cR (Tj) + cR
+ Tbk∗
+
+(j)
+≤(1 −2c/(1 −c))
+ ∆j −∆bk∗
+
++ cR (Tj) + 2c(1 + 2c)ρR (Tj) /(1 −c)
+(k)
+≤∆j + cR (Tj) + 2c(1 + 2c)ρR (Tj) /(1 −c) = ∆j + (2ρ(1 + 2c)/(1 −c) + 1)cR (Tj) .
+(j) Again, this claim follows using (18) and (17).
+(k) This passage is true when 0 ≤2c/(1 −c) ≤1, i.e., when 0 ≤c ≤1/3.
+References
+D. B. Ami, K. Cohen, and Q. Zhao. Client selection for generalization in accelerated feder-
+ated learning: A multi-armed bandit approach. IEEE Access, 2025.
+J.-Y. Audibert, S. Bubeck, and R. Munos. Best arm identification in multi-armed bandits.
+In Proceedings of the Twenty-Third Annual Conference on Learning Theory (COLT’10),
+pages 41–53, 2010.
+P. Auer, N. Cesa-Bianchi, and P. Fischer. Finite-time analysis of the multiarmed bandit
+problem. Machine Learning Journal, 47(2-3):235–256, May 2002. ISSN 0885-6125. doi:
+10.1023/A:1013689704352. URL http://dx.doi.org/10.1023/A:1013689704352.
+S. Ben-David, J. Blitzer, K. Crammer, A. Kulesza, F. Pereira, and J. W. Vaughan. A theory
+of learning from different domains. Machine learning, 79:151–175, 2010.
+M. Bettini, A. Prorok, and V. Moens. Benchmarl: Benchmarking multi-agent reinforcement
+learning. Journal of Machine Learning Research, 25(217):1–10, 2024.
+C. B. Browne, E. Powley, D. Whitehouse, S. M. Lucas, P. I. Cowling, P. Rohlfshagen,
+S. Tavener, D. Perez, S. Samothrakis, and S. Colton. A survey of monte carlo tree search
+methods. IEEE Transactions on Computational Intelligence and AI in games, 4(1):1–43,
+2012.
+S. Bubeck, R. Munos, and G. Stoltz. Pure exploration in finitely-armed and continuous-
+armed bandits.
+Theoretical Computer Science, 412(19):1832–1852, April 2011.
+ISSN
+0304-3975.
+R. Caruana. Multitask learning. Machine learning, 28:41–75, 1997.
+N. Cesa-Bianchi, G. Lugosi, et al. Combinatorial bandits. In COLT 2009: proceedings of
+the 22nd Annual Conference on Learning Theory, Montréal, Canada, June 18-21, 2009/,
+pages 237–246. Omnipress, 2009.
+24
+
+Semi-overlapping MAB best arm identification
+M. U. Chaudhry and J.-H. Lee. Feature selection for high dimensional data using monte
+carlo tree search. IEEE Access, 6:76036–76048, 2018.
+B. R. Chaudhury, X. Xie, and Y. Liu.
+Fairness in federated learning via core-stability
+(corefed). In Advances in Neural Information Processing Systems, 2022.
+M. Chen, X. Wu, X. Tang, T. He, Y.-S. Ong, Q. Liu, Q. Lao, and H. Yu. Free-rider and
+conflict aware collaboration formation for cross-silo federated learning. In Advances in
+Neural Information Processing Systems (NeurIPS), 2024.
+S. Chen, T. Lin, I. King, M. R. Lyu, and W. Chen. Combinatorial pure exploration of
+multi-armed bandits. Advances in neural information processing systems, 27, 2014.
+X. Chen et al. Dualgfl: Federated learning with a dual-level game in cooperative-competitive
+environments. In Proceedings of the AAAI Conference on Artificial Intelligence, 2025.
+Forthcoming.
+L. Cohen and N. Agmon. Online learning of partitions in additive hedonic games. Proc. of
+IJCAI, 2024.
+L. Cohen and N. Agmon. Decentralized online learning by selfish agents in coalition forma-
+tion. Proc. of IJCAI, 2025.
+L. M. Dery, P. Michel, M. Khodak, G. Neubig, and A. Talwalkar.
+Aang: Automating
+auxiliary learning. In The Eleventh International Conference on Learning Representations,
+2022.
+K. Donahue and J. M. Kleinberg. Optimality and stability in federated learning: A game-
+theoretic approach. In Advances in Neural Information Processing Systems, 2021.
+Y. Du, L. Huang, and W. Sun.
+Multi-task representation learning for pure exploration
+in linear bandits. In International Conference on Machine Learning, pages 8511–8564.
+PMLR, 2023.
+V. Fan and R. Barzilay. Assaymatch: Learning to select data for molecular activity models.
+arXiv preprint arXiv:2511.16087, 2025.
+C. Fifty, E. Amid, Z. Zhao, T. Yu, R. Anil, and C. Finn.
+Efficiently identifying task
+groupings for multi-task learning. Advances in Neural Information Processing Systems,
+34:27503–27516, 2021.
+N. Friedman, I. Nachman, and D. Pe’er. Learning bayesian network structure from massive
+datasets: The “sparse candidate” algorithm. In Proceedings of the Fifteenth Conference
+on Uncertainty in Artificial Intelligence (UAI), pages 206–215, Stockholm, Sweden, 1999.
+Morgan Kaufmann.
+V. Gabillon, M. Ghavamzadeh, A. Lazaric, and S. Bubeck. Multi-bandit best arm identifi-
+cation. Advances in Neural Information Processing Systems, 24, 2011a.
+25
+
+Antos et al
+V. Gabillon, M. Ghavamzadeh, A. Lazaric, and S. Bubeck. Multi-bandit best arm identifica-
+tion. Technical Report hal-00632523, INRIA, Nov. 2011b. URL https://hal.science/
+hal-00632523.
+V. Gabillon, M. Ghavamzadeh, and A. Lazaric. Best arm identification: a unified approach
+to fixed budget and fixed confidence. Technical Report hal-00747005, INRIA, Jan. 2013.
+URL https://hal.science/hal-00747005.
+R. Gaudel and M. Sebag. Feature selection as a one-player game. In International Conference
+on Machine Learning, pages 359–366, 2010.
+R. Gorsane, O. Mahjoub, R. J. de Kock, R. Dubb, S. Singh, and A. Pretorius. Towards a
+standardised performance evaluation protocol for cooperative marl. Advances in Neural
+Information Processing Systems, 35:5510–5521, 2022.
+H. Guo, R. Pasunuru, and M. Bansal. Autosem: Automatic task selection and mixing in
+multi-task learning. arXiv preprint arXiv:1904.04153, 2019.
+H. Gupta, A. Krishnan, O. Vyas, G. Merlino, F. Longo, and A. Puliafito. Federated learning
+across the compute continuum: A hierarchical approach with splitnns and personalized
+layers. Future Generation Computer Systems, page 107878, 2025.
+P. Hernandez-Leal, B. Kartal, and M. E. Taylor. A survey of multi-agent reinforcement
+learning. Journal of Artificial Intelligence Research, 69:1–113, 2020.
+F. Huang and J. Li.
+Compositional federated learning: Applications in distributionally
+robust averaging and meta learning. arXiv preprint arXiv:2106.11264, 2021.
+T. Huang, Z. Hu, and R. Ying. Learning to group auxiliary datasets for molecule. Advances
+in Neural Information Processing Systems, 36:45339–45359, 2023.
+J. Jiang, B. Chen, J. Pan, X. Wang, D. Liu, J. Jiang, and M. Long. Forkmerge: Mitigating
+negative transfer in auxiliary-task learning. Advances in Neural Information Processing
+Systems, 36, 2024.
+S. Jiang and J. Wu. Coalition formation game in the cross-silo federated learning system.
+In IEEE International Conference on Mobile Ad Hoc and Sensor Systems (MASS), 2022.
+L. Kocsis and Cs. Szepesvári. Bandit based Monte-Carlo planning. In Proceedings of the
+17th European conference on Machine Learning, pages 282–293, 2006.
+T. Krueger, D. Panknin, and M. Braun. Fast cross-validation via sequential testing. Journal
+of Machine Learning Research, 16:1103–1155, 2015.
+T. Larsson, J. Francois, and S. Tixeuil.
+Automated collaborator selection for federated
+learning with multi-armed bandit agents. In FlexNets Workshop @ ACM SIGCOMM,
+2021.
+L. Li, K. Jamieson, G. DeSalvo, A. Rostamizadeh, and A. Talwalkar. Hyperband: A novel
+bandit-based approach to hyperparameter optimization. Journal of Machine Learning
+Research, 18(185):1–52, 2018.
+26
+
+Semi-overlapping MAB best arm identification
+Y. Li, T. N. Wolf, S. Pölsterl, I. Yakushev, D. M. Hedderich, and C. Wachinger. From
+barlow twins to triplet training: Differentiating dementia with limited data. In Medical
+Imaging with Deep Learning, 2024.
+S. Lin, Z. Zhou, Z. Zhang, X. Chen, and J. Zhang. Communication-efficient client-edge-
+cloud hierarchical federated learning. In Edge Intelligence in the Making: Optimization,
+Deep Learning, and Applications, pages 141–177. Springer, 2025.
+K. Liu, H. Huang, W. Zhang, A. Hariri, Y. Fu, and K. Hua. Multi-armed bandit based
+feature selection.
+In Proceedings of the 2021 SIAM International Conference on Data
+Mining (SDM), pages 316–323. SIAM, 2021.
+L. Liu, J. Zhang, S. Song, and K. B. Letaief. Client-edge-cloud hierarchical federated learn-
+ing. In ICC 2020-2020 IEEE international conference on communications (ICC), pages
+1–6. IEEE, 2020.
+J. Luo, M. Mendieta, C. Chen, and S. Wu. Pgfed: Personalize each client’s global objective
+for federated learning.
+In Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), pages 3946–3956, 2023.
+J. Ma and K. Sivakumar. Privacy-preserving bayesian network learning from heterogeneous
+distributed data. In DMIN, pages 246–252, 2006.
+O. Madani, D. Lizotte, and R. Greiner. Active model selection. In Proceedings of the 20th
+Conference on Uncertainty in Artificial Intelligence (UAI), pages 282–289, 2004.
+O. Maron and A. Moore. Hoeffding races: Accelerating model selection search for classifi-
+cation and function approximation. Advances in Neural Information Processing Systems,
+6:59–66, 1993.
+A. Millinghoffer, M. Antal, M. Marosi, A. Formanek, A. Antos, and P. Antal. Boosting
+multitask decomposition: Directness, sequentiality, subsampling, cross-gradients. In In-
+ternational Conference on Artificial Intelligence in Medicine, pages 17–35. Springer, 2024.
+F. Mohr and J. N. van Rijn. Towards model selection using learning curve cross-validation.
+In Proceedings of the 8th ICML Workshop on Automated Machine Learning (AutoML),
+2021.
+S. Mukherjee, Q. Xie, J. Hanna, and R. Nowak. Multi-task representation learning for pure
+exploration in bilinear bandits. Advances in Neural Information Processing Systems, 36,
+2024.
+L. Nagalapatti and R. Narayanam.
+Game of gradients: Mitigating irrelevant clients in
+federated learning.
+In Proceedings of the AAAI Conference on Artificial Intelligence,
+volume 35, pages 9046–9054, 2021.
+M. Ota, Y. Sakurai, and S. Oyama.
+Coalitional game theoretic federated learning.
+In
+IEEE/WIC/ACM International Joint Conference on Web Intelligence and Intelligent
+Agent Technology (WI-IAT), pages 48–55, 2022.
+27
+
+Antos et al
+A. Pentina and C. H. Lampert. Multi-task learning with labeled and unlabeled tasks. In
+International Conference on Machine Learning, pages 2807–2816. PMLR, 2017.
+Z. Qu, R. Duan, L. Chen, J. Xu, Z. Lu, and Y. Liu. Context-aware online client selection for
+hierarchical federated learning. IEEE Transactions on Parallel and Distributed Systems,
+33(12):4353–4367, 2022.
+I. Rejwan and Y. Mansour.
+Top-k combinatorial bandits with full-bandit feedback.
+In
+Algorithmic Learning Theory, pages 752–776. PMLR, 2020.
+H. Robbins. Some aspects of the sequential design of experiments. Bulletin of the American
+Mathematics Society, 58:527–535, 1952.
+S. Samet and A. Miri. Privacy-preserving bayesian network for horizontally partitioned data.
+In 2009 International Conference on Computational Science and Engineering, volume 3,
+pages 9–16. IEEE, 2009.
+J. Scarlett, I. Bogunovic, and V. Cevher. Overlapping multi-bandit best arm identification.
+In 2019 IEEE International Symposium on Information Theory (ISIT), pages 2544–2548.
+IEEE, 07 2019. doi: 10.1109/ISIT.2019.8849327.
+P. G. Sessa, P. Laforgue, N. Cesa-Bianchi, and A. Krause. Multitask learning with no regret:
+from improved confidence bounds to active learning.
+Advances in Neural Information
+Processing Systems, 36, 2024.
+Y. Shen et al. Multi-objective federated learning: Balancing global objectives across clients.
+Future Generation Computer Systems, 2025a. Forthcoming.
+Y. Shen et al. Multi-objective methods in federated learning: A survey and taxonomy. arXiv
+preprint, 2025b. In preparation / preprint.
+B. Shi et al. Auxiliary task reweighting for minimum-data learning. 2020. doi: 10.48550.
+ARXIV, 2010.
+X. Song, S. Zheng, W. Cao, J. Yu, and J. Bian. Efficient and effective multi-task grouping
+via meta learning on task combinations. In Advances in Neural Information Processing
+Systems, 2022.
+T. Standley, A. Zamir, D. Chen, L. Guibas, J. Malik, and S. Savarese. Which tasks should
+be learned together in multi-task learning?
+In International Conference on Machine
+Learning, pages 9120–9132. PMLR, 2020.
+M. Świechowski, K. Godlewski, B. Sawicki, and J. Mańdziuk.
+Monte carlo tree search:
+A review of recent modifications and applications. Artificial Intelligence Review, 56(3):
+2497–2562, 2023.
+D. A. Tarzanagh, R. Xu, P. Jain, and S. Oh. Federated bilevel, minimax, and compositional
+optimization. arXiv preprint arXiv:2205.14391, 2022.
+S. Trindade and N. L. da Fonseca. Client selection in hierarchical federated learning. IEEE
+Internet of Things Journal, 11(17):28480–28495, 2024.
+28
+
+Semi-overlapping MAB best arm identification
+R. Wright and Z. Yang.
+Privacy-preserving bayesian network structure computation on
+distributed heterogeneous data. In Proceedings of the tenth ACM SIGKDD international
+conference on Knowledge discovery and data mining, pages 713–718, 2004.
+L. Wu, S. Guo, Y. Ding, Y. Zhan, and J. Zhang. A coalition formation game approach for
+personalized federated learning (pfedsv). arXiv preprint arXiv:2202.02502, 2022.
+S. M. Xie, S. Santurkar, T. Ma, and P. S. Liang. Data selection for language models via
+importance resampling. Advances in Neural Information Processing Systems, 36:34201–
+34227, 2023.
+D. Xin, B. Ghorbani, J. Gilmer, A. Garg, and O. Firat. Do current multi-task optimization
+methods in deep learning even help? Advances in Neural Information Processing Systems,
+35:13597–13609, 2022.
+Y. Xu, J. Ma, A. Liaw, R. P. Sheridan, and V. Svetnik. Demystifying multitask deep neural
+networks for quantitative structure–activity relationships. Journal of chemical information
+and modeling, 57(10):2490–2504, 2017.
+Y. Yang, C. Sun, J. Li, Q. Li, and Y. Yu. Beyond shared reward: Credit assignment in
+cooperative multi-agent reinforcement learning. IEEE Transactions on Neural Networks
+and Learning Systems, 31(10):3820–3834, 2020.
+Z. Yang and R. N. Wright. Privacy-preserving computation of bayesian networks on verti-
+cally partitioned data. IEEE Transactions on Knowledge and Data Engineering, 18(9):
+1253–1264, 2006.
+H. Zhang and et al. Coalitional federated learning: Coalition formation and selection in fl
+with heterogeneous data. IEEE Transactions on Mobile Computing, 23(11), 2024.
+N. Zhang et al. Fedpref: Federated learning across heterogeneous multi-preference clients.
+In Proceedings of the ACM Conference, 2025. Forthcoming.
+W. Zhang, L. Deng, L. Zhang, and D. Wu. A survey on negative transfer. IEEE/CAA
+Journal of Automatica Sinica, 2022.
+X. Zhang, Z. Liu, Y. Chen, and D. Wang. Federated compositional deep auc maximization.
+In Advances in Neural Information Processing Systems, 2023.
+M. Zhou, Z. Liu, P. Sui, Y. Li, and Y. Y. Chung. Learning implicit credit assignment for
+cooperative multi-agent reinforcement learning. Advances in neural information processing
+systems, 33:11853–11864, 2020.
+K. Zhu, F. Zhang, L. Jiao, B. Xue, and L. Zhang. Client selection for federated learning
+using combinatorial multi-armed bandit under long-term energy constraint. Computer
+Networks, 250:110512, 2024.
+29

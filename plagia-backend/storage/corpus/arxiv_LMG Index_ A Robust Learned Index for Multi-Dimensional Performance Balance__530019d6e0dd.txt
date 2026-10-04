@@ -1,0 +1,1852 @@
+LMG Index: A Robust Learned Index for Multi-Dimensional
+Performance Balance
+Yuzhen Chen
+Shanghai Jiao Tong University
+Shanghai, China
+chenyz-sjtu@sjtu.edu.cn
+Bin Yao*
+Shanghai Jiao Tong University
+Shanghai, China
+yaobin@cs.sjtu.edu.cn
+ABSTRACT
+Index structures are fundamental for efficient query processing
+on large-scale datasets. Learned indexes model the indexing pro-
+cess as a prediction problem to overcome the inherent trade-offs of
+traditional indexes. However, most existing learned indexes opti-
+mize only for limited objectives like query latency or space usage,
+neglecting other practical evaluation dimensions such as update
+efficiency and stability. Moreover, many learned indexes rely on
+assumptions about data distributions or workloads, lacking theoret-
+ical guarantees when facing unknown or evolving scenarios, which
+limits their generality in real-world systems.
+In this paper, we propose LMIndex, a robust framework for
+learned indexing that leverages a efficient query/update top-layer
+structure (theoretically 𝑂(1) when the key type is fixed) and a ef-
+ficient optimal error threshold training algorithm (approach 𝑂(1)
+in practice). Building upon this, we develop LMG (LMIndex with
+gaps), a variant employing a novel gap allocation strategy to en-
+hance update performance and maintain stability under dynamic
+workloads. Extensive evaluations show that LMG achieves compet-
+itive or leading performance, including bulk loading (up to 8.25×
+faster), point queries (up to 1.49× faster), range queries (up to 4.02×
+faster than B+Tree), update (up to 1.5× faster on read-write work-
+loads), stability (up to 82.59× lower coefficient of variation), and
+space usage (up to 1.38× smaller). These results demonstrate that
+LMG effectively breaks the multi-dimensional performance trade-
+offs inherent in state-of-the-art approaches, offering a balanced and
+versatile framework.
+1
+INTRODUCTION
+The rapid development of information technology has resulted
+in an enormous amount of data, posing significant challenges to
+data management systems [3]. Indexes are vital components that
+enhance query performance by avoiding exhaustive searches. Tra-
+ditional indexes [2, 6, 10, 11, 18, 22, 24, 25, 30, 34], such as B+Tree,
+do not take full advantage of data distributions, leading to ineffi-
+ciencies caused by pointer chasing and cache misses [28]. Learned
+indexes [16], proposed in recent years, regard index as a model of
+data distribution, and makes proper use of this model to improve
+query efficiency and reduce index size.
+In recent years, learned indexes have emerged as a compelling
+alternative to traditional structures by treating the task of locating
+a record as a prediction problem. However, accurate position pre-
+diction is extremely difficult and expensive, instead, most learned
+*Bin Yao is the corresponding author.
+indexes predict within an error threshold, then perform a bounded
+search around predicted position to locate the true position. To
+keep both training and prediction costs low, they employ simple
+models, such as linear model or a single-layer neural network. More-
+over, to improve overall accuracy and reduce correction overhead,
+the data is partitioned into multiple segments, each trained with
+its own model so as to capture local distributions with high pre-
+cision. This segmented modeling both raises prediction accuracy
+and enhances scalability, enabling learned indexes to handle large,
+complex datasets. Empirical studies [21] have shown that even a
+simple piecewise linear model works effectively on the majority
+of real-world datasets. Accordingly, most existing learned indexes
+[7–9, 13–15, 17, 20] adopt piecewise linear regression as their pre-
+diction backbone.
+Despite these gains, some evaluations [1, 21, 28, 31] have shown
+that existing learned indexes still have a series of flaws. For example,
+[16, 26, 27] is only suitable for read-only workloads; [12, 19, 29, 32]
+deliver excellent point queries throughput but suffer on range
+queries; [8] performs well after bulk loading but lack stability after
+updates; [32] queries and updates are efficient, but incur high space
+usage; [7, 20] impose slow bulk-load times. Critically, most propos-
+als focus on optimizing only one or two metrics at a time, making
+it difficult to achieve a multidimensional trade-off that outperforms
+the classic B+Tree. This gap leaves learned indexes largely experi-
+mental: selecting the appropriate index for an unknown or evolving
+workload is itself a challenge. As a result, learned indexes struggle
+to gain traction in practical, real-world settings.
+To address these limitations, we first propose LMIndex (Linear
+Map Index), a versatile, distribution-adaptive learned index that
+provides query efficiency, space efficiency, and stable performance
+after updates. We then build upon LMIndex to introduce LMG
+(LMIndex with Gaps), a variant that further enhances update per-
+formance. Their design stems from the optimization of two key
+steps in the indexing process: (1) the segment index step, which
+locates the appropriate data segment. For generality, it needs to
+occupy small space, support low-latency queries, incur low update
+cost, and adapt as the distribution evolves. (2) the correction step,
+which searches within the segment to find the exact record position.
+To construct a versatile and efficient index, this correction process
+requires selecting an appropriate search algorithm and low pre-
+diction error. Concretely, LMIndex and LMG meticulously designs
+data structures and algorithms for both the segment index and the
+correction step, leading to the following contributions:
+(1) A robust, spatio-temporal efficient segment index struc-
+ture. We introduce the Linear Map (LM), an internal structure
+designed for indexing segments that maintains robust efficiency
+across dynamic workloads and diverse datasets. In practice, given
+arXiv:2512.24824v1 [cs.DB] 31 Dec 2025
+
+a fixed key type, the LM achieves 𝑂(1) complexity for both queries
+and updates. Empirically, it incurs an average space overhead of
+only 4% in our experiments.
+(2) An optimal error-threshold compression algorithm. We
+prove that binary search (BS) within a segment outperforms expo-
+nential search on complex data distributions. And time complexity
+of BS depends on the maximum error bound, s.t., error threshold,
+not on the average. In line with BS, we introduce OETA (Optimal Er-
+ror Threshold Algorithm), which efficiently trains the linear model
+with minimal error threshold and its overhead approaches 𝑂(1) in
+practice. By coupling OETA with an existing optimal segmentation-
+number algorithm [8], LMIndex can partition data into the fewest
+segments under the initial error threshold while minimizing each
+segment’s error threshold.
+(3) A versatile learned index framework and its variant,
+LMG. We implement LMIndex alongside LMG, the latter using
+a gapped array layout and proposing an optimized gaps alloca-
+tion strategy to maintain each segment’s error threshold. On real
+datasets, LMG outperforms the B+Tree across six key evaluation
+dimensions and metrics, including bulk load latency, point queries
+latency, range queries latency, updates latency, stability, and space
+usage, while never performing worse. LMIndex is competitive with
+SOTA learned indexes on all metrics, exceeds in some metrics.
+The remainder of this paper is organized as follows. Section 2
+describes the background and motivation. Section 3 provides an
+overview of the overall design of LMIndex and LMG, including
+basic operations. Section 4 introduces the Linear Map in detail.
+Section 5 introduces Optimal Error Threshold Algorithm. Section
+6 presents experimental analysis. Finally, Section 7 concludes the
+paper.
+2
+BACKGROUND AND MOTIVATION
+2.1
+The idea of learned index
+The concept of learned indexes is inspired by machine learning:
+an index can be viewed as a model that maps keys to storage ad-
+dresses, and building an index is analogous to training that model.
+Concretely, the index model is the dataset’s empirical cumulative
+distribution function (ECDF), so the core idea of learned indexing is
+to construct models that fit the ECDF. In practice, however, fitting a
+complex real-world ECDF with a single global model is difficult and
+brittle under distribution shifts. Therefore, most practical learned
+index designs adopt multi-model hierarchies: an upper-layer di-
+rects queries to leaf-layer models, which are typically piecewise
+functions that provide more accurate local fits. In addition, indexes
+applies the final “last-mile” search corrects any residual prediction
+error when necessary.
+One representative realization of this multi-model hierarchies
+is the Recursive Model Index (RMI) framework [16]. In RMI, each
+layer consists of multiple models, where a higher-level model se-
+lects the next-layer model, and the leaf-layer model predicts the
+position within its local range, followed by a correction search to
+find the exact key. Error correction in multi-model hierarchies can
+be performed either at internal/leaf nodes [8, 19, 29] or only at leaf
+nodes [7, 16]; all corrections introduce runtime overhead. LMIndex
+achieves perfect accuracy in internal node predictions, eliminating
+the need for internal-node correction and its associated cost.
+Table 1: B+Tree vs. Learned indexes across six key dimensions
+B+Tree
+DPGM
+ALEX
+LIPP
+FINEdex
+Bulk load
+△
+△
+×
+×
+×
+Point query
+△
+⃝
+⃝
+⃝
+△
+Range query
+△
+△
+△
+×
+×
+Update
+△
+⃝
+×
+△
+△
+Stability
+△
+×
+△
+△
+△
+Space
+△
+⃝
+△
+×
+×
+Compared to B+Tree: ⃝: better; △: similar; ×: worse.
+At the leaf level, learned indexes often adopt piecewise linear ap-
+proximation models due to their structural simplicity and sufficient
+fitting capability [21]. Constructing a piecewise linear function typi-
+cally involves two phases: segmentation and training. Some indexes
+[7, 20, 33] perform segmentation using independent heuristics and
+then train per-segment models via least squares regression. An
+alternative family of approaches [5, 8, 9] follows an 𝜀-constrained
+construction: during segmentation, an error threshold 𝜀is enforced
+so that each segment’s model satisfies the constraint:
+Constraint 1 (𝜀-constraint). For all keys 𝑘in a segment, have | ˆ𝑝(𝑘)−
+𝑝(𝑘)| ≤𝜀, where ˆ𝑝(𝑘) is the predicted position and 𝑝(𝑘) is the true
+position.
+Several methods, including RS [15] and LIPP [32], use greedy
+one-pass segment generation algorithms to produce 𝜀-constrained
+partitions efficiently. The PGM-Index [8] adapts the streaming algo-
+rithm from [23] to construct the optimal piecewise linear approx-
+imation model (Opt. PLA-model), which generates the minimum
+number of 𝜀-constrained segments in one pass. Opt. PLA constructs,
+for each prospective segment, a convex region of slope–intercept
+pairs that satisfy the 𝜀-constrain and simply chooses the central
+point as the model parameter.
+Compared to independent segmentation-then-train pipelines,
+𝜀-constrained approaches typically run in 𝑂(𝑛) time for segmen-
+tation, and the part of training cost is implicitly embedded in the
+segmentation process, yielding higher construction efficiency. How-
+ever, Opt. PLA-model focuses solely on optimal segmentation and
+does not optimize the training phase. LMIndex builds upon this
+foundation with the Optimal Error Threshold Algorithm (OETA),
+which efficiently computes per-segment linear parameters that min-
+imize the segment’s maximum prediction error. Combined with
+binary search for final error correction, OETA allows LMIndex to
+adapt each segment to its local distribution and significantly reduce
+last-mile correction overhead.
+2.2
+Learned indexes vs. B+Tree
+Learned indexes have attracted significant attention for their po-
+tential to exploit data distribution to accelerate query processing.
+Nevertheless, compared to the mature and widely adopted B+Tree,
+existing learned index designs invariably fall short in one or more
+critical dimensions. This discrepancy restricts their applicability as
+versatile indexes in practical database systems.
+Table 1 summarizes the comparison among B+Tree, DPGM,
+ALEX, LIPP, and FINEdex across six key evaluation dimensions. All
+symbols represent performance comparisons against B+Tree. For
+2
+
+example, ⃝indicates better performance than B+Tree, while △de-
+notes similar performance to B+Tree. All dimensions (except space)
+are evaluated in terms of latency. For Stability, we evaluate the devi-
+ation in read/write latency after updates. The results highlight that
+no existing learned index consistently outperforms B+Tree across
+all these dimensions. We briefly analyze the underlying reasons for
+these limitations below.
+DPGM. DPGM [8] extends the original read-only PGM-index
+by organizing data into sorted sets of exponentially increasing size,
+each independently indexed with a read-only PGM. New entries
+are inserted into the smallest set and trigger merges upon overflow,
+which involves retraining a static PGM for the merged set. While
+enabling updates, DPGM suffers from unstable query performance
+post-update: unlike B+Tree’s logically contiguous leaf data layout,
+DPGM disperses data across multiple sets, causing point queries to
+probe several models and range queries to merge partial results from
+each set, thus incurring higher latency and resource consumption.
+ALEX. ALEX [7] segments data using a cost model involving
+complex sampling and computation, followed by 𝑂(𝑛)-time least
+squares training per segment. Its construction demands multiple
+passes over data and maintains a complex cost model, whereas
+B+Tree can be bulk-loaded with one pass. Under heavy updates
+cause drastic changes in the data distribution, ALEX experiences
+frequent node splits and retraining, and pay further overhead to
+maintain the cost model. In contrast, B+Tree updates are less sensi-
+tive to data distribution and avoid the burden of model recalibration.
+LIPP. LIPP [32] eliminates correction both at internal and leaf
+nodes by ensuring perfect prediction. To prevent “last-mile” cor-
+rection, it recursively partitions conflicting key sets and retrains
+models until each key is uniquely placed. This leads to high bulk
+loading cost on complex distributions due to repeated conflict reso-
+lution and retraining. And scattered data layouts of LIPP increase
+range query overhead compared to B+Tree’s linked leaf nodes. Ad-
+ditionally, LIPP’s conflict-driven model proliferation may cause
+large internal gaps and unpredictable space usage, especially on
+real-world skewed data, unlike B+Tree’s stable space footprint.
+FINEdex. FINEdex [19] employs the Learning Probe Algorithm
+(LPA) to adaptively train models and optimize layout, storing them
+in a SIMD-optimized B-Tree. LPA uses least squares fitting, probing
+whether appending a block exceeds an error threshold, and perform-
+ing localized rollbacks if necessary. This LPA-based construction
+requires multiple data passes, thus incurring greater construction
+complexity compared to B+Tree’s one pass bulk load. For updates,
+LIPP employs an optional per-key “level bins” to absorb insertions.
+Although its fine-grained buffering can absorb more keys, it in-
+creases range query cost and space overhead.
+Motivation. As summarized above, existing learned indexes
+tend to trade off improvements in few metric for another, limiting
+their generality under unknown or dynamic workloads and data
+distributions. This gap motivates us to design a comprehensive
+learned index that achieves superiority compared to B+Tree across
+multiple key dimensions (including bulk load, point and range
+queries, updates, stability, and space usage), while simultaneously
+maintaining competitiveness with state-of-the-art learned indexes.
+Map Info: SMF(key) = (𝑘𝑘𝑘𝑘𝑘𝑘−min)/R(layer) ⋅|𝑙𝑙𝑙𝑙𝑙𝑙𝑙𝑙𝑙𝑙|
+···
+Map Info
+Map Info
+Linear Model
+Update Absorber
+MODEL pointer
+NULL pointer
+MAP pointer
+Linear Map
+Segment List
+Data Array
+𝒌𝒌𝟎𝟎
+𝒌𝒌𝟏𝟏
+𝒌𝒌𝟐𝟐
+𝒌𝒌𝟑𝟑
+…
+𝒌𝒌𝒊𝒊
+Linear Model
+Update Absorber
+Data Array
+𝒌𝒌𝒊𝒊+𝟏𝟏𝒌𝒌𝒊𝒊+𝟐𝟐
+… 
+Figure 1: Main structure of LMIndex. The top-layer Linear
+Map indexes segments using the linear function SMF(key).
+Each segment in Segment List comprises a linear model, an
+update absorber, and the corresponding data array. Every
+segments are sequentially linked in order to ensure efficient
+range scanning.
+3
+LMINDEX OVERVIEW
+LMIndex is an in-memory, space- and time-efficient versatile learned
+index paradigm designed to adapt to unknown or dynamic work-
+loads and data distributions. Its key idea is straightforward: use
+a lightweight yet effective structure that preserves high perfor-
+mance across diverse workloads without complex online tuning.
+To achieve this, LMIndex adopts a simple two layer architecture
+(Figure 1).
+At the top layer, Linear Map (LM) efficiently identifies the target
+segment. As an auxiliary structure, LM neither requires online
+parameter tuning to maintain stability nor relies on costly model
+fitting. Instead, it structurally captures the key range distribution
+of the segments (i.e. [𝑘𝑒𝑦𝑚𝑖𝑛,𝑘𝑒𝑦𝑚𝑎𝑥] for each segment) through
+the linear function SMF (detailed in Section 4). And it can locate
+the bottom segment in 𝑂(1) time complexity when the key type is
+determined.
+The bottom layer consists of an ordered sequence of segments,
+each containing a linear model, an update absorber, and the data
+array. The linear model includes a range (max/min key), parameters,
+and a minimum error threshold. The update absorber exists only
+when necessary and combines ordered buffering and query/update
+function, which can be a compact array with binary search and
+shift-based updates, or a more advanced secondary index such as
+a red–black tree or linked list. For the data array, LMIndex em-
+ploys a compact array for maximum space utilization, whereas its
+variant LMG uses a gapped array, sacrificing some space efficiency
+in exchange for acting as an effective update absorber that better
+accommodates incremental inserts.
+3
+
+This architecture is motivated by the goal of fully leveraging
+the inherent quality of the LM. Consequently, modest augmen-
+tations produce meaningful gains, allowing LMIndex to achieve
+outstanding performance across multiple dimensions:
+Bulk load. The bulk load consists of the construction of bottom
+layer and top layer. The bottom layer is constructed in 𝑂(𝑛) time by
+integrating a linear segmentation algorithm with the efficient model
+training algorithm, OETA. In the top layer, LM avoids complex
+approximation fitting, thus ensuring that the construction time
+overhead is 𝑂(𝑚) (𝑚is the number of segments, less than the data
+size). So the total complexity of bulk load is 𝑂(𝑛).
+Updates. LMIndex accumulates modifications in an update ab-
+sorber and triggers Structure Modification Operation (SMO) once a
+predefined threshold is reached. At the bottom layer, SMO resem-
+bles bulk loading but retrains only on the affected local data. At the
+top layer, SMO incurs an 𝑂(1) cost, contributing marginally to the
+overall SMO time.
+Stability. Many learned indexes degrade after updates because
+structural changes disrupt query performance. LMIndex maintains
+stability by ensuring that the post-update structure resembles that
+of a freshly bulk-loaded index on the current data.
+Point and range queries. Queries are decomposed into a top
+layer LM lookup and linear model prediction with error correction
+at the bottom layer. LM and OETA together ensure consistently
+low latency for both steps.
+Space usage. Due to the optimal segmentation and compact
+structure, reducing space usage at the bottom layer is less effective.
+Thus, optimization focuses on the top layer LM, whose storage
+depends on the key range distribution of the segments. On real-
+world datasets, LM accounts for only about 4% of the total index
+size in average.
+3.1
+Basic Operations
+3.1.1
+Point queries and range queries. For a point query with a
+search key 𝑞, the lookup process first traverses the top layer struc-
+ture LM to locate the target segment, followed by a prediction and
+correction search within that segment. As shown in Figure 1, the
+LM is composed of flat pointer arrays (termed as map layers), where
+a function SMF(𝑘𝑒𝑦) maps 𝑞to a specific cell. The routing logic
+is determined by the cell’s pointer type: a MODEL pointer directs
+the query to the target segment; a NULL pointer terminates the
+search indicating the key is absent; and a MAP pointer advances
+the traversal to the next map layer. For a fixed key type, the LM
+routing complexity is efficient and bounded by 𝑂(1).
+Within the segment, LMIndex using a linear model predicts the
+position of 𝑞in the data array. If the prediction does not match the
+true position, a binary search is conducted within the segment’s er-
+ror threshold. If an identical key is found, and it hasn’t been deleted,
+the corresponding record is returned. If not, LMIndex queries the
+update absorber (if exist) for the record of key.
+For range queries, they begin by finding the first key greater
+than or equal to the lower bound of the range, then sequentially
+scans keys until exceeding the upper bound. As shown in Figure 1,
+each segment is connected by a two-way pointer and sorted by key
+value. This process automatically skips deleted keys. If an update
+absorber exists, it merges keys within range. The theoretical time
+complexity of this operation is comparable to directly searching
+the array. To operate efficiently in large range queries, LMIndex
+pre-probes and allocates enough space before scanning to avoid
+repeated dynamic resizing.
+In detail, we explore the query mechanics of LM in Section 4.
+For the "last-mile" search within the segment, we demonstrate in
+Section 5 how binary search outperforms exponential search in
+complex distributions dataset, while OETA narrows the segment’s
+error threshold so that binary search performs on par with expo-
+nential search under near-linear distributions.
+3.1.2
+Update. The insertion process begins by locating the appro-
+priate segment for insertion and placing the key in its true location,
+particularly if it was previously marked as deleted. If origin key is
+not deleted, an update absorber absorbs the update. And it is an
+interface that organizes the data in an ordered array for efficient
+range queries. We can set its maximum capacity to trade off query
+and update performance. Once the absorber reaches capacity, the
+segment undergoes retraining.
+For retraining, LMIndex employs OETA to train segment param-
+eters. While it shares the same Big-O complexity as Least Squares
+(LS), its computational overhead is typically significantly lower
+in practice (see Section 5.1). Prior to training, we apply the seg-
+mentation algorithm from [8] to partition the data. This process
+may yield a residual segment at the tail containing fewer than 2𝜀
+(𝜀is the global error threshold) keys. To avoid its negative impact
+on lookup efficiency, we first attempt to merge the residual keys
+into the next segment, provided the resulting error remains within
+the 𝜀-constraint. If the merge fails, they are jointly retrained. This
+residual-handling strategy may trigger cascading retraining, but
+this guarantees optimal segmentation, ensuring stability even in
+heavy write workloads. Further optimizations for this issue are
+presented in LMG (Section 3.2).
+For deletions, if a matching key is found within a segment, LMIn-
+dex marks the key with a tombstone. In-place deletion ensures that
+deletion efficiency is generally similar to querying. To maintain
+stability, LMIndex reallocates data after deletion: when the number
+of valid keys within a segment falls below global 𝜀, the largest key
+from the preceding segment is moved and placed in front of the
+segment. If this insertion does not satisfy the 𝜀-constraint, or if the
+number of valid keys in the previous segment is less than 𝜀+ 1, the
+current and the previous segment are merged and retrained.
+When insertions or deletions shift a segment’s key range, LM
+is updated to maintain segment routing. Because these changes
+are confined to affected segment boundaries, the update cost is
+negligible compared to retraining. Section 4 elaborates on LM’s
+update handling in detail.
+3.1.3
+Bulk load. Bulk load consists of splitting the data, training
+the model, and building the segment index. First, LMIndex splits
+data using the algorithm in [8]. Given a global error threshold 𝜀, it
+ensures each segment admits at least one linear function fitting all
+points within error bound 𝜀.
+Secondly, to further improve local accuracy, we introduce OETA,
+which efficiently computes the minimum error threshold and cor-
+responding model parameters for each segment. OETA enhances
+local adaptivity of models, enabling smaller correction ranges. For
+instance, if global 𝜀= 64 but the optimal threshold for a segment is
+4
+
+2, correcting within that segment requires only log2(2) = 1 steps,
+i.e., a log2(64)/log2(2) = 6× reduction in correction steps when
+using binary search.
+Finally, segments are indexed by the LM structure. LM is a shal-
+low, hierarchical structure with theoretical construction cost 𝑂(𝑚),
+where 𝑚is the number of segments. Larger range segments are
+placed in higher layers with coarser granularity, while smaller
+ranges descend into finer levels, allowing LM to adapt to segment
+range distribution. Detailed LM construction procedures are dis-
+cussed in Section 4. Total complexity of bulk loading is 𝑂(𝑛).
+3.2
+LMIndex with Gaps (LMG)
+LMG is a variant of LMIndex tailored to raise update throughput
+while preserving query efficiency. The primary structural modifica-
+tion in LMG is it replaces compact array with gapped array. And
+we introduce an expansion rate 𝜏to control the additional space
+allocated for gaps.
+Allocating gaps in a gapped array is usually implemented by
+inserting keys. The model-based insertion [7] places the key at the
+predicted position if it’s empty, or at the nearest empty position
+thereafter. However, it would suffer a larger maximum error for
+many-to-one subsets:
+A contiguous subset of keys 𝐾= {𝑘1,𝑘2, . . . ,𝑘𝑠} is many-to-one
+subset if ∀𝑘∈𝐾, 𝑓(𝑘) = 𝐶, where 𝑓(𝑥) is prediction model and
+𝑠= |𝐾|. Model-based insertion yields the least 𝑠−1 maximum error
+when many-to-one subset are encountered.
+To mitigate the many-to-one subset effect, LMG proposes a
+reserved-space insertion strategy. It records the current minimum
+insertable position 𝐶𝑓and an upper bound 𝐶𝑏= min(𝑓(𝑘𝑠+1, 𝑁)
+(𝑁is the gapped array size). The strategy operates as follows: (1) If
+𝐶−𝐶𝑓≤𝑠/2, the first key 𝑘1 is placed at𝐶𝑓; (2) If𝐶𝑏−𝐶≤𝑠/2, 𝑘1 is
+placed at max(𝐶𝑓,𝐶−𝜀𝑖,𝐶𝑏−𝑠); (3) Otherwise,𝑘1 is placed at𝐶−𝑠/2.
+Other keys in 𝐾are inserted contiguously after 𝑘1. Functionally,
+this strategy adapts the insertion to reduce the prediction error
+for many-to-one subsets, while maintaining the same behavior as
+model-based insertion for other keys.
+LMG uses the gapped array as the preferred update absorber,
+enabling localized updates. An insertion first identifies the target
+slot and then moves the nearest gap to that slot to place the key.
+To bound latency, the gap’s movement is limited by a constant
+multiple 𝜀(e.g., 8𝜀). To prevent the cascading retraining described
+in Section 3.1.2, LMG merges any tail residual shorter than 2𝜀into
+the preceding segment. In practice, this approach prevents the
+cascading retraining while maintaining a compact segmentation
+under sustained updates.
+To guarantee semantic correctness of search despite potential
+update, LMG adopts a binary–then–exponential hybrid search strat-
+egy. It first performs a binary search bounded by the segment’s
+error threshold, and falling back to exponential search if the target
+position is not located. As show in Section 5.2, this design prior-
+itizes binary search because it’s more effective on complex data
+distributions.
+4
+LINEAR MAP
+In learned indexes based on piecewise linear models, the major
+overhead of queries typically stems from locating the correct seg-
+ment and performing last-mile correction within it. Linear Map
+focuses on segment localization, achieving theoretical 𝑂(1) query
+and update complexity. Its space complexity is 𝑂(𝑚), where 𝑚is
+the number of segments, and the actual memory footprint adapts
+to the distribution of segment ranges.
+10
+33
+46
+53
+66
+scaling mapping
+Real number field
+Integer field
+10
+17
+24
+31
+38
+45
+52
+59
+66
+0
+1
+2
+3
+4
+5
+6
+7
+mapping range:
+𝑠0 range: [10, 33]
+cell index:
+Figure 2: Key idea of LM: Mapping segment range from the
+real number field to the integer field, ensuring each segment
+corresponds to at least one integer cell.
+4.1
+Single-layer LM
+Let 𝑆= {𝑠1,𝑠2, . . . ,𝑠𝑚} denote an ordered set of non-overlapping
+segments, where each segment 𝑠𝑖corresponds to the range of keys
+[𝑚𝑖𝑛𝑖,𝑚𝑎𝑥𝑖] with width 𝑅(𝑠𝑖) = 𝑚𝑎𝑥𝑖−𝑚𝑖𝑛𝑖. These segments can
+be naturally viewed as intervals over the real number field, as
+illustrated in Figure 2.
+To enable direct lookup without probing, Linear Map projects the
+continuous key range onto a flat indexable array, referred to as the
+layer. Each cell in the layer represents a fixed-length subrange of
+the key domain and stores either a pointer MODEL to the segment
+that covers that subrange or NULL if no segment overlaps it.
+To ensure that every segment occupies at least one cell, LM
+guarantees minimum resolution over the key range [𝑚𝑖𝑛1,𝑚𝑎𝑥𝑚].
+Let 𝑅(𝑙𝑎𝑦𝑒𝑟) = 𝑚𝑎𝑥𝑚−𝑚𝑖𝑛1 and |𝑙𝑎𝑦𝑒𝑟| be the number of cells in
+layer, the minimum resolution is:
+min |𝑙𝑎𝑦𝑒𝑟| = ⌈𝑅(𝑙𝑎𝑦𝑒𝑟)/min𝑅(𝑠𝑖)⌉
+LM adopts this minimal resolution to optimize space usage. Un-
+der this resolution, LM applies a scaling mapping formula (SMF) to
+directly compute the cell index for a key:
+SMF(𝑘𝑒𝑦) = ⌊(𝑘𝑒𝑦−𝑚𝑖𝑛1)/𝑅(𝑙𝑎𝑦𝑒𝑟) · |𝑙𝑎𝑦𝑒𝑟|⌋
+We next show that SMF guarantees that the endpoints of every
+segment map to different cells when |𝑙𝑎𝑦𝑒𝑟| equals the minimum
+required resolution. Let 𝑑= min𝑅(𝑠𝑖), and consider a segment
+range [𝑘𝑎,𝑘𝑎+ 𝑑]. Then:
+SMF(𝑘𝑎+ 𝑑) ≥⌊(𝑘𝑎−𝑚𝑖𝑛1)/𝑅(𝑙𝑎𝑦𝑒𝑟) · ⌈𝑅(𝑙𝑎𝑦𝑒𝑟)/𝑑⌉⌋+ 1
+SMF(𝑘𝑎+ 𝑑) ≤⌊(𝑘𝑎−𝑚𝑖𝑛1)/𝑅(𝑙𝑎𝑦𝑒𝑟) · ⌈𝑅(𝑙𝑎𝑦𝑒𝑟)/𝑑⌉⌋+ 2
+Since SMF(𝑘𝑎) = ⌊(𝑘𝑎−𝑚𝑖𝑛1)/𝑅(𝑙𝑎𝑦𝑒𝑟) · ⌈𝑅(𝑙𝑎𝑦𝑒𝑟)/𝑑⌉⌋, SMF
+(𝑘𝑎+ 𝑑) is bounded by [SMF(𝑘𝑎) + 1, SMF(𝑘𝑎) + 2], ensuring that
+each segment occupies at least one distinct layer cell and preventing
+boundary collapse.
+Importantly, SMF is used for both queries and updates. Although
+it is a linear function, it differs from linear predictive models in that
+it requires no training. All parameters are derived directly from the
+5
+
+known properties of the segment set 𝑆, enabling it to dynamically
+adapt to changes in the segment layout.
+To construct a single-layer LM, the layer is first initialized with
+NULL pointers. For each segment 𝑠𝑖, its range [𝑚𝑖𝑛𝑖,𝑚𝑎𝑥𝑖] is pro-
+jected to the cell range [SMF(𝑚𝑖𝑛𝑖), SMF(𝑚𝑎𝑥𝑖)], and each cell in
+this range is filled with a MODEL pointer link to 𝑠𝑖. When adja-
+cent segments 𝑠𝑗and 𝑠𝑗+1 share a boundary cell, i.e., SMF(𝑚𝑎𝑥𝑗) =
+SMF(𝑚𝑖𝑛𝑗+1), LM assigns this cell to𝑠𝑗+1. This minimum-first bound-
+ary rule consistently resolves ties without ambiguity and preserves
+correctness.
+For point queries, SMF computes the target cell in 𝑂(1) time.
+Every key is deterministically mapped to its corresponding cell
+with perfect accuracy. In most cases, the cell contains the correct
+segment pointer. In boundary cases where a key near the tail of
+segment 𝑠𝑗falls into the first cell of 𝑠𝑗+1, LM performs a single
+fallback step to 𝑠𝑗via the segment list, ensuring correctness with
+constant overhead.
+For updates, LM locates the affected cells via SMF and replaces
+them with NULL or new MODEL pointers. The update cost is pro-
+portional to the number of cells traversed.
+4.2
+Multi-layer Linear Map
+The single-layer LM represents an conceptually unbounded flat
+array, with space complexity 𝑂(min |𝑙𝑎𝑦𝑒𝑟|). Since the theoretical
+lower bound for indexing 𝑚segments is 𝑂(𝑚), the single-layer LM
+amplifies:
+𝑂(min |𝑙𝑎𝑦𝑒𝑟|/𝑚) = 𝑂((𝑅(𝑙𝑎𝑦𝑒𝑟)/𝑚)/min𝑅(𝑠𝑖))
+When the distributions is skewed or non-linear, min𝑅(𝑠𝑖) may
+be orders of magnitude smaller than the average segment width
+𝑅(𝑙𝑎𝑦𝑒𝑟)/𝑚, resulting in excessive space usage, poorer cache local-
+ity, and higher average update cost. Moreover, future insertions
+that further reduce min𝑅(𝑠𝑖) force a full rebuild of the single-layer
+LM, incurring considerable overhead.
+To avoid these limitations, we introduce the multi-layer LM,
+which bounds each layer size by a constant L. As shown in Figure
+1, it combines flat and tree-like designs: each layer maps a flat key
+interval and each cell may store a MAP pointer to another layer,
+recursively refining the mapping.
+Each layer covers a key range [𝑚𝑖𝑛𝑙𝑎𝑦𝑒𝑟,𝑚𝑎𝑥𝑙𝑎𝑦𝑒𝑟] and indexes
+a contiguous subset of segments 𝑆′ = {𝑠𝑗, ...,𝑠𝑗+𝑡} with 𝑚𝑖𝑛𝑗≥
+𝑚𝑖𝑛𝑙𝑎𝑦𝑒𝑟and 𝑚𝑎𝑥𝑗+𝑡≤𝑚𝑎𝑥𝑙𝑎𝑦𝑒𝑟. Its minimum resolution is:
+min |𝑙𝑎𝑦𝑒𝑟| = ⌈𝑅(𝑙𝑎𝑦𝑒𝑟)/min𝑅(𝑠𝑖′)⌉,
+𝑖′ ∈[𝑗, 𝑗+ 𝑡]
+and the associated SMF becomes:
+SMF(𝑘𝑒𝑦) =
+
+(𝑘𝑒𝑦−𝑚𝑖𝑛𝑙𝑎𝑦𝑒𝑟)/𝑅(𝑙𝑎𝑦𝑒𝑟) · |𝑙𝑎𝑦𝑒𝑟|
+
+Algorithm 1 summarizes the recursive construction of the multi-
+layer LM. In lines 4 and 17, we compute the minimal resolution for
+the current segment. If it exceeds L and this segment collapses into
+one cell, we recurse (lines 11–13) to build a child layer. Recursion
+continues until the mapped range spans at least two distinct cells.
+The helper function draw_multi_layer_map() fills the mapped cells
+and ensures correct pointer assignment at segment boundaries.
+Each child layer can refine current resolution by a factor of L,
+while occupying only one cell in its parent layer, yielding a compact
+but arbitrarily fine-grained hierarchical mapping.
+Algorithm 1: BuildMultiLayerLM
+Input: 𝑆: the set of segments, L: max layer size
+Output: 𝑙𝑚: Multi-layer LM
+1 𝑘0 ←left range bound of 𝑆;
+2 descending sort 𝑆by 𝑅(𝑠), 𝑠∈𝑆;
+3 𝑠′ ←pop(𝑆);
+4 𝑚𝑖𝑛_𝑠𝑖𝑧𝑒←⌈𝑅(𝑆)/𝑅(𝑠′)⌉;
+5 𝑙𝑚←an array of size min(L,𝑚𝑖𝑛_𝑠𝑖𝑧𝑒);
+6 𝑟𝑎𝑡𝑒←size(𝑙𝑚) /𝑅(𝑆);
+7 while 𝑚𝑖𝑛_𝑠𝑖𝑧𝑒> L and 𝑆is not empty do
+8
+𝑝𝑜𝑠1 ←int((𝑚𝑖𝑛𝑠′ −𝑘0) × 𝑟𝑎𝑡𝑒);// Scaling mapping
+9
+𝑝𝑜𝑠2 ←int((𝑚𝑎𝑥𝑠′ −𝑘0) × 𝑟𝑎𝑡𝑒);
+10
+if 𝑝𝑜𝑠1 = 𝑝𝑜𝑠2 and 𝑙𝑚[𝑝𝑜𝑠1] = 𝑁𝑈𝐿𝐿then
+// Build a child layer
+11
+𝑆′ ←{𝑠′};
+12
+range(𝑆′) ←mapping_index(𝑙𝑚[𝑝𝑜𝑠1, 𝑝𝑜𝑠2]);
+13
+𝑙𝑚[𝑝𝑜𝑠1] ←BuildMultiLayerLM(𝑆′, L);
+14
+else
+15
+draw_multi_layer_map(𝑙𝑚, 𝑝𝑜𝑠1, 𝑝𝑜𝑠2, 𝑠′);
+16
+𝑠′ ←pop(𝑆);
+17
+𝑚𝑖𝑛_𝑠𝑖𝑧𝑒←⌈𝑅(𝑆)/𝑅(𝑠′)⌉;
+18 𝑆←𝑆∪𝑠′;
+// Draw remaining segments, they don’t build new layers
+19 for 𝑠∈𝑆do
+20
+𝑝𝑜𝑠1 ←int((𝑚𝑖𝑛𝑠−𝑘0) × 𝑟𝑎𝑡𝑒);
+21
+𝑝𝑜𝑠2 ←int((𝑚𝑎𝑥𝑠−𝑘0) × 𝑟𝑎𝑡𝑒);
+22
+draw_multi_layer_map(𝑙𝑚, 𝑝𝑜𝑠1, 𝑝𝑜𝑠2, 𝑠);
+23 return 𝑙𝑚;
+Queries. Querying follows the same SMF-based mapping strat-
+egy. Given a key, multi-layer LM computes its target cell via SMF.
+If the cell contains a MAP pointer, the query proceeds recursively
+to the next layer. This process repeats until the result points to
+a MODEL or a NULL. Although hierarchical, the maximum layer
+depth is bounded by a small constant (see Section 4.3), ensuring
+an overall query cost of 𝑂(1), making multi-layer LM suitable for
+high-performance lookup workloads.
+Insertions. Insertions also follow SMF-based localization. (1) If
+a segment spans multiple cells (SMF(𝑚𝑖𝑛𝑖) ≠SMF(𝑚𝑎𝑥𝑖)), pointers
+are directly written to the mapped range. (2) If a segment maps
+to a single cell and the cell is not a MAP, LM checks whether the
+required resolution exceeds L. If so, it recursively constructs a child
+layer; otherwise, it scales the current layer by an integer multiple.
+(3) At the root level, when insertions extend the global key range
+and the layer size exceeds 2L, LM triggers a rebuild to maintain
+compact layout.
+Deletion. Since the query computation is independent of layer
+size, LM does not shrink the layer even when min𝑅(𝑠𝑖′) increases
+due to deletions. A non-root layer is only removed when its segment
+subset 𝑆′ becomes empty. At the root, if the total key range shrinks
+such that the ideal resolution falls below 25% of the current layer
+size, LM triggers a rebuild to restore efficient memory utilization
+and stable query performance.
+6
+
+4.3
+Complexity Analysis of LM
+In practice, LMIndex employs a multi-layer Linear Map. Unless
+otherwise noted, the following analysis assumes a multi-layer LM
+by default.
+4.3.1
+Query Complexity. Within each layer, a query requires only
+constant-time computation using the SMF. Thus, the overall query
+complexity is𝑂(𝑡), where𝑡is the maximum depth of multi-layer LM.
+Let L = 2𝑙, then the depth 𝑡is given by 𝑡= logL(R) = log2(R)/𝑙,
+where R = 𝑅(𝑆)/min𝑅(𝑠𝑖). Since the key type determines a fixed
+bit-width 𝑏, R is naturally bounded by 𝑚≤R ≤2𝑏, where 𝑚is
+the number of segments. Note that R decreases as the distribution
+becomes more linear or as the segment ranges become more uni-
+form. Consequently, 𝑂(𝑡) = 𝑂(𝑏/𝑙) = 𝑂(1), since both 𝑏and 𝑙are
+constants.
+Following this logic, in theoretically, any 𝑂(log𝑛) index is also
+𝑂(1) because 𝑛≤2𝑏. However, in practice, significant distinctions
+exist between the LM and such traditional structures (e.g., B+Tree):
+First, thanks to the 𝑂(1) intra-layer search cost enabled by the
+SMF, 𝑙can be configured to be sufficiently large, thereby effectively
+reducing the theoretical upper bound of 𝑡. In contrast, B+Trees
+employ binary search within each node, which constrains the node
+size (fan-out) to maintain efficiency. Second, the depth of the LM
+is independent of the dataset size, whereas the depth of a B+Tree
+scales strictly with that size. Notably, when 𝑛approaches 2𝑏, the
+data becomes highly linear, causing the LM depth to converge to its
+minimum. Finally, the above derivation assumes each segment con-
+tains only a single key. In reality, [8] proves each segment contains
+at least 2𝜀keys, resulting in a smaller depth.
+For instance, with L = 65536 (i.e., 216) and standard 64-bit keys,
+the depth is bounded by 𝑡≤64/16 = 4. Empirical results (see Table
+4) further confirm that the actual depth 𝑡remains small in practice.
+While increasing L reduces 𝑡, excessive values yield diminishing
+returns. Larger values of L may increase space consumption, harm
+cache locality, and degrade update efficiency. Importantly, L serves
+as an adaptive upper bound rather than a fixed capacity, allowing
+LM to adjust layer sizes dynamically according to segment distri-
+bution. In practice, setting L = 65536 achieves a favorable balance
+between query efficiency and space overhead.
+4.3.2
+Update Complexity. In the single-layer LM, the cost of updat-
+ing a segment 𝑠𝑖is determined by the number of cells it occupies:
+SMF(𝑚𝑎𝑥𝑖) −SMF(𝑚𝑖𝑛𝑖) ≤𝑅(𝑠𝑖)/𝑅(𝑙𝑎𝑦𝑒𝑟) · |𝑙𝑎𝑦𝑒𝑟| + 1
+For a segment with the minimum key range length min𝑅(𝑠𝑖),
+the number of occupied cells is constant. Thus, the update cost is
+𝑂(min𝑅(𝑠𝑖)/𝑅(𝑙𝑎𝑦𝑒𝑟) · |𝑙𝑎𝑦𝑒𝑟|) = 𝑂(1). Consequently, the update
+cost for a general segment 𝑠𝑖is quantified as 𝑂(𝑅(𝑠𝑖)/min𝑅(𝑠𝑖)).
+Considering amortized complexity across𝑚segments, we obtain:
+𝑂
+ 
+1
+𝑚
+𝑚
+∑︁
+𝑖=1
+𝑅(𝑠𝑖)/min𝑅(𝑠𝑖)
+!
+= 𝑂(avg(𝑅(𝑠𝑖))/min𝑅(𝑠𝑖))
+Hence, the more the width of the segment tends to be uniform
+(avg(𝑅(𝑠𝑖)) −→min𝑅(𝑠𝑖)), the closer the amortized cost is to 𝑂(1).
+In the multi-layer LM, updating a segment requires first locating
+the target layer in 𝑂(𝑡) time. Within that layer, updates affect at
+most 𝑂(L) cells, following the same logic as the single-layer case.
+Since segment boundaries may span multiple layers, updates may
+involve up to 𝑂(𝑡L) cells. Based on Section 4.3.1, and setting L
+large enough depending on the key type, we get:
+𝑂(𝑡+ L + 𝑡L) = 𝑂(𝑡L) = 𝑂(1)
+Layer allocation or release is triggered when the current layer
+fails to assign at least one cell to a new segment, or when the
+deletion of an existing segment renders the layer empty. While
+this process may cascade, it affects at most 𝑡L cells. In practice,
+most updates modify only a few cells. Layer allocation is infrequent,
+while lazy reclamation further amortizes the overhead of release.
+LM’s rebuilds are only triggered when the root layer becomes
+highly unbalanced, e.g., if the size of the root layer is exceeds 2L
+or the theoretical resolution is 25% of the current size. Since each
+rebuild exponentially adjusts 𝑅(𝑙𝑎𝑦𝑒𝑟), the probability of repeated
+rebuilds rapidly decreases.
+Notably, LM does not require rebuilding to maintain correctness.
+It maintains robust query and update performance under distri-
+bution shifts, tolerating accumulated updates via bounded space
+redundancy rather than accuracy loss. Stability experiments in
+Section 6.2.5 confirm this resilience.
+4.3.3
+Space and Construction Complexity. In multi-layer LM, each
+segment occupies at most 𝑂(𝑡L) = 𝑂(1) space under a fixed key
+type. Given that there are 𝑚segments in total, the overall space
+complexity of LM is 𝑂(𝑚𝑡L) = 𝑂(𝑚). In fact, 𝑂(𝑡L) is quite loose.
+Table 4 demonstrates that the average number of cells per segment
+is far smaller than the theoretical peak value 𝑡L. Additionally, since
+LM requires no model retraining, its construction overhead primar-
+ily consists of pointer allocation. Consequently, the construction
+complexity aligns with the space complexity, both being 𝑂(𝑚).
+To understand how space grows with L, we consider the worst-
+case bound 𝑡L = L · logL R.
+Where R = 𝑅(𝑆)/min𝑅(𝑠𝑖) is regarded as a constant related to
+the dataset, we compute the derivative:
+𝑑
+𝑑L
+ L · logL R = ln R · ln L −1
+(ln L)2
+So when ln R > 0, this function achieves its minimum at L = 3
+(L is an integer), representing the theoretical space-optimal max
+layer size. For L > 3, the function increases monotonically.
+In practice, space usage is closely tied to the model distribu-
+tion. Due to LM’s adaptive layer allocation, larger values of L can
+sometimes reduce space overhead. For instance, consider 9 adjacent
+segments of equal range: when L = 3, they require 12 cells, while
+setting L ≥9 reduces the requirement to 9 cells.
+5
+INDEXING WITHIN A SEGMENT
+This section describes how LMIndex performs indexing within a
+segment, focusing on the OETA and the strategy for error correc-
+tion.
+5.1
+Optimal Error Threshold Algorithm (OETA)
+OETA is built upon Piecewise Linear Approximation (PLA) [23],
+which fits a linear model 𝑝𝑜𝑠= 𝑚· 𝑘𝑒𝑦+ 𝑏to a set of points such
+that the maximum prediction error for each point is bounded by
+the threshold 𝜀. In practice, we typically normalize 𝑘𝑒𝑦as 𝑡by
+7
+
+Algorithm 2: OETA
+Input: (upper, lower): sets of convex hull vertexes (except for the
+upper left corner point 𝐿and the lower right corner point
+𝑅), 𝜀𝑔𝑙𝑜𝑏𝑎𝑙: a global error threshold
+Output: (𝑚,𝑏,𝜀): optimal segment parameters
+1 (𝑚𝑝,𝑏𝑝) ←(0, 0);
+2 𝐴←upper ∪lower, sorted by increasing 𝑚;
+3 for 𝑎∈𝐴do
+4
+if 𝑓′
++ (𝑚𝑎) ≤𝑔′
++(𝑚𝑎) then
+5
+(𝑚𝑝,𝑏𝑝) ←𝑎;
+6
+break;
+// calculate maximum Δ𝜀and corresponding parameters
+7 𝛥𝜀←1
+2 × max(𝑏𝑝−𝑔+(𝑚𝑝), 𝑓+(𝑚𝑝) −𝑏𝑝);
+8 𝑏←𝑏𝑝= 𝑓+(𝑚𝑝) ? 𝑏𝑝−𝛥𝜀: 𝑏𝑝+ 𝛥𝜀;
+9 𝜀←⌈𝜀𝑔𝑙𝑜𝑏𝑎𝑙−𝛥𝜀⌉;
+10 return (𝑚𝑝,𝑏,𝜀);
+subtracting the first key of the segment, i.e., 𝑡𝑘= 𝑘𝑒𝑦𝑘−𝑘𝑒𝑦0, to
+ensure that 𝑡𝑘is non-negative. For the 𝑘-th point (𝑡𝑘, 𝑝𝑜𝑠𝑘), the set
+of all parameters (𝑚,𝑏) in the dual space that satisfy the𝜀-constraint
+forms a strip bounded by two parallel lines:
+Lower Bound: 𝑏≥−𝑡𝑘· 𝑚+ (𝑝𝑜𝑠𝑘−𝜀)
+Upper Bound: 𝑏≤−𝑡𝑘· 𝑚+ (𝑝𝑜𝑠𝑘+ 𝜀)
+(1)
+The intersection of all such strips forms a convex hull 𝑃(specifi-
+cally, a convex polygon), representing all feasible parameters. The
+upper boundary of 𝑃consists of the tightest segments from the
+upper bounds of the intersecting strips, and the lower boundary
+is similarly derived from their lower bounds. A new segment is
+triggered in PLA when the strip of an incoming point no longer
+overlaps with 𝑃.
+OETA calculates the minimum error threshold 𝜀𝑖for segment 𝑖
+based on its convex hull 𝑃𝑖. Let 𝜀𝑖= 𝜀−Δ𝜀. The 𝜀-constraint requires
+that there exists (𝑚,𝑏) ∈𝑃𝑖such that:
+−𝑡𝑙𝑜𝑤· 𝑚+ 𝑝𝑜𝑠𝑙𝑜𝑤−𝜀+ Δ𝜀≤𝑏≤−𝑡𝑢𝑝· 𝑚+ 𝑝𝑜𝑠𝑢𝑝+ 𝜀−Δ𝜀
+For a fixed 𝑚, Δ𝜀is maximized when the boundaries meet:
+−𝑡𝑙𝑜𝑤· 𝑚+ 𝑝𝑜𝑠𝑙𝑜𝑤−𝜀+ Δ𝜀= −𝑡𝑢𝑝· 𝑚+ 𝑝𝑜𝑠𝑢𝑝+ 𝜀−Δ𝜀
+Solving for Δ𝜀yields:
+Δ𝜀= 1
+2
+
+(−𝑡𝑢𝑝· 𝑚+ 𝑝𝑜𝑠𝑢𝑝+ 𝜀) −(−𝑡𝑙𝑜𝑤· 𝑚+ 𝑝𝑜𝑠𝑙𝑜𝑤−𝜀)
+
+= 1
+2 (𝑓(𝑚) −𝑔(𝑚))
+where 𝑓(𝑚) and 𝑔(𝑚) are the upper and lower boundary func-
+tions, respectively (both are linear piecewise functions). Since 𝑓(𝑚)
+- 𝑔(𝑚) represents the vertical chord length of the convex hull, maxi-
+mizing Δ𝜀is equivalent to finding the Maximum Vertical Chord
+Length of 𝑃𝑖. Due to the opposing curvatures of the upper (concave)
+and lower (convex) boundaries, the Vertical Chord Length func-
+tion 𝐿(𝑚) = 𝑓(𝑚) −𝑔(𝑚) is inherently unimodal. Consequently,
+max 𝐿(𝑚) can be efficiently determined by a linear time scanning
+algorithm that identifies the "slope flip vertex", which is the first
+vertex (from left to right) where the slope difference of the incident
+edges to the right satisfies 𝑓′
++(𝑚) ≤𝑔′
++(𝑚), signifying the transition
+from divergence to convergence of the boundaries.
+Table 2: Statistics of each segment max(|𝑢𝑝𝑝𝑒𝑟|, |𝑙𝑜𝑤𝑒𝑟|) (ex-
+cept for 𝐿, 𝑅) after bulk loading, 𝜀=64
+uni
+books
+osm
+fb
+Avg
+1.012
+1.031
+1.113
+1.075
+Max
+3
+7
+11
+9
+Algorithm 2 implements this process: Lines 3–6 scan vertexes in
+increasing order of 𝑚. Except for the upper left corner point 𝐿and
+the lower right corner point 𝑅, which are the intersection points of
+the upper and lower boundaries. Line 4 quickly detects the slope
+flip vertex by slope comparison. Lines 7-9 calculate the minimum
+error threshold and corresponding model parameters.
+Complexity. The dominant overhead of OETA lies in traversing
+the vertices of the convex hull. For a segment containing 𝑁points,
+the resulting convex hull consists of at most 𝑂(𝑁) vertices. We
+demonstrate that reaching this worst-case upper bound imposes
+strict constraints on the data distribution. In practice, however, the
+empirical complexity on real-world datasets is significantly lower
+than this theoretical limit.
+lemma 1. Under the dense key layout (𝑝𝑜𝑠𝑖+1 −𝑝𝑜𝑠𝑖= 1), for every
+data point 𝑝𝑖to contribute a unique vertex to the upper boundary
+or the lower boundary of the feasible convex hull 𝑃, the sequence of
+key intervals {Δ𝑡𝑖} (Δ𝑡𝑖= 𝑡𝑖+1 −𝑡𝑖) must be strictly monotonically
+increasing or decreasing.
+Proof. We focus the proof on the upper boundary of the feasible
+hull 𝑃(the proof for the lower boundary follows a symmetric logic).
+In the dual space, the upper constraint for the 𝑖-th data point is
+defined by the strip upper bound line: 𝑓𝑖(𝑚) = −𝑡𝑖· 𝑚+ (𝑝𝑜𝑠𝑖+ 𝜀).
+Since the normalized keys 𝑡𝑖are strictly increasing, the slopes of
+these lines, −𝑡𝑖, are strictly monotonically decreasing.
+The upper boundary of the convex hull 𝑃corresponds to the
+lower envelope of the set of functions {𝑓𝑖}, defined as 𝐸(𝑚) =
+min𝑖{𝑓𝑖(𝑚)}. A specific line 𝑓𝑖constitutes a distinct segment of
+this envelope (i.e., contributes a vertex) if and only if there exists
+a non-empty open interval (𝑚𝑠𝑡𝑎𝑟𝑡,𝑚𝑒𝑛𝑑) where 𝑓𝑖(𝑚) is strictly
+smaller than all other lines in the set.
+Due to the monotonicity of the slopes, the valid interval for 𝑓𝑖is
+bounded on the left by the intersection with the preceding line 𝑓𝑖−1
+and on the right by the intersection with the succeeding line 𝑓𝑖+1.
+Let 𝑚𝑢,𝑣denote the 𝑚-coordinate of the intersection point between
+lines 𝑓𝑢and 𝑓𝑣, 𝑚𝑢,𝑣= 𝑝𝑜𝑠𝑣−𝑝𝑜𝑠𝑢
+𝑡𝑣−𝑡𝑢
+. For the interval (𝑚𝑖−1,𝑖,𝑚𝑖,𝑖+1)
+to be non-empty (i.e., 𝑚𝑠𝑡𝑎𝑟𝑡< 𝑚𝑒𝑛𝑑), the necessary and sufficient
+condition is 𝑚𝑖−1,𝑖< 𝑚𝑖,𝑖+1. Substituting the 𝑚𝑢,𝑣formula and ap-
+plying the dense layout constraint (𝑝𝑜𝑠𝑖+1 −𝑝𝑜𝑠𝑖= 1), the inequality
+simplifies to:
+1
+Δ𝑡𝑖−1
+<
+1
+Δ𝑡𝑖
+Δ𝑡𝑖>0
+−−−−→Δ𝑡𝑖< Δ𝑡𝑖−1
+Thus, the sequence of key intervals {Δ𝑡𝑖} must be strictly mono-
+tonically decreasing. (Conversely, maintaining all vertices on the
+lower boundary of 𝑃would require {Δ𝑡𝑖} to be strictly monotoni-
+cally increasing).
+In practice, the accumulation of a large number of vertices is
+statistically rare due to two dominant factors: local Δ𝑡oscillation
+8
+
+Table 3: Performance Comparison of Hybrid Search vs. Ex-
+ponential Search in LMG across datasets from Section 6
+global 𝜀
+32
+64
+128
+256
+512
+Avg
++4.71%
++3.25%
++0.75%
++4.89%
++1.29%
+Max
++19.26%
++7.97%
++8.08%
++12.71%
++4.88%
+and curvature limits. First, real-world data rarely maintains the
+strict Δ𝑡monotonicity as lemma 1. A single significant oscillation
+point (e.g., a local "reverse bend" in the key trend) generates a
+steeper strip then preceding points and typically cuts across the
+existing hull boundary more aggressively, thereby rendering the
+intermediate bounds redundant and excluding them from the active
+boundary. Second, segments with high curvature will exhaust the
+fixed error threshold 𝜀quickly. Consequently, such segments are
+forced to terminate while the number of data points 𝑁is still small,
+which naturally limits the total vertex count.
+As a result, most segments fall into two categories: long and
+linear or short and curved, both of which result in a low ver-
+tex count. As evidenced in Table 2, the average number of ver-
+tices (max(|𝑢𝑝𝑝𝑒𝑟|, |𝑙𝑜𝑤𝑒𝑟|)) remains approximately 1.0 across all
+datasets, with a maximum observed value of only 11. In conclusion,
+due to the above limitations and the random entropy of real data,
+it is justifiable to treat the overhead of the OETA as 𝑂(1) in
+practice, rather than the worst-case 𝑂(𝑁).
+5.2
+Choosing the Error Correction Algorithm
+To guarantee correct query results, learned indexes typically per-
+form error correction after model prediction. Among the com-
+monly adopted correction algorithms, binary search and exponen-
+tial search are the two dominant options. Their efficiency depends
+on prediction accuracy and data distribution characteristics.
+Let 𝑑denote the average prediction error. Binary search operates
+within a fixed correction range and performs independently of 𝑑,
+offering stable and predictable cost. In contrast, exponential search
+adaptively expands its search radius without a predefined bound,
+making it efficient when predictions are extremely accurate but
+causing its cost to grow rapidly with larger 𝑑.
+Let ˆ𝑑= 2⌈log𝑑⌉. A common implementation of exponential
+search first performs 𝑂(log ˆ𝑑) exponential probes to determine
+the key’s range, followed by a final binary search within the range
+of size approximately ˆ𝑑/2. Thus, the execution time for exponen-
+tial search is 𝑇exp = 𝐶exp(log ˆ𝑑+ log( ˆ𝑑/2)) = 𝐶𝑒𝑥𝑝log( ˆ𝑑2/2), and
+binary search with a predictable time 𝑇bin = 𝐶bin log𝜀. Due to expo-
+nential search contains binary search, typically, 𝐶exp ≥𝐶bin. Even
+assuming 𝐶exp ≈𝐶bin through aggressive engineering, the the run-
+time ratio 𝑇exp/𝑇bin = log( ˆ𝑑2/2)/log𝜀exceeds 1 when ˆ𝑑2/2 > 𝜀.
+Figure 7 presents the empirical average error in complex or skewed
+real-world datasets, showing that ˆ𝑑2/2 ≫𝜀.
+OETA amplifies the advantage of binary search by computing the
+optimal error threshold 𝜀𝑖for each segment. In locally linear regions
+with small prediction error, this tightening yields binary search
+performance comparable to exponential search. Table 3 reports
+the percentage improvement in query latency achieved by hybrid
+search over exponential search across different global 𝜀, showing
+the constant factor optimization provided by OETA and hybrid
+search further exploits the optimization space of error correction.
+Furthermore, the adaptive correction strategy ensures robustness
+across distributions. For near-linear regions, tuning 𝜀𝑖limits the
+overhead of binary search; for highly non-linear regions, binary
+search guarantees bounded worst-case cost. This distribution-aware
+adaptability is one of the key factors that enables LMG to maintain
+generality and stability in practice.
+6
+EVALUATION
+We first compare LMIndex and LMG against representative base-
+lines across key evaluation dimensions, followed by component-
+level and parameter sensitivity analysis. The key findings include:
+• LMIndex provides the fastest build time, achieving up to
+12.8×, 1.2×, 11.6× and 4.6× speedups over ALEX, DPGM,
+SWIX and B+Tree, respectively.
+• LMIndex and LMG maintain compact space usage. After
+insertions, their space footprint is second only to DPGM,
+and LMIndex reduces peak usage by up to 2.5× vs. B+Tree.
+• For point queries, LMG achieves up to 1.7×, 2.2× and 2.3×
+faster than ALEX, SWIX and B+Tree, and 1.7× than DPGM
+after inserts. For range queries, LMIndex achieves the best
+performance in large range, and reaching 5.1× average
+speedups (up to 16.6×) over B+Tree.
+• LMG exhibits the lowest latency variance, with CV 0.011
+(point queries), 0.024 (range queries), and 0.024 (insertions).
+On read-write workloads, it achieves up to 1.5× and 1.3×
+faster than the ALEX and B+Tree, maintaining superior
+p99/max latency compared to DPGM.
+6.1
+Experimental Setup
+All code is implemented in C++. Our single-threaded experiments
+are conducted on an Ubuntu 24.04 machine with an AMD R9
+7945HX 2.5GHz CPU and 64GB RAM, compiled with gcc -O3.
+6.1.1
+Baseline. We evaluate LMIndex and LMG against four repre-
+sentative baselines. Shared parameters such as the error threshold
+are aligned for fairness and others remain default to simulate real-
+world scenarios that are difficult to tune. (1) Dynamic PGM-Index
+(DPGM) [8] is the update-capable variant of PGM, using the same
+error threshold 𝜀as LMIndex. (2) ALEX [7] adopts gapped arrays
+with model-based insertion and exponential search. We set its max
+node size equal to our max layer size L. (3) SWIX [20] is optimized
+for streaming data with a flat routing layer and strong random
+access support. We use default settings. (4) STX B+Tree [4] serves
+as the traditional baseline, evaluated with its default configuration.
+LMIndex is configured with a max layer size L = 216, initial error
+threshold 𝜀= 64, and a red-black tree (C++ STL) as the update
+absorber with max size 64. LMG inherits all LMIndex settings and
+uses a gapped-array with expansion rate 𝜏= 0.5. This configuration
+is a balanced trade-off, and parameter sensitivity is discussed in
+Section 6.3.1.
+6.1.2
+Datasets. All experiments are conducted on four datasets: a
+synthetic dataset with uniform distribution and three real-world
+datasets from the SOSD benchmark [21]. The Uniform dataset (uni,
+9
+
+uni
+books
+osm
+fb
+Dataset
+0
+50
+100
+150
+200
+Latency (s)
+(a) Bulk loading
+uni
+books
+osm
+fb
+Dataset
+0
+1
+2
+3
+Size (1010 Bytes)
+(b) Index size after bulk loading
+Max
+Current
+uni
+books
+osm
+fb
+Dataset
+0
+1
+2
+3
+Size (1010 Bytes)
+(c) Index size after insertion
+Max
+Current
+uni
+books
+osm
+fb
+Dataset
+0
+5
+10
+15
+Latency (100 ns)
+(d) Point query after bulk loading
+LMIndex
+LMG
+ALEX
+DPGM
+SWIX
+B+Tree
+10
+0
+10
+1
+10
+2
+10
+3
+10
+4
+10
+5
+Scan range
+10
+3
+10
+4
+10
+5
+10
+6
+10
+7
+Latency (ns)
+uni
+10
+0
+10
+1
+10
+2
+10
+3
+10
+4
+10
+5
+Scan range
+osm
+(e) Range query after bulk loading
+0M 20M 40M 60M 80M100M
+Insertion scale (million)
+8
+10
+12
+14
+16
+Latency (100 ns)
+(f) Point query after insertion
+0M 20M 40M 60M 80M100M
+Insertion scale (million)
+20
+30
+40
+Latency (100 ns)
+>2e4
+(g) Range query after insertion
+0M
+20M 40M 60M 80M
+Insertion scale (million)
+5
+10
+15
+20
+Latency (100 ns)
+>300
+(h) Insert after insertion
+Figure 3: Comparison experiments between LMG/LMIndex and baselines in five dimensions, subgraphs (g) and (h) are annotated
+with the same color triangle with extreme large values. In subgraph (c), some Max and Current size are very close.
+200M keys) contains keys drawn from a globally and locally linear
+distribution. The Amazon Books dataset (books, 800M keys) ex-
+hibits global non-linearity with partially linear local distributions.
+The Open Street Map dataset (osm, 800M keys) is both globally
+and locally non-linear. The Facebook user IDs dataset (fb, 200M
+keys) is mostly linear but includes a small number of large outliers.
+All datasets do not contain duplicate values, consistent with prior
+studies or the open-source codebases of learned baselines.
+6.1.3
+Workloads. We evaluate performance under three workload
+types: (1) read-only, (2) mixed read-write workloads with 10%, 30%,
+50%, 80%, and 100% write ratios, and (3) range queries with lengths
+from 100 to 105. Read-only workloads are used to measure point and
+range query performance (after bulk load or after prior insertions).
+Point queries randomly probe 10M existing keys; range queries
+select 10K random start keys and report average latency. Read-
+write workloads issue operations in randomized order to emulate
+interleaving. We first randomly sample 100M write points and
+then load the remaining points to execute workloads. Across all
+experiments, keys are uniformly sampled to avoid distribution-
+induced bias.
+6.1.4
+Metrics. We measure time using average operation latency,
+recorded at nanosecond resolution with C++ std::chrono. For
+memory, we track physical memory consumption via Linux kernel-
+reported metrics: Proportional Set Size (PSS) and historical peak
+usage VmHWM. To ensure accuracy, all memory measurements
+subtract the initial usage before bulk loading.
+6.2
+Evaluation of diverse dimensions
+6.2.1
+Bulk Loading. As shown in Figure 3a, LMIndex significantly
+reduces construction time under bulk loading. Across four real-
+world datasets, LMIndex is on average 1.5× faster than LMG and
+close to DPGM (1.16×, up to 1.20×). It outperforms SWIX and ALEX
+by 8.28× and 8.15× on average (up to 11.64× and 12.75×), and
+exceeds B+Tree by 3.29× on average (up to 4.59×).
+The speedup stems from LMIndex’s lightweight construction
+pipeline: the linear segmentation algorithm computes optimal par-
+titions for a given 𝜀in a single pass, and the top-layer LM is built
+based on segments without training. Compared to DPGM, which
+shares the same segmentation scheme but incurs overhead from
+recursive model fitting, LMIndex avoids additional training. LMG
+introduces minor overhead from gapped array allocation, yet still
+outperforms most baselines.
+6.2.2
+Space Usage. We measure memory usage after bulk loading
+and after 100M random insertions (Figure 3b, Figure 3c). LMIndex
+and LMG both show compact memory footprints, second only to
+DPGM, and reduce peak usage by up to 2.5× compared to B+Tree.
+DPGM benefits from storing only model parameters, though its
+peak memory increase after updates.
+LMIndex allocates LM space based on segment distribution, with
+actual usage influenced by data distribution. On linear datasets
+(e.g., uni, fb), its adaptive structure yields space efficiency close to
+DPGM. In both evaluation stages, LMIndex and LMG show stable
+memory profiles, with peak and steady-state usage nearly aligned.
+6.2.3
+Point Query Performance. We first evaluate point query la-
+tency on fully loaded indexes using 10M random probes (Figure 3d.
+LMG achieves the lowest average latency among all indexes except
+DPGM, outperforming SWIX, ALEX, and B+Tree by 1.415× (up to
+10
+
+2.21×), 1.258× (up to 1.66×), and 1.486× (up to 2.29×) on average,
+respectively. Compared to LMIndex, LMG is 1.156× faster on aver-
+age, primarily due to gapped-array optimizations that reduce error
+correction cost.
+Against DPGM, LMG performs slightly worse on skewed datasets
+(e.g., books, osm) but outperforms DPGM by 1.3× on uni, where LM
+effectively acts like a flat array. The advantage stems from precise
+segment localization by LM and reduced in-segment search cost via
+OETA. While DPGM is fast on static workloads, its performance
+degrades significantly with minor insertions, as analyzed in 6.2.5.
+6.2.4
+Range Query Performance. We evaluate range queries with
+varying scan lengths (100 to 105) (Figure 3e). For large ranges (≥103),
+LMIndex consistently achieves the lowest latency. Compared to
+B+Tree, LMIndex and LMG consistently outperform for all ranges,
+achieving 5.06× and 2.66× average speedups, respectively, peaking
+at 16.62× and 4.02×.
+The advantage of LMIndex in large ranges benefits from the
+ordered link of the segment list and the space pre-allocation of the
+result set. LMG is slightly slower due to additional skip cost from
+gaps. We further evaluate post-update range queries performance
+and stability in Section 6.2.5.
+6.2.5
+Stability. We evaluate stability by incrementally inserting
+0–100M keys (step size: 10M) into the osm dataset and measur-
+ing average latency at each step for point queries (Figures 3f),
+range queries (Figures 3g), and further insertions (Figures 3h). LMG
+exhibits the highest stability across all metrics, with the lowest
+coefficient of variation (CV ≈0.011/0.024/0.024 for average point
+query/range query/insert latency). Its average CV across the three
+scenarios is 2.87×, 11.69×, 82.59×, 1.27× lower than that of ALEX,
+DPGM, SWIX and B+Tree, respectively. After insertions, its latency
+outperforming all baselines in point and range queries and trailing
+only DPGM in inserts. These results benefit from LM structure
+adapts well to high-volume writes, and gapped arrays effectively
+absorb updates while maintaining latency consistency.
+For LMIndex, it employs a secondary index as its unique update
+absorber, which increases the likelihood of merging data from both
+sources during range queries as updates accumulate. This leads to
+a noticeable upward trend in range query latency. Insert latency
+is initially highest but stabilizes after 70–90M keys as periodic re-
+training dominates. Despite higher update cost, LMIndex maintains
+second-best point query latency due to accurate segment mapping
+and OETA-assisted correction.
+Figure 3d shows that DPGM achieves the fastest point queries
+post-load, but Figure 3f shows that it degrades rapidly after minor
+updates, indicating poor stability. Its LSM-like append-only struc-
+ture enables strong insert speed but causes severe tail latencies. The
+insertion latency of SWIX shows a pronounced spike at the begin-
+ning, which subsequently stabilizes. This pattern indicates that the
+implementation involves expensive maintenance operations that
+are occasionally triggered by rare events. Overall, LMG delivers the
+most robust stability, combining low mean latency and minimal
+variation.
+6.2.6
+Update Performance. We evaluate latency and stability un-
+der read-write workloads on osm with 100M total operations and
+write ratios from 0.1 to 1.0. SWIX is omitted from this evaluation
+0.1
+0.3
+0.5
+0.8
+1
+Frequency of write
+0
+5
+10
+15
+Latency (100 ns)
+(a) Update (read-write workload)
+LMIndex
+LMG
+ALEX
+DPGM
+B+Tree
+0.1
+0.3
+0.5
+0.8
+1
+Frequency of write
+10
+3
+10
+5
+10
+7
+10
+9
+Latency (ns)
+(b) LMG vs. DPGM in p99 & max
+LMG p99
+LMG max
+DPGM p99
+DPGM max
+Figure 4: LMG has the best comprehensive update capability.
+as it consistently underperformed. As shown in Figure 4a, LMG
+outperforms ALEX and B+Tree by 1.41× and 1.22× on average (up
+to 1.50× and 1.28×). In the 0.1–0.5 write ratios, LMG provides the
+best performance and remains competitive at higher ratios, trailing
+only DPGM, while maintaining the lowest variance.
+DPGM exhibits severe tail latency (p99/max up to 109 ns ≈1s;
+Figure 4b) due to repeated segment merges, limiting its practicality
+in latency-sensitive scenarios. In contrast, LMG maintains the low
+mean latency with bounded tail latency across diverse write ra-
+tios. In addition, LMIndex performs well in read-heavy workloads
+(0.1–0.3) but degrades as writes increase.
+6.3
+Detailed Evaluation
+6.3.1
+Parameter Evaluation. We evaluate the impact of four key
+parameters on LMIndex and LMG. To isolate effects of gapped
+array, the first three are tested on LMIndex, and the expansion rate
+is evaluated on LMG only.
+Error Threshold. Figure 5a shows how varying the error thresh-
+old affects bulk loading time and point query latency (10M queries)
+on uni and osm. Larger thresholds reduce the number of segments,
+lowering bulk load time but increasing correction cost during
+queries. On uni, small thresholds create excessive segmentations,
+deepening the LM and degrading performance. Thus, an intermedi-
+ate value balances load and query efficiency.
+Max Layer Size. We vary the maximum layer size and measure
+its effect on query latency and total LM size (normalized by the min-
+imum layer size; see Figure 5b). Results show that latency remains
+stable, consistent with the theoretical analysis that single-layer
+query time is unaffected. Total LM size varies by dataset, growing
+notably on uni but not on osm. Small layer size limitations generally
+yield more compact models.
+Max update Absorber Size. We analyze the effect of the max-
+imum update absorber size on 100M key insertion latency and
+length-100 range query latency (Figure 5c). As the max absorber
+size increases, insertion latency decreases due to reduced buffer
+merging and segment retraining frequency. However, larger buffers
+introduce more fragmented regions, leading to higher scan costs
+during range queries. This highlights a typical read-write trade-off,
+which we translate into a read/write-space trade-off in LMG.
+Expansion Rate. The expansion rate 𝜏determines the propor-
+tion of reserved gaps in the data array, influencing both memory
+footprint and update/query performance. As shown in Figure 6,
+increasing 𝜏initially reduces insertion latency, but the benefits
+11
+
+16
+32
+64
+128
+256
+0
+2
+4
+6
+8
+10
+Query latency (100 ns)
+(a) Error threshold
+Point query (uni)
+Bulk loading (uni)
+Point query (osm)
+Bulk loading (osm)
+14
+16
+18
+20
+22
+0
+2
+4
+6
+8
+Query latency (100 ns)
+(b) Max layer size
+Point query (uni)
+LM layer size (uni)
+Point query (osm)
+LM layer size (osm)
+32
+64
+128
+256
+512
+20
+40
+60
+80
+Query latency (100 ns)
+(c) Max update absorber size
+Range query (uni)
+Insert (uni)
+Range query (osm)
+Insert (osm)
+0
+5
+10
+15
+20
+25
+Loading latency (s)
+0
+20
+40
+60
+80
+Normalized layer size (x)
+20
+40
+60
+80
+Insert latency (100 ns)
+Figure 5: Three basic parameter evaluations, based on datasets uni (linear)
+and osm (non-linear).
+0.1
+0.2
+0.5
+0.8
+1.0
+0
+2
+4
+6
+Size (109 Bytes)
+(a) Expansion rate (uni)
+Size af/load
+Insert
+Size af/insert
+Point query
+0.1
+0.2
+0.5
+0.8
+1.0
+0
+10
+20
+30
+Size (109 Bytes)
+(b) Expansion rate (osm)
+Size af/load
+Insert
+Size af/insert
+Point query
+0
+20
+40
+60
+Latency (100 ns)
+5
+10
+15
+20
+Latency (100 ns)
+Figure 6: Impact of expansion rate on LMG in
+terms of point query, insert and space.
+uni
+books
+osm
+fb
+0
+20
+40
+60
+80
+Error
+LS avg error
+OETA avg error
+LS avg latency
+LS max error
+OETA max error
+OETA avg latency
+10
+2
+10
+3
+10
+4
+Latency (ns)
+Figure 7: Analysis of OETA and
+Least Squares.
+uni
+books
+osm
+fb
+2
+4
+6
+8
+10
+Latency (100 ns)
+MBI query
+MBI bulk loading
+RSI query
+RSI bulk loading
+0
+10
+20
+30
+40
+Latency (s)
+Figure 8: Comparison of gap in-
+sertion strategies.
+uni
+books
+osm
+fb
+0
+2
+4
+6
+8
+Latency (100 ns)
+(a) Delete
+uni
+books
+osm
+fb
+0
+5
+10
+15
+Latency (100 ns)
+(b) Point query after delete
+LMIndex
+LMG
+ALEX
+DPGM
+B+Tree
+Figure 9: In addition to competitive deletion performance, LMG
+has the lowest query latency after massive deletion.
+Table 4: Statistics of Linear Map
+uni
+books
+osm
+fb
+Avg update latency (ns)
+156.86
+159.99
+280.13
+111.05
+Avg layer size
+61504
+39
+7335.5
+20.4
+Avg search depth
+0
+0.997
+1.001
+2.184
+Avg num of segment’s cells
+4.7
+3.0
+108.9
+3.6
+Max layer depth
+0
+3
+2
+3
+Num of layer
+1
+60591
+20421
+93025
+LM building time / total
+0.02%
+0.7%
+4.4%
+3.1%
+LM space usage / total
+0.066%
+0.32%
+15.7%
+1.73%
+plateaus once most updates are absorbed by existing gaps. Query
+latency also improves slightly due to fewer correction steps, though
+the gain quickly saturates, especially on datasets with linear dis-
+tributions like uni. Meanwhile, memory usage rises steadily with
+larger 𝜏, reflecting the overhead of excess reserved space. Therefore,
+selecting 𝜏mainly requires balancing update performance against
+memory overhead.
+6.3.2
+Gap Insertion Strategy. We compare two gap insertion strate-
+gies within LMG: model-based insertion [7] and reserved-space
+insertion. As shown in Figure 8, the reserved-space strategy incurs
+slightly higher bulk load time due to more complex gap placement.
+However, it consistently delivers better query performance by pre-
+allocating gaps more evenly across array. This reduces average
+correction length and improves search performance. Overall, given
+LMG’s efficient bulk loading process, the small increase in load
+time is an acceptable trade-off for stronger runtime performance.
+6.3.3
+OETA vs. Least Squares. We compare OETA with the classic
+least squares (LS) method across three metrics: average maximum
+error per segment, average mean error per segment, and algorithm
+runtime. As shown in Figure 7, OETA significantly outperforms
+LS by reducing the average maximum error by 15.4%–26.6% while
+incurring only 0.5%–18% of LS’s runtime. These improvements
+align with OETA’s theoretical design, which directly minimizes
+the maximum segment error to accelerate binary search. Moreover,
+this efficiency makes OETA suitable for time-sensitive scenarios,
+offering an alternative approach to computing model parameters
+for other learned indexes.
+6.3.4
+Linear Map Evaluation. Table 4 presents key statistics of LM,
+except update latency measured under a 100M random insertion
+workload and all other metrics collected after fully loading each
+dataset. The root layer is defined as depth 0. Across datasets, LM
+exhibits consistently low and stable update latency. Most keys are
+located within 1 layer, with the fb dataset being an exception due
+to the segments containing a small number of large outliers placed
+at the root. Owing to the flat layer structure and the training-free
+model design, LM achieves almost negligible build time, accounting
+for just 0.02%–4.4% of total index construction time.
+6.3.5
+Delete Evaluation. We evaluate delete performance by re-
+moving 100M randomly selected keys and measuring point query
+latency with 10M random lookups post-deletion. SWIX is excluded
+due to its lack of an explicit delete interface. As shown in Figure 9,
+DPGM supports fast deletion but suffers significant query degrada-
+tion afterward. LMIndex achieves both efficient deletions and stable
+post-delete queries, enabled by its lightweight segment split-merge
+strategy and fast model retraining. LMG further delivers the best
+trade-off by exploiting gapped-array to reduce prediction errors
+and avoiding chain updates.
+12
+
+7
+CONCLUSIONS
+This work introduces Linear Map (LM), a lightweight and model-
+indexing architecture, together with the Optimal Error Thresh-
+old Algorithm (OETA). These components jointly form LMIndex
+and its enhanced variant LMG. LMIndex is well-suited for space-
+constrained read-heavy workloads. Meanwhile, LMG extends LMIn-
+dex with adaptive gap allocation and hybrid correction, delivering
+superior update performance and stability. Across six practical eval-
+uation dimensions, LMG achieves the best overall performance, and
+consistently outperforms B+Tree. These results highlight a path
+toward practical, universal learned index structures suitable for real
+system deployments.
+REFERENCES
+[1] Mikkel Møller Andersen and Pinar Tözün. 2022. Micro-architectural analysis of
+a learned index. In Proceedings of the Fifth International Workshop on Exploiting
+Artificial Intelligence Techniques for Data Management (aiDM ’22). ACM, New
+York, NY, USA, 1–12.
+[2] Christoph Anneser, Andreas Kipf, Huanchen Zhang, Thomas Neumann, and
+Alfons Kemper. 2022. Adaptive Hybrid Indexes. In Proceedings of the Interna-
+tional Conference on Management of Data (SIGMOD). ACM, New York, NY, USA,
+1626–1639.
+[3] Abhay Kumar Bhadani and Dhanya Jothimani. 2016. Big data: challenges, op-
+portunities, and realities. Effective big data management and opportunities for
+implementation (2016), 1–24.
+[4] Timo Bingmann. 2019. stx-btree. Retrieved January 1, 2025 from https://github.
+com/bingmann/stx-btree
+[5] Yifan Dai, Yien Xu, Aishwarya Ganesan, Ramnatthan Alagappan, Brian Kroth,
+Andrea C. Arpaci-Dusseau, and Remzi H. Arpaci-Dusseau. 2020. From WiscKey
+to Bourbon: a learned index for log-structured merge trees. In 14th USENIX
+Symposium on Operating Systems Design and Implementation (OSDI). USENIX
+Association, USA, 155–171.
+[6] M. Dietzfelbinger, A. Karlin, K. Mehlhorn, F. M. auf der Heide, H. Rohnert,
+and R. E. Tarjan. 1988. Dynamic perfect hashing: upper and lower bounds. In
+Proceedings of the 29th Annual Symposium on Foundations of Computer Science
+(SFCS). IEEE Computer Society, USA, 524–531.
+[7] Jialin Ding, Umar Farooq Minhas, Jia Yu, Chi Wang, Jaeyoung Do, Yinan Li,
+Hantian Zhang, Badrish Chandramouli, Johannes Gehrke, Donald Kossmann,
+David Lomet, and Tim Kraska. 2020. ALEX: An Updatable Adaptive Learned
+Index. In Proceedings of the International Conference on Management of Data
+(SIGMOD). ACM, New York, NY, USA, 969–984.
+[8] Paolo Ferragina and Giorgio Vinciguerra. 2020. The PGM-index: a fully-dynamic
+compressed learned index with provable worst-case bounds. Proc. VLDB Endow.
+13, 8 (April 2020), 1162–1175.
+[9] Alex Galakatos, Michael Markovitch, Carsten Binnig, Rodrigo Fonseca, and Tim
+Kraska. 2019. FITing-Tree: A Data-aware Index Structure. In Proceedings of the
+International Conference on Management of Data (SIGMOD). ACM, New York,
+NY, USA, 1189–1206.
+[10] Goetz Graefe. 2006. B-tree indexes for high update rates. SIGMOD Rec. 35, 1
+(March 2006), 39–44.
+[11] Goetz Graefe. 2011. Modern B-Tree Techniques. Foundations and Trends in
+Databases 3, 4 (April 2011), 203–402.
+[12] Na Guo, Yaqi Wang, Wenli Sun, Yu Gu, Jianzhong Qi, Zhenghao Liu, Xiufeng
+Xia, and Ge Yu. 2024. Chameleon: Towards Update-Efficient Learned Indexing
+for Locally Skewed Data. In 2024 IEEE 40th International Conference on Data
+Engineering (ICDE). 4316–4328.
+[13] Ali Hadian, Behzad Ghaffari, Taiyi Wang, and Thomas Heinis. 2023. COAX:
+Correlation-Aware Indexing. In Proceedings of the IEEE International Conference
+on Data Engineering Workshops (ICDEW). 55–59.
+[14] Ali Hadian and Thomas Heinis. 2020. MADEX: Learning-augmented Algorithmic
+Index Structures. In Proceedings of the International VLDB Workshop on Applied
+AI for Database Systems and Applications (AIDB).
+[15] Andreas Kipf, Ryan Marcus, Alexander van Renen, Mihail Stoian, Alfons Kemper,
+Tim Kraska, and Thomas Neumann. 2020. RadixSpline: a single-pass learned
+index. In Proceedings of the Third International Workshop on Exploiting Artificial
+Intelligence Techniques for Data Management (aiDM). ACM, New York, NY, USA.
+[16] Tim Kraska, Alex Beutel, Ed H. Chi, Jeffrey Dean, and Neoklis Polyzotis. 2018. The
+Case for Learned Index Structures. In Proceedings of the International Conference
+on Management of Data (SIGMOD). ACM, New York, NY, USA, 489–504.
+[17] Hai Lan, Zhifeng Bao, J. Shane Culpepper, Renata Borovica-Gajic, and Yu Dong.
+2024. A Fully On-Disk Updatable Learned Index. In Proceedings of the IEEE
+International Conference on Data Engineering (ICDE). 4856–4869.
+[18] Justin J. Levandoski, David B. Lomet, and Sudipta Sengupta. 2013. The Bw-Tree:
+A B-tree for new hardware platforms. In Proceedings of the IEEE International
+Conference on Data Engineering (ICDE). USA, 302–313.
+[19] Pengfei Li, Yu Hua, Jingnan Jia, and Pengfei Zuo. 2021. FINEdex: a fine-grained
+learned index scheme for scalable and concurrent memory systems. Proc. VLDB
+Endow. 15, 2 (Oct. 2021), 321–334.
+[20] Liang Liang, Guang Yang, Ali Hadian, Luis Alberto Croquevielle, and Thomas
+Heinis. 2024. SWIX: A Memory-efficient Sliding Window Learned Index. Proc.
+ACM Manag. Data 2, 1 (March 2024).
+[21] Ryan Marcus, Andreas Kipf, Alexander van Renen, Mihail Stoian, Sanchit Misra,
+Alfons Kemper, Thomas Neumann, and Tim Kraska. 2020. Benchmarking learned
+indexes. Proc. VLDB Endow. 14, 1 (Sept. 2020), 1–13.
+[22] Fei Mei, Qiang Cao, Hong Jiang, and Lei Tian Tintri. 2017. LSM-tree managed
+storage for large-scale key-value store. In Proceedings of the 2017 Symposium on
+Cloud Computing (SoCC). ACM, New York, NY, USA, 142–156.
+[23] Joseph O’Rourke. 1981. An on-line algorithm for fitting straight lines between
+data ranges. Commun. ACM 24, 9 (Sept. 1981), 574–578.
+[24] Patrick O’Neil, Edward Cheng, Dieter Gawlick, and Elizabeth O’Neil. 1996. The
+log-structured merge-tree (LSM-tree). Acta Inf. 33, 4 (June 1996), 351–385.
+[25] Felix Martin Schuhknecht, Jens Dittrich, and Laurent Linden. 2018. Adaptive
+Adaptive Indexing. In Proceedings of the IEEE International Conference on Data
+Engineering (ICDE). 665–676.
+[26] Mihail Stoian, Andreas Kipf, Ryan Marcus, and Tim Kraska. 2021. Towards
+Practical Learned Indexing. In Proceedings of the International VLDB Workshop
+on Applied AI for Database Systems and Applications (AIDB).
+[27] Mihail Stoian, Andreas Kipf, Ryan Marcus, and Tim Kraska. 2021. Towards
+practical learned indexing. arXiv preprint arXiv:2108.05117 (2021).
+[28] Zhaoyan Sun, Xuanhe Zhou, and Guoliang Li. 2023. Learned Index: A Com-
+prehensive Experimental Evaluation. Proc. VLDB Endow. 16, 8 (April 2023),
+1992–2004.
+[29] Chuzhe Tang, Youyun Wang, Zhiyuan Dong, Gansen Hu, Zhaoguo Wang, Minjie
+Wang, and Haibo Chen. 2020. XIndex: a scalable learned index for multicore
+data storage. In Proceedings of the Principles and Practice of Parallel Programming
+(PPoPP). ACM, New York, NY, USA, 308–320.
+[30] Jun Wang, Wei Liu, Sanjiv Kumar, and Shih-Fu Chang. 2016. Learning to Hash
+for Indexing Big Data—A Survey. Proc. IEEE 104, 1 (2016), 34–57.
+[31] Chaichon Wongkham, Baotong Lu, Chris Liu, Zhicong Zhong, Eric Lo, and
+Tianzheng Wang. 2022. Are updatable learned indexes ready? Proc. VLDB Endow.
+15, 11 (July 2022), 3004–3017.
+[32] Jiacheng Wu, Yong Zhang, Shimin Chen, Jin Wang, Yu Chen, and Chunxiao Xing.
+2021. Updatable learned index with precise positions. Proc. VLDB Endow. 14, 8
+(April 2021), 1276–1288.
+[33] Jiaoyi Zhang and Yihan Gao. 2022. CARMI: a cache-aware learned index with
+a cost-based construction algorithm. Proc. VLDB Endow. 15, 11 (July 2022),
+2679–2691.
+[34] Wenshao Zhong, Chen Chen, Xingbo Wu, and Song Jiang. 2021. REMIX: Efficient
+Range Query for LSM-trees. In Proceedings of the File and Storage Technologies
+(FAST). USENIX Association, 51–64.
+13

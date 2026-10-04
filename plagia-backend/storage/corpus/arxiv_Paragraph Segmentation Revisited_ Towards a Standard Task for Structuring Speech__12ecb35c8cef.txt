@@ -1,0 +1,1321 @@
+Paragraph Segmentation Revisited:
+Towards a Standard Task for Structuring Speech
+Fabian Retkowski1, Alexander Waibel1,2
+1Karlsruhe Institute of Technology, 2Carnegie Mellon University
+retkowski@kit.edu, waibel@cmu.edu
+Abstract
+Automatic speech transcripts are often delivered as unstructured word streams that impede readability and
+repurposing. We recast paragraph segmentation as the missing structuring step and fill three gaps at the intersection
+of speech processing and text segmentation. First, we establish TEDPara (human-annotated TED talks) and
+YTSegPara (YouTube videos with synthetic labels) as the first benchmarks for the paragraph segmentation task.
+The benchmarks focus on the underexplored speech domain, where paragraph segmentation has traditionally not
+been part of post-processing, while also contributing to the wider text segmentation field, which still lacks robust and
+naturalistic benchmarks. Second, we propose a constrained-decoding formulation that lets large language models
+insert paragraph breaks while preserving the original transcript, enabling faithful, sentence-aligned evaluation. Third,
+we show that a compact model (MiniSeg) attains state-of-the-art accuracy and, when extended hierarchically, jointly
+predicts chapters and paragraphs with minimal computational cost. Together, our resources and methods establish
+paragraph segmentation as a standardized, practical task in speech processing.
+Keywords: paragraph segmentation, text segmentation, transcript formatting
+1.
+Introduction
+Readability is a major concern for automatic speech
+recognition (ASR) transcripts, which are tradition-
+ally output as unstructured sequences of words,
+frequently lacking punctuation, casing, and higher-
+level organization such as sentence or paragraph
+boundaries (Jones et al., 2003; Shugrina, 2010;
+Tündik et al., 2018). While much research has fo-
+cused on restoring sentence-level structure, para-
+graph segmentation is a less explored area. Para-
+graphs help users navigate and understand long-
+form speech such as lectures or meetings, where
+ideas unfold over extended spans (Lai et al., 2016).
+They also improve the usability and visual clarity
+of transcripts, avoiding the appearance of a dense,
+unreadable block of text (Figure 1). Human evalua-
+tions show a preference for paragraph-segmented
+transcripts with breaks enhancing comprehension
+and perceived coherence (Pappu and Stent, 2015).
+Despite its importance, paragraph segmentation
+remains underexplored in speech processing, in
+part due to the absence of standardized bench-
+marks and the scarcity of labeled data for spoken
+content. Unlike sentence boundary detection or
+punctuation restoration, paragraph segmentation
+lacks large-scale, curated datasets, making system-
+atic evaluation and model development difficult.
+To address this gap, we introduce TEDPara and
+YTSegPara, the first benchmarks for paragraph
+segmentation in speech, covering both TED talks
+and YouTube videos. Beyond that, these datasets
+fill a key void in the broader text segmentation
+area, where high-quality spoken-domain bench-
+marks remain scarce. We provide strong base-
+In this video, we’re going to walk
+through how to manage user per-
+missions for the payments profile
+tied to your Google Cloud billing
+account. If you’re looking to give
+users permission to update your
+payment method, billing address,
+or payment contacts, you’ll need to
+grant them permissions on the pay-
+ments profile associated with your
+billing account. Your billing account
+and payments profile are separate
+entities that work together.
+The
+billing account tracks the costs in-
+curred by all attached projects and
+defines who pays for the resources.
+It is connected to a payments pro-
+file, which stores your payment in-
+strument information and defines
+how you pay for charges. A pay-
+ments profile can be linked to
+multiple payment accounts across
+Google products, such as Google
+Workspace, Google Cloud, Google
+Ads, and more.
+In this video, we’re going to walk
+through how to manage user per-
+missions for the payments profile
+tied to your Google Cloud billing ac-
+count.
+If you’re looking to give users per-
+mission to update your payment
+method, billing address, or payment
+contacts, you’ll need to grant them
+permissions on the payments pro-
+file associated with your billing ac-
+count.
+Your billing account and payments
+profile are separate entities that
+work together. The billing account
+tracks costs for attached projects
+and defines who pays for resources.
+It is connected to a payments pro-
+file, which stores your payment in-
+strument information and defines
+how you pay for charges.
+A payments profile can be linked to
+multiple payment accounts across
+Google products, such as Google
+Workspace, Google Cloud, Google
+Ads, and more.
+Raw Transcript
+Paragraph-Segmented Transcript
+¶
+¶
+¶
+¶
+Figure 1: Paragraph segmentation turns an undif-
+ferentiated transcript into visually coherent para-
+graphs, aiding readability and navigation.
+lines, including a compact model (MiniSeg) and
+LLM–based methods, and propose an efficient con-
+strained decoding approach that inserts paragraph
+breaks while preserving transcript fidelity, essen-
+tial for faithful evaluation. Using YTSegPara, we
+further extend MiniSeg to hierarchical modeling, en-
+abling the joint prediction of chapter and paragraph
+boundaries, demonstrating that both levels can be
+learned efficiently within a shared framework. Eval-
+uation combines automatic metrics with human
+1
+arXiv:2512.24517v1 [cs.CL] 30 Dec 2025
+
+judgments, providing a comprehensive perspective
+on segmentation quality. Together, these contribu-
+tions establish a foundation for treating paragraph
+segmentation as a standardized, measurable task
+in speech processing and highlight the practical
+value of our datasets for future research.
+2.
+Related Work
+Paragraph Segmentation in Written Text.
+Para-
+graph segmentation has largely been explored in
+the context of written text, where paragraph bound-
+aries are typically already available. As a result,
+it is often treated as a secondary task, commonly
+used in self-supervised pretraining for sentence
+segmentation (Wicks and Post, 2021; Minixhofer
+et al., 2023; Frohmann et al., 2024), rather than as
+a primary research objective. Only a few recent
+studies have directly addressed paragraph segmen-
+tation as their main focus, typically within specific
+domains such as news articles and literary texts
+(Iikura et al., 2021; Zhuo et al., 2023; Yoo and Kim,
+2024), but these efforts remain isolated without a
+standardized task definition or benchmark.
+Segmentation of Speech Transcripts.
+Re-
+search on segmentation in speech data has been
+limited. Early work on video transcripts explored
+automatic paragraph segmentation strategies (Lai
+et al., 2016; Salimbajevs and Ikauniece, 2017; Lai
+et al., 2020), but these efforts did not produce
+reusable benchmarks, thereby limiting reproducibil-
+ity and broader applicability.
+Recent work has
+focused on higher-level segmentation, targeting
+chapter segmentation in long-form spoken content
+with joint title generation (Ghazimatin et al., 2024;
+Retkowski and Waibel, 2024). While related, these
+approaches address a coarser segmentation gran-
+ularity and involve broader objectives.
+Text Segmentation Benchmarks.
+Current re-
+search in text segmentation is constrained by the
+scarcity of high-quality datasets.
+As noted by
+Glavaš et al. (2021), the field suffers from an “ab-
+sence of large annotated datasets,” a limitation re-
+flected in earlier work that often relied on small
+datasets or benchmarks constructed by concate-
+nating unrelated snippets (e.g., Lukasik et al. 2020).
+A recent survey (Ghinassi et al., 2024) identifies
+this lack of suitable resources as the central chal-
+lenge for progress. To date, only a few large-scale
+benchmarks exist, most prominently Wiki-727K
+(Koshorek et al., 2018) and more recently YTSeg
+(Retkowski and Waibel, 2024). Our contribution
+addresses this gap by introducing benchmarks for
+a new segmentation task, allowing for more diverse
+and robust model evaluation.
+Constrained Decoding with LLMs.
+Constrained
+decoding and structured output generation en-
+able LLMs to produce outputs that follow spe-
+cific formats or rules. Recent work has explored
+grammar-based and input-dependent constraints
+(Geng et al., 2023a,b). However, these works do
+not consider paragraph boundaries as a structured
+prediction problem.
+3.
+Task Definition
+Paragraph segmentation is a special case of text
+segmentation whose goal is to divide a text into
+paragraph units. While there is no single agreed-
+upon definition of what constitutes a paragraph, it
+is often described as a semantically or functionally
+coherent segment (Bolshakov and Gelbukh, 2001).
+At the same time, boundaries may also be intro-
+duced for stylistic reasons, considering discourse
+structure and rhetorical roles (Sporleder and La-
+pata, 2004), transitional and connective phrases
+(Zadrozny and Jensen, 1991; Lai et al., 2016), or
+length and readability (Yoo and Kim, 2024). Para-
+graph segmentation operates on a finer granularity
+compared to topic segmentation, which predicts
+higher-level topic shifts that also typically imply
+paragraph breaks (Filippova and Strube, 2006).
+4.
+Dataset Construction
+4.1.
+TEDPara
+TEDPara is derived from publicly available TED
+Talk transcripts, which include high-quality, human-
+annotated paragraph structure aligned with spoken
+presentations. We restrict our dataset to English
+transcripts only and collect all TED Talks listed on
+the official TED website as of May 13, 2024, span-
+ning content published since February 2006. This
+results in an initial pool of 6,379 talks.
+Preprocessing.
+We apply the following filtering
+steps. First, we remove all talks that lack a tran-
+script, affecting 724 talks (12.8%). Next, we ex-
+clude talks that contain only a single paragraph, as
+they do not provide any paragraph boundary infor-
+mation; this step removes an additional 462 talks
+(7.2%). The final TEDPara dataset contains 5,193
+talks with multi-paragraph transcripts, that we fur-
+ther partition into training, validation, and testing,
+see Table 1 for details.
+Release.
+Due to licensing restrictions on TED
+content, we do not redistribute the data directly.
+Instead, we provide both the partitioned talk IDs as
+well as scripts for downloading and preprocessing
+2
+
+Partition
+# Examples
+Training
+4,154
+(80 %)
+Validation
+519
+(10 %)
+Testing
+520
+(10 %)
+Total
+5,193
+Table 1: TEDPara Data Split
+the talks into a standardized format1, ensuring both
+reproducibility and legal compliance.
+4.2.
+YTSegPara
+To extend our task to more diverse speech content,
+we augment the existing YTSeg dataset (Retkowski
+and Waibel, 2024), which provides chapter annota-
+tions for structurally and topically diverse YouTube
+videos. The original dataset is limited to English-
+language videos with English transcripts, and the
+transcripts are derived from closed captions, which
+lack paragraph structure. We augment the dataset
+with paragraph-level annotations to produce a new
+dataset: YTSegPara.
+Augmentation.
+Since manual paragraph anno-
+tation is infeasible at scale, we derive paragraph
+boundaries using the LLM-based constrained de-
+coding method described in Section 5, using the
+LLaMA 3.1 70B model (Grattafiori et al., 2024).
+Utility and Scope.
+Paragraph segmentation is a
+narrow problem that can be reduced to a sequence
+of binary decisions, making it well-suited for knowl-
+edge distillation into smaller, more efficient models
+(e.g., a Transformer encoder classifier) where in-
+ductive biases can effectively be imposed. Thus,
+the generated annotations serve a dual purpose:
+they provide training data for compact models and
+establish a benchmark for hierarchical segmen-
+tation, jointly predicting both chapters and para-
+graphs, in long-form spoken content.
+Release.
+YTSegPara
+inherits
+the
+original
+dataset’s CC BY-NC-SA 4.0 license and is
+released with scripts and metadata2.
+5.
+Paragraph Insertion with LLMs
+We cast paragraph segmentation as a constrained
+completion task (Figure 2):
+at each sentence
+boundary the LLM may emit only (i) the punctu-
+ation token that ends the current sentence (“con-
+tinue”), or (ii) punctuation tokens followed by the
+1https://github.com/retkowski/tedseg
+2https://github.com/retkowski/
+ytsegpara
+s1
+s2
+sN
+...
+s1
+s2
+sN
+...
+In this video, we're going to walk 
+through 
+how 
+to 
+manage 
+user 
+permissions for the payments profile 
+tied to your Google Cloud billing 
+account. If you're looking to give 
+users permission to update your 
+payment method, billing address, or 
+payment contacts, you'll need to 
+grant 
+them 
+permissions 
+on 
+the 
+payments profile associated with your 
+billing account. Your billing account 
+and payments profile are separate 
+entities that work together. 
+In this video, we're going to walk 
+through 
+how 
+to 
+manage 
+user 
+permissions for the payments profile 
+tied to your Google Cloud billing 
+account. If you're looking to give 
+users permission to update your 
+payment method, billing address, or 
+payment contacts, you'll need to 
+grant 
+them 
+permissions 
+on 
+the 
+payments profile associated with your 
+billing account. Your billing account 
+and payments profile are separate 
+entities that work together. 
+Transcript T
+Sentences S
+Sentence
+Segmentation
+O := O + si[:-1]
+ := O + t
+prompt(T,O)
+Append sentence si to 
+previous output O without 
+punctuation token
+Construct prompt with 
+transcript and 
+previous output
+Produce a single next token t, 
+masked to break and 
+sentence-final punctuation
+Break
+Continue
+LLM
+¶
+≡
+. ? ! 
+.\n\n 
+t
+for each si
+Figure 2: Conceptual illustration of the sentence-
+wise constrained decoding algorithm for paragraph
+insertion with LLMs. At each sentence boundary,
+the model performs a single forward pass to decide
+between two constrained actions: continue (emit
+standard punctuation) or break (emit punctuation
+followed by newlines).
+delimiter “\n\n” (“break”). Because the model can-
+not hallucinate arbitrary text, the original transcript
+is preserved verbatim and the paragraph structure
+emerges from a sequence of binary choices.
+Formally, let T be the transcript and S
+=
+(s1, . . . , sm) its sentence tokenization, obtained with
+NLTK’s sentence tokenizer (Bird et al., 2009). Be-
+fore boundary i we hold the partially formatted out-
+put O, whose last token is the sentence-final punc-
+tuation p ∈P. We strip that token, build a prompt
+that contains T and the shortened O, encode it
+as x = τ(prompt(T, O)) and ask the LLM for the
+next-token distribution p = LLM(x). Only two alter-
+natives remain unmasked:
+ppunct = pLLM(p | x),
+(1)
+pbreak = max
+t∈N pLLM(t | x).
+(2)
+If pbreak > ppunct we append the most likely break
+token t⋆= arg maxt∈N pLLM(t | x) and set the indi-
+cator πi+1 = 1; otherwise we restore p and keep
+πi+1 = 0. Finally, the next sentence si+1 is copied
+verbatim to O, adjusting whitespace so that no dou-
+ble blanks are produced.
+Efficiency.
+The loop performs exactly one for-
+ward pass of LLM per sentence boundary, for an
+O(m) runtime; far cheaper than the O(|τ(T)|) gen-
+erations a full re-write would need.
+Ensuring
+Comparable
+Evaluation.
+Uncon-
+strained decoding often modifies content or
+structure, producing outputs that differ from the
+reference transcript. Such deviations undermine
+evaluation reliability because automatic metrics
+in text segmentation including F1, Pk and Bound-
+ary Similarity depend on consistent sentence
+boundaries. If transcripts change, results become
+incomparable across systems.
+3
+
+Section-Wise Processing.
+When a dataset al-
+ready provides coarser units such as chapters (as
+in YTSeg), we process each block independently.
+This ensures that predicted paragraph boundaries
+are coherent with the higher-level structure, while
+keeping inputs within the context window and en-
+abling work on hierarchical segmentation.
+Release.
+For reproducibility and documentation,
+we publish the inference scripts with their decoding
+algorithm and prompts under a CC-BY 4.0 license3.
+6.
+Experiments
+6.1.
+Experimental Setup
+Our experiments aim to establish strong baselines
+for our newly introduced benchmarks, TEDPara
+and YTSegPara, and to provide insights into the
+relationship between chapter segmentation and
+paragraph segmentation, the effectiveness of hi-
+erarchical segmentation, and the quality of LLM
+labeling used for pseudo-annotated data.
+Models.
+In our experiments, we utilize the LLaMA
+3 series, specifically LLaMA 3.1 8B, LLaMA 3.1
+70B, and LLaMA 3.3 70B (Grattafiori et al., 2024)
+as examples for LLM-based zero-shot paragraph
+segmentation. At the same time, we report results
+with MiniSeg (Retkowski and Waibel, 2024), as
+a model shown to have a strong performance in
+chapter segmentation of speech transcripts.
+Hierarchical Segmentation.
+For experiments on
+YTSegPara, we extend MiniSeg to hierarchical
+segmentation by framing the segmentation on dif-
+ferent levels (chapter-level and paragraph-level) as
+a multi-class classification problem.
+Metrics.
+We report three metrics:
+F1 score,
+Boundary Similarity (BS; Fournier 2013), and Pk
+(Beeferman et al., 1999). F1 score is a classic clas-
+sification metric that is increasingly used for text
+segmentation due to its interpretability. BS is a pro-
+posed and promising metric that captures graded
+boundary similarity. Pk is a well-established stan-
+dard for evaluating segmentation tasks.
+Baselines.
+Baselines include random and rule-
+based segmentations, multiple variants of MiniSeg
+trained with different pretraining and fine-tuning
+regimes, e.g., pretrained with Wiki-727K (Koshorek
+et al., 2018) as well as the LLaMA 3 series as an
+example for LLM-based segmentation.
+3https://github.com/retkowski/
+paragraph-llm
+Human Evaluation.
+For human evaluation, we
+used two complementary methods. Pairwise com-
+parisons were aggregated into ELO ratings, an in-
+creasingly common way to quantify relative prefer-
+ences in a single measure (Boubdir et al., 2023;
+Chiang et al., 2024), while Likert-scale judgments
+(1–5) provided absolute quality assessments. This
+combination captures both relative and absolute
+perspectives on segmentation quality.
+Human Evaluation Methodology.
+We con-
+ducted a two-part study on the TEDPara test split
+with 8 participants (4 per subtask), each complet-
+ing 30 judgements. In Subtask 1, annotators per-
+formed randomized, blind A/B comparisons of para-
+graph segmentations with three response options
+(A, B, tie); presentation order and sampling were
+randomized to mitigate position bias and ensure
+balanced model coverage. In Subtask 2, annota-
+tors rated single segmentations on a 5-point Likert
+scale (1 = Poor, 5 = Excellent), using a similar bal-
+anced sampling procedure. Across both subtasks,
+we compared random and rule-based baselines,
+LLM-generated segmentations (with and without
+PBR), and human-annotated references.
+6.2.
+Results and Discussion
+Model
+Exact (↑)
++Whitespace (↑)
++Punct./Case (↑)
+Len. ±5% (↑)
+Naïve Decoding
+LLaMA 3.1 8B
+0.59
+0.80
+0.83
+0.99
+LLaMA 3.1 70B
+0.64
+0.87
+0.88
+1.00
+LLaMA 3.3 70B
+0.63
+0.89
+0.91
+1.00
+Constrained Decoding
+LLaMA 3.1 8B
+1.00
+1.00
+1.00
+1.00
+LLaMA 3.1 70B
+1.00
+1.00
+1.00
+1.00
+LLaMA 3.3 70B
+1.00
+1.00
+1.00
+1.00
+Table 2: Divergence of generated output from the
+original TEDPara transcript when using uncon-
+strained decoding. Reported are proportions of
+outputs matching the input exactly (ignoring only
+paragraph breaks), then progressively relaxing con-
+straints to ignore whitespace, punctuation/casing,
+and smaller length variations.
+Hallucination Risks with LLMs.
+As demon-
+strated in Table 2, unconstrained decoding fre-
+quently introduces hallucinations, even under re-
+laxed matching criteria. Although ignoring para-
+graph breaks, whitespace, and punctuation/cas-
+ing improves match rates, divergence persists in a
+meaningful number of cases (ranging from 0.09 to
+0.17, depending on the model). In the most lenient
+setting, which only requires outputs to be within
+5% of the original length, LLaMA 3.1 8B still falls
+short of perfect fidelity (0.99), indicating occasional
+severe hallucinations such as dropped text parts.
+4
+
+These results strongly motivate the constrained de-
+coding approach introduced in this paper, which not
+only improves efficiency but also ensures faithful
+preservation of the input transcript.
+Model
+Val
+Test
+F1 (↑)
+BS (↑)
+Pk (↓)
+F1 (↑)
+BS (↑)
+Pk (↓)
+Zero-Shot
+Random Baselinea
+16.8
+15.9
+49.7
+17.1
+15.8
+49.6
+Rule-Based Baselineb
+21.6
+24.2
+49.9
+22.4
+24.0
+49.8
+LLaMA 3.1 8B
+36.6
+30.5
+38.7
+33.9
+28.3
+40.3
+LLaMA 3.1 70B
+42.8
+35.6
+37.5
+40.7
+33.9
+38.5
+LLaMA 3.3 70B
+37.5
+30.1
+37.7
+37.1
+29.3
+38.2
+MiniSeg (Wiki)
+24.6
+14.9
+37.6
+25.0
+15.3
+38.0
+MiniSeg (Wiki)c
+30.5
+20.3
+36.3
+29.7
+19.6
+28.3
+MiniSeg (Wiki →YT)
+33.2
+21.4
+36.1
+32.7
+21.5
+36.7
+MiniSeg (Wiki →YT)c
+45.7
+32.6
+32.4
+43.4
+30.9
+33.2
+Zero-Shot + Paralinguistic Break Rule
+LLaMA 3.1 8B + PBRd
+51.7
+44.3
+32.9
+49.9
+42.5
+34.2
+LLaMA 3.1 70B + PBRd
+55.5
+47.6
+32.4
+54.0
+46.7
+33.1
+LLaMA 3.3 70B + PBRd
+52.2
+43.7
+32.3
+52.5
+43.5
+32.5
+Fine-Tuned on TEDPara
+MiniSeg (TED)
+67.3
+56.1
+24.3
+67.3
+56.3
+24.0
+MiniSeg (YT →TED)
+69.8
+60.2
+22.4
+70.6
+61.2
+21.6
+MiniSeg (Wiki →TED)
+70.6
+60.7
+21.8
+71.2
+61.5
+21.0
+MiniSeg (Wiki →YT →TED)
+72.1
+62.2
+21.0
+72.7
+63.2
+20.1
+a Random placement of paragraph breaks within a document, assum-
+ing oracle knowledge of the reference number of paragraph breaks.
+b Rule-based placement of paragraph breaks every n sentences,
+where n is the global average number of sentences per paragraph
+(rounded). n = 5 for both validation (4.57) and test (4.63).
+c Threshold tuned across partitions (τval=0.264, τtest=0.300 for Wiki;
+τval=0.257, τtest=0.293 for Wiki →YT).
+d Paralinguistic Break Rule (PBR): Additional, rule-based post-
+processing to insert paragraph breaks around standalone paralin-
+guistic cues.
+Table 3: Performance comparison of baselines for
+paragraph segmentation on TEDPara, using differ-
+ent approaches and (pre-)training strategies.
+From Chapters to Paragraphs.
+The results in Ta-
+ble 3 highlight a strong connection between chapter
+and paragraph segmentation. The zero-shot per-
+formance of models trained on chapter-level data
+improves notably when the segmentation thresh-
+old is lowered, leading to more frequent segment
+predictions and outputs that better align with para-
+graph structure. Additionally, pretraining on data
+with higher-level segments such as Wiki-727K and
+YTSeg leads to strong results when fine-tuned on
+TEDPara, showing effective transfer of structural
+cues between domains and segmentation levels.
+Overall, the findings confirm that pretraining on
+related segmentation tasks significantly benefits
+paragraph segmentation.
+Paralinguistic Parentheticals.
+We conducted a
+qualitative investigation to better understand the
+performance gap between the fine-tuned models
+and the LLM-based approaches. One consistent
+pattern we identified is that the TEDPara reference
+annotations reliably place paralinguistic parenthet-
+icals such as "(Laughter)" or "(Applause)" in their
+own paragraphs. In contrast, LLMs treat these as
+inline elements. This discrepancy introduces a sys-
+tematic mismatch that is not due to a fundamental
+limitation of the LLMs, but rather the absence of
+a simple formatting rule. Once this rule is applied
+by inserting paragraph boundaries before and after
+standalone paralinguistic cues, the performance
+gap narrows, as can be seen in Table 3.
+Model
+Paragraph Seg.
+Chapter Seg.
+F1 (↑)
+BS (↑)
+Pk (↓)
+F1 (↑)
+BS (↑)
+Pk (↓)
+Random Baselinea
+26.3
+26.6
+51.3
+7.6
+8.7
+47.9
+[ MiniSeg (Wiki →TED)b
+35.7
+32.2
+43.6
+–
+–
+–
+[ MiniSeg (Wiki)
+–
+–
+–
+12.5
+8.8
+40.5
+[ MiniSeg (Wiki →YT)
+–
+–
+–
+46.1
+38.2
+27.0
+ú MiniSeg (YT)
+47.9
+42.2
+33.4
+43.6
+32.5
+28.8
+ú MiniSeg (Wiki →YT)
+50.5
+44.5
+32.2
+43.8
+35.7
+28.2
+a Random placement of chapter boundaries within a document, given
+oracle knowledge of the number of chapters, followed by random
+placement of paragraphs inside each chapter, guided by the global
+paragraph-break rate.
+b Predicted paragraph boundaries, scored within the oracle chapter
+spans.
+[ Trained on either chapter or paragraph segmentation only.
+ú Trained hierarchically on both paragraph and chapter segmentation.
+Table 4: Performance comparison of baselines
+for hierarchical segmentation (consisting of para-
+graph segmentation and chapter segmentation) on
+YTSegPara, using different variants of MiniSeg.
+Efficient, Hierarchical Segmentation.
+Table 4
+shows that adding the paragraph task to MiniSeg
+results in only minimal impact on chapter-level per-
+formance: chapter F1 decreases slightly from 46.1
+to 43.8, and Pk increases modestly from 27.0 to
+28.2. This is notable given the increased inter-class
+confusion typically expected when expanding the
+label space. At the same time, the model produces
+a useful paragraph segmenter (paragraph F1 50.5).
+These results suggest that the existing parameter
+budget is sufficient to model both levels, yielding, to
+our knowledge, the first hierarchical segmentation
+model for speech and audiovisual transcripts.
+Human Validation of LLM Outputs.
+As pre-
+sented in Table 5, pairwise comparisons on TED-
+Para yielded ELO ratings that place LLaMA 3.1
+above the human reference and well above base-
+lines, while Likert-scale judgments confirmed that
+its outputs are rated on par with references and con-
+sistently outperform rule-based or random base-
+lines. These results are consistent with the au-
+tomatic evaluation in Table 3, where LLM-based
+segmentation approaches the performance of su-
+pervised systems trained directly on reference seg-
+mentations. Together, these findings strengthen
+confidence that our approach produces paragraph
+structures comparable to human-authored segmen-
+tations and is suitable for use as a benchmark.
+Rule-Based Baseline Performance.
+While rule-
+based segmentation performs poorly on automated
+metrics, its human evaluation scores are higher
+5
+
+Model
+ELO Score
+LLaMA 3.1 70B + PBR
+1050.5
+LLaMA 3.1 70B
+1034.9
+Reference
+1015.9
+Rule-Based Baseline
+1005.9
+Random Baseline
+892.8
+(a)
+Pairwise
+preference
+evaluation using ELO.
+Model
+Score
+LLaMA 3.1 70B
+3.64 ± 0.73
+LLaMA 3.1 70B + PBR
+3.55 ± 1.12
+Reference
+3.50 ± 1.10
+Rule-Based Baseline
+3.30 ± 0.98
+Random Baseline
+2.88 ± 1.32
+(b) Likert-scale ratings of
+segmentation quality.
+Table 5: Human evaluation results on TEDPara
+test data: (a) ELO scores from pairwise preference;
+(b) Likert-scale ratings (1 = Poor, 5 = Excellent).
+than expected given its simplicity. This likely re-
+flects the visual structure it introduces: evenly
+spaced paragraph breaks reduce visual density
+and create a more readable layout. As Stark (1988)
+argued, paragraphing often serves stylistic func-
+tions rather than marking clear linguistic or seman-
+tic boundaries. The resulting visual separation can
+thus produce a sense of coherence and intentional-
+ity even when breaks are not meaningfully placed.
+7.
+Conclusion
+This work lays the foundation for treating paragraph
+segmentation as a standardized and measurable
+task in speech processing by introducing two com-
+plementary benchmarks: TEDPara and YTSeg-
+Para. TEDPara provides a high-quality, human-
+annotated reference grounded in formal spoken
+presentations, while YTSegPara covers a broad
+spectrum of real-world spoken content with syn-
+thetic labels generated via constrained LLM decod-
+ing. Together, these datasets capture a range of
+speech domains and conditions, forming a robust
+foundation for training and evaluation, not only for
+paragraph segmentation of speech transcripts but
+also in the broader research area of text segmen-
+tation, which has notoriously lacked benchmarks.
+Our proposed constrained decoding method
+enables LLMs to efficiently and faithfully insert
+paragraphs without altering the original transcript.
+While fine-tuned models achieve stronger auto-
+matic scores, human evaluations rate the LLM
+outputs on par with or above human references,
+showing their potential as pseudo-labels for bench-
+marking. In addition, experiments demonstrate
+that paragraph and chapter segmentation can be
+modeled jointly with minimal performance trade-
+offs, enabling efficient, hierarchical structuring of
+speech transcripts. These contributions not only
+address a longstanding gap in transcript format-
+ting but also support downstream tasks, including
+summarization and information retrieval, offering
+practical value for applications in education, acces-
+sibility, and knowledge management.
+8.
+Limitations
+While our benchmarks and methods advance para-
+graph segmentation for spoken content, several
+limitations remain. First, YTSegPara relies on syn-
+thetic labels generated via constrained decoding,
+which may not fully align with human judgment.
+However, our human evaluation provides encour-
+aging evidence that LLM-generated segmentations
+broadly align with human preferences. Second, we
+observed a systematic stylistic mismatch between
+model and reference conventions, particularly in the
+handling of paralinguistic cues, which affects auto-
+matic metrics despite comparable perceived quality.
+Third, our datasets focus on structured, relatively
+clean speech from TED talks and YouTube videos,
+leaving out more challenging domains such as con-
+versational meetings, where noise and disfluencies
+are more prevalent. Finally, our current approach
+operates solely on textual transcripts. While this
+simplifies processing and broadens applicability, it
+misses potentially useful prosodic cues from the
+audio signal, such as pauses, pitch, and intonation,
+that could further improve segmentation quality.
+9.
+Acknowledgements
+This research is supported by the project "How
+is AI Changing Science? Research in the Era of
+Learning Algorithms" (HiAICS), funded by the Volk-
+swagen Foundation.
+10.
+Bibliographical References
+Doug Beeferman, Adam Berger, and John Lafferty.
+1999. Statistical Models for Text Segmentation.
+Machine Learning, 34(1):177–210.
+Steven Bird, Ewan Klein, and Edward Loper. 2009.
+Natural language processing with Python, 1st
+edition. O’Reilly, Beijing ; Cambridge [Mass.].
+OCLC: ocn301885973.
+Igor A. Bolshakov and Alexander F. Gelbukh. 2001.
+Text Segmentation into Paragraphs Based on Lo-
+cal Text Cohesion. In Text, Speech and Dialogue,
+4th International Conference, TSD 2001, Zelezna
+Ruda, Czech Republic, September 11-13, 2001,
+Proceedings, volume 2166 of Lecture Notes in
+Computer Science, pages 158–166. Springer.
+Meriem Boubdir, Edward Kim, Beyza Ermis, Sara
+Hooker, and Marzieh Fadaee. 2023. Elo Uncov-
+ered: Robustness and Best Practices in Lan-
+guage Model Evaluation. In Proceedings of the
+6
+
+Third Workshop on Natural Language Genera-
+tion, Evaluation, and Metrics (GEM), pages 339–
+352, Singapore. Association for Computational
+Linguistics.
+Wei-Lin Chiang, Lianmin Zheng, Ying Sheng, Anas-
+tasios N. Angelopoulos, Tianle Li, Dacheng Li,
+Banghua Zhu, Hao Zhang, Michael I. Jordan,
+Joseph E. Gonzalez, and Ion Stoica. 2024. Chat-
+bot arena: an open platform for evaluating LLMs
+by human preference. In Proceedings of the 41st
+International Conference on Machine Learning,
+ICML’24. JMLR.org. Place: Vienna, Austria.
+Katja Filippova and Michael Strube. 2006. Using
+linguistically motivated features for paragraph
+boundary identification. In Proceedings of the
+2006 Conference on Empirical Methods in Natu-
+ral Language Processing, pages 267–274, Syd-
+ney, Australia. Association for Computational Lin-
+guistics.
+Chris Fournier. 2013. Evaluating Text Segmenta-
+tion using Boundary Edit Distance. In Proceed-
+ings of the 51st Annual Meeting of the Associ-
+ation for Computational Linguistics (Volume 1:
+Long Papers), pages 1702–1712, Sofia, Bulgaria.
+Association for Computational Linguistics.
+Markus Frohmann, Igor Sterner, Ivan Vulić, Ben-
+jamin Minixhofer, and Markus Schedl. 2024. Seg-
+ment Any Text: A Universal Approach for Robust,
+Efficient and Adaptable Sentence Segmentation.
+In Proceedings of the 2024 Conference on Em-
+pirical Methods in Natural Language Processing,
+pages 11908–11941, Miami, Florida, USA. As-
+sociation for Computational Linguistics.
+Saibo Geng, Martin Josifoski, Maxime Peyrard, and
+Robert West. 2023a. Grammar-Constrained De-
+coding for Structured NLP Tasks without Fine-
+tuning. In Proceedings of the 2023 Conference
+on Empirical Methods in Natural Language Pro-
+cessing, pages 10932–10952, Singapore. Asso-
+ciation for Computational Linguistics.
+Saibo Geng, Martin Josifosky, Maxime Peyrard,
+and Robert West. 2023b.
+Flexible Grammar-
+Based Constrained Decoding for Language Mod-
+els. CoRR, abs/2305.13971. ArXiv: 2305.13971.
+Azin Ghazimatin, Ekaterina Garmash, Gustavo
+Penha, Kristen Sheets, Martin Achenbach, Oguz
+Semerci, Remi Galvez, Marcus Tannenberg,
+Sahitya Mantravadi, Divya Narayanan, Ofeliya
+Kalaydzhyan, Douglas Cole, Ben Carterette, Ann
+Clifton, Paul N. Bennett, Claudia Hauff, and Mou-
+nia Lalmas. 2024. PODTILE: Facilitating Podcast
+Episode Browsing with Auto-generated Chap-
+ters. In Proceedings of the 33rd ACM Interna-
+tional Conference on Information and Knowledge
+Management, CIKM ’24, pages 4487–4495, New
+York, NY, USA. Association for Computing Ma-
+chinery. Event-place: Boise, ID, USA.
+Iacopo Ghinassi, Lin Wang, Chris Newell, and
+Matthew Purver. 2024. Recent Trends in Lin-
+ear Text Segmentation: A Survey. In Findings
+of the Association for Computational Linguistics:
+EMNLP 2024, pages 3084–3095, Miami, Florida,
+USA. Association for Computational Linguistics.
+Goran Glavaš, Ananya Ganesh, and Swapna So-
+masundaran. 2021. Training and Domain Adap-
+tation for Supervised Text Segmentation. In Pro-
+ceedings of the 16th Workshop on Innovative
+Use of NLP for Building Educational Applications,
+pages 110–116, Online. Association for Compu-
+tational Linguistics.
+Aaron Grattafiori, Abhimanyu Dubey, Abhinav
+Jauhri, Abhinav Pandey, Abhishek Kadian, Ah-
+mad Al-Dahle, Aiesha Letman, Akhil Mathur,
+Alan Schelten, Alex Vaughan, Amy Yang, Angela
+Fan, Anirudh Goyal, Anthony Hartshorn, Aobo
+Yang, ..., and Zhiyu Ma. 2024. The Llama 3
+Herd of Models. ArXiv:2407.21783 [cs].
+Riku Iikura, Makoto Okada, and Naoki Mori. 2021.
+Improving BERT with Focal Loss for Paragraph
+Segmentation of Novels. In Distributed Comput-
+ing and Artificial Intelligence, 17th International
+Conference, pages 21–30, Cham. Springer Inter-
+national Publishing.
+Douglas A. Jones, Florian Wolf, Edward Gibson,
+Elliott Williams, Evelina Fedorenko, Douglas A.
+Reynolds, and Marc A. Zissman. 2003. Mea-
+suring the readability of automatic speech-to-
+text transcripts.
+In 8th European Conference
+on Speech Communication and Technology,
+EUROSPEECH 2003 - INTERSPEECH 2003,
+Geneva, Switzerland, September 1-4, 2003,
+pages 1585–1588. ISCA.
+Omri Koshorek, Adir Cohen, Noam Mor, Michael
+Rotman, and Jonathan Berant. 2018. Text Seg-
+mentation as a Supervised Learning Task. In
+Proceedings of the 2018 Conference of the North
+American Chapter of the Association for Compu-
+tational Linguistics: Human Language Technolo-
+gies, Volume 2 (Short Papers), pages 469–473,
+New Orleans, Louisiana. Association for Compu-
+tational Linguistics.
+Catherine Lai, Mireia Farrús, and Johanna D.
+Moore. 2016. Automatic Paragraph Segmen-
+tation with Lexical and Prosodic Features. In In-
+terspeech 2016, pages 1034–1038. ISSN: 2958-
+1796.
+Catherine Lai, Mireia Farrús, and Johanna D.
+Moore. 2020. Integrating lexical and prosodic
+7
+
+features for automatic paragraph segmentation.
+Speech Communication, 121:44–57.
+Michal Lukasik, Boris Dadachev, Kishore Papineni,
+and Gonçalo Simões. 2020. Text Segmentation
+by Cross Segment Attention. In Proceedings of
+the 2020 Conference on Empirical Methods in
+Natural Language Processing (EMNLP), pages
+4707–4716, Online. Association for Computa-
+tional Linguistics.
+Benjamin Minixhofer, Jonas Pfeiffer, and Ivan Vulić.
+2023. Where’s the Point? Self-Supervised Multi-
+lingual Punctuation-Agnostic Sentence Segmen-
+tation. In Proceedings of the 61st Annual Meeting
+of the Association for Computational Linguistics
+(Volume 1: Long Papers), pages 7215–7235,
+Toronto, Canada. Association for Computational
+Linguistics.
+Aasish Pappu and Amanda Stent. 2015. Automatic
+formatted transcripts for videos. In Interspeech
+2015, pages 2514–2518. ISSN: 2958-1796.
+Fabian Retkowski and Alexander Waibel. 2024.
+From Text Segmentation to Smart Chaptering:
+A Novel Benchmark for Structuring Video Tran-
+scriptions. In Proceedings of the 18th Conference
+of the European Chapter of the Association for
+Computational Linguistics, EACL 2024 - Volume
+1: Long Papers, St. Julian’s, Malta, March 17-22,
+2024, pages 406–419. Association for Computa-
+tional Linguistics.
+Askars Salimbajevs and Indra Ikauniece. 2017.
+System for Speech Transcription and Post-
+Editing in Microsoft Word. In Interspeech 2017,
+pages 825–826. ISSN: 2958-1796.
+Maria Shugrina. 2010. Formatting Time-Aligned
+ASR Transcripts for Readability. In Human Lan-
+guage Technologies: The 2010 Annual Confer-
+ence of the North American Chapter of the As-
+sociation for Computational Linguistics, pages
+198–206, Los Angeles, California. Association
+for Computational Linguistics.
+Caroline Sporleder and Mirella Lapata. 2004. Au-
+tomatic Paragraph Identification: A Study across
+Languages and Domains.
+In Proceedings of
+the 2004 Conference on Empirical Methods in
+Natural Language Processing , EMNLP 2004, A
+meeting of SIGDAT, a Special Interest Group of
+the ACL, held in conjunction with ACL 2004, 25-
+26 July 2004, Barcelona, Spain, pages 72–79.
+ACL.
+Heather
+A.
+Stark.
+1988.
+What
+do
+para-
+graph markings do?
+Discourse Processes,
+11(3):275–303. Publisher: Routledge _eprint:
+https://doi.org/10.1080/01638538809544704.
+Máté Ákos Tündik, György Szaszák, Gábor Gosz-
+tolya, and András Beke. 2018. User-centric Eval-
+uation of Automatic Punctuation in ASR Closed
+Captioning. In Interspeech 2018, pages 2628–
+2632. ISSN: 2958-1796.
+Rachel Wicks and Matt Post. 2021. A unified ap-
+proach to sentence segmentation of punctuated
+text in many languages. In Proceedings of the
+59th Annual Meeting of the Association for Com-
+putational Linguistics and the 11th International
+Joint Conference on Natural Language Process-
+ing (Volume 1: Long Papers), pages 3995–4007,
+Online. Association for Computational Linguis-
+tics.
+Byunghwa Yoo and Kyung-Joong Kim. 2024. Im-
+proving paragraph segmentation using BERT
+with additional information from probability den-
+sity function modeling of segmentation distances.
+Natural Language Processing Journal, 6:100061.
+Wlodek Zadrozny and Karen Jensen. 1991. Seman-
+tics of paragraphs. Comput. Linguist., 17(2):171–
+209. Place: Cambridge, MA, USA Publisher:
+MIT Press.
+Binggang Zhuo, Masaki Murata, and Qing Ma.
+2023. Auxiliary Loss for BERT-Based Paragraph
+Segmentation. IEICE Transactions on Informa-
+tion and Systems, E106.D(1):58–67.
+11.
+Language Resource References
+Koshorek, Omri and Cohen, Adir and Mor, Noam
+and Rotman, Michael and Berant, Jonathan.
+2018. Wiki-727K. TAD - The Center for AI &
+Data Science, Tel Aviv University. Distributed via
+GitHub.
+Retkowski,
+Fabian
+and
+Waibel,
+Alexander.
+2024.
+YTSeg (2024-07-25).
+Interactive
+Systems Lab,
+Karlsruhe Institute of Tech-
+nology. Distributed via Hugging Face.
+PID
+https://doi.org/10.57967/hf/1824.
+License:
+CC-BY-NC-SA-4.0.
+8
+
+A.
+Prompt Template
+Figure 3 shows the prompt template used in both
+the naive and constrained decoding settings. We
+also employ prompt prefilling (i.e., including a stub
+assistant reply) to better guide the model toward
+generating paragraph-structured output.
+B.
+LLM Hyperparameters
+Greedy Decoding.
+For all LLM-based inference,
+we apply greedy decoding. This applies to both
+the naïve baseline as well as the constrained de-
+coding setup. In the constrained decoding case,
+however, the output space at sentence boundaries
+is explicitly restricted to punctuation tokens only.
+Context Handling.
+All LLaMA-based models
+used in our experiments support a context window
+of up to 128K tokens. This enables processing
+of long-form spoken content, including multi-hour
+YouTube transcripts from YTSegPara. While some
+transcripts exceed the model’s context limit, we
+employ chapter-wise processing, allowing all docu-
+ments to be processed.
+C.
+MiniSeg Hyperparameters
+For training MiniSeg on the TEDPara and YT-
+SegPara datasets, we largely follow the hyperpa-
+rameter configuration established in the original
+work and implementation by Retkowski and Waibel
+(2024). The full set of hyperparameters used is
+summarized in Table 6. A key aspect of the train-
+ing setup involves the weighting scheme for the
+weighted cross-entropy loss. For TEDPara, we
+retain the original weighting of [1.2] as proposed. In
+contrast, YTSegPara involves a hierarchical seg-
+mentation task with three distinct classes, allowing
+for class-specific weighting. Based on validation ex-
+periments, a class weight configuration of [1, 1.5, 2]
+was found to be effective.
+D.
+Segmentation Evaluation
+We utilize the segeval4 library (Fournier, 2013)
+to calculate segmentation evaluation metrics, such
+as Pk and Boundary Similarity, using the default
+parameter configurations in both cases.
+E.
+Human Evaluation
+We conducted a two-part human evaluation on the
+TEDPara test dataset with 8 participants (4 per
+subtask; 30 trials each), comparing random and
+4https://segeval.readthedocs.io/
+rule-based baselines, LLM-generated segmenta-
+tions (with and without PRB), and human-annotated
+references. In Subtask 1, annotators performed
+randomized, blind pairwise A/B comparisons of seg-
+mentations with three response options: A, B, or
+tie; to mitigate position bias, presentation order was
+randomized, and model–text pairs were sampled
+online using inverse-frequency weighting to avoid
+per-participant repeats and ensure balanced cov-
+erage. In Subtask 2, participants rated individual
+segmentations on a 5-point Likert scale, with each
+trial assigned by a balanced sampler that inversely
+weighted overrepresented models and prioritized
+unseen texts, again ensuring broad and nonredun-
+dant evaluation coverage.
+9
+
+System
+You are an AI assistant that helps users insert paragraphs into text.
+User
+You are tasked with inserting paragraphs into a given text. The text will be provided to you,
+and your job is to break it up into coherent paragraphs. Here’s the text you’ll be working with:
+{input}
+Your task is to insert paragraph breaks into this text. A paragraph break should be
+signified by two newline characters.
+A paragraph is a functionally or semantically coherent segment of text. This means
+that each paragraph should focus on a single main idea, topic, or function within the
+overall text. To identify where to insert paragraph breaks, consider the following guidelines:
+1. Look for shifts in topic or focus
+2. Identify transitions between different ideas or themes
+3. Recognize changes in time, place, or perspective
+4. Consider the length of the current segment (very long segments might benefit from
+being broken up)
+5. Pay attention to transitional phrases or words that might signal a new paragraph
+Please provide your final output with the inserted paragraph breaks. Ensure that you
+maintain the original text exactly as it was given, only adding the paragraph breaks where
+appropriate.
+Assistant
+Here is the segmentation of the video transcription into paragraphs: \n\n
+Figure 3: Prompt Template for Paragraph Insertion with LLMs
+Hyperparameter
+TEDPara
+YTSegPara
+Sentence Encoder
+all-MiniLM-L6-v2
+Loss Function
+Weighted Binary Cross-Entropy
+Learning Rate
+2.5 × 10−5
+Batch Size
+115,000 Tokens
+Epochs
+15
+Learning Rate Schedule
+Cosine
+Optimizer
+AdamW
+Dropout Rate
+0.1
+Gradient Sampling Rate
+0.5
+Cross-Entropy Class Weights
+[1.2]
+[1, 1.5, 2]
+Table 6: MiniSeg Hyperparameters for Training on TEDPara and YTSegPara
+10

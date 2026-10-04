@@ -1,0 +1,1615 @@
+ProDM: Synthetic Reality–driven Property-aware Progressive Diffusion Model
+for Coronary Calcium Motion Correction in Non-gated Chest CT
+Xinran Gonga,b,∗, Gorkem Duraka, Halil Ertugrul Aktasa, Vedat Ciceka, Jinkui Haoa, Ulas Bagcia,c, Nilay S. Shahd,e,
+Bo Zhoua,∗
+aDepartment of Radiology, Northwestern University, Chicago, IL, USA
+bCollege of Computing, Georgia Institute of Technology, Atlanta, GA, USA
+cDepartment of Biomedical Engineering, Northwestern University, Evanston, IL, USA
+dDepartment of Cardiology, Northwestern University, Chicago, IL, USA
+eDepartment of Preventive Medicine, Northwestern University, Chicago, IL, USA
+Abstract
+Coronary artery calcium (CAC) scoring from chest CT is a well-established tool to stratify and refine clinical cardio-
+vascular disease risk estimation. CAC quantification relies on the accurate delineation of calcified lesions, but is often-
+times affected by artifacts introduced by cardiac and respiratory motion. ECG-gated cardiac CTs substantially reduce
+motion artifacts, but their use in population screening and routine imaging remains limited due to gating requirements
+and lack of insurance coverage. Although identification of incidental CAC from non-gated chest CT is increasingly
+considered for it offers an accessible and widely available alternative, this modality is limited by more severe motion
+artifacts. We present ProDM (Property-aware Progressive Correction Diffusion Model), a generative diffusion frame-
+work that restores motion-free calcified lesions from non-gated CTs. ProDM introduces three key components: (1) a
+CAC motion simulation data engine that synthesizes realistic non-gated acquisitions with diverse motion trajectories
+directly from cardiac-gated CTs, enabling supervised training without paired data; (2) a property-aware learning strat-
+egy incorporating calcium-specific priors through a differentiable calcium consistency loss to preserve lesion integrity;
+and (3) a progressive correction scheme that reduces artifacts gradually across diffusion steps to enhance stability and
+calcium fidelity. Experiments on real patient datasets show that ProDM significantly improves CAC scoring accuracy,
+spatial lesion fidelity, and risk stratification performance compared with several baselines. A reader study on real non-
+gated scans further confirms that ProDM suppresses motion artifacts and improves clinical usability. These findings
+highlight the potential of progressive, property-aware frameworks for reliable CAC quantification from routine chest
+CT imaging.
+Keywords: Coronary Artery Calcium, Non-gated Chest CT, Diffusion Models, Motion Correction, Synthetic Data
+1. Introduction
+Cardiovascular diseases (CVDs) remain one of the
+most prevalent and preventable causes of death globally,
+∗Corresponding author.
+Email addresses: xgong80@gatech.edu (Xinran Gong),
+bo.zhou@northwestern.edu (Bo Zhou)
+with an estimation of nearly 20 million fatalities world-
+wide in 2022 alone (World Health Organization, 2025).
+In the United States, CVDs are responsible for roughly
+every one in three mortalities (Center for Disease Con-
+trol and Prevention, 2024). Detection of coronary artery
+calcium (CAC) can help refine CVD risk estimation, en-
+abling timely lifestyle modification and medical interven-
+tion (Detrano et al., 2008; Greenland et al., 2018; Hus-
+Preprint submitted to Elsevier
+January 1, 2026
+arXiv:2512.24948v1 [cs.CV] 31 Dec 2025
+
+sain et al., 2023). CAC score is a highly specific marker
+of subclinical atherosclerosis and a powerful predictor of
+future cardiovascular events (Greenland et al., 2018; Bud-
+off et al., 2018; Miedema et al., 2019). Compared to other
+methods of evaluating coronary artery disease and CVD
+risk, CAC scoring acquired through chest computed to-
+mography (CT) is a non-invasive approach and offers a
+reliable, reproducible, and cost-effective method for as-
+sessing coronary plaque burden and providing risk strat-
+ification of the patient developing CVDs (Gaine et al.,
+2023).
+While ECG-gated cardiac CTs remain the gold stan-
+dard for CAC scoring due to the ability to minimize mo-
+tion artifacts, they are not routinely acquired in clinical
+practice due to the need for specialized imaging protocols
+involving ECG-gating (Peng et al., 2023). Additionally,
+many insurance do not cover such scans as it is considered
+a screening rather than diagnostic procedure (Ali et al.,
+2021; Greenland et al., 2022). In contrast, non-gated chest
+CTs are far more commonly covered by insurance, and are
+frequently obtained for oncologic or pulmonary evalua-
+tion. Nearly twenty times more non-gated chest CTs are
+performed annually in the United States than gated car-
+diac CTs, and the ability to accurately assess incidental
+CAC on non-gated CT represents a major untapped op-
+portunity for CVD prevention (Dzaye et al., 2025). In
+fact, studies have found that CAC scores derived from
+non-gated scans strongly correlated with those acquired
+from gated scans, and incidental findings through non-
+gated scans are capable of predicting major adverse car-
+diac events in the future (Takx et al., 2015; Almeida et al.,
+2020; Yu et al., 2021; Jacobs et al., 2012; Wetscherek
+et al., 2023).
+However, accurate cardiovascular risk stratification de-
+pends on the precise representation of both the spatial
+distribution and intensity of calcified lesions. The Agat-
+ston score, which is the most widely clinically used met-
+ric for CAC quantification, integrates both lesion area
+and peak intensity within predefined thresholds to quan-
+tify calcium burden. As a result, even subtle blurring or
+smearing, which are common in non-gated acquisitions,
+can lead to substantial deviations in Agatston scores, po-
+tentially impacting clinical usability and shifting patients
+across risk categories Brown et al. (2000); Budoff et al.
+(2006); Taguchi and Khaled (2009). Consequently, de-
+spite their wide availability and potential as a substitute
+for gated scans, non-gated chest CTs remain limited by
+motion-induced degradation that undermines the accuracy
+of CAC quantification (Parsa et al., 2024). Compounding
+this challenge is the scarcity of paired datasets, as patients
+rarely undergo both ECG-gated cardiac CT and non-gated
+chest CT (Chi et al., 2021), making it difficult to obtain
+matched motion-free and motion-corrupted images for su-
+pervised learning of a motion-correction model.
+Motion-compensated reconstruction (MCR) methods
+represent the classical efforts toward mitigating the ef-
+fect of cardiac motion in CT. These techniques estimate
+local motion vectors fields from multi-phase or ECG-
+synchronized data and apply the estimated motion during
+reconstruction to compensate for cardiac motion (Forth-
+mann et al., 2008; Carsten Oliver Schirra et al., 2009;
+Isola et al., 2010; Tang et al., 2012; Jin et al., 2018). While
+effective in reducing motion artifacts and improving im-
+age quality, they require projection data, ECG-gating,
+and multiple phase reconstructions, which are not read-
+ily available and not applicable to non-gated chest CT.
+More recently, many studies began adopting deep
+learning approaches to learn motion correction from the
+image domain directly. For example, Yan et al. (2021)
+uses a VNet-based deep learning approach to perform
+centerline-based motion tracking and estimate the mo-
+tion vector field from Coronary CT Angiography (CCTA)
+images.
+Gong et al. (2024) proposed an attention-
+guided and spatial transformer–based framework that
+leverages cross-phase information for artifact correction,
+while Yao et al. (2025) recently introduced a temporal-
+weighted motion correction network with a differentiable
+spatial transformer module trained on simulated motion
+data. These works primarily target gated-cardiac CT and
+CCTA, which already use ECG-gating and therefore ex-
+hibit smaller motion amplitudes, whereas motion in rou-
+tine non-gated chest CTs is typically more severe. Gen-
+erative diffusion-based models have also demonstrated
+promising results for motion artifact reduction in head CT
+(Chen et al., 2025) and MRI (Liu et al., 2024; Safari et al.,
+2025), but to our best knowledge, no study has applied
+such diffusion-based approaches to coronary calcium mo-
+tion correction with preservation of calcified lesion prop-
+erties.
+To address the aforementioned challenges and gaps in
+research, we propose ProDM (Property-Aware Progres-
+sive Correction Diffusion Model), a generative frame-
+2
+
+work that restores motion-free coronary calcified lesions
+in non-gated chest CTs. Our main contributions are as
+follows:
+(1)
+Motion
+Simulation
+Engine
+for
+Supervised
+Learning We build a motion simulation data engine that
+generates large-scale, realistic paired datasets spanning
+diverse motion profiles, enabling supervised learning of
+motion artifact correction in non-gated chest CT scans.
+(2) CAC property-aware and score-driven learning.
+We introduce CAC property-aware supervision that ex-
+plicitly preserves calcified lesion properties through a dif-
+ferentiable volumetric CAC score loss, which approxi-
+mates the non-differentiable Agatston scoring process.
+(3) Progressive motion correction framework for
+non-gated chest CT. We developed a progressive motion
+correction framework that progressively removes motion
+artifacts and recovers the motion-free calcified lesions.
+This design enables stable and interpretable correction of
+motion artifacts in non-gated chest CTs, and is the first
+diffusion-based approach tailored for this task.
+2. Methods
+In this section, we detail our proposed method, in-
+cluding simulating realistic CAC motion artifacts (2.1),
+the model architecture (2.2), implementation details (2.3),
+and evaluation metrics (2.4).
+2.1. CAC Motion Simulation Data Engine
+To simulate large-scale datasets of realistic CAC mo-
+tion artifacts, we used the widely available cardiac-gated
+non-contrast CTs (i.e., calcium CT) as a starting point.
+Each scan was accompanied by a binary calcium mask
+delineating the location of calcified plaques.
+We simulated 21 motion profiles to represent a range of
+plausible coronary calcium motion trajectories caused by
+cardiac or respiratory motions seen in non-gated scans,
+covering random jitters, translational, oscillatory, and
+piecewise movements. Each motion profile is represented
+as a trajectory-generating function π(· ; ϕ), where π spec-
+ifies the functional form of the motion (e.g., sinusoidal,
+linear displacement, etc.), and ϕ represents the corre-
+sponding profile-specific parameters such as directions
+in 3D, displacement magnitude, velocity, and temporal
+phase, where applicable. Together, (π, ϕ) defines the com-
+plete motion trajectory used to identify the position of
+the calcified lesion at each partial angle of the forward
+projection. We intentionally modeled displacement vec-
+tors primarily in the axial plane (xy-direction), where mo-
+tion magnitude is typically largest, while the z-direction
+displacement was kept relatively small to reflect realistic
+motion patterns seen in non-gated chest CTs. For each
+simulation, the number of projection angles N was ran-
+domly sampled from {180, 360, 540, 720, 1080} to sim-
+ulate different temporal resolutions and acquisition du-
+rations, producing motion artifacts of varying levels of
+severity and trajectory smoothness. Randomized pertur-
+bations were added to the underlying parameters ϕ to
+introduce stochastic variability across samples, ensuring
+that the coronary calcium motion artifacts exhibited per-
+patient differences.
+The overall motion simulation process, which includes
+how (π, ϕ) defines the displacement trajectory, is out-
+lined in high-level in Algorithm 1 and shown in Figure
+1. To briefly summarize, calcium regions were first re-
+moved via inpainting and reinserted at new positions at
+each projection angle determined by the chosen motion
+trajectory. Forward projections were computed using the
+Radon transform to form motion-perturbed sinograms for
+each projection angle, followed by reconstruction using
+the inverse Radon transform to obtain synthetic motion-
+corrupted CT volumes. Further details of the simulated
+motion profiles, the corresponding parameters, as well as
+the value ranges of these parameters are available in Ap-
+pendix A.3.
+2.2. Progressive
+Property-Aware
+Motion
+Correction
+Model
+Our proposed framework adopts a diffusion model as
+a backbone with a direct bridge between the motion-
+corrupted and motion-free patches. This formulation is
+suitable for our motion correction task because it con-
+strains the diffusion process to begin and end with mean-
+ingful images rather than arbitrary noise, allowing the
+model to learn a more stable, interpretable, and struc-
+tured denoising trajectory that progressively transforms
+motion-corrupted inputs toward their motion-free coun-
+terparts. We embed calcium-specific priors through a cal-
+cium consistency loss into the diffusion process, so that
+the recovered motion-free calcified lesion preserves the
+original intensity, quantity, and spatial distribution.
+3
+
+Simulated Non-gated CT
+…
+Simulate 
+Motion-Perturbed
+States with CAC 
+Trajectory
+Motion-Perturbed 
+State #1
+Motion-Perturbed
+State #2
+Motion-Perturbed 
+State #N
+Projection Angle #1
+Projection Angle #2
+Projection Angle #3
+Sinogram 
+with 
+CAC Motion
+Calcium Gated CT
+Inject Noise
+For Dose 
+Randomization
+Reconstruction
+Generate Random CAC Motion 
+Proﬁle and Projection Parameters
+Simulated Data 
+vs. 
+Real Data
+Figure 1: Overview of CAC Motion Data Engine for simulating non-gated CT from gated calcium CT. The displacement trajectory of the calcified
+lesion is computed based on the selected CAC motion profile and projection parameters with added stochasticity, which is applied to the motion-free
+gated calcium CT introducing motion perturbation to the calcified lesion at each partial angle of the forward projection. The resulting sinogram
+then undergoes inverse Radon transform to obtain the simulated non-gated CT. The bottom-right panel demonstrates that the simulated CAC motion
+profiles cover a superset of real motion patterns, including simulated scans with motion profiles similar to real CAC motion (orange) as well as
+additional, less realistic scans (blue) introduced to increase diversity.
+2.2.1. Forward Diffusion Process
+Let {xt}T
+t=0 denote a diffusion trajectory between x0 and
+y where T is the total number of timesteps to transition
+from the motion-free to the motion-corrupted image with
+gradual and controlled addition of noise. The forward
+process is defined by iteratively interpolating states be-
+tween the two deterministic endpoints:
+q(xt | x0, y) = N(xt; (1 −αt) x0 + αt y, δtI) ,
+(1)
+where αt =
+t
+T
+∈[0, 1] is a monotonically increasing
+schedule that controls the interpolation between y and x0,
+and δt = 2(αt −α2
+t ) is the variance of noise added at each
+step t. At t = 0, we have the motion-free image x0; at
+t = T, the distribution of the image centers at y. This ap-
+proach ensures that all intermediate states remain visually
+plausible CT images, rather than potentially drifting away
+into noisy, unrealistic states. Each intermediate state xt
+can be represented as:
+xt = (1 −αt) x0 + αt y +
+p
+δt ε,
+ε ∼N(0, I). (2)
+4
+
+Randomly sample 
+ 0<=t<=T during training
+UNet Denoiser
+x(t)
+noise
+x(t)-noise
+x(0) recon
+Reverse Process
+Conditioning
+…
+Forward Process 
+(Precomputed)
+Motion-free 
+Motion-corrupted
+x(0)
+x(T/2)
+x(t)
+x(T)
+…
+…
+k=3
+64
+64
+64
+64
+k=3
+2.5D Reconstruction Loss
+Calcium Consistency Loss 
+Training
+Motion-corrupted
+Test Scan
+x(0) 
+recon
+x(T)
+noise(T, T-1)
+Inference
+x(0) recon
+Central Slice
+Repeat for all patches 
+stack central slice reconstructions
+Reconstructed 
+Motion-free
+Test Patch
+Extract patches
+thickness k=3 
+x(T-1)
+noise(T-1, T-2)
+x(1)
+noise(1, 0)
+…
+…
+Figure 2: Overview of the ProDM framework demonstrating the training and inference processes for CAC motion correction in non-gated chest
+CTs. The top figure shows training pipeline, where motion-corrupted non-gated CT volumes (orange) and corresponding motion-free gated calcium
+CT volumes (green) are used to construct supervised training pairs. Training is set up through a precomputed forward diffusion process where noise
+is progressively added to obtain intermediate states x(t), a UNet denoiser learns to predict this noise at randomly sampled timesteps, guided by
+reconstruction loss and calcium consistency loss. Bottom figure shows the sliding-window inference pipeline used at test time, where all motion-
+corrupted patches within an ROI undergo progressive motion correction. The central slices of neighboring context windows are stacked together to
+form the final motion-corrected reconstruction of the ROI.
+2.2.2. Reverse Denoising Process
+The reverse process learns to recover the motion-free
+image from noisy, motion-corrupted image by iteratively
+estimating xt−1 from xt. Same as standard diffusion frame-
+works, the reverse process follows a Markov process de-
+fined by:
+pθ(xt−1 | xt, y) = N
+
+xt−1; µθ(xt, y, t), ˜δtI
+
+,
+(3)
+where µθ is the predicted mean value of the noise and ˜δt
+is the variance of noise at step t, obtained in closed form
+from the forward variance schedule (Li et al., 2023). The
+reparameterization technique in DDPM (Ho et al., 2020)
+was adopted and µθ can be reformulated as follows:
+µθ(xt, y, t) = cx,t xt + cy,t y + ce,t ϵθ(xt, y, t),
+(4)
+where
+cx,t = δt−1
+δt
+1 −αt
+1 −αt−1
++ δt|t−1
+δt
+(1 −αt−1),
+cy,t = αt −αt−1
+1 −αt
+1 −αt−1
+δt−1
+δt
+,
+ce,t = (1 −αt−1)δt|t−1
+δt
+,
+ϵθ(xt, y, t) =  αt(y −x0) +
+p
+δt ε.
+(5)
+5
+
+Algorithm 1 Motion Modeling Framework for Simulat-
+ing Coronary Calcium Motion
+Input: ECG-gated calcium CT volume x0; binary cal-
+cium mask m.
+Output: Synthetic non-gated motion-perturbed recon-
+struction y.
+1. Inpaint to remove calcium:
+x′
+0 ←Inpaint(x0, m)
+2. Select motion profile and parameters:
+choose π with params ϕ
+3. Choose projection count:
+N ∈{180, 360, 540, 720, 1080}; set angles Θ = {θi}N
+i=1
+4. Generate trajectory:
+compute displacements {∆x(θi)}N
+i=1 from (π, ϕ, N)
+5. Angle-wise forward projection:
+for i = 1 to N do
+Shift calcium by ∆x(θi) using m to form instantaneous
+image xi at partial angle θi (reinsert original calcium
+values into x′
+0).
+pi ←Radon(xi, θi) is the partial angle projection at
+angle i
+6. Stack to sinogram: S ←[ p1, . . . , pN ]
+7. Reconstruct: y ←iRadon(S, Θ)
+Note that cx,t =, cy,t, and ce,t are non-trainable, time-
+dependent coefficients determined by the diffusion sched-
+ule. Instead of directly predicting µθ(xt, y, t), we can train
+a neural network for learning to predict the noise term
+ϵθ(xt, y, t) at each timestep, which can be used to recover
+the reconstructed motion-free image at inference time. To
+maintain consistency with the motion correction setting,
+the corrupted image y is provided as a conditioning input
+throughout the denoising path.
+With this formulation, the training objective is given
+by optimizing the Evidence Lower-Bound (ELBO) which
+can be simplified as
+ELBO = Ex0,y,ε
+
+
+αt(y −x0) +
+p
+δtϵ −ϵθ(xt, y, t)
+
+2
+2
+
+. (6)
+2.2.3. Calcium Property-Aware Consistency Learning
+CAC scoring methods, such as the Agatston and Vol-
+ume scores (Gupta et al., 2022), are highly sensitive to
+small intensity or structural changes in calcified regions.
+Therefore, even subtle motion artifacts can result in large
+deviations in computed CAC scores, which in turn affect
+downstream CVD risk stratification. Due to the relatively
+small size of calcified lesions in proportion to the context
+image, this is difficult to enforce using diffusion alone.
+In addition to learning to restore overall image fidelity
+through progressive motion correction, our model explic-
+itly enforces a calcium-specific consistency loss to pre-
+serve the quantitative accuracy and spatial distribution of
+the calcium regions.
+Since the Agatston score is the most widely adopted
+CAC scoring method in clinical practice, it would ide-
+ally be incorporated directly into the training objective to
+enforce calcified lesion consistency. However, because
+the Agatston score depends on the maximum voxel in-
+tensity within each calcified lesion, it is inherently non-
+differentiable and therefore unsuitable for gradient-based
+optimization.
+To address this, we employ the Volume
+score (Thomas et al., 2018) as a differentiable surrogate
+that approximates the Agatston score by summing the in-
+tensities of all voxels exceeding the clinical threshold of
+130 Hounsfield Unit (HU).
+For any voxel with intensity xi, the soft mask function
+is defined as:
+SoftMask(xi) = σ
+ xi −130
+τ
+!
+,
+(7)
+where σ(·) denotes the sigmoid function and τ controls
+the softness of the 130 HU clinical threshold for coronary
+calcium.
+Given motion-free reference x0 and reconstructed
+motion-free sample ˆx0, the resulting calcium score con-
+sistency loss is defined as:
+Lvol = EMSE log(1 + S vol(ˆx0)), log(1 + S vol(x0)) (8)
+where S vol(x) computes the differentiable volume score
+as
+S vol(x) = vvoxel
+X
+i∈V
+SoftMask(xi),
+(9)
+6
+
+Algorithm 2 Training Scheme of ProDM
+Input: Motion-free batch B0 = {x0} ;
+// x0:
+motion-free CAC patches
+Motion-corrupted batch BT = {y} ;
+// y:
+motion-corrupted patches paired with x0
+Other inputs: total diffusion steps T, denoiser ϵθ, sched-
+ules {αt}T
+t=1, {δt}T
+t=1, calcium consistency loss weight λ
+Output: Total loss Ltotal for one optimization step
+Sample diffusion step and noise:
+t ∼U{1, . . . , T}
+ϵ ∼N(0, I)
+Construct noisy intermediate state and target noise:
+xt ←(1 −αt)x0 + αty + √δt ϵ
+nt ←αt(y −x0) + √δt ϵ
+Forward pass through the denoiser:
+ˆϵt ←ϵθ(xt, y, t)
+ˆx0,t ←xt −ˆϵt
+Compute auxiliary loss:
+Lcalc ←CalciumConsistencyLoss(x0, ˆx0,t)
+Aggregate total loss:
+Ltotal ←∥nt −ˆϵt ∥2
+2 + λLcalc
+Update denoiser parameters (Adam):
+θ ←AdamUpdate(θ, ∇θLtotal, η, β1, β2)
+where η is the learning rate, and β1, β2 are Adam
+momentum coefficients
+End on convergence
+This loss encourages the reconstructed motion-free im-
+age ˆx0 to yield a calcium burden consistent with the refer-
+ence x0.
+Training and sampling algorithms are described in Al-
+gorithms 2 and 3, respectively.
+2.3. Implementation Details
+Data Preprocessing Implementation Details. Before
+training,
+both
+motion-free
+and
+simulated
+motion-
+corrupted CT scans are preprocessed and converted into
+3D patches. Each CT volume was intensity-clipped to
+Algorithm 3 ProDM Inference Process
+Input: Motion-corrupted ROI y = xT
+Context window size (H, W, k) and extraction stride
+Total diffusion steps T, trained denoiser ϵθ
+Output: Reconstructed motion-suppressed ROI ˆx0
+Extract context windows:
+{x(i)
+T }N
+i=1 ←ExtractWindows(y, H, W, k)
+;
+// x(i)
+T :
+2.5D context window centered at
+slice i
+Sliding window inference:
+Initialize list recon roi ←[ ]
+for i = 1 to N do
+xT ←x(i)
+T
+Reverse diffusion process:
+for t = T, T −1, . . . , 1 do
+ˆnt→t−1 ←ϵθ(xt, y, t)
+xt−1 ←xt −ˆnt→t−1
+Extract central slice:
+x(i)
+0 ←CentralSlice(x0)
+Append x(i)
+0 to recon roi
+Stack slice-wise reconstructions:
+ˆx0 ←Stack(recon roi)
+return ˆx0
+the range [−200, 800] Hounsfield Units (HU) to focus on
+the coronary calcium, and then normalized to [0, 1]. Be-
+cause coronary calcium occupies only a small portion of
+the CT volume, directly performing uniform patch extrac-
+tion over the entire axial plane would result in a large im-
+balance between background and calcium-containing re-
+gions. To address this, we first identified regions of inter-
+est (ROIs) that contained either coronary calcium along
+with adjacent background tissue, or background-only re-
+gions, based on the provided calcium masks. This ap-
+proach ensures that the model learns both the local cal-
+cium morphology and the surrounding anatomical context
+necessary for accurate motion correction. Each ROI was
+extracted as a 3D block of size (64, 64, 16).
+We used 435 gated calcium CTs publicly available from
+7
+
+the Stanford COCA dataset. For each scan, we simulated
+21 motion-corrupted non-gated chest CT scans, with a to-
+tal of 9135 scans. We adopt an 80%-20% split between
+training and testing, which corresponds to 7228 training
+scans and 1847 testing scans, with no overlap of scans
+between splits. From the training scans, we extracted a
+total of 269,206 patches. The relatively large number of
+training patches arises from dense patch extraction around
+calcified lesions with small random spatial offsets, serv-
+ing as a form of data augmentation to improve robust-
+ness against spatial translation, even though the number
+of unique calcified lesions is substantially smaller. From
+the testing scans, we extracted 13,813 patches for eval-
+uation. We intentionally extracted fewer patches during
+testing for two reasons. Firstly, many patches obtained
+through dense patch extraction correspond to the same
+calcified lesion with minor spatial shifts and therefore
+provide redundant information for evaluation. Secondly,
+diffusion-based inference is computationally expensive,
+making exhaustive inference on all possible patches im-
+practical without providing useful additional insight. The
+selected testing patches were used consistently across all
+methods to ensure fair comparison.
+Framework Implementation Details. Our framework
+was implemented in PyTorch and trained on a single
+NVIDIA RTX 6000 Ada GPU. We used the Adam op-
+timizer with a learning rate of 2 × 10−4, β1 = 0.9, β2 =
+0.999, and a weight decay of 1×10−4. The batch size was
+set to 64 for all experiments. For efficiency, we adopt a
+2.5D training strategy, similar to recent multi-view diffu-
+sion approaches that leverage orthogonal slice ensembles
+to approximate full 3D generation while reducing compu-
+tational cost (Chen et al., 2024). Training is performed
+using adjacent, overlapping patches of size (64, 64, 3)
+along the axial (z) direction extracted from the ROI, and
+inference is conducted using a sliding-window strategy
+to aggregate the central slices of the predicted motion-
+corrected patches to recover the reconstructed motion-
+corrected volume. The calcium consistency loss weight
+was empirically set to λ = 20. For computing the soft
+calcium region mask, we used a softness parameter of
+τ = 60.
+The diffusion process uses T = 1000 total
+timesteps, and the sampling interval is set to 100 for ef-
+ficient inference.
+The denoising network ϵθ follows a
+UNet architecture adapted from the OpenAI diffusion im-
+plementation (UNetModel). The network takes 6 input
+channels, corresponding to a motion-corrupted patch and
+a context patch (each with depth 3), and predicts 3 out-
+put channels. It has a base channel width of 128 and uses
+channel multipliers [1, 2, 2, 2] across levels, attention is
+applied at spatial resolutions {16,8} with a channel width
+of 64 per attention head. Temporal embeddings are used
+to encode the diffusion timesteps.
+2.4. Evaluation Strategies and Metrics
+We evaluate the performance of ProDM using both
+quantitative and qualitative assessments. For quantitative
+evaluation on synthetic data, we compare ProDM with
+several commonly used image-to-image translation base-
+lines, including UNet (Ronneberger et al., 2015), cGAN
+(Mirza and Osindero, 2014), DDPM (Ho et al., 2020), and
+the BBDM (Li et al., 2023). Because the primary objec-
+tive of motion correction is to improve the reliability of
+CAC quantification, we measure performance using four
+calcified lesion-related metrics: (1) Mean absolute er-
+ror (MAE) of Agatston scores: to measure how well
+the corrected results preserve the calcium burden com-
+pared to ground truth; (2) CAC severity grade accuracy:
+to evaluate downstream CVD risk stratification according
+to clinical guidelines (Shreya et al., 2021) by comparing
+predicted severity categories with ground truth; (3) Dice
+loss: to assess the preservation of calcified lesion spatial
+distribution after motion correction compared to ground
+truth; (4) Pearson correlation of Agatston scores: to
+assess overall agreement between predicted and ground
+truth Agatston scores.
+To further evaluate the generalizability of our method,
+we conducted a reader study with two experienced radiol-
+ogists using real non-gated chest CT scans from the Stan-
+ford COCA dataset. We extracted 30 motion-corrupted
+patches containing coronary calcium and generated corre-
+sponding motion-corrected reconstructions using both the
+UNet baseline and ProDM. For each de-identified sam-
+ple, readers rated motion suppression, clinical usability,
+and vessel fidelity on a scale from 1 to 5, where 1 repre-
+sents the lowest quality and 5 represents the highest. Fur-
+ther details of the evaluation rubric are available in Ap-
+pendix A Table A.4. Readers were also asked to provide
+an overall ranking of the three methods (original, UNet,
+and ProDM). To ensure a fully blinded assessment, the
+8
+
+three method outputs for each sample were randomly or-
+dered and labeled as M1, M2, and M3 without revealing
+the underlying method. In addition, the ordering of sam-
+ples themselves was randomized across the study to pre-
+vent potential recall or ordering bias.
+3. Results
+3.1. Comparison with Baseline Methods
+In this section, we compare the proposed ProDM
+framework on the simulated motion test dataset against
+several models commonly used in image-to-image trans-
+lation tasks for medical imaging.
+Figure 3 presents qualitative comparisons of the eval-
+uated methods on representative motion-corrupted test
+samples with varying artifact types and severity. For eas-
+ier assessment of qualitative similarity with the ground
+truth, the Structural Similarity Index (SSIM) between
+each reconstructed motion-suppressed image and the
+ground truth is provided.
+The UNet produced slightly
+higher SSIM for two samples but lower for the other two,
+showing clear over-smoothing and poor calcium region
+intensity preservation. cGAN achieved marginally higher
+SSIM than the uncorrected case but failed to maintain
+the correct spatial distribution and calcium intensity, of-
+ten producing under-represented lesions. DDPM gener-
+ated visually sharper results and achieved higher SSIM
+while improving intensity consistency; however, the spa-
+tial distribution of calcified lesions were evidently dis-
+torted in samples #2 and #3. In contrast, ProDM achieved
+the highest SSIM across all samples (0.9911, 0.9919,
+0.9856, 0.9963), closely resembling the motion-free ref-
+erence. The reconstructed calcium regions retained ac-
+curate shapes and intensity patterns, with only slight un-
+derestimation of intensity observed at the lesion center in
+sample #2. It is worth noting that a higher SSIM does
+not always imply superior motion correction quality, as
+illustrated by cGAN, which achieved moderate SSIM yet
+failed to restore the true spatial and intensity distribution
+of calcified lesions.
+Table 1 shows the quantitative performance com-
+parison across different methods and evaluation met-
+rics. It is evident that without motion correction, Agat-
+ston score–related properties are poorly preserved in the
+motion-corrupted samples, as indicated by a high Agat-
+ston Score MAE of 37.876 ± 0.588, low Agatston grade
+accuracy of 42.614 ± 0.544%, a high average Dice loss of
+0.853 ± 0.002. Pearson correlation between predicted and
+ground truth scores is 0.953. The UNet model achieved
+moderate improvement in Agatston grade accuracy and
+Dice loss but exhibited higher Agatston Score MAE and
+lower Pearson correlation. cGAN performed the worst
+among all models, with the highest Agatston MAE, low-
+est grade accuracy, and weakest correlation, despite a
+marginal reduction in Dice loss compared with uncor-
+rected inputs. DDPM demonstrated better performance,
+achieving lower MAE, higher grade accuracy, and sub-
+stantially lower Dice loss, though it showed slightly re-
+duced Pearson correlation. BBDM significantly improved
+motion correction across all metrics but still struggled to
+maintain accurate calcified lesion distribution and grade
+accuracy in certain cases.
+Among all models, ProDM achieved the best over-
+all performance across all metrics.
+After motion cor-
+rection with ProDM, the Agatston Score MAE de-
+creased to 9.391±0.257, the grade accuracy increased to
+95.334±0.232%, the Dice loss between predicted and
+ground-truth calcium regions dropped to 0.078±0.001,
+and the Pearson correlation improved to 0.993, demon-
+strating its superiority in preserving CAC score accuracy,
+calcified lesion spatial and intensity distributions, as well
+as scoring consistency.
+We also assess the model’s performance on per-class
+severity category accuracy for risk stratification.
+Fig-
+ure 5 shows the percentage-based confusion matrices of
+Agatston score cardiovascular risk categories of the un-
+corrected baseline, UNet-corrected results, and ProDM-
+corrected results.
+Without motion correction, the risk
+stratification accuracy is poor, especially in the minimal
+CAC score range, where only 10.4% cases are correctly
+categorized and an overwhelming 89.0% of cases are in-
+correctly categorized as no CAC, and the accuracy for the
+mild CAC score range is also quite low at 48.1%. This
+indicates that without motion correction, more subtle and
+lower intensity calcified lesions are most likely to be neg-
+atively impacted in terms of CAC score accuracy. UNet-
+corrected outputs exhibited a lot better severity category
+accuracy in the minimal (88.4%) to mild (66.6%) CAC
+score ranges, but the performance for moderate (61.4% →
+54.9%) to severe (72.2% →41.9%) score ranges de-
+creased significantly compared to uncorrected samples.
+This is consistent with the observation that UNet has the
+9
+
+Table 1: Motion correction performance comparison on synthetic motion-corrupted patches derived from Stanford COCA.
+Model
+Agatston MAE ↓
+Grade Accuracy(%) ↑
+Avg. Dice Loss ↓
+Agatston Pearson Corr. ↑
+No correction
+37.876 ± 0.588
+42.614 ± 0.544
+0.853 ± 0.002
+0.953
+UNet
+45.163 ± 0.829
+68.146 ± 0.512
+0.403 ± 0.002
+0.929
+cGAN
+59.729 ± 8.256
+35.431 ± 2.309
+0.806 ± 0.011
+0.748
+DDPM
+33.659 ± 0.985
+82.571 ± 0.530
+0.210 ± 0.002
+0.942
+BBDM
+10.644 ± 0.261
+92.735 ± 0.285
+0.131 ± 0.001
+0.992
+ProDM (Ours)
+9.391 ± 0.257
+95.334 ± 0.232
+0.078 ± 0.001
+0.993
+Agatston severity categories. 0 (No calcification), 1-10 (Minimal), 11-100 (Mild), 101-400 (Moderate), > 400 (Severe). Grade
+accuracy = proportion of cases where predicted grade matches ground-truth grade.
+Dice loss. 1 −Dice coefficient between predicted calcium mask and ground-truth calcium region on the motion-free (gated) reference.
+Figure 3: Qualitative comparison of motion correction performance of different models on simulated motion-corrupted samples. SSIM with the
+ground truth is shown for reference.
+tendency to oversmooth and result in decreased intensities
+in predictions than the ground truth. ProDM performed
+the best and showed significant improvement compared
+to the other two methods, with excellent per-category ac-
+curacy across the minimal (96.1%), mild (96.7%), mod-
+erate (94.7%), and severe (85.3%) score ranges.
+3.2. Ablation Studies
+In order to better understand how ProDM performs un-
+der different configurations, we conduct extensive abla-
+tion studies on assessing the role of calcium consistency
+loss and axial context thickness.
+10
+
+3.2.1. Effect of Calcium Consistency Loss on Risk Strati-
+fication
+We first assess the role of calcium consistency loss in
+ProDM by comparing the performance with and without
+this auxiliary loss, both quantitatively and qualitatively.
+For quantitative comparison, Table 2 shows the per-class
+severity category accuracy, precision, recall, and F1 score
+of the motion correction methods. Without motion correc-
+tion, the performance is poor as expected, particularly for
+the 1–10 (minimal) score range, where precision, recall,
+and F1 are 0.150, 0.104, and 0.123, respectively. ProDM
+without the calcium consistency loss improves perfor-
+mance across all severity categories. However, adding the
+calcium consistency loss provides significant further im-
+provement in almost all metrics across all severity cate-
+gories. The most notable improvements occur in the min-
+imal (1–10) and mild (11–100) score ranges, where re-
+covering small calcified lesions is most challenging. For
+example, precision and recall in the 1–10 range increase
+from 0.932 and 0.914 (no-loss) to 0.972 and 0.961 (with-
+loss), yielding an F1 score of 0.966. Similar trends are
+seen in higher score ranges as well. One exception is the
+moderate range (101-400), which sees a slight decrease in
+precision (0.940→0.936) when calcium consistency loss
+is added, but this is accompanied by an improvement in
+recall (0.929→0.947). As a result, the overall F1 score
+still increases (0.934→0.941).
+Figure B.8 shows the qualitative comparison of ProDM
+without vs with calcium consistency loss on some sample
+cases compared against the ground truth. SSIM scores
+against ground truth are displayed for visual reference.
+With calcium consistency loss, the SSIM scores are con-
+sistently higher than the same cases without calcium con-
+sistency loss. Samples #2 and #3 show the most evident
+qualitative improvement. For these cases, without cal-
+cium consistency loss, ProDM did not successfully re-
+cover the correct calcified lesion shape, which was re-
+covered successfully with its addition, further highlight-
+ing the significance of the calcium consistency loss.
+3.2.2. Impact of Calcium Consistency Loss Weight
+To assess the impact of weight λ for calcium consis-
+tency loss on the performance of ProDM, we compare the
+evaluation metrics Agatston Score MAE, overall sever-
+ity grade accuracy, Dice loss, and Pearson correlation for
+λ = 0, 10, 15, 20, 40, 80 as shown in Figure 6. As λ in-
+creases from 0, grade accuracy and Dice loss show con-
+sistent improvement. In contrast, MAE and Pearson cor-
+relation vary across different λ values and do not follow
+a strictly monotonic trend. Notably, λ = 20 achieves the
+best overall performance, yielding the highest grade accu-
+racy and Pearson correlation as well as the lowest MAE
+and Dice loss.
+3.2.3. Impact of Number of Axial Slices
+To investigate the effect of varying the number of slices
+in the axial direction, we compare the same aforemen-
+tioned evaluation metrics using different axial context
+thickness settings k = 3, 5, 7, 9. As shown in Figure 7, as
+the number of context slices increased, the performance
+decreases consistently, where k = 3 achieves the best per-
+formance across all metrics.
+3.3. Clinical Reader Study
+With the goal of evaluating our proposed model on real
+data, we conduct a blinded reader study with two expe-
+rienced radiologists to assess the performance of base-
+line (original), UNet, and ProDM on real non-gated scans.
+The radiologists’ preferences and ratings across different
+evaluation metrics for each sample were collected for fur-
+ther analysis. Figure 4 (a) shows the distribution of rat-
+ings using violin plots, while Figure 4 (b) summarizes
+the mean and standard deviation of the ratings for each
+method across the three evaluation criteria: motion sup-
+pression, clinical usability, and vessel fidelity.
+Without motion correction, the original uncorrected
+samples showed low scores across all three criteria, with
+motion suppression level 1.42 ± 0.69, clinical usability
+1.44 ± 0.71, and vessel fidelity 1.48 ± 0.76. These scores
+correspond to moderate to severe motion artifacts, poor
+clinical usability, and loss of most vessel fidelity, respec-
+tively. The violin plot also shows that most scores are
+centred on the lower end of the Likert scale.
+With UNet correction, all three metrics showed no-
+ticeable improvement, with moderate motion suppression
+(2.25 ± 0.78), limited clinical usability (1.89 ± 0.86),
+and moderate distortions with some loss of vessel fidelity
+(1.92 ± 0.78). While all metrics showed some improve-
+ments, they are still relatively low and indicate insuffi-
+cient correction. The violin plots show that the radiolo-
+11
+
+Table 2: Per severity grade performance comparison across score ranges for uncorrected baseline, ProDM without calcium consistency loss, and
+ProDM with calcium consistency loss.
+1-10 (Minimal)
+11-100 (Mild)
+101-400 (Moderate)
+>400 (Severe)
+Method of Motion Correction
+Prec
+Rec
+F1
+Prec
+Rec
+F1
+Prec
+Rec
+F1
+Prec
+Rec
+F1
+Uncorrected
+0.150
+0.104
+0.123
+0.711
+0.481
+0.574
+0.863
+0.614
+0.717
+0.847
+0.722
+0.780
+No Calc. Consistency Loss
+0.932
+0.914
+0.923
+0.953
+0.945
+0.949
+0.940
+0.929
+0.934
+0.957
+0.853
+0.902
+With Calc. Consistency Loss
+0.972
+0.961
+0.966
+0.956
+0.967
+0.961
+0.936
+0.947
+0.941
+0.959
+0.853
+0.903
+Figure 4: Radiologist assessment results from the reader study. (a) Violin plots show the distribution of radiologists’ ratings for motion suppression,
+clinical usability, and vessel fidelity across methods. (b) Box-and-whisker plots summarize the mean ratings and variability for the original (non-
+corrected), UNet baseline, and ProDM, with corresponding p-values indicating statistical significance.
+gists most frequently gave UNet-corrected outputs a score
+of around 2.
+ProDM achieved the highest average scores across all
+criteria, with substantial gains over both the Original and
+UNet outputs. Motion suppression improved to 2.97 ±
+0.89, clinical usability reached 2.78 ± 1.02, and vessel fi-
+delity increased to 2.91 ± 0.94. These indicate that the
+outputs had some motion artifacts but are mostly clean,
+good clinical usability with minor limitations, and most
+vessel details preserved.
+All improvements of ProDM
+over the other two methods were statistically significant
+(p < 0.001). The violin plot shows that most scores cen-
+tered around 3.
+We noticed that uncertainty in mean scores increased
+across original, UNet, and ProDM; with ProDM hav-
+ing relatively more uncertainties, which is generally ex-
+pected with improved average performance.
+However,
+despite the larger score variance, both radiologists con-
+sistently ranked ProDM as the best-performing method
+when asked to provide an overall ranking of the three ap-
+proaches in the blinded reader study.
+12
+
+Figure 5: Percentage-based confusion matrices for Agatston score–based cardiovascular risk stratification using three methods: no correction
+(motion-corrupted), UNet baseline, and ProDM. Each cell represents the proportion of subjects within a given ground-truth risk category (rows)
+assigned to a predicted category (columns). Subjects are grouped into five Agatston-based risk levels: 0 (no CAC), 1–10 (minimal CAC), 11–100
+(mild CAC), 101–400 (moderate CAC), and >400 (severe CAC).
+Figure 6: Comparison of different hyperparameter λ values used in ProDM and the resulting Agatston score MAE, risk stratification severity grade
+accuracy, dice loss and Pearson correlation of Agatston scores between predicted output and ground truth. Optimal λ is shown in purple.
+4. Discussion
+In this study, we propose a progressive, property-aware
+motion correction framework ProDM for learning CAC
+motion correction directly from realistically simulated
+non-gated CTs synthesized from gated calcium CTs, ad-
+dressing the critical challenges with a lack of paired data
+and preserving calcified lesion properties. We evaluate the
+13
+
+Figure 7: Comparison of different axial context thickness k used in 2.5D training and the resulting Agatston score MAE, risk stratification severity
+grade accuracy, dice loss, and Pearson correlation of Agatston scores between predicted output and ground truth. Optimal k is shown in purple for
+each metric.
+model on both synthetic and real non-gated data, through
+extensive quantitative and qualitative analyses. Across all
+experiments, ProDM demonstrated clear advantages over
+both conventional UNet-based image-to-image transla-
+tional baselines and existing diffusion-based approaches.
+The model achieved substantially lower Agatston score
+MAE, higher overall and per-class severity grade ac-
+curacy, stronger agreement with ground-truth Agatston
+scores as reflected by a higher Pearson correlation, and
+lower Dice loss compared with UNet, cGAN, DDPM, and
+BBDM. This indicates a more faithful recovery of cal-
+cified lesion intensity and morphology, as well as better
+preservation of risk stratification. These improvements
+were especially prominent in the minimal and mild CAC
+ranges, where the motion artifacts are more subtle and
+low intensity, making motion correction especially dif-
+ficult and resulting in oversmoothing and lesion distor-
+tion for traditional methods. The ablation studies demon-
+strated the importance of calcium consistency loss in sta-
+bilizing the reconstructed intensity and shape of calcified
+lesions, as its inclusion results in improvement of preci-
+sion, recall, and F1 scores across different severity cate-
+gories. Our analysis of the weight hyperparameter λ for
+calcium consistency loss showed that moderate weight-
+ing (λ = 20) produced the best overall balance between
+CAC score preservation and spatial distribution. Simi-
+larly, experiments on axial context thickness revealed that
+a compact 2.5D context window of k = 3 yields the best
+performance, whereas more context axial context actually
+decreases the performance. This may be because calci-
+fied lesion motions are typically constrained to only a
+small number of slices in the axial direction, and larger
+windows tended to incorporate irrelevant structures, nega-
+tively impacting the motion correction ability at inference
+time. Qualitatively, ProDM produced reconstructions that
+closely resembled motion-free references across diverse
+14
+
+motion profiles, yielding the highest SSIM scores with
+the ground truth. In the blinded reader study, experienced
+radiologists consistently ranked ProDM as the most effec-
+tive method, which achieved good ratings across motion
+correction, vessel fidelity, and clinical usability, further
+highlighting our method’s potential to be applied on real
+non-gated CTs for providing opportunistic screening for
+subclinical atherosclerosis.
+Despite the strong performance of ProDM on both syn-
+thetic and real test data, our work is not without limita-
+tions. Firstly, there are no ground truth motion-free coun-
+terparts available for the real non-gated samples used in
+the reader study. As a result, we were unable to quan-
+titatively assess objective performance metrics such as
+Agatston score MAE, severity grade accuracy, Dice loss,
+and Pearson correlation as done with the synthetic non-
+gated samples. Additionally, although the reader study
+results demonstrated that applying ProDM to real non-
+gated data results in statistically significant improvement
+in motion correction, clinical usability, and vessel fidelity,
+these scores are averaged around 3, which corresponds to
+good clinical quality, but with some limitations, such as
+remaining motion artifacts. Improving ProDM to consis-
+tently achieve ratings of 4 or 5 may require more exten-
+sive and realistic simulation pipelines, domain-adaptation
+strategies, as well as a larger and more diverse reader
+study to better characterize performance. Another lim-
+itation lies in the extensive training time required for a
+diffusion-based progressive motion correction model. In
+this work, we used T = 1000 steps to achieve high-
+quality and stable motion correction. Although this in-
+curs significant training time, recent work such as Zhou
+et al. (2024) demonstrates that diffusion-model acceler-
+ation techniques can significantly reduce the number of
+required timesteps. Integrating such methods into ProDM
+is a promising direction for improving training efficiency.
+On a related note, training diffusion models directly on 3D
+medical imaging data is computationally intensive, which
+motivated our use of a 2.5D training strategy to maintain
+feasible memory and runtime constraints. This challenge
+is well recognized, and several recent works have adopted
+similar 2.5D paradigms for 3D medical imaging data as
+a practical compromise between computational cost and
+representational richness (Hu et al., 2023; Chen et al.,
+2024; Jin et al., 2025; Xie et al., 2025). While there may
+be advantages of extending ProDM to fully 3D, our ab-
+lation studies on axial context thickness suggest that per-
+formance degrade with including more slices, potentially
+due to calcium motion being confined to a narrow axial re-
+gion, and larger context introduces distracting structures
+that decreases the signal magnitude. Whether a carefully
+designed 3D variant could overcome these limitations re-
+mains an open question.
+5. Conclusion
+We present a novel progressive motion-correction
+framework for coronary artery calcium in non-gated CTs,
+which effectively reduces motion artifacts while preserv-
+ing calcified lesion properties. By simulating non-gated
+scans with diverse motion profiles directly from gated
+calcium CT, our approach bypasses the need for paired
+datasets and allows the model to learn to correct real-
+istic motion artifact patterns. By combining a progres-
+sive diffusion framework with calcium consistency loss as
+guidance, our approach is able to achieve superior perfor-
+mance in reducing motion while effectively preserving the
+spatial distribution, morphology, and quantity of coronary
+artery calcium for reliable risk stratification. Together,
+this formulation enables the potential for opportunistic
+subclinical atherosclerosis screening and more accurate
+risk assessment using widely available non-gated CTs.
+References
+Ali, M.M., Gul, S., Naqvi, M., Hakam, L., Inayat, A.,
+Saleem, S., Polavarpu, M., Syed, M.A., 2021. Utility
+of coronary artery calcium scores in predicting risk of
+subclinical cardiovascular atherosclerotic disease: An
+analysis of limitations to its adoption with policy rec-
+ommendations.
+Cureus 13, e14647.
+doi:10.7759/
+cureus.14647.
+Almeida, S.O., Honoris, L., Defranco, A., Port, S., Li,
+D., Nasir, K., Kronmal, R., Barr, R.G., Budoff, M.J.,
+2020. Reliability of cac scoring on nongated compared
+with gated cardiac ct scans from mesa. JACC: Cardio-
+vascular Imaging 13, 177–178. doi:10.1016/j.jcmg.
+2019.08.007. epub 2019 Sep 18.
+15
+
+Brown, S.J., Hayball, M.P., Coulden, R.A., 2000.
+Impact
+of
+motion
+artefact
+on
+the
+measure-
+ment of coronary calcium score.
+British Jour-
+nal of Radiology 73, 956–962.
+URL: https:
+//doi.org/10.1259/bjr.73.873.11064648,
+doi:10.1259/bjr.73.873.11064648.
+Budoff, M.J., Achenbach, S., Blumenthal, R.S., Carr, J.J.,
+Goldin, J.G., Greenland, P., Guerci, A.D., Lima, J.A.,
+Rader, D.J., Rubin, G.D., Shaw, L.J., Wiegers, S.E.,
+2006. Assessment of coronary artery disease by cardiac
+computed tomography. Circulation 114, 1761–1791.
+doi:10.1161/CIRCULATIONAHA.106.178458.
+Budoff, M.J., Young, R., Burke, G., et al., 2018. Ten-year
+association of coronary artery calcium with atheroscle-
+rotic cardiovascular disease (ascvd) events: the multi-
+ethnic study of atherosclerosis (mesa). European Heart
+Journal 39, 2401–2408.
+Carsten Oliver Schirra,
+C.B.,
+van Stevendaal,
+U.,
+D¨ossel, O., Grass, M., 2009. Improvement of cardiac
+ct reconstruction using local motion vector fields.
+Computerized Medical Imaging and Graphics 33,
+122–130.
+URL: https://www.sciencedirect.
+com/science/article/pii/S0895611108001195,
+doi:https://doi.org/10.1016/j.compmedimag.
+2008.10.012.
+Center for Disease Control and Prevention,
+2024.
+Heart disease facts. URL: https://www.cdc.gov/
+heart-disease/data-research/facts-stats/
+index.html.
+Chen, T., Hou, J., Zhou, Y., Xie, H., Chen, X., Liu,
+Q., Guo, X., Xia, M., Duncan, J.S., Liu, C., Zhou,
+B., 2024. 2.5d multi-view averaging diffusion model
+for 3d medical image translation: Application to low-
+count pet reconstruction with ct-less attenuation correc-
+tion. IEEE Transactions on Medical Imaging 44, 4239–
+4250. URL: https://api.semanticscholar.org/
+CorpusID:270392074.
+Chen, Z., Yoon, S., Strotzer, Q., Khalid, R.N., Tivnan, M.,
+Li, Q., Gupta, R., Wu, D., 2025. Head ct scan motion
+artifact correction via diffusion-based generative mod-
+els, in: Applied Medical Artificial Intelligence, pp. 21–
+30. doi:10.1007/978-3-031-82007-6_3.
+Chi, J.M., Makaryus, J.N., Rahmani, N., Shah, A.B.,
+Shah, R.D., Cohen, S.L., 2021. Coronary ct calcium
+score in patients with prior nongated ct, is it necessary?
+Current Problems in Diagnostic Radiology 50, 54–58.
+doi:10.1067/j.cpradiol.2019.07.011. epub 2019
+Jul 26.
+Detrano, R., Guerci, A.D., Carr, J.J., Bild, D.E., Burke,
+G., Folsom, A.R., Liu, K., Shea, S., Szklo, M.,
+Bluemke, D.A., et al., 2008. Coronary calcium as a pre-
+dictor of coronary events in four racial or ethnic groups.
+New England Journal of Medicine 358, 1336–1345.
+Dzaye, O., Razavi, A.C., Jelwan, Y.A., Peng, A.W.,
+Grant, J.K., Blaha, M.J., 2025. Coronary artery cal-
+cium scoring on dedicated cardiac ct and noncardiac ct
+scans. Radiology: Cardiothoracic Imaging 7, e240548.
+doi:10.1148/ryct.240548.
+Forthmann, P., van Stevendaal, U., Grass, M., Koohler,
+T., 2008.
+Vector field interpolation for cardiac mo-
+tion compensated reconstruction, in: 2008 IEEE Nu-
+clear Science Symposium Conference Record, Dres-
+den, Germany. pp. 4157–4160. doi:10.1109/NSSMIC.
+2008.4774197.
+Gaine,
+S.P.,
+Blumenthal,
+R.S.,
+Sharma,
+G.,
+2023.
+Coronary
+artery
+calcium
+score
+as
+a
+graded
+decision
+tool.
+JACC:
+Advances
+2,
+100664.
+URL:
+https://www.jacc.org/
+doi/abs/10.1016/j.jacadv.2023.100664,
+doi:10.1016/j.jacadv.2023.100664.
+Gong, H., Ahmed, Z., Chang, S., Koons, E.K., Thorne,
+J.E., Rajiah, P., Foley, T.A., Fletcher, J.G., McCol-
+lough, C.H., Leng, S., 2024.
+Motion artifact cor-
+rection in cardiac ct using cross-phase temporospatial
+information and synergistic attention gate and spatial
+transformer sub-networks. Physics in Medicine & Bi-
+ology 69, 10.1088/1361–6560/ad1b6a. doi:10.1088/
+1361-6560/ad1b6a.
+Greenland, P., Blaha, M., Budoff, M., et al., 2018. Coro-
+nary calcium score and cardiovascular risk.
+Jour-
+nal of the American College of Cardiology 72, 434–
+447.
+URL: https://doi.org/10.1016/j.jacc.
+2018.05.027, doi:10.1016/j.jacc.2018.05.027.
+16
+
+Greenland, P., Maron, D.J., Budoff, M.J., 2022. Insur-
+ance payers should cover selective coronary artery cal-
+cium testing in intermediate risk primary prevention
+patients.
+Circulation 146, 585–586.
+doi:10.1161/
+CIRCULATIONAHA.122.061193.
+Gupta, A., Bera, K., Kikano, E., Pierce, J.D., Gan, J., Ra-
+jdev, M., Ciancibello, L.M., Gupta, A., Rajagopalan,
+S., Gilkeson, R.C., 2022. Coronary artery calcium scor-
+ing: current status and future directions. Radiographics
+42, 947–967.
+Ho, J., Jain, A., Abbeel, P., 2020.
+Denoising diffu-
+sion probabilistic models.
+CoRR abs/2006.11239.
+URL:
+https://arxiv.org/abs/2006.11239,
+arXiv:2006.11239.
+Hu, Y., Kothapalli, S.V.V.N., Gan, W., Sukstanskii, A.L.,
+Wu, G.F., Goyal, M., Yablonskiy, D.A., Kamilov, U.S.,
+2023.
+Diffgepci: 3d mri synthesis from mgre sig-
+nals using 2.5d diffusion model.
+2024 IEEE Inter-
+national Symposium on Biomedical Imaging (ISBI)
+, 1–4URL: https://api.semanticscholar.org/
+CorpusID:265506582.
+Hussain, B., Mahmood, A., Flynn, M.G., Alexander,
+T., 2023. Coronary artery calcium scoring in asymp-
+tomatic patients. HCA Healthcare Journal of Medicine
+4, 341–352. doi:10.36518/2689-0216.1565.
+Isola, A.A., Grass, M., Niessen, W.J., 2010.
+Fully
+automatic nonrigid registration-based local motion
+estimation for motion-corrected iterative cardiac ct
+reconstruction.
+Medical Physics 37, 1093–1109.
+URL:
+https://doi.org/10.1118/1.3301600,
+doi:10.1118/1.3301600.
+Jacobs, P.C., Gondrie, M.J.A., van der Graaf, Y., et al.,
+2012. Coronary artery calcium can predict all-cause
+mortality and cardiovascular events on low-dose ct
+screening for lung cancer. AJR American Journal of
+Roentgenology 198, 505–511.
+Jin, K., Sun, C., Xia, L., 2025. Development of a hybrid
+2.5d deep learning model for glioma survival prediction
+using t1-weighted mri from the cgga database. Euro-
+pean Journal of Radiology Open 15, 100697. doi:10.
+1016/j.ejro.2025.100697.
+Jin, M., Zhao, C., Jia, X., Yu, L., 2018.
+Motion-
+compensated reconstruction for limited-angle multi-
+phase cardiac ct, in: Medical Imaging 2018: Physics of
+Medical Imaging, SPIE. p. 1057333. URL: https://
+doi.org/10.1117/12.2294922, doi:10.1117/12.
+2294922.
+Li, B., Xue, K., Liu, B., Lai, Y.K., 2023. Bbdm: Image-to-
+image translation with brownian bridge diffusion mod-
+els, in: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pp. 1952–
+1961.
+Liu, Y., Diao, J., Zhou, Z., Qi, H., Hu, P., 2024. Cardiac
+cine mri motion correction using diffusion models, in:
+2024 IEEE International Symposium on Biomedical
+Imaging (ISBI), pp. 1–5. doi:10.1109/ISBI56570.
+2024.10635444.
+Miedema, M.D., Dardari, Z.A., Nasir, K., et al., 2019.
+Association of coronary artery calcium with long-term,
+cause-specific mortality among young adults. JAMA
+Network Open 2, e197440.
+Mirza, M., Osindero, S., 2014. Conditional generative
+adversarial nets.
+URL: https://arxiv.org/abs/
+1411.1784, arXiv:1411.1784.
+Parsa, S., Saleh, A., Raygor, V., Hoeting, N., Rao,
+A., Navar, A.M., Rohatgi, A., Kay, F., Abbara, S.,
+Khera, A., Joshi, P.H., 2024.
+Measurement and
+application of incidentally detected coronary calcium:
+Jacc review topic of the week. Journal of the Amer-
+ican College of Cardiology 83, 1557–1567.
+URL:
+https://www.sciencedirect.com/science/
+article/pii/S0735109724004157,
+doi:https:
+//doi.org/10.1016/j.jacc.2024.01.039.
+Peng, A.W., Dudum, R., Jain, S.S., Maron, D.J.,
+Patel, B.N., Khandwala, N., Eng, D., Chaudhari,
+A.S., Sandhu, A.T., Rodriguez, F., 2023.
+As-
+sociation of coronary artery calcium detected by
+routine
+ungated
+ct
+imaging
+with
+cardiovascular
+outcomes.
+JACC 82, 1192–1202.
+URL: https:
+//www.jacc.org/doi/abs/10.1016/j.jacc.
+2023.06.040, doi:10.1016/j.jacc.2023.06.040,
+arXiv:https://www.jacc.org/doi/pdf/10.1016/j.jacc.2023.0
+17
+
+Ronneberger, O., Fischer, P., Brox, T., 2015. U-net: Con-
+volutional networks for biomedical image segmenta-
+tion. URL: https://arxiv.org/abs/1505.04597,
+arXiv:1505.04597.
+Safari, M., Wang, S., Li, Q., Eidex, Z., Qiu, R.L.J.,
+Chang, C.W., Mao, H., Yang, X., 2025. Res-mocodiff:
+residual-guided diffusion models for motion artifact
+correction in brain MRI. Physics in Medicine and Biol-
+ogy 70, 205022. doi:10.1088/1361-6560/ae1110.
+Shreya, D., Zamora, D.I., Patel, G.S., Grossmann, I., Ro-
+driguez, K., Soni, M., Joshi, P.K., Patel, S.C., Sange, I.,
+2021. Coronary artery calcium score – a reliable indi-
+cator of coronary artery disease? Cureus 13, e20149.
+doi:10.7759/cureus.20149.
+Taguchi, K., Khaled, A., 2009. Artifacts in cardiac com-
+puted tomographic images. Journal of the American
+College of Radiology 6, 590–593.
+doi:10.1016/j.
+jacr.2009.05.001.
+Takx, R.A.P., Iˇsgum, I., Willemink, M.J., et al., 2015.
+Quantification of coronary artery calcium in nongated
+ct to predict cardiovascular events in male lung cancer
+screening participants: results of the nelson study. Jour-
+nal of Cardiovascular Computed Tomography 9, 50–
+57.
+Tang, Q., Cammin, J., Srivastava, S., Taguchi, K., 2012. A
+fully four-dimensional, iterative motion estimation and
+compensation method for cardiac ct. Medical physics
+39, 4291–4305. doi:10.1118/1.4725754.
+Thomas, I.C., Shiau, B., Denenberg, J.O., McClelland,
+R.L., Greenland, P., de Boer, I.H., Kestenbaum, B.R.,
+Lin, G.M., Daniels, M., Forbang, N.I., Rifkin, D.E.,
+Hughes-Austin, J., Allison, M.A., Carr, J., Ix, J.H.,
+Criqui, M.H., 2018. Association of cardiovascular dis-
+ease risk factors with coronary artery calcium volume
+versus density.
+Heart 104, 135–143.
+doi:10.1136/
+heartjnl-2017-311536. epub 2017 Aug 16.
+Wetscherek, M.T.A., McNaughton, E., Majcher, V., et al.,
+2023. Incidental coronary artery calcification on non-
+gated ct thorax correlates with risk of cardiovascular
+events and death. European Radiology , 1–11.
+World
+Health
+Organization,
+2025.
+Cardiovas-
+cular
+diseases
+(cvds).
+https://www.who.
+int/news-room/fact-sheets/detail/
+cardiovascular-diseases-(cvds).
+Xie, H., Gan, W., Ji, W., Chen, X., Alashi, A., Thorn,
+S.L., Zhou, B., Liu, Q., Xia, M., Guo, X., Liu, Y.H.,
+An, H., Kamilov, U.S., Wang, G., Sinusas, A.J.,
+Liu, C., 2025.
+A generalizable diffusion framework
+for 3d low-dose and few-view cardiac spect imag-
+ing.
+Medical Image Analysis 106, 103729.
+URL:
+https://www.sciencedirect.com/science/
+article/pii/S1361841525002762,
+doi:https:
+//doi.org/10.1016/j.media.2025.103729.
+Yan, C., Zhou, G., Yang, X., et al., 2021.
+Im-
+age quality of automatic coronary ct angiography
+reconstruction for patients with hr ≥75 bpm us-
+ing an ai-assisted 16-cm z-coverage ct scanner.
+BMC Medical Imaging 21, 24.
+URL: https://
+doi.org/10.1186/s12880-021-00559-7, doi:10.
+1186/s12880-021-00559-7.
+Yao, D., Yan, C., Du, W., et al., 2025. Deep learning-
+based cardiac ct coronary motion correction method
+with temporal weight adjustment: Clinical data eval-
+uation.
+Journal of Digital Imaging URL: https://
+doi.org/10.1007/s10278-025-01683-4, doi:10.
+1007/s10278-025-01683-4.
+Yu, C., Ng, A.C.C., Ridley, L., et al., 2021. Incidentally
+identified coronary artery calcium on non-contrast ct
+scan of the chest predicts major adverse cardiac events
+among hospital inpatients. Open Heart 8, e001695.
+Zhou, Y., Chen, T., Hou, J., Xie, H., Dvornek, N.C.,
+Zhou, S.K., Wilson, D.L., Duncan, J.S., Liu, C.,
+Zhou,
+B.,
+2024.
+Cascaded multi-path shortcut
+diffusion
+model
+for
+medical
+image
+translation.
+Medical
+Image
+Analysis
+98,
+103300.
+URL:
+https://www.sciencedirect.com/science/
+article/pii/S1361841524002251,
+doi:https:
+//doi.org/10.1016/j.media.2024.103300.
+18
+
+Appendix A. Additional Implementation Details
+Table A.3: High-level motion profiles used to simulate coronary motion. Each trajectory is defined in 3D with axis-specific amplitudes derived
+from sampled displacement ratios.
+Profile
+Behavior
+Displacement Model
+Translation
+Slow monotonic drift along a
+fixed 3D direction
+⃗
+d(t) = (Vxt, Vyt, Vzt)
+Oscillation
+Back-and-forth motion along a
+fixed 3D direction
+⃗
+d(t) = cos(2πt +β) ·(Ax, Ay, Az) where β is the phase shift
+Local Jitter
+Small, smooth random motion
+⃗
+d(t) = α P3
+k=1 wk sin(2πkt + β) ⃗uk, where wk are scaler
+weights of the kth sinusoidal function, ⃗uk is a randomly
+sampled direction in 3D, β is the phase shift, and α is
+scale applied so ∥⃗
+d(t)∥≤A
+Piecewise
+Movement
+in
+one
+direction,
+stops and dwell for some time,
+then movement in a new direc-
+tion
+d(t) follows segment1(t) with amplitude A(1) in direction
+⃗
+u(1), pauses briefly, then continues along segment2(t) with
+amplitude A(2) in direction ⃗
+u(2)
+Note 1. Axis-specific amplitudes (Ax, Ay, Az) were derived from displacement ratios (rx, ry, rz). For translation, the corresponding
+velocities are Vx = Ax
+T ,
+Vy =
+Ay
+T ,
+Vz = Az
+T , where T is the total number of timesteps.
+Note 2. We selected the following parameters for the simulations: A ∈[4, 15] pixels, β ∼U(0, 2π), and ratios sampled from
+rx, ry ∼[2.0, 4.0] or [0.5, 1.5] depending on the dominant in-plane axis, and rz ∼[0.3, 1.0] for reduced axial motion. Piecewise
+dwell breakpoint time steps, dwell duration, as well as the directions of motion are sampled randomly.
+19
+
+Table A.4: Likert-scale scoring criteria used for the reader study. All ratings were provided on a 1-5 scale, where higher scores indicate better
+performance.
+Criterion
+Score
+Definition
+Motion suppression
+1
+Severe motion artifacts
+2
+Moderate motion artifacts
+3
+Some motion artifacts remain but mostly clean
+4
+Minor motion artifacts
+5
+No visible motion artifacts
+Clinical usability
+1
+Not suitable for clinical use with major artifacts or distortions
+2
+Limited clinical usability with significant quality issues
+3
+Good for clinical use with minor limitations
+4
+High clinical usability with only minor quality issues
+5
+Optimal for clinical use with no quality concerns
+Vessel fidelity
+1
+Severe distortion or loss of vessel structures and calcium
+2
+Moderate distortion wth some vessel detail lost
+3
+Minor distortion, most vessel detail preserved
+4
+Minimal distortion with excellent vessel detail preservation
+5
+Perfect preservation of vessel structures and calcium
+20
+
+Appendix B. Additional Results
+SSIM:0.9886
+SSIM:0.9866
+SSIM:0.9841
+SSIM:0.9920
+No Calcium 
+Consistency 
+Loss
+SSIM:0.9911
+SSIM:0.9919
+SSIM:0.9856
+SSIM:0.9963
+With Calcium 
+Consistency 
+Loss
+Ground Truth
+Sample #1
+Sample #2
+Sample #3
+Sample #4
+SSIM:0.8291
+SSIM:0.8818
+SSIM:0.9072
+SSIM:0.9161
+Uncorrected
+Figure B.8: Qualitative comparison of motion correction output of ProDM without calcium consistency loss vs. with calcium consistency loss,
+compared against ground truth. SSIM against ground truth presented for reference.
+21

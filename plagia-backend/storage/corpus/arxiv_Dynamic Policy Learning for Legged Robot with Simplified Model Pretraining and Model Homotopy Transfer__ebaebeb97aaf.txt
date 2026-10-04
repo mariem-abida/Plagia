@@ -1,0 +1,1104 @@
+Dynamic Policy Learning for Legged Robot
+with Simplified Model Pretraining and Model Homotopy Transfer
+Dongyun Kang1, Min-Gyu Kim1, Tae-Gyu Song1, Hajun Kim1, Sehoon Ha2 and Hae-Won Park1
+Abstract— Generating dynamic motions for legged robots
+remains a challenging problem. While reinforcement learning
+has achieved notable success in various legged locomotion tasks,
+producing highly dynamic behaviors often requires extensive re-
+ward tuning or high-quality demonstrations. Leveraging reduced-
+order models can help mitigate these challenges. However, the
+model discrepancy poses a significant challenge when transferring
+policies to full-body dynamics environments. In this work, we
+introduce a continuation-based learning framework that combines
+simplified model pretraining and model homotopy transfer to
+efficiently generate and refine complex dynamic behaviors. First,
+we pretrain the policy using a single rigid body model to capture
+core motion patterns in a simplified environment. Next, we
+employ a continuation strategy to progressively transfer the
+policy to the full-body environment, minimizing performance
+loss. To define the continuation path, we introduce a model
+homotopy from the single rigid body model to the full-body
+model by gradually redistributing mass and inertia between the
+trunk and legs. The proposed method not only achieves faster
+convergence but also demonstrates superior stability during the
+transfer process compared to baseline methods. Our framework
+is validated on a range of dynamic tasks, including flips and
+wall-assisted maneuvers, and is successfully deployed on a real
+quadrupedal robot.
+I. INTRODUCTION
+Learning complex and dynamic motions for legged robots
+remains a challenging problem. Successfully generating such
+behaviors requires navigating the intricate interplay between
+the robot’s body momentum, leg inertia, and contact forces,
+making it difficult to develop effective control strategies.
+Classical motion generation approaches, particularly trajec-
+tory optimization (TO), formulate the problem as a constrained
+optimization [1]–[13]. While TO offers interpretability and
+principled motion synthesis, solving it reliably is often hindered
+by nonconvexity and the hybrid nature of contact dynamics.
+To cope with these challenges, reduced-order models are
+employed to approximate feasible motions [5]–[13], yet relying
+on them introduces dynamics mismatches. While hierarchical
+frameworks [10], [12]–[14] mitigate this by refining trajectories
+with full-body dynamics, this process is often computationally
+intensive, making it challenging to achieve real-time reactivity
+without significant optimization expertise.
+Reinforcement learning (RL), which has demonstrated
+impressive results across various legged locomotion tasks [15]–
+[17], offers an alternative paradigm capable of discovering
+highly dynamic behaviors. However, generating complex
+This work has been submitted to the IEEE for possible publication. Copyright
+may be transferred without notice, after which this version may no longer be
+accessible.
+1Korea Advanced Institute of Science and Technology, Yuseong-gu, Daejeon
+34141, Republic of Korea. haewonpark@kaist.ac.kr
+2Georgia
+Institute
+of
+Technology,
+Atlanta,
+GA,
+30308,
+USA
+sehoonha@gatech.edu
+Model Homotopic Path
+Full-Body Model
+SRB Model
+Fig. 1: Conceptual illustration of the proposed model homotopy
+transfer. The framework defines a continuation path from the simplified
+SRB to full-body dynamics via gradual mass and inertia redistribution.
+This approach facilitates the stable transfer of core motion patterns to
+complex, highly dynamic behaviors such as wall-assisted maneuvers.
+motions without prior information often results in instability
+and convergence to suboptimal solutions. To address these
+issues, extensive reward engineering is required, making the
+process time consuming and difficult to apply to a wide range of
+dynamic behaviors. While imitation learning [18]–[21], which
+utilizes expert demonstrations, is known to be an effective
+solution for guiding RL, obtaining high-quality demonstrations
+often requires substantial resources and is sometimes not readily
+available [22]–[25].
+One strategy to alleviate these challenges is to leverage a
+reduced-order model to train the policy in a simpler environ-
+ment [26]–[29]. This approach offers several advantages, such
+as simple reward design and faster simulation speeds, leading
+to more efficient policy learning [26], [27]. However, the
+discrepancy between simplified models and full-body models,
+commonly referred to as the model gap, poses a significant
+hurdle when deploying these policies in real environments.
+Previous works have addressed this gap by combining
+simplified model planners with whole-body tracking controllers
+[26], [28] or by employing imitation learning [27]. Although
+these methods have shown promise in simple locomotion
+tasks or 2D scenarios, their applicability to highly dynamic
+maneuvers remains unproven. Moreover, adhering to the
+simplified model’s motion often leads to suboptimal solutions
+for the full-body system. These observations highlight the need
+for an effective and stable refinement process to bridge the
+model gap.
+Continuation methods [30] offer a powerful conceptual
+framework to tackle such challenges. By gradually transforming
+a well-understood, simpler system into a more complex target
+arXiv:2512.24698v1 [cs.RO] 31 Dec 2025
+
+system, continuation methods facilitate smoother transitions
+and more robust convergence on difficult problems. Building
+on this conceptual foundation, we propose a continuation-based
+method that first leverages a simplified model to pretrain the
+policy in an idealized setting, and then incrementally bridges
+the gap to the full-body environment. To define the continuation
+path, we introduce a model homotopy from the Single Rigid
+Body (SRB) model to the full-body model, constructed by
+progressively interpolating the mass and inertia between the
+trunk and legs. Following this controlled progression allows the
+policy to navigate increasingly complex dynamics and achieve
+a smooth, reliable transfer.
+We validate our framework on a series of challenging
+dynamic tasks, including flips and wall-assisted maneuvers.
+Our results show that the proposed approach enhances learning
+stability and achieves faster convergence compared to baseline
+methods. Finally, we successfully transfer the learned policies
+to a real quadrupedal robot.
+In summary, the key contributions of this work are as follows:
+• We present a continuation-based learning framework that
+integrates simplified model pretraining and model homo-
+topy transfer to efficiently generate and refine complex
+dynamic motions.
+• This framework provides a principled way to smoothly
+transition from simplified to full-body dynamics, improv-
+ing both convergence speed and learning stability.
+• We validate the effectiveness of our method by suc-
+cessfully generating a variety of dynamic behaviors in
+simulation, and deploy the learned policies on a real robot.
+II. RELATED WORK
+A. Trajectory Optimization
+TO is a systematic process for finding the optimal trajectory
+that satisfies a set of physical and task constraints. Due to its
+interpretability and ability to handle diverse constraints, TO has
+been extensively utilized in legged robot motion generation [1]–
+[4]. However, the optimization landscape for legged locomotion
+is fundamentally nonconvex. Furthermore, the hybrid nature
+of the system, characterized by discontinuous contact modes,
+makes finding desired solutions extremely challenging, as
+solvers are prone to getting trapped in poor local optima.
+To overcome these computational complexities, a common
+strategy is to decompose the high-dimensional full-body opti-
+mization problem into simpler, manageable subproblems. This
+is typically achieved by pre-specifying contact sequences [6],
+[8], [12] or employing reduced-order models, such as Linear
+Inverted Pendulum (LIP) [5], SRB [6]–[10], and centroidal
+model [11]–[13], to generate approximate solutions. These
+simplified solutions are often used as warm starts or references
+for hierarchical optimization frameworks, which subsequently
+refine the trajectory using a detailed full-body model to ensure
+dynamic feasibility and tracking accuracy [10], [12]–[14].
+B. Reinforcement Learning
+An alternative approach for achieving dynamic motions is
+RL. RL has recently achieved remarkable success across various
+tasks, including quadruped locomotion [15]–[17].
+However, generating complex, high-quality motions without
+prior information often requires tedious reward tuning. To
+guide the learning more effectively, several strategies have
+been proposed, such as curriculum learning [17], [31], [32],
+the use of barrier rewards to enforce constraints [33], [34],
+and combining RL with model-based control [35]. Another
+effective approach to address the reward engineering problem
+is to leverage expert demonstrations. These demonstrations
+can be obtained through hand-designed motions, trajectory
+optimization [18], or motion capture data [19]. Once these
+demonstrations are available, imitation can be performed using
+imitation rewards [20] or adversarial rewards to capture stylistic
+behaviors [21]. However, collecting high-quality demonstra-
+tions often requires significant resources. To mitigate this issue,
+WASABI [22] proposed a method that utilizes rough partial
+demonstrations obtained from hand-held human demonstrations.
+Additionally, trajectory optimization on simplified models has
+been used as a more accessible and less resource-intensive way
+to generate reasonable demonstrations [23]–[25].
+C. Policy Learning with Simplified Model
+A few notable studies [26]–[29] have focused on utilizing
+RL policies learned in environments governed by simplified
+dynamics models. For example, GLiDE [26] used a policy
+trained in a SRB environment, where the RL policy generated
+desired body accelerations that were tracked by a quadratic
+programming-based tracking controller. This study highlighted
+the benefits of simplified model learning, such as simple reward
+design, fast and efficient training simulations, and robust sim-
+to-real deployment. Reda et al. [27] used a point mass with
+arm model to train a policy, which served as a motion planner
+for the full-body model and was subsequently refined through
+imitation learning. Chen et al. [28], employed a LIP model, and
+the resulting policy were tracked using an operational space
+control in the full-body environment.
+These works share a common approach of using the policy
+learned in the simplified model as a high-level motion planner,
+which a full-body controller then tracks. While effective, this
+strictly hierarchical approach can lead to suboptimal behaviors
+as the full-body system is constrained by the simplified plan.
+In our work, we take this concept a step further by introduc-
+ing a model continuum that smoothly transitions between the
+SRB model and the full-body model. Our approach smoothly
+transitions the policy from the simplified to the full-body model,
+ensuring stable transfer while enabling the discovery of more
+optimal behaviors beyond the initial SRB guidance.
+D. Continuation Method
+Continuation methods [30], originating in numerical analysis
+and optimization, are widely used to address challenging
+problems by gradually transforming a simpler, well-understood
+system into a complex target system. This approach is particu-
+larly effective for mitigating dependency on initial conditions
+and avoiding poor local minima.
+The effectiveness of this approach was demonstrated in sev-
+eral recent studies. For instance, Pardis et al. [36] tackled chal-
+lenging trajectory optimization problems through homotopic
+optimization. In this method, homotopic paths were explored
+
+Full Body Environment
+SRB 
+Environment
+Actor
+100Hz
+Estimator
+100Hz
+2KHz
+Action Conversion
+Jacobian
+Transpose
+Taskspace
+PD
+Nominal 
+Swing Trajectory
+Foot Residual Target
+Joint State
+Ground Reaction Force
+SRB 
+Observation
+Proprioceptive 
+History
+Torques
+Actor
+100Hz
+Nominal 
+Swing Trajectory
+Foot Residual Target
+Ground Reaction Force
+True Linear Velocity
+True Contact State
+SRB 
+Observation
+Stage 1: 
+SRB Pretraining
+Stage 2: 
+Model Homotopy Tranfer
+Model Homotopic Path
+Fig. 2: Overview of the proposed learning framework. The motion policy is first pretrained on a simplified SRB model to learn core motion
+patterns. Subsequently, this policy is smoothly adapted to the full-body environment using our model homotopy transfer.
+probabilistically using a tree structure in a multidimensional
+homotopy parameter space while avoiding pitfalls such as
+bifurcations or folds. Similarly, Raff et al. [37] introduced
+a model homotopy to transition between an energetically
+conservative model (ECM) and a fully actuated robot. This
+approach used ECM motions as seeds for finding the optimal
+gait of a more realistic robot model. Curriculum learning can
+also be viewed as a specific form of continuation methods
+[38]. However, while curriculum learning typically focuses
+on gradually increasing task or environmental complexity,
+continuation methods focus on transitioning from simpler to
+more complex models. In this work, we adopt model homotopy
+as the foundation for continuation, defining a continuous path
+between the SRB model and the full-body dynamics model.
+III. SIMPLIFIED MODEL PRETRAINING
+In this section, we present SRB pretraining, the first stage
+of our learning framework. The goal of this stage is to
+establish a robust foundation for dynamic behaviors by learning
+to coordinate body momentum and contact forces under
+idealized conditions. In the following, we first outline the
+mathematical formulation of the SRB model, followed by a
+detailed description of the pretraining pipeline used to bootstrap
+the discovery of complex motions.
+A. Single Rigid Body Model
+The SRB model represents the robot as a floating rigid body
+with a fixed lumped mass and inertia, assuming massless legs
+and ideal point contacts with the ground. The state comprises
+the base position, orientation, linear and angular velocities, and
+the Cartesian positions of the virtual feet. In this formulation,
+the ground reaction forces (GRFs) exerted at the contact points
+serve as the control inputs. The equations of motion for the
+SRB model, expressed in the world frame, are given as follows:
+X
+i
+fi + mg = m ˙v,
+˙p = v
+X
+i
+ri × fi = I ˙w + w × Iw,
+˙R = [w]×R
+(1)
+where ri ∈R3 is the vector from the center of mass (COM) to
+the ith contact point, and fi ∈R3 represents the GRFs exerted
+at the ith contact point. p = [px, py, pz] ∈R3 and v ∈R3
+denote the position and velocity of the COM, respectively. w ∈
+R3 is the angular velocity, and R = [Rx, Ry, Rz] ∈SO(3) is
+a rotation matrix describing the orientation of the body. m is
+the lumped mass and I = RIbR⊤∈R3×3 is the inertia tensor
+expressed in the world frame, where Ib denotes the constant
+inertia matrix in the body-fixed frame.
+By effectively capturing essential body dynamics while
+abstracting away less critical aspects, the SRB model strikes
+an ideal balance between simplicity and expressiveness. This
+makes it a suitable middle ground for discovering diverse
+dynamic behaviors, serving as an effective foundation for the
+initial stage of our learning framework.
+B. SRB Pretraining
+Building upon the dynamics described in the previous
+section, we create an idealized learning environment free from
+confounding factors like leg inertia, leg collisions, and contact
+instabilities. This simplification allows the policy to focus
+exclusively on learning the core principles of body momentum
+control, enabling the efficient discovery of the motion.
+1) SRB Environment: The SRB model is initialized with
+the composite mass and inertia of the full robot in its nominal
+standing pose. Based on this physical configuration, the policy
+network generates hybrid control actions that alternate between
+two phases according to a predefined contact plan. During the
+stance phase, the policy outputs GRF actions fi, which are
+clipped to remain within the friction cone. Conversely, during
+the swing phase, the policy outputs a residual foot target actions
+∆ri. These residuals are added to a point on the predefined
+nominal swing trajectory ri to determine the final foot target
+ˆri. This target is then constrained by clipping to stay within
+the leg’s workspace (a sphere centered at the hip) and to avoid
+ground penetration. Foot contact is determined purely based
+on kinematic conditions: a foot is considered in contact if the
+distance between its center and the ground is less than the
+foot’s radius. Once all control inputs are set, the base’s state
+transition follows the rigid body dynamics in Eq. 1.
+2) Task-Specific Design: Our framework learns diverse
+motions, each defined by a high-level structure consisting of a
+contact plan and a nominal swing trajectory. The contact plan
+specifies the motion’s total duration and the allowed contact
+intervals for each foot. Nominal swing trajectory defines a
+central path for the foot during the swing phase, parameterized
+using a simple quadratic Bezier curve. The policy then learns
+to output a residual to this nominal path.
+
+Gaits
+negative reward
+x
+a
+b
+rp
+pz - 0.28
+0.35
+5
+ro
+Rz −ˆz
+0.40
+5
+rgrf
+fi
+0.05
+1e-5
+rres
+∆ri
+0.2
+2
+positive reward
+x
+a
+b
+rv
+v −vcmd
+0.3
+3
+rw
+w −wcmd
+0.3
+3
+vcmd and wcmd denote the command linear and
+angular velocities, respectively.
+Flips
+negative reward
+x
+a
+b
+rp
+p −0.3ˆz
+0.1
+1
+ro (landing)
+Rz −ˆz
+0.15
+0.1
+rw
+w −(αtw)α
+0.2
+1
+rgrf
+fi
+0.05
+1e-5
+rres
+∆ri
+0.2
+2
+positive reward
+x
+a
+(u, l)
+rrot (air)
+αtw
+0.3
+(6, -0.1)
+α is the desired rotational axis, which is ˆx for sideflip,
+ˆy for backflip and ˆz for yawspin.
+Wall Assisted Motions
+negative reward
+x
+a
+b
+rp
+p −ptarget
+2
+0.1
+ro
+R −Rtarget
+1
+0.1
+rw
+w
+0.15
+0.01
+rgrf
+fi
+0.05
+1e-5
+rres
+∆ri
+0.2
+2
+positive reward
+x
+a
+(u, l)
+rrot (air)
+αtw
+1
+(8,-0.1)
+α is ˆy for wall assisted backflip and 0 otherwise.
+See appendix for ptarget and Rtarget.
+TABLE I: Reward Table of Generated Motions
+We designed three classes of motions: gaits, flips, and wall-
+assisted maneuvers. For gaits, the contact plan consists of
+periodic phases, and the swing trajectory is guided by the
+Raibert’s heuristic. For flips, the contact plan is composed
+of takeoff, air, and landing phases. For complex wall-assisted
+maneuvers, the plan is a sequence of bounding gaits guided by
+keyframe position and orientation targets. The detailed contact
+timings, Bezier control points, and keyframe values for each
+motion are provided in the Appendix A.
+3) Reward Function: The reward terms rp, ro, rv, and rw
+encourage the body to track the target position, orientation,
+linear velocity, and angular velocity, respectively. The terms
+rgrf and rres regularize excessive actions. Additionally, rrot is
+included for motions involving significant rotational maneuvers.
+Most reward terms adopt an exponential form defined as
+r(x; a, b) = a exp(−b||x||2), whereas the rotational reward
+rrot follows a linear form r(x; a, u, l) = a max(min(x, u), l).
+The parameters for each motion’s reward terms are summarized
+in Table I. All notation is consistent with Eq. 1, unless otherwise
+specified. Reward components active only during specific
+phases are explicitly marked in the table. The total reward
+is calculated as (1 + P rpos) × (P rneg) where rpos and rneg
+are the positive and negative reward components, respectively.
+4) Policy Architecture and Training: The policy is imple-
+mented as a Multi-Layer Perceptron (MLP) and trained using
+Proximal Policy Optimization (PPO). The network’s inputs
+consist of the gravity vector, linear and angular velocities,
+Cartesian positions of the four feet in the local base frame,
+contact states, and the sine and cosine of the current phase.
+For linear velocity and contact states, the true values from the
+simulation are used as privileged information, which are later
+substituted by the estimator network’s predictions in the full-
+body environment (Sec.IV-C). For each learning iteration, data
+is collected from 100 parallel environments over a 4-second
+rollout and trained for eight epochs.
+IV. MODEL HOMOTOPY TRANSFER
+In this section, we address the challenge of bridging
+the significant model gap between the SRB model and the
+full-body model. Direct transfer of a policy trained under
+simplified conditions often fails due to the sudden emergence
+of unmodeled leg and contact dynamics. To facilitate a smooth
+transition, we adopt a continuation transfer approach based on
+model homotopy. By progressively adjusting the leg’s inertial
+parameters, this method constructs a continuous path from
+simple SRB dynamics to the high-fidelity full-body dynamics.
+This allows the policy to incrementally adapt to the evolving
+reward landscape, promoting stable convergence to a desirable
+local optimum in the target environment.
+A. Model Homotopic Environment
+We formulate a continuous environment that smoothly
+bridges the SRB and full-body model by gradually increasing
+the leg mass and inertia from nearly zero to their original
+values. This progressive adjustment allows the composite mass
+and inertia of the system to incrementally approach those of
+the full-body model.
+However, simply increasing the leg mass leads to a significant
+increase in total mass, requiring the policy to increase the
+magnitude of its actions, which may hinder the learning process.
+To address this, we also adjusted the trunk mass, inertia, and
+its center of mass position to linearly interpolate between the
+composite values from the nominal pose and their original
+full-body values. This approach keeps the total mass constant,
+preventing large changes in the GRF action. This entire process
+of redistributing mass between the trunk and legs can be
+parameterized by a continuation parameter λ, which is the ratio
+of leg mass to the original leg mass. The following equations
+provide a mathematical representation of this process:
+mleg(λ) = λ · mleg,full
+Ileg(λ) = λ · Ileg,full
+mtrunk(λ) = λ · mtrunk,full + (1 −λ) · mcomposite
+Itrunk(λ) = λ · Itrunk,full + (1 −λ) · Icomposite
+ctrunk(λ) = λ · ctrunk,full + (1 −λ) · ccomposite
+where mtrunk,full, Itrunk,full, and ctrunk,full are the origi-
+nal trunk mass, inertia, and CoM, respectively. mcomposite,
+Icomposite, and ccomposite represent the composite properties
+of the entire robot in the nominal pose.
+Although various schemes could be used to adjust the
+continuation paramter λ, in this study, we chose to linearly
+increase it from 0.01 to 1. Additionally, to mitigate numerical
+instability caused by the ill-conditioned mass matrix at low λ
+values, we adaptively adjusted the simulation timestep, starting
+with finer time steps for small λ and gradually increasing them
+to the nominal value as λ increases.
+B. Action Conversion
+While the controller maintains the structure described in
+Sec. III-B, an additional action conversion step is required to
+translate the actions into actual full-body torques.
+During the stance phase, if the foot is in contact, we
+transform GRFs into joint torques using the Jacobian transpose:
+τ stance
+i
+= JT
+i fi
+
+Fig. 3: Snapshots of wall-assisted backflip. The red lines represent the CoM trajectories over time.
+where Ji is the ith foot Jacobian, and fi, τ stance
+i
+∈R3 are
+the GRF action and resulting torque for ith stance leg. During
+the swing phase, task-space PD control is used to track the
+foot target, with the PD gains set to Kp = 500 and Kd = 5.
+ˆri = ri + ∆ri
+τ swing
+i
+= JT
+i [Kp(ˆri −ri) + Kd(ˆsi −si)]
+where ri ∈R3 and si ∈R3 are the current position and velocity
+of the ith foot, and ˆsi is set to zero in our case. τ swing
+i
+∈R3
+is the torque for ith swing leg.
+C. Estimation Network
+We utilized the concurrent estimation framework [39] to infer
+linear velocity and contact states from proprioceptive sensor
+histories, which are subsequently incorporated into the policy’s
+observation. Modeled as a two-layer MLP, the estimator is
+trained concurrently with the policy by minimizing the loss
+function Lest = ||ˆv−v||2+||ˆc−c||2, where ˆv and ˆc denote the
+estimated linear velocity and contact probabilities, while v and
+c represent the ground truth values from simulation. Network
+inputs comprise the history of joint positions, velocities, and
+torque commands, concatenated with the non-privileged policy
+observations. The discrete contact state is determined by
+applying a threshold of 0.5 to the estimated probability.
+V. RESULTS
+This section details the results of applying our method in both
+simulated and real-world settings. We evaluate the effectiveness
+of Model Homotopy Transfer for seamless motion transfer and
+provide a comparative analysis against established baseline
+methods. Additionally, we showcase the successful deployment
+of the generated motions on real hardware.
+A. Motion Generation
+To verify the effectiveness of our method, we evaluated its
+ability to generate motions that are challenging to obtain via
+standard end-to-end RL. The proposed framework successfully
+generated a wide range of complex motions in simulation. We
+produced various locomotion gaits, as well as flipping motions
+such as backflip, sideflip, and yawspin. Beyond these, we
+also explored dynamic maneuvers that leverage environmental
+interactions for rapid redirection and momentum changes. The
+wall-assisted jump example (Fig. 1) demonstrates the agent
+using the wall as support for upward propulsion to reach a
+higher platform. Similarly, the wall-assisted backflip shows
+the agent initiating a backflip by applying force against the
+wall to propel itself into the air. Fig. 3 illustrates the wall-
+assisted backflip, showcasing both the pretrained SRB motion
+and the corresponding full-body motion after transfer. For a
+comprehensive visualization of these results, please refer to
+the supplementary video.
+(a)
+0
+2000
+4000
+Converged
+Iteration
+(b)
+yawspin
+sideflip
+backflip
+wall assisted
+turn
+wall assisted
+jump
+wall assisted
+backflip
+0
+0.5
+1
+Normalized
+Return
+(c)
+0
+1000
+2000
+3000
+4000
+5000
+Iteration
+0
+0.2
+0.4
+0.6
+0.8
+1
+Normalized Return
+Model Homotopy Transfer (Ours)
+Direct Transfer
+Imitation Transfer
+Vanilla RL
+Fig. 4: Comparison of training performance across various methods
+and motions. (a) Converged iteration. The number of iterations required
+for the return to reach 99% of the final mean value. (b) Normalized
+return. The black box on top of each bar indicates the range between
+the maximum and minimum normalized returns. (c) Learning curves
+for wall-assisted backflip. The solid line represents the average, while
+the shaded region shows the range between maximum and minimum
+values. Overall, the proposed Model Homotopy Transfer demonstrated
+the fastest convergence and the most consistent performance.
+B. Analysis of the Proposed Methodology
+1) Effectiveness of Model Homotopy in Motion Transfer:
+To investigate the efficacy of Model Homotopy Transfer as
+a strategy for transferring the SRB policy to the full-body
+
+environment, we compared the proposed method against several
+baseline approaches, in terms of sample efficiency, learning
+stability, and optimality. The baseline methods used are:
+• Direct Transfer (DT): The SRB policy is directly fine-
+tuned in the full-body environment without intermediate
+adaptation steps.
+• Model Homotopy Transfer (Ours): Training progresses
+along a series of model homotopic environments for the
+first 900 iterations, followed by additional training in the
+full-body environment.
+• Imitation Transfer (IT): This method employs imitation
+learning with Reference State Initialization (RSI) and
+Early Termination (ET). A trajectory recorded from the
+SRB policy served as the kinematic reference, utilizing
+the same reward settings as [20].
+• Vanilla RL: Trained solely with motion rewards, without
+pretraining or imitation.
+The results are presented in Fig. 4. For each method, training
+was conducted five times using distinct initial (pretrained or
+random) policies and seeds. The SRB pretraining is omitted
+from the figure, as it is computationally inexpensive and serves
+as a common initialization for all baselines except Vanilla RL.
+Overall, our method achieves the fastest convergence
+(Fig. 4a) and the most consistent learning outcomes (Fig. 4b).
+Specifically, in the wall-assisted backflip task, Model Homotopy
+Transfer achieves a 19.0% higher normalized return and
+converges twice as fast as IT (2,240 vs. 4,610 iterations).
+Additionally, it demonstrates superior stability over DT, main-
+taining a tight variation (max-min range) of 0.0042 compared
+to 0.2285 for DT (Fig. 4c).
+The superior performance of our approach can be attributed
+to two main factors. First, the pretrained policy allowed the
+agent to retain reactive behaviors learned during pretraining and
+initiate exploration around promising action spaces. Second,
+the smooth transition facilitated by the model homotopic
+environment enabled the policy to adapt to the full-body model
+while operating in regions of high success rate, continuously
+generating high-quality samples. This significantly improved
+learning stability and sample efficiency.
+In contrast, DT suffered from significant performance
+degradation early in training due to the model gap (Fig. 4c),
+hindering learning by accumulating poor-quality samples.
+This occasionally resulted in the loss of behaviors learned
+during pretraining. The IT approach, while benefiting from
+dense references derived from SRB trajectories and showing
+relatively stable training compared to DT, often converged to
+suboptimal policies because the model gap between the SRB
+reference and the full-body environment persisted. Furthermore,
+starting from a random initial policy required the policy to
+re-discover the motion, which significantly slowed convergence.
+Conversely, the Vanilla RL, trained entirely from scratch
+without pretraining, consistently failed to discover meaningful
+motions. This highlights the effectiveness of SRB pretraining,
+which succeeds in identifying essential motion patterns.
+2) Comparison of Disturbance Robustness: To comprehen-
+sively evaluate the performance of the learned policies, we
+conducted disturbance robustness tests on the Model Homotopy
+0
+0.2
+0.4
+0.6
+0.8
+1.0
+Torque Norm [Nm]
+0
+2
+4
+6
+8
+10
+Force Norm [N]
+Model Homotopy Transfer
+0
+0.2
+0.4
+0.6
+0.8
+1.0
+Torque Norm [Nm]
+Imitation Transfer
+40
+60
+80
+100
+Success Rate (%)
+Fig. 5: Comparison of robustness across disturbances. Each heatmap
+shows the success rate for combinations of force and torque distur-
+bance norms, with brighter colors indicating higher success rates.
+Transfer and IT method. The success rate was measured across
+extensive combinations of force and torque disturbances. For
+each combination, 100 different disturbance directions were
+tested at the specified magnitude, and the average success
+rate was recorded. Disturbances were applied continuously
+throughout the trajectory. Note that no disturbances were
+experienced during training.
+The results, illustrated in Fig. 5, show that the Model
+Homotopy Transfer exhibited greater robustness compared to
+IT. This enhanced robustness is likely due to the capability
+of Model Homotopy Transfer to preserve reactive behaviors
+acquired during pretraining. Moreover, by exploring the state
+space without the constraints of ET, the policy can experience
+a wider range of deviations and learn to stabilize from diverse
+states.
+C. Real-World Deployment
+We validated our method by deploying two representative
+policies, a trot gait and a backflip, on a Unitree Go1 robot. To
+increase the fidelity of the simulation to the physical world,
+we incorporated crucial physical phenomena into our full-body
+simulation, including rotor inertia, sensor and motor command
+latency, and motor operating regions [40]. Robustness was
+further enhanced through domain randomization applied to
+initial poses, friction coefficients, trunk inertia, motor strength,
+and sensor noise injection.
+In the trot gait experiments, we evaluated velocity tracking
+performance under specific commands: a forward velocity of
+1.0 m/s and a yaw rate of 0.3 rad/s. We compared our method
+against an SRB-pretrained policy directly deployed without any
+fine-tuning. While both policies were able to generate a stable
+trot gait without falling, the SRB policy exhibited significant
+steady-state errors due to the inherent model mismatch, as
+quantified in Fig. 7a.
+The benefits of Model Homotopy Transfer were particularly
+evident in the challenging backflip motion. Although successful
+in SRB simulation, the SRB policy failed in the real world
+as it could not account for the increased composite inertia
+during leg extension. This resulted in insufficient angular
+momentum, causing severe under-rotation and leading the robot
+to land on its back. In contrast, the policy transferred using
+our method successfully executed the backflip on the physical
+robot (Fig. 6), achieving close alignment between simulated
+and real-world trajectories (Fig. 7b). For a comprehensive
+
+Fig. 6: Snapshots of the backflip execution on the Unitree Go1 robot.
+(a)
+0
+1
+2
+3
+4
+Time [s]
+0
+0.5
+1
+ Forward Velocity [m/s]
+Command
+0
+1
+2
+3
+4
+Time [s]
+-0.2
+0
+0.2
+0.4
+ Yaw Rate [rad/s]
+(b)
+0
+0.5
+1
+Time [s]
+-6
+-4
+-2
+0
+Angle [rad]
+-2
+Yaw
+Roll
+Pitch
+0
+0.2
+0.4
+0.6
+0.8
+1
+Time [s]
+-2
+-1
+0
+1
+2
+Hip
+Thigh
+Knee
+SRB(Sim)
+SRB(Real)
+Transferred(Sim)
+Transferred(Real)
+Fig. 7: Quantitative analysis of real-world deployment. (a) Trot velocity
+tracking: Comparison between the SRB and transferred policies. The
+SRB policy resulted in a velocity tracking RMSE of 0.53 m/s and a
+yaw rate RMSE of 0.29 rad/s, whereas the transferred policy achieved
+0.28 m/s and 0.11 rad/s, respectively, demonstrating superior tracking
+accuracy. (b) Backflip trajectories: Base orientation (left) and right-
+rear leg joint angles (right) over time.
+visual demonstration of these real-world deployments, please
+refer to the supplementary video.
+VI. CONCLUSION
+In this study, we introduced a novel framework for generating
+and transferring complex dynamic motions. We simplified
+learning by focusing on essential body dynamics, enabling
+efficient motion discovery. Model Homotopy Transfer then
+facilitated a smooth transition from SRB-learned motions
+to the full-body environment. Our method was validated in
+challenging tasks such as backflips and wall-assisted motions.
+Comparisons with baselines, including an imitation-based
+method, demonstrated that our approach leads to fast and
+stable convergence, and enhanced robustness to disturbances.
+Furthermore, the successful deployment to real hardware
+highlights the practical applicability of the proposed framework.
+Despite these promising results, our framework currently
+relies on predefined contact sequences and nominal swing
+trajectories, which requires significant engineering effort.
+Future work aims to automate this process by learning
+contact schedules implicitly or by integrating contact sequence
+optimization, thereby enabling more efficient generation of
+diverse behaviors.
+REFERENCES
+[1] Y. Tassa, T. Erez, and E. Todorov, “Synthesis and stabilization of complex
+behaviors through online trajectory optimization,” in 2012 IEEE/RSJ
+International Conference on Intelligent Robots and Systems.
+IEEE,
+2012, pp. 4906–4913.
+[2] I. Mordatch, E. Todorov, and Z. Popovi´c, “Discovery of complex
+behaviors through contact-invariant optimization,” ACM Transactions on
+Graphics (ToG), vol. 31, no. 4, pp. 1–8, 2012.
+[3] J. Carpentier and N. Mansard, “Multicontact locomotion of legged robots,”
+IEEE Transactions on Robotics, vol. 34, no. 6, pp. 1441–1460, 2018.
+[4] G. Kim, D. Kang, J.-H. Kim, S. Hong, and H.-W. Park, “Contact-implicit
+mpc: Controlling diverse quadruped motions without pre-planned contact
+modes or trajectories,” arXiv preprint arXiv:2312.08961, 2023.
+[5] T. Apgar, P. Clary, K. Green, A. Fern, and J. W. Hurst, “Fast online
+trajectory optimization for the bipedal robot cassie.” in Robotics: Science
+and Systems, vol. 101.
+Pittsburgh, Pennsylvania, USA, 2018, p. 14.
+[6] J. Di Carlo, P. M. Wensing, B. Katz, G. Bledt, and S. Kim, “Dynamic
+locomotion in the mit cheetah 3 through convex model-predictive control,”
+in 2018 IEEE/RSJ international conference on intelligent robots and
+systems (IROS).
+IEEE, 2018, pp. 1–9.
+[7] A. W. Winkler, C. D. Bellicoso, M. Hutter, and J. Buchli, “Gait and
+trajectory optimization for legged systems through phase-based end-
+effector parameterization,” IEEE Robotics and Automation Letters, vol. 3,
+no. 3, pp. 1560–1567, 2018.
+[8] S. Hong, J.-H. Kim, and H.-W. Park, “Real-time constrained nonlinear
+model predictive control on so (3) for dynamic legged locomotion,”
+in 2020 IEEE/RSJ International Conference on Intelligent Robots and
+Systems (IROS).
+IEEE, 2020, pp. 3982–3989.
+[9] S. Kim, H. Kim, G. Kim, M.-G. Kim, and H.-W. Park, “Dynamically-
+consistent trajectory optimization for legged robots via contact point
+decomposition,” arXiv preprint arXiv:2510.24069, 2025.
+[10] D. Kim, J. Di Carlo, B. Katz, G. Bledt, and S. Kim, “Highly dynamic
+quadruped locomotion via whole-body impulse control and model
+predictive control,” arXiv preprint arXiv:1909.06586, 2019.
+[11] H. Dai, A. Valenzuela, and R. Tedrake, “Whole-body motion planning
+with centroidal dynamics and full kinematics,” in 2014 IEEE-RAS
+International Conference on Humanoid Robots.
+IEEE, 2014, pp. 295–
+302.
+[12] Z. Zhou, B. Wingo, N. Boyd, S. Hutchinson, and Y. Zhao, “Momentum-
+aware trajectory optimization and control for agile quadrupedal locomo-
+tion,” IEEE Robotics and Automation Letters, vol. 7, no. 3, pp. 7755–7762,
+2022.
+[13] M. R. Turski, J. Norby, and A. M. Johnson, “Staged contact optimization:
+Combining contact-implicit and multi-phase hybrid trajectory optimiza-
+tion,” in 2023 IEEE/RSJ International Conference on Intelligent Robots
+and Systems (IROS).
+IEEE, 2023, pp. 2376–2383.
+[14] C. Nguyen and Q. Nguyen, “Contact-timing and trajectory optimization
+for 3d jumping on quadruped robots,” in 2022 IEEE/RSJ International
+Conference on Intelligent Robots and Systems (IROS).
+IEEE, 2022, pp.
+11 994–11 999.
+[15] J. Lee, J. Hwangbo, L. Wellhausen, V. Koltun, and M. Hutter, “Learning
+quadrupedal locomotion over challenging terrain,” Science robotics, vol. 5,
+no. 47, p. eabc5986, 2020.
+[16] D. Hoeller, N. Rudin, D. Sako, and M. Hutter, “Anymal parkour: Learning
+agile navigation for quadrupedal robots,” Science Robotics, vol. 9, no. 88,
+p. eadi7566, 2024.
+[17] H. Kim, H. Oh, J. Park, Y. Kim, D. Youm, M. Jung, M. Lee, and
+J. Hwangbo, “High-speed control and navigation for quadrupedal robots
+on complex and discrete terrain,” Science Robotics, vol. 10, no. 102, p.
+eads6192, 2025.
+[18] M. Bogdanovic, M. Khadiv, and L. Righetti, “Model-free reinforcement
+learning for robust locomotion using demonstrations from trajectory
+optimization,” Frontiers in Robotics and AI, vol. 9, p. 854212, 2022.
+
+[19] X. B. Peng, E. Coumans, T. Zhang, T.-W. Lee, J. Tan, and S. Levine,
+“Learning agile robotic locomotion skills by imitating animals,” arXiv
+preprint arXiv:2004.00784, 2020.
+[20] X. B. Peng, P. Abbeel, S. Levine, and M. Van de Panne, “Deepmimic:
+Example-guided deep reinforcement learning of physics-based character
+skills,” ACM Transactions On Graphics (TOG), vol. 37, no. 4, pp. 1–14,
+2018.
+[21] X. B. Peng, Z. Ma, P. Abbeel, S. Levine, and A. Kanazawa, “Amp:
+Adversarial motion priors for stylized physics-based character control,”
+ACM Transactions on Graphics (ToG), vol. 40, no. 4, pp. 1–20, 2021.
+[22] C. Li, M. Vlastelica, S. Blaes, J. Frey, F. Grimminger, and G. Mar-
+tius, “Learning agile skills via adversarial imitation of rough partial
+demonstrations,” in Conference on Robot Learning.
+PMLR, 2023, pp.
+342–352.
+[23] K. Green, Y. Godse, J. Dao, R. L. Hatton, A. Fern, and J. Hurst, “Learning
+spring mass locomotion: Guiding policies with a reduced-order model,”
+IEEE Robotics and Automation Letters, vol. 6, no. 2, pp. 3926–3932,
+2021.
+[24] R. Batke, F. Yu, J. Dao, J. Hurst, R. L. Hatton, A. Fern, and
+K. Green, “Optimizing bipedal maneuvers of single rigid-body models for
+reinforcement learning,” in 2022 IEEE-RAS 21st International Conference
+on Humanoid Robots (Humanoids).
+IEEE, 2022, pp. 714–721.
+[25] Y. Fuchioka, Z. Xie, and M. Van de Panne, “Opt-mimic: Imitation of
+optimized trajectories for dynamic quadruped behaviors,” in 2023 IEEE
+International Conference on Robotics and Automation (ICRA).
+IEEE,
+2023, pp. 5092–5098.
+[26] Z. Xie, X. Da, B. Babich, A. Garg, and M. v. de Panne, “Glide:
+Generalizable quadrupedal locomotion in diverse environments with
+a centroidal model,” in International Workshop on the Algorithmic
+Foundations of Robotics.
+Springer, 2022, pp. 523–539.
+[27] D. Reda, H. Y. Ling, and M. Van De Panne, “Learning to brachiate
+via simplified model imitation,” in ACM SIGGRAPH 2022 Conference
+Proceedings, 2022, pp. 1–9.
+[28] Y.-M. Chen, H. Bui, and M. Posa, “Reinforcement learning for reduced-
+order models of legged robots,” in 2024 IEEE International Conference
+on Robotics and Automation (ICRA).
+IEEE, 2024, pp. 5801–5807.
+[29] T. Kwon, T. Gu, J. Ahn, and Y. Lee, “Adaptive tracking of a single-
+rigid-body character in various environments,” in SIGGRAPH Asia 2023
+Conference Papers, 2023, pp. 1–11.
+[30] E. L. Allgower and K. Georg, Numerical continuation methods: an
+introduction.
+Springer Science & Business Media, 2012, vol. 13.
+[31] W. Yu, G. Turk, and C. K. Liu, “Learning symmetric and low-energy
+locomotion,” ACM Transactions on Graphics (TOG), vol. 37, no. 4, pp.
+1–12, 2018.
+[32] Z. Zhuang, Z. Fu, J. Wang, C. Atkeson, S. Schwertfeger, C. Finn, and
+H. Zhao, “Robot parkour learning,” in Conference on Robot Learning
+(CoRL), 2023.
+[33] Y. Kim, H. Oh, J. Lee, J. Choi, G. Ji, M. Jung, D. Youm, and J. Hwangbo,
+“Not only rewards but also constraints: Applications on legged robot
+locomotion,” IEEE Transactions on Robotics, 2024.
+[34] G. Kim, Y.-H. Lee, and H.-W. Park, “A learning framework for diverse
+legged robot locomotion using barrier-based style rewards,” arXiv preprint
+arXiv:2409.15780, 2024.
+[35] D. Youm, H. Jung, H. Kim, J. Hwangbo, H.-W. Park, and S. Ha,
+“Imitating and finetuning model predictive control for robust and
+symmetric quadrupedal locomotion,” IEEE Robotics and Automation
+Letters, 2023.
+[36] S. Pardis, M. Chignoli, and S. Kim, “Probabilistic homotopy optimization
+for dynamic motion planning,” arXiv preprint arXiv:2408.12490, 2024.
+[37] M. Raff, N. Rosa, and C. D. Remy, “Generating families of optimally
+actuated gaits from a legged system’s energetically conservative dynam-
+ics,” in 2022 IEEE/RSJ International Conference on Intelligent Robots
+and Systems (IROS).
+IEEE, 2022, pp. 8866–8872.
+[38] X. Wang, Y. Chen, and W. Zhu, “A survey on curriculum learning,” IEEE
+transactions on pattern analysis and machine intelligence, vol. 44, no. 9,
+pp. 4555–4576, 2021.
+[39] G. Ji, J. Mun, H. Kim, and J. Hwangbo, “Concurrent training of a control
+policy and a state estimator for dynamic and robust legged locomotion,”
+IEEE Robotics and Automation Letters, vol. 7, no. 2, pp. 4630–4637,
+2022.
+[40] Y.-H. Shin, T.-G. Song, G. Ji, and H.-W. Park, “Reinforcement learning
+for high-speed quadrupedal locomotion with motor operating region
+constraints: Mitigating motor model discrepancies through torque clipping
+in realistic motor operating region,” IEEE Robotics & Automation
+Magazine, 2024.
+APPENDIX
+A. Motion Task Specifications
+This appendix provides the detailed parameters used to
+define each motion task, including contact plans, nominal
+swing trajectories, and keyframe targets.
+1) Gait Parameters: Gait motions are defined by periodic
+stance and swing phases, each with a duration of 0.2 s. The
+nominal swing trajectory is defined by three control points:
+the current foot position in the local frame, a target position
+determined by the Raibert heuristic, and a midpoint with a
+clearance of 0.1 m.
+2) Flip Motion Parameters: Flips are composed of takeoff,
+air, and landing phases over a total duration of 2 s. Key air
+phase timings are summarized in Table II. The nominal swing
+trajectory is parameterized as a Bezier curve with three control
+points: the current foot position, (0, 0, −0.2) and (0, 0, −0.3)
+in the local frame.
+TABLE II: Contact Plan Parameters for Flip Motions
+Motion
+Contact Plan (Air Phase)
+Backflip
+Front Legs: [0.15, 0.7]s
+Rear Legs: [0.30, 0.85]s
+Sideflip
+Right Legs: [0.15, 0.7]s
+Left Legs: [0.30, 0.85]s
+Yawspin
+All Legs: [0.5, 0.9]s
+3) Wall-Assisted Motion Parameters: Wall-assisted motions
+are designed as a series of bounding gaits over a 2 s duration.
+The contact plan is illustrated in Fig. 8. Each motion is guided
+by keyframe position and orientation targets that vary across
+phases. The targets for the wall-assisted turn are summarized
+in Table III. Other wall-assisted motions can be easily derived
+by making small adjustments to these targets.
+0
+0.5
+1
+1.5
+2
+Time (s)
+RL
+RR
+FL
+FR
+Fig. 8: Contact plan of wall-assisted motions
+Phase
+ptarget
+Rtarget
+Bound (0)
+(0.4, 0, 0.3)
+-
+Air (1)
+(0.4, 0, 0.3)
+-
+Jump Up (2)
+(0.85, 0, 0.6)
+-
+Air (3)
+(0.85, 0, 0.6)
+Rz = −ˆx
+Wall (4)
+(0.2, 0, 0.3)
+Rz = −ˆx
+Air (5)
+(0.2, 0, 0.3)
+Rz = ˆz, Rx = −ˆx
+Landing (6)
+(0.0, 0, 0.3)
+Rz = ˆz, Rx = −ˆx
+TABLE III: Keyframe targets of the wall-assisted turn.
+To effectively explore the interaction with the wall, the
+swing trajectory interpolates between a local path and a world-
+frame target: ri = ηrb(ϕ) + (1 −η)rw(ϕ), η = 16(ϕ −0.5)4
+where ϕ ∈[0, 1] represents the motion phase. The local path
+component, rb is defined by a Bezier curve with control points
+(−0.1, 0, −0.2), (0, 0, −0.1) and (0.1, 0, −0.2). The world-
+frame target, rw, is the current foot position if ϕ < 0.5 and the
+nominal foot position associated with the upcoming keyframe
+target otherwise.

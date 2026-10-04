@@ -1,0 +1,1529 @@
+F2IDiff: Real-world Image Super-resolution using Feature to Image Diffusion
+Foundation Model
+Devendra K. Jangid Ripon K. Saha Dilshan Godaliyadda Jing Li Seok-Jun Lee Hamid R. Sheikh
+MPI Lab, Samsung Research America
+{d.jangid, dilshan.g, hr.sheikh}@samsung.com
+Abstract
+With the advent of Generative AI, Single Image Super-
+Resolution (SISR) quality has seen substantial improve-
+ment, as the strong priors learned by Text-2-Image Diffu-
+sion (T2IDiff) Foundation Models (FM) can bridge the gap
+between High-Resolution (HR) and Low-Resolution (LR)
+images. However, flagship smartphone cameras have been
+slow to adopt generative models because strong genera-
+tion can lead to undesirable hallucinations. For substan-
+tially degraded LR images, as seen in academia, strong
+generation is required and hallucinations are more toler-
+able because of the wide gap between LR and HR im-
+ages. In contrast, for smartphone photography, the LR im-
+age has substantially higher fidelity, requiring only minimal
+hallucination-free generation. We hypothesize that genera-
+tion in SISR is controlled by the stringency and richness of
+the FM’s conditioning feature. First, text features are high
+level features, which often cannot describe subtle textures
+in an image. Additionally, Smartphone LR images are at
+least 12MP, whereas SISR networks built on T2IDiff FM
+are designed to perform inference on much smaller images
+(< 1MP). As a result, SISR inference has to be performed
+on small patches, which often cannot be accurately de-
+scribed by text feature. To address these shortcomings, we
+introduce an SISR network built on a FM with lower-level
+feature conditioning, specifically DINOv2 features, which
+we call a Feature-to-Image Diffusion (F2IDiff) Foundation
+Model (FM). Lower level features provide stricter condi-
+tioning while being rich descriptors of even small patches.
+We demonstrate the superiority of F2IDiff over T2IDiff FMs
+for SISR by training both with the same dataset and showing
+that F2IDiff achieves better fidelity through controlled gen-
+eration. Furthermore, Given the high fidelity of smartphone
+LR images and the richness of DINOv2 features, we demon-
+strate that the underlying FM can be trained with just 38K
+images (vs. billions in SD2.1), using a 2× smaller U-Net,
+while achieving higher quality than SD2.1-based SISR.
+Figure 1.
+In top figure, F2IDiff-SR shows exceptional perfor-
+mance on the Real-SISR (4×) task, achieving better metrics:-
+PSNR, SSIM, and FID. It outperforms SOTA methods by a sub-
+stantial margin, highlighting its effectiveness. In the bottom figure,
+F2IDiff-SR gives better results compared to other methods on real-
+world images captured from an S25 Ultra smartphone. The other
+methods generate inconsistent texture and hallucinations.
+1. Introduction
+Single-image super-resolution (SISR) [68] involves recon-
+structing a HR image from an degraded LR input. SISR
+is a classical yet active research problem with diverse ap-
+plications, including smartphone cameras [19, 20], climate
+research [56, 60], material science [21, 22], satellite im-
+agery [41, 54], and medical science [9, 15]. In this paper, we
+focus specifically on smartphone cameras. Most high-end
+smartphones come with multiple optical zoom lenses. The
+sensors mosaic patterns can enable 2× and/or 4× zoom,
+1
+arXiv:2512.24473v1 [cs.CV] 30 Dec 2025
+
+and optics allow for at most 10× zoom. As a result, the
+remaining zoom scenarios have to be covered through dig-
+ital zoom built on SISR. Historically, classical image pro-
+cessing algorithms [26, 59] were used to address this prob-
+lem, but more recently, deep learning-based networks such
+as Convolutional Neural Networks (CNNs) [12, 33] and
+Transformers [7, 31, 38] have been used more widely. Al-
+though early deep learning-based approaches significantly
+outperformed classical methods, they were largely discrim-
+inative rather than generative, and were commonly trained
+with maximum-likelihood objective implemented as pixel-
+wise L2/MSE. These methods tended to average over mul-
+timodal targets and produce overly smooth blurry out-
+puts [4, 24, 28]. To address this shortcoming, Generative
+Adversarial Network (GAN) based methods [63, 64] em-
+ploy adversarial loss objectives in an attempt to enhance the
+perceptual realism of the super-resolved images. However,
+such approaches can introduce artifacts and often compro-
+mise fidelity [17, 28].
+More recently, Diffusion-based methods have improved
+the generative capability of SISR substantially [13, 29, 58,
+71]. These methods can be broadly categorized based on
+their underlying architectures.
+One prominent family of
+approaches are based on pre-trained text-to-image diffu-
+sion (T2IDiff) FMs [13, 58, 71], such as Stable Diffu-
+sion (SD) [51] which provides a strong prior to sample
+from. However, these methods are often complex, com-
+pute/memory intensive, and tend to produce significant hal-
+lucination artifacts as shown in Figure 1 and 2.
+While
+distillation techniques [6, 13, 43, 53, 55, 65] can alleviate
+some of these complexity issues, they frequently result in a
+notable degradation in output quality [6]. The other fam-
+ily of approaches involve training diffusion models from
+scratch [8, 42, 51, 52] without relying on pre-trained FMs.
+These methods typically employ multi-step inference pro-
+cesses but often fall short in terms of generative quality,
+making them less appealing for real-world applications. We
+posit that hallucinations in FM based methods are corre-
+lated to the rigidity and richness of the FM conditioning. In
+academia, most LR images used for SISR are severely de-
+graded compared to their corresponding HR image. There-
+fore, hallucinations in SISR are useful, due to the large LR-
+HR gap. However, in smartphones, especially flagship de-
+vices, LR images have very high fidelity because they use
+high-end sensors and optics. For example Galaxy S25 Ultra
+(1/1.3′′, 200MP, f/1.7), iPhone 17 Pro/Max (≈1/1.28′′,
+48MP, f/1.78) and Google Pixel 10 Pro (≈1/1.3′′, 50MP,
+f1/1.85) - yielding superior SNR, dynamic range, and fine-
+texture details [45–47].
+Our target domain is consumer
+photos, where preserving scene fidelity matters more than
+adding plausible texture. We therefore prefer controlled,
+hallucination-free enhancement over the aggressive hallu-
+cinations seen in some academic settings. Furthermore, in
+Figure 2. Zoom-in for details: SOTA single-step diffusion SR
+methods, such as OSEDiff [71] and PiSA-SR [58], produce exces-
+sive hallucination on real-world test datasets. For instance, OSED-
+iff generates a bird’s tail in the output image even when no bird is
+present in the input. Similarly, PiSA-SR produces fur instead of
+facial features, leading to inaccurate and unrealistic results.
+smartphones, the LR image is minimally 12MP i.e. 4k×3k
+while T2IDiff FMs [49–52] can only operate on at most
+1k × 1k images. As a result, the image needs to be broken
+down into patches and super-resolved independently. This
+means that the text caption must be generated for a patch
+of a higher resolution image, which often lacks sufficient
+content/context for a text captioning engine to generate a
+meaningful caption. For example, a patch may contain a
+portion of a face or a tree, and the captioning engine cannot
+meaningfully describe it, leading to erroneous conditioning.
+In fact the authors of OSEDiff have observed that giving a
+null vector as text conditioning often generated comparable
+results to text conditioning [71].
+To overcome these shortcomings, we propose a SISR
+network built on low-level feature-to-image Diffusion FMs
+(F2IDiff FM) instead of T2IDiff FM. In particular, we pro-
+pose using DINOv2 features [44], as it can capture low-
+levels details such as texture, whereas text tends to capture
+high-level semantic information.
+Furthermore, DINOv2
+can capture differentiating features even at the patch level
+since it works at much lower level compared to text [3, 23].
+Given that we only need to enhance an already high-fidelity
+input, we further posit that the underlying FM model can
+be trained with significantly fewer image, as long as they
+are carefully chosen. In this paper, we use just 38,000 HR
+images to train our F2IDiff FM, compared to the billions
+used by SD 2.1 [51], which is the basis of most SISR net-
+works that use diffusion-based FMs. Lastly, since we are
+using significantly fewer images to build a prior, the model
+capacity can be reduced significantly and we show compa-
+rable results with 2× reduction in U-Net complexity. In
+summary, our contributions are:-
+• We introduce a Feature-to-Image Diffusion (F2IDiff) FM
+specifically tailored for the SISR problem, where the FM
+2
+
+is conditioned on image features as opposed to text.
+• We develop an SISR network on F2IDiff FM, demonstrat-
+ing superior performance compared to T2IDiff FM-based
+networks and state-of-the-art (SOTA) methods [13, 58,
+71] on both public datasets and real images captured us-
+ing the Samsung S25U device.
+• We show that for SISR, a FM trained on just 38K care-
+fully selected HR images, leveraging richer DINOv2 fea-
+tures instead of text, significantly outperforms models
+trained on billions of images, achieving superior fidelity
+and less hallucination. Additionally, this approach allows
+for a two-fold reduction in U-Net complexity.
+2. Related Work
+The field of SISR has advanced significantly, driven by deep
+learning methods. Here, we present the progression from
+early CNN approaches to modern generative models, posi-
+tioning our F2IDiff-SR within the latest SOTA methods.
+GAN-based Real-world SISR: Early deep learn-
+ing methods for SISR were significantly advanced by
+GAN [16], which moved beyond pixel-wise metrics to
+achieve photorealistic results. SRGAN [52], its successor
+ESRGAN [63] and LDL [32] were seminal in this area.
+A critical challenge was their reliance on simple, known
+degradations. To improve generalization to real-world im-
+ages, BSRGAN [78] and Real-ESRGAN [64] introduced
+high-order degradation modeling to synthesize more realis-
+tic training data. Despite their success in generating sharp
+details, GAN-based methods are known for training insta-
+bility and a tendency to produce visual artifacts [2], a limi-
+tation that persists in subsequent works.
+Multi-step Diffusion Models for Real-world SISR:
+More recently, diffusion models showed better quality for
+SISR, leveraging powerful priors from pre-trained T2IDiff
+models like SD [51].
+A common paradigm is to guide
+the iterative denoising process with the LQ input, using
+techniques like fine-tuned encoders in StableSR [62], pre-
+restoration modules in DiffBIR [34].
+To better incorpo-
+rate semantic information, methods like SeeSR [72] and
+SUPIR [76] utilize text prompts derived from the image
+content.
+Seeking richer context, some works have ex-
+panded conditioning beyond text to fuse multiple modal-
+ities, such as depth and segmentation, to improve detail
+recovery and reduce hallucinations [39]. While these ap-
+proaches achieve exceptional perceptual quality, their itera-
+tive nature requires substantial computational resources and
+inference time, limiting their practical applicability [65, 77].
+One-Step Diffusion for Real-world SISR: To address
+the latency of multi-step methods, SinSR [65] has focused
+on distilling the generative capabilities of large diffusion
+models into a single forward pass. This is often enabled by
+techniques like Variational Score Distillation (VSD) [69].
+OSEDiff [71] is a prominent example, using the LQ im-
+age as the starting point and a VSD loss to regularize the
+output. However, recent works have identified limitations
+in existing one-step models, such as unsatisfactory detail
+recovery or the generation of visual artifacts [13]. Conse-
+quently, new distillation frameworks have been proposed,
+including Target Score Distillation (TSD-SR) [13] which
+uses real image references, and Consistent Score Identity
+Distillation [66] which tailors the VAE architecture with
+a larger latent space better suited for SR. Another critical
+research direction is providing user control on SISR task,
+and methods like PiSA-SR [58] and RCOD [73] aim to
+resolve the inherent trade-off between fidelity and realism
+by allowing for adjustable control at inference time. PiSA-
+SR [58] achieves this by decoupling pixel and semantic ob-
+jectives into two Low-Rank Adaptation (LoRA) modules,
+while RCOD [73] employs a latent domain grouping strat-
+egy. Different from all of these methods, our F2IDiff-SR is
+built on our F2IDiff FM instead of a public T2IDiff FM.
+3. Methodology
+In this section, we first elaborate on the training method
+of the F2IDiff FM. Then, we discuss how we integrate the
+trained F2IDiff FM model to a SISR network for 4× super-
+resolution, utilizing the LoRA training strategy [18]. Fi-
+nally, we outline dataset collection and preparation that was
+employed for training both the FMs and the SISR network.
+3.1. Feature-to-Image Foundation Model
+We trained and developed both the F2IDiff and T2IDiff
+FMs on an internal dataset of 38K HR images to ensure
+a fair comparison between F2IDiff-SR and T2IDiff-SR for
+the SISR task.
+The objective was to demonstrate that
+F2IDiff-SR produces images with better fidelity and con-
+trolled generation, resulting in more realistic outputs com-
+pared to T2IDiff-SR. Both FMs’ U-Nets were trained from
+scratch, as illustrated in Figure 3 (a) and (b). For F2IDiff
+FM, DINOv2 features were used as low-level image con-
+ditioning due to their robustness and conciseness compared
+to text captions, while T2IDiff FM employed a pre-trained
+Clip ViT-L text encoder [48] for feature extraction. Both
+FMs utilized a pre-trained encoder-decoder (f8d4) [51] and
+were trained on approximately 1.5 million patches gen-
+erated from 38K HR images captured by flagship smart-
+phones. Given the informativeness of DINOv2 features and
+the limited dataset size (38K images), the U-Net complexity
+for F2IDiff FM was reduced twofold, involving a decrease
+in channels and attention head dimensions, resulting in Eff-
+F2IDiff, which outperforms SOTA methods for SISR. This
+approach highlights the superiority of F2IDiff-SR in gener-
+ating realistic images for real-world SISR tasks.
+3
+
+Figure 3. Our Methods:(a) Training pipeline of T2IDiff FM: A diffusion U-Net with text conditioning is trained from scratch on internal
+38K HR images using a pre-trained Encoder-Decoder, Florence caption generation, and text-encoder. (b) Training pipeline of F2IDiff
+FM: A diffusion U-Net using DINOv2 features as conditioning is trained from scratch on internal 38K HR images using a pre-trained
+Encoder-Decoder, DINOv2 feature extractor. (c) SISR network based on T2IDiff FM: A single-step diffusion SR model is built on T2IDiff
+FM using LoRA. (d) SISR network based on F2IDiff FM: A single-step diffusion SR model is built on F2IDiff FM using LoRA.
+3.2. Single Image Super-resolution Network
+In this subsection, we design SISR networks using T2IDiff
+and F2IDiff FMs. Our objective is to develop an advanced
+SISR network for smartphone cameras that preserves fi-
+delity and exhibits controlled generative capabilities, min-
+imizing hallucinations and artifacts. To achieve this, we
+employ the LoRA strategy [18, 71] to train our SISR net-
+works using FMs:T2IDiff, F2IDiff, and Eff-F2IDiff, which
+were initially trained from scratch on our 38K HR dataset.
+We demonstrate empirically that the SISR network built
+on the F2IDiff FM significantly outperforms the SISR net-
+work built on the T2IDiff FM. For SISR network training,
+we generate LR images from HR images using the Real-
+ESRGAN [64] synthetic degradation pipeline to ensure a
+fair comparison with existing SOTA methods [58, 65, 71].
+However, we observe that in the context of SISR-based dig-
+ital zoom for smartphones, the images captured by smart-
+phone sensor have higher resolution and more details than
+the synthetic LR images, generated by synthetic degrada-
+tion pipeline from public datasets. To train the SISR net-
+work using the T2IDiff FM, we adopt the pipeline described
+in OSEDiff [71]. We replace the Stable Diffusion U-Net
+in this pipeline with our custom T2IDiff U-Net, which has
+been trained on 38K internal HR images, as opposed to the
+SDV2.1 U-Net trained on billions of public images. For the
+SISR network built on F2IDiff, we extract DINOv2 features
+from LR images, assuming that the difference between DI-
+NOv2 features of LR and HR images is minimal. These
+extracted DINOv2 features serve as conditioning for our
+F2IDiff U-Net, and we employ the LoRA strategy [18] to
+train LoRA layers for both the U-Net and the pre-trained
+encoder. To compute the VSD loss [69], we use DINOv2
+features instead of text features for our F2IDiff FM. Addi-
+tionally, we train an efficient SISR network based on Eff-
+F2IDiff and compare its results against SOTA SR methods.
+3.3. Training Datasets
+Typically, existing T2IDiff FMs are trained on images with
+a maximum resolution of 2MP, which is considerably
+lower than the images captured by modern smartphone
+cameras, often exceeding 12MP.
+To develop our own
+diffusion-based FMs, we collected a dataset of 38,000 HR
+images using a flagship smartphone camera. These images
+were captured under optimal conditions, featuring 12MP
+resolutions and bright settings without digital zoom to en-
+sure high-quality outputs free from blur, noise, or other arti-
+facts. The dataset was carefully curated to ensure diversity,
+encompassing various locations and perspectives.
+Given that our objective is not to design the most ad-
+vanced generative models, we contend that large-scale
+training datasets are unnecessary for FMs in the context of
+SISR. This controlled HR training dataset for the FM en-
+hances fidelity for the SISR task compared to public gener-
+ative models, where we lack control over the training data.
+For the training of the T2IDiff FM, text captions were gen-
+erated using pre-trained Florence models [74] on patches
+of size 512 × 512 extracted from the full 12MP images.
+This approach yields more concise captions compared to
+4
+
+Figure 4. Zoom-in for best visuals: Qualitative comparison between our methods on public datasets and smartphone captured images. (a)
+Our method on public datasets show the highest fidelity with HR, while OSEDiff [71], which uses public SDV2.1 [51], generates artificial
+textures. (b) Our method generates uniform textures and natural textures compared to other methods which use public SDV2.1 [51].
+Table 1. Quantitative comparison between T2IDiff-SR and F2IDiff-SR for 4× SISR. For reference, we include pre-trained OSEDiff [71],
+and OSEDiff model trained on our 38K HR datasets (OSEDiff-38K). The best results are highlighted in red. Our method F2IDiff-SR
+demonstrates superior performance on reference-based metrics on real-world datasets such as RealSR [5] and DRealSR [70]. This is
+achieved despite our F2IDiff FM being trained on only 38K HR images, in contrast to the Public-T2IDiff FM model (SDV2.1) [51], which
+was trained on billion of images. On synthetic datasets like DIV2K [1], which are less representative of real-world scenarios encountered
+in smartphone cameras due to their HR nature, our methods excel in fidelity metrics such as PSNR and SSIM.
+Data
+Models
+Base Method
+Reference-based IQA - Focus on Fidelity via HR Comparison
+Blind IQA - Focus on Perception without looking at HR
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+DISTS ↓
+FID ↓
+NIQE ↓
+CLIPIQA ↑
+MUSIQ ↑
+MANIQA ↑
+DRealSR
+(Real
+Datasets)
+OSEDiff [71]
+Pub-T2I-FM
+27.92
+0.783
+0.297
+0.217
+135.29
+6.49
+0.696
+64.65
+0.590
+OSEDiff-38K
+Pub-T2I-FM
+29.51
+0.816
+0.249
+0.199
+133.86
+7.51
+0.548
+58.05
+0.549
+T2IDIff-SR
+Our-T2I-FM
+29.52
+0.818
+0.250
+0.202
+134.51
+8.15
+0.523
+55.76
+0.533
+F2IDiff-SR
+Our F2I-FM
+29.71
+0.820
+0.240
+0.190
+125.06
+7.37
+0.510
+55.74
+0.537
+RealSR
+(Real
+Datasets)
+OSEDiff [71]
+Pub-T2I-FM
+25.15
+0.734
+0.292
+0.213
+123.50
+5.65
+0.669
+69.09
+0.634
+OSEDiff-38K
+Pub-T2I-FM
+26.53
+0.761
+0.242
+0.192
+123.13
+6.67
+0.497
+62.80
+0.592
+T2IDiff-SR
+Our-T2I-FM
+26.80
+0.765
+0.244
+0.194
+113.06
+7.17
+0.470
+60.52
+0.572
+F2IDiff-SR
+Our-F2I-FM
+26.84
+0.767
+0.232
+0.185
+112.95
+6.85
+0.462
+60.21
+0.581
+DIV2K
+(Syn-
+thetic
+Dataset)
+OSEDiff [71]
+Pub-T2I-FM
+23.72
+0.611
+0.294
+0.198
+26.32
+4.71
+0.668
+67.97
+0.615
+OSEDiff-38K
+Pub-T2I-FM
+24.76
+0.639
+0.326
+0.220
+32.42
+5.42
+0.509
+59.87
+0.572
+T2IDiff-SR
+Our-T2I-FM
+24.89
+0.645
+0.342
+0.233
+35.62
+6.05
+0.462
+55.03
+0.537
+F2IDiff-SR
+Our-F2I-FM
+25.13
+0.648
+0.343
+0.226
+35.02
+5.85
+0.446
+55.44
+0.542
+alternatives such as LLaVA [36]. We opted for patch-based
+captioning rather than full-image captioning because our
+SISR networks are trained on patches rather than full im-
+ages, preserving higher-resolution information and ensur-
+ing practicality for smartphone camera implementation. To
+train the F2IDiff FM, we employed a pre-trained DINOv2-
+large model [44] to generate DINOv2 features on-the-fly
+during training. A significant advantage of using DINOv2
+features over text captions on custom internal datasets lies
+in their fast feature generation capability during training, as
+opposed to the time-intensive offline text caption generation
+process. This approach enhances both efficiency and adapt-
+ability within our pipeline. The same dataset of 38,000 HR
+images was utilized for training our SISR networks. The
+5
+
+resolution of our training images surpasses that of public
+datasets such as LSDIR [30], which are commonly used in
+SISR networks. To ensure a fair comparison with standard
+SOTA methods, our LR images were synthesized using the
+Real-ESRGAN pipeline [64].
+4. Experiments
+4.1. Experimental Settings
+Training settings: For the development of FMs, we train
+three distinct U-Nets (T2IDiff, F2IDiff, Eff-F2IDiff) from
+scratch. All three networks share a common pre-trained en-
+coder and decoder [51], initialized with pre-trained weights
+(f8d4).
+Each FM undergoes training for 30 H200 days,
+encompassing 700,000 iterations with a batch size of 120.
+Training is conducted using a learning rate of 10−4 and a
+patch size of 512 × 512, optimized with the AdamW opti-
+mizer [37]. We develop SISR networks, inspired by OSED-
+iff [71], based on the aforementioned FMs: T2IDiff FM,
+F2IDiff FM, and Eff-F2IDiff.
+The LoRA strategy [18],
+as outlined in OSEDiff [71], is applied across SISR net-
+works, which are trained with a learning rate of 5 × 10−5,
+a batch size of 6, and a patch size of 256 × 256, utiliz-
+ing the AdamW optimizer over a period of 8 V100 days.
+To ensure a fair comparison with pre-trained public T2IDiff
+FM (SDV2.1) [51], we train OSEDiff [71] on our 38K HR
+dataset using identical training settings to compare with our
+methods. This comprehensive approach underscores the ef-
+ficacy and reliability of our proposed models in SISR tasks.
+Test datasets and evaluation metrics: We perform
+comparative evaluations on standard test datasets, including
+DRealSR [70], RealSR [5], and DIV2K [1], to benchmark
+our results against existing methods.
+The synthetic test
+dataset consists of cropped images of size 512 × 512 from
+DIV2K, degraded using the Real-ESRGAN [64] degrada-
+tion pipeline. For real-world test datasets, we utilize center-
+cropped images from RealSR and DRealSR, with LQ im-
+ages resized to 128 × 128 and HQ images to 512 × 512.
+To comprehensively assess the performance of our SISR
+methods, we employ a diverse set of evaluation metrics. Fi-
+delity metrics, including PSNR and SSIM [67], are com-
+puted on the Y channel in the YCbCr space to measure the
+fidelity of SR results. Perceptual quality metrics, such as
+LPIPS [79] and DISTS [10] (calculated in the RGB space),
+evaluate the perceptual quality of SR results.
+FID [17]
+quantifies the distance between the distributions of HR and
+super-resolved images. Additionally, no-reference quality
+metrics like NIQE [40], CLIPIQA [61], MUSIQ [25], and
+MANIQA [75] are used to evaluate image quality without
+reference images. This multi-faceted evaluation framework
+ensures a thorough analysis of our method’s performance
+across both fidelity and perceptual quality dimensions, pro-
+viding a robust assessment of its effectiveness in SISR tasks.
+4.2. Comparison of T2IDiff-SR and F2IDiff-SR
+To
+demonstrate
+that
+F2IDiff-SR
+model
+outperforms
+T2IDiff-SR model both quantitatively and qualitatively, we
+compare between our three trained SISR models (T2IDiff-
+SR, F2IDiff-SR, OSEDiff-38K) on our internal 38K HR
+images, along with the pre-trained OSEDiff [71] model,
+as shown in Figure 4, and Table 1.
+OSEDiff [71] was
+selected as the base pipeline because our SISR networks
+utilize a similar pipeline, though the underlying U-Net of
+diffusion-based FMs differs.
+To ensure a fair compari-
+son with the public Stable Diffusion FM [51], we also
+trained OSEDiff [71] on our internal 38K HR images and
+evaluated its performance against our methods. Quantita-
+tively, our F2IDiff-SR model demonstrated superior perfor-
+mance on reference based metrics (PSNR, SSIM, LPIPS,
+DISTS, FID) on real-world test datasets (DrealSR and Re-
+alSR) as shown in Table 1. Notably, this was achieved us-
+ing only 38K training images, in contrast to the billions of
+images required for training the Stable Diffusion FM. On
+DIV2K, a synthetically generated dataset using the Real-
+ESRGAN degradation pipeline, our models outperformed
+others in terms of fidelity metrics (PSNR, SSIM). How-
+ever, we believe that such extreme degradation scenarios
+are unlikely to occur in real-world SISR tasks due to ad-
+vancements in sensor technology. This level of degrada-
+tion often leads to hallucination, which is not representa-
+tive of practical applications. Qualitatively, our F2IDiff-
+SR model demonstrates reduced hallucination and greater
+proximity to the HR compared to other methods, includ-
+ing T2IDiff-SR, OSEDiff-38K, and pre-trained OSEDiff,
+as illustrated in Figure 4(a). Furthermore, when applied to
+real-world smartphone-captured images with significantly
+higher resolution (12MP), F2IDiff exhibits consistent tex-
+ture preservation and the absence of hallucination, outper-
+forming T2IDiff-SR, OSEDiff-38K, and pre-trained OSED-
+iff, as depicted in Figure 4(b).
+4.3. Comparison between F2IDiff-SR, Eff-F2IDiff-
+SR and SOTA
+We conducted a comprehensive comparison of our proposed
+methods, F2IDiff-SR and Eff-F2IDiff-SR, against SOTA
+single-step diffusion-based SR models, including PiSA-
+SR [58], OSEDiff [71], TSD-SR [13], and SinSR [65], as
+well as multi-step diffusion models such as Reshift [77],
+DiffBIR [34], and SeeSR [72].
+Additionally, we evalu-
+ated our methods against GAN-based SR techniques, in-
+cluding Real-ESRGAN [64] and LDL [32]. Our analysis
+demonstrates that F2IDiff-SR and Eff-F2IDiff-SR outper-
+form these methods quantitatively on reference-based met-
+rics when applied to real-world public test datasets, such as
+DRealSR [70] and RealSR [5], despite the FM being trained
+on just 38K HR images as opposed to billion for public FM
+(Table 2). On the other hand, for the public DIV2K [1],
+6
+
+Figure 5. Zoom-in for best visuals: Qualitative comparisons of our methods (F2IDiff-SR, Eff-F2IDiff-SR) with SOTA GAN-based meth-
+ods, multi-step diffusion methods, and single-step diffusion methods. The SOTA diffusion methods show significant hallucinations and
+unrealistic texture. Our methods generate details while preserving best fidelity.
+generated using synthetic degradation, our methods achieve
+superior performance in terms of fidelity metrics like PSNR
+and SSIM. However, we argue that such synthetic degrada-
+tion scenarios are unlikely to occur in smartphone cameras
+due to the availability of HR sensors. Furthermore, we ob-
+serve that increased degradation leads to greater hallucina-
+tion in SISR.
+Our F2IDiff-SR method is optimized for fidelity, result-
+ing in excellent performance on full-reference and percep-
+tual metrics such as PSNR, SSIM, FID, LPIPS, and DISTS,
+outperforming all other methods by a significant margin,
+as illustrated in Figure 1 and Tables 1 and 2. Our method
+emphasizes on minimizing pixel-level reconstruction errors,
+preserving structural information, and aligning feature dis-
+tributions closely with HR images, directly addressing hal-
+lucination issues in SISR [11, 80]. F2IDiff-SR sets a new
+SOTA in SISR, achieving SSIM of 0.820 (beating prior
+SOTA of 0.813), PSNR of 29.71 (surpassing prior SOTA
+of 28.65), and FID↓of 125.06 (exceeding prior SOTA of
+130.61) on the DRealSR dataset. It significantly outper-
+forms all previous methods while minimizing hallucina-
+tion and preserving details. In contrast, our methods did
+not achieve the best results on no-reference image qual-
+ity assessment (NR-IQA) metrics, including NIQE, CLIP-
+IQA, MUSIQ, and MANIQA, because these metrics eval-
+uate images in isolation based on learned priors of natu-
+ral scene statistics, semantic coherence, and perceptual re-
+alism—often favoring outputs with enhanced textures or
+stochastic details that may deviate from the original con-
+tent, even when such deviations introduce inaccuracies or
+hallucinations [35, 57]. Consequently, fidelity-oriented re-
+constructions that appear over-smoothed or lacking in arti-
+ficial variability are penalized, despite being more faithful
+to the reference [14, 27]. This unreliability of NR-IQA is
+illustrated in Figure 2 (first row), where OSEDiff SR result
+has NIQE(↓) = 3.22, CLIPIQA(↑) = 0.599, MUSIQ(↑) =
+60.79, and MANIQA(↑) = 0.565. The NR-IQA metrics for
+our F2IDIff method are NIQE(↓) = 3.75, CLIPIQA(↑) =
+0.444, MUSIQ(↑) = 57.55, and MANIQA(↑) = 0.543.
+Despite having better NR-IQA quantitative numbers for
+OSEDiff, it generates bird hallucination as shown in Fig-
+ure 2. Therefore, NR-IQA are not well-suited for assess-
+7
+
+Table 2. Quantitative comparison between F2IDiff-SR, Eff-F2IDiff-SR, and SOTA SISR methods for 4× super-resolution on real-world
+and synthetic datasets. The best and the second-best results are highlighted in red and blue. Our methods demonstrate superior performance
+on reference-based metrics, particularly on real-world datasets such as DRealSR [70] and RealSR [5], despite the fact that our FMs were
+trained on a relatively modest dataset of 38K HR images, in contrast to the Public-T2IDiff model (SDV2.1) [51], which was trained on
+billions of images. On synthetic dataset like DIV2K [1], which are less representative of real-world scenarios encountered in smartphone
+cameras due to their high-resolution nature, our methods excel in fidelity metrics, including PSNR and SSIM.
+Data
+Models
+Base Method
+Reference-based IQA - Focus on Fidelity via HR Comparison
+Blind IQA - Focus on Perception without looking at HR
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+DISTS ↓
+FID ↓
+NIQE ↓
+CLIPIQA ↑
+MUSIQ ↑
+MANIQA ↑
+DRealSR (Real Datasets)
+Real-ESRGAN [64]
+GAN
+28.64
+0.805
+0.285
+0.209
+147.62
+6.69
+0.442
+54.18
+0.491
+LDL [32]
+GAN
+28.21
+0.813
+0.281
+0.213
+155.53
+7.13
+0.431
+53.85
+0.491
+Reshift-S15 [77]
+Diffusion
+28.45
+0.763
+0.407
+0.270
+175.92
+8.28
+0.526
+49.86
+0.457
+SinSR-S1 [65]
+Diffusion
+28.41
+0.749
+0.374
+0.249
+177.05
+7.02
+0.637
+55.34
+0.490
+StableSR-S200 [62]
+Pub-T2I-FM
+28.04
+0.746
+0.335
+0.229
+147.03
+6.51
+0.617
+58.50
+0.560
+DiffBIR-S50 [34]
+Pub-T2I-FM
+26.84
+0.666
+0.445
+0.271
+167.38
+6.02
+0.629
+60.68
+0.590
+SeeSR-S50 [72]
+Pub-T2I-FM
+28.26
+0.770
+0.320
+0.231
+149.86
+6.52
+0.667
+64.84
+0.603
+OSEDiff-S1 [71]
+Pub-T2I-FM
+27.92
+0.783
+0.297
+0.217
+135.29
+6.49
+0.696
+64.65
+0.590
+PiSA-SR-S1 [58]
+Pub-T2I-FM
+28.31
+0.780
+0.296
+0.217
+130.61
+6.20
+0.697
+66.11
+0.616
+TSD-SR-S1 [13]
+Pub-T2I-FM
+27.77
+0.756
+0.297
+0.214
+134.98
+5.91
+0.734
+66.62
+0.587
+F2IDiff-SR-S1
+Our F2I-FM
+29.71
+0.820
+0.240
+0.190
+125.06
+7.37
+0.510
+55.74
+0.537
+Eff-F2IDiff-SR-S1
+Our F2I-FM
+29.58
+0.817
+0.249
+0.196
+129.18
+7.37
+0.483
+56.41
+0.532
+RealSR (Real Datasets)
+Real-ESRGAN [64]
+GAN
+25.69
+0.762
+0.273
+0.206
+135.18
+5.83
+0.445
+60.18
+0.549
+LDL [32]
+GAN
+25.28
+0.757
+0.277
+0.212
+142.71
+6.00
+0.448
+60.82
+0.549
+Reshift-S15 [77]
+Diffusion
+26.31
+0.741
+0.349
+0.250
+142.81
+7.27
+0.545
+58.10
+0.531
+SinSR-S1 [65]
+Diffusion
+26.30
+0.735
+0.321
+0.235
+137.05
+6.31
+0.620
+60.41
+0.539
+StableSR-S200 [62]
+Pub-T2I-FM
+24.69
+0.705
+0.309
+0.217
+127.20
+5.76
+0.619
+65.42
+0.621
+DiffBIR-S50 [34]
+Pub-T2I-FM
+24.88
+0.667
+0.357
+0.229
+124.56
+5.63
+0.641
+64.66
+0.623
+SeeSR-S50 [72]
+Pub-T2I-FM
+25.33
+0.727
+0.299
+0.221
+125.66
+5.38
+0.659
+69.37
+0.644
+OSEDiff-S1 [71]
+Pub-T2I-FM
+25.15
+0.734
+0.292
+0.213
+123.50
+5.65
+0.669
+69.09
+0.634
+PiSA-SR-S1 [58]
+Pub-T2I-FM
+25.50
+0.742
+0.267
+0.204
+124.09
+5.50
+0.670
+70.15
+0.656
+TSD-SR-S1 [13]
+Pub-T2I-FM
+24.81
+0.717
+0.274
+0.210
+114.45
+5.13
+0.716
+71.19
+0.635
+F2IDiff-SR-S1
+Our-F2I-FM
+26.84
+0.767
+0.232
+0.185
+112.95
+6.85
+0.462
+60.21
+0.581
+Eff-F2IDiff-SR-S1
+Our-F2I-FM
+26.70
+0.765
+0.239
+0.188
+113.06
+6.90
+0.431
+60.43
+0.566
+DIV2K (Synthetic Datasets)
+Real-ESRGAN [64]
+GAN
+24.29
+0.637
+0.311
+0.214
+37.64
+4.68
+0.528
+61.06
+0.550
+LDL [32]
+GAN
+23.83
+0.634
+0.326
+0.223
+42.29
+4.85
+0.518
+60.04
+0.535
+Reshift-S15 [77]
+Diffusion
+24.69
+0.617
+0.337
+0.222
+36.01
+6.82
+0.609
+60.92
+0.545
+SinSR-S1 [65]
+Diffusion
+24.43
+0.601
+0.326
+0.207
+35.45
+6.02
+0.650
+62.80
+0.539
+StableSR-S200 [62]
+Pub-T2I-FM
+23.31
+0.573
+0.313
+0.214
+24.67
+4.76
+0.668
+65.63
+0.619
+DiffBIR-S50 [34]
+Pub-T2I-FM
+23.67
+0.565
+0.354
+0.213
+30.93
+4.71
+0.665
+65.66
+0.620
+SeeSR-S50 [72]
+Pub-T2I-FM
+23.71
+0.604
+0.321
+0.197
+25.83
+4.82
+0.687
+68.49
+0.624
+OSEDiff-S1 [71]
+Pub-T2I-FM
+23.72
+0.611
+0.294
+0.198
+26.32
+4.71
+0.668
+67.97
+0.615
+PiSA-SR-S1 [58]
+Pub-T2I-FM
+23.87
+0.606
+0.282
+0.193
+25.07
+4.55
+0.693
+69.68
+0.640
+TSD-SR-S1 [13]
+Pub-T2I-FM
+23.02
+0.581
+0.267
+0.182
+29.16
+4.32
+0.742
+71.69
+0.619
+F2IDiff-SR-S1
+Our-F2I-FM
+25.13
+0.648
+0.343
+0.226
+35.02
+5.85
+0.446
+55.44
+0.542
+Eff-F2IDiff-SR-S1
+Our-F2I-FM
+25.06
+0.645
+0.346
+0.230
+38.13
+5.94
+0.439
+56.13
+0.537
+ing fidelity in SISR task. Qualitatively, as shown in the
+Figure 5, our methods exhibit the absence of hallucination
+and unrealistic textures, while demonstrating superior de-
+tail preservation compared to SOTA methods. In Figure 5
+(first example), Real-ESRGAN introduces artifacts in the
+towel, while LDL produces blurry outputs. Diffusion meth-
+ods trained from scratch, such as SinSR and Reshift, gen-
+erate unnatural textures. SOTA methods employing public
+T2IDiff-FM, such as Stable-SR, DiffBIR, SeeSR, OSED-
+iff, PiSA-SR, and TSD-SR, yield synthetic and unnatural
+textures. In contrast, our F2IDiff-SR and Eff-F2IDiff-SR
+methods achieve superior fidelity while maintaining gener-
+ative capabilities.
+5. Conclusion and Future Work
+In this paper, we introduce F2IDiff-SR and Eff-F2IDiff-
+SR models, which are trained on DINOv2 features rather
+than conventional text captions. Our results demonstrate
+that F2IDiff-SR outperforms T2IDiff-SR on public test
+datasets, including DRealSR, RealSR, DIV2K, and real-
+world smartphone-captured images, both quantitatively and
+qualitatively. We also compare our methods with SOTA
+GAN-based methods, diffusion-based single step methods,
+and multi-step diffusion-based methods, showing that our
+methods perform best both quantitatively and qualitatively
+on real world test datasets (DrealSR and RealSR), despite
+our FM being trained on 38,000 HR images, as opposed
+to billions of images on which public FM was trained. On
+the DIV2K dataset, which is synthetically generated using
+the Real-ESRGAN degradation pipeline, our methods ex-
+hibit better performance in fidelity metrics such as PSNR
+and SSIM. However such synthetic degradation may not ad-
+equately represent the real-world scenarios encountered in
+smartphone cameras due to the availability of HR sensors.
+Future research could focus on modifying the VAE com-
+ponent of the FM and increasing the training dataset from
+38,000 to 100,000 HR images to further enhance the con-
+trolled generative quality of the model, potentially leading
+to improved performance and robustness.
+8
+
+References
+[1] Eirikur Agustsson and Radu Timofte. Ntire 2017 challenge
+on single image super-resolution: Dataset and study. In Pro-
+ceedings of the IEEE conference on computer vision and pat-
+tern recognition workshops, pages 126–135, 2017. 5, 6, 8
+[2] Martin Arjovsky, Soumith Chintala, and L´eon Bottou.
+Wasserstein gan, 2017. 3
+[3] Luca Barsellotti, Lorenzo Bianchi, Nicola Messina, Fabio
+Carrara, Marcella Cornia, Lorenzo Baraldi, Fabrizio Falchi,
+and Rita Cucchiara.
+Talking to dino:
+Bridging self-
+supervised vision backbones with language for open-
+vocabulary segmentation. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 22025–
+22035, 2025. 2
+[4] Yochai Blau and Tomer Michaeli. The perception-distortion
+tradeoff. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 6228–6237, 2018. 2
+[5] Jianrui Cai, Hui Zeng, Hongwei Yong, Zisheng Cao, and Lei
+Zhang.
+Toward real-world single image super-resolution:
+A new benchmark and a new model.
+In Proceedings of
+the IEEE/CVF international conference on computer vision,
+pages 3086–3095, 2019. 5, 6, 8
+[6] Bin Chen, Gehui Li, Rongyuan Wu, Xindong Zhang, Jie
+Chen, Jian Zhang, and Lei Zhang.
+Adversarial diffusion
+compression for real-world image super-resolution. In Pro-
+ceedings of the Computer Vision and Pattern Recognition
+Conference, pages 28208–28220, 2025. 2
+[7] Hanting Chen, Yunhe Wang, Tianyu Guo, Chang Xu, Yiping
+Deng, Zhenhua Liu, Siwei Ma, Chunjing Xu, Chao Xu, and
+Wen Gao. Pre-trained image processing transformer. In Pro-
+ceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 12299–12310, 2021. 2
+[8] Junsong Chen, Jincheng Yu, Chongjian Ge, Lewei Yao, Enze
+Xie, Yue Wu, Zhongdao Wang, James Kwok, Ping Luo,
+Huchuan Lu, and Zhenguo Li. Pixart-α: Fast training of dif-
+fusion transformer for photorealistic text-to-image synthesis.
+2023. 2
+[9] Zixuan Chen, Lingxiao Yang, Jian-Huang Lai, and Xiaohua
+Xie. Cunerf: Cube-based neural radiance field for zero-shot
+medical image arbitrary-scale super resolution. In Proceed-
+ings of the IEEE/CVF international conference on computer
+vision, pages 21185–21195, 2023. 1
+[10] Keyan Ding, Kede Ma, Shiqi Wang, and Eero P. Simoncelli.
+Image quality assessment: Unifying structure and texture
+similarity. IEEE Transactions on Pattern Analysis and Ma-
+chine Intelligence, page 1–1, 2020. 6
+[11] Keyan Ding, Kede Ma, Shiqi Wang, and Eero P Simoncelli.
+Comparison of full-reference image quality models for opti-
+mization of image processing systems. International Journal
+of Computer Vision, 129(4):1258–1281, 2021. 7
+[12] Chao Dong, Chen Change Loy, Kaiming He, and Xiaoou
+Tang. Image super-resolution using deep convolutional net-
+works. IEEE transactions on pattern analysis and machine
+intelligence, 38(2):295–307, 2015. 2
+[13] Linwei Dong, Qingnan Fan, Yihong Guo, Zhonghao Wang,
+Qi Zhang, Jinwei Chen, Yawei Luo, and Changqing Zou.
+Tsd-sr: One-step diffusion with target score distillation for
+real-world image super-resolution, 2025. 2, 3, 6, 8
+[14] Yuming Fang, Chi Zhang, Wenhan Yang, Jiaying Liu, and
+Zongming Guo. Blind visual quality assessment for image
+super-resolution by convolutional neural network. Multime-
+dia Tools and Applications, 77(22):29829–29846, 2018. 7
+[15] Mariana-Iuliana Georgescu, Radu Tudor Ionescu, Andreea-
+Iuliana Miron, Olivian Savencu, Nicolae-C˘at˘alin Ristea,
+Nicolae Verga, and Fahad Shahbaz Khan.
+Multimodal
+multi-head convolutional attention with various kernel sizes
+for medical image super-resolution. In Proceedings of the
+IEEE/CVF winter conference on applications of computer
+vision, pages 2195–2205, 2023. 1
+[16] Ian J. Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing
+Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and
+Yoshua Bengio. Generative adversarial networks, 2014. 3
+[17] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner,
+Bernhard Nessler, and Sepp Hochreiter. Gans trained by a
+two time-scale update rule converge to a local nash equilib-
+rium, 2018. 2, 6
+[18] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-
+Zhu, Yuanzhi Li, Shean Wang, Lu Wang, Weizhu Chen, et al.
+Lora: Low-rank adaptation of large language models. ICLR,
+1(2):3, 2022. 3, 4, 6
+[19] Andrey Ignatov, Nikolay Kobyshev, Radu Timofte, Kenneth
+Vanhoey, and Luc Van Gool. Dslr-quality photos on mobile
+devices with deep convolutional networks. In Proceedings of
+the IEEE international conference on computer vision, pages
+3277–3285, 2017. 1
+[20] Andrey Ignatov, Andres Romero, Heewon Kim, and Radu
+Timofte. Real-time video super-resolution on smartphones
+with deep learning, mobile ai 2021 challenge: Report. In
+Proceedings of the IEEE/CVF conference on computer vi-
+sion and pattern recognition, pages 2535–2544, 2021. 1
+[21] Devendra K Jangid, Neal R Brodnik, Michael G Goebel,
+Amil Khan, SaiSidharth Majeti, McLean P Echlin, Saman-
+tha H Daly, Tresa M Pollock, and BS Manjunath. Adapt-
+able physics-based super-resolution for electron backscatter
+diffraction maps.
+npj Computational Materials, 8(1):255,
+2022. 1
+[22] Devendra K Jangid, Neal R Brodnik, McLean P Echlin,
+Chandrakanth Gudavalli, Connor Levenson, Tresa M Pol-
+lock, Samantha H Daly, and BS Manjunath. Q-rbsa: high-
+resolution 3d ebsd map generation using an efficient quater-
+nion transformer network. npj Computational Materials, 10
+(1):27, 2024. 1
+[23] Dongsheng Jiang, Yuchen Liu, Songlin Liu, Jin’e Zhao,
+Hao Zhang, Zhen Gao, Xiaopeng Zhang, Jin Li, and
+Hongkai Xiong. From clip to dino: Visual encoders shout
+in multi-modal large language models.
+arXiv preprint
+arXiv:2310.08825, 2023. 2
+[24] Justin Johnson, Alexandre Alahi, and Li Fei-Fei. Perceptual
+losses for real-time style transfer and super-resolution. In
+European conference on computer vision, pages 694–711.
+Springer, 2016. 2
+[25] Junjie Ke, Qifei Wang, Yilin Wang, Peyman Milanfar, and
+Feng Yang. Musiq: Multi-scale image quality transformer.
+9
+
+In Proceedings of the IEEE/CVF international conference on
+computer vision, pages 5148–5157, 2021. 6
+[26] Robert Keys. Cubic convolution interpolation for digital im-
+age processing. IEEE transactions on acoustics, speech, and
+signal processing, 29(6):1153–1160, 2003. 2
+[27] Valentin Khrulkov and Artem Babenko.
+Neural side-by-
+side: Predicting human preferences for no-reference super-
+resolution evaluation. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+4988–4997, 2021. 7
+[28] Christian Ledig, Lucas Theis, Ferenc Husz´ar, Jose Caballero,
+Andrew Cunningham, Alejandro Acosta, Andrew Aitken,
+Alykhan Tejani, Johannes Totz, Zehan Wang, et al. Photo-
+realistic single image super-resolution using a generative ad-
+versarial network. In Proceedings of the IEEE conference on
+computer vision and pattern recognition, pages 4681–4690,
+2017. 2
+[29] Xin Li, Yulin Ren, Xin Jin, Cuiling Lan, Xingrui Wang,
+Wenjun Zeng, Xinchao Wang, and Zhibo Chen. Diffusion
+models for image restoration and enhancement: a compre-
+hensive survey. International Journal of Computer Vision,
+pages 1–31, 2025. 2
+[30] Yawei Li, Kai Zhang, Jingyun Liang, Jiezhang Cao, Ce Liu,
+Rui Gong, Yulun Zhang, Hao Tang, Yun Liu, Denis Deman-
+dolx, et al. Lsdir: A large scale dataset for image restoration.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 1775–1787, 2023. 6
+[31] Jingyun Liang, Jiezhang Cao, Guolei Sun, Kai Zhang, Luc
+Van Gool, and Radu Timofte. Swinir: Image restoration us-
+ing swin transformer. In Proceedings of the IEEE/CVF inter-
+national conference on computer vision, pages 1833–1844,
+2021. 2
+[32] Jie Liang, Hui Zeng, and Lei Zhang. Details or artifacts:
+A locally discriminative learning approach to realistic im-
+age super-resolution. In Proceedings of the IEEE/CVF con-
+ference on computer vision and pattern recognition, pages
+5657–5666, 2022. 3, 6, 8
+[33] Bee Lim, Sanghyun Son, Heewon Kim, Seungjun Nah, and
+Kyoung Mu Lee. Enhanced deep residual networks for single
+image super-resolution. In Proceedings of the IEEE confer-
+ence on computer vision and pattern recognition workshops,
+pages 136–144, 2017. 2
+[34] Xinqi Lin, Jingwen He, Ziyan Chen, Zhaoyang Lyu, Bo Dai,
+Fanghua Yu, Yu Qiao, Wanli Ouyang, and Chao Dong. Diff-
+bir: Toward blind image restoration with generative diffusion
+prior.
+In European conference on computer vision, pages
+430–448. Springer, 2024. 3, 6, 8
+[35] Xinying Lin, Xuyang Liu, Hong Yang, Xiaohai He, and
+Honggang Chen.
+Perception-and fidelity-aware reduced-
+reference super-resolution image quality assessment. IEEE
+Transactions on Broadcasting, 2024. 7
+[36] Haotian Liu, Chunyuan Li, Yuheng Li, and Yong Jae Lee.
+Improved baselines with visual instruction tuning. In Pro-
+ceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 26296–26306, 2024. 5
+[37] Ilya Loshchilov and Frank Hutter. Decoupled weight decay
+regularization. arXiv preprint arXiv:1711.05101, 2017. 6
+[38] Zhisheng Lu, Juncheng Li, Hong Liu, Chaoyan Huang, Lin-
+lin Zhang, and Tieyong Zeng. Transformer for single im-
+age super-resolution. In Proceedings of the IEEE/CVF con-
+ference on computer vision and pattern recognition, pages
+457–466, 2022. 2
+[39] Kangfu Mei, Hossein Talebi, Mojtaba Ardakani, Vishal M.
+Patel, Peyman Milanfar, and Mauricio Delbracio. The power
+of context:
+How multimodality improves image super-
+resolution, 2025. 3
+[40] Anish Mittal, Rajiv Soundararajan, and Alan C. Bovik. Mak-
+ing a “completely blind” image quality analyzer. IEEE Sig-
+nal Processing Letters, 20(3):209–212, 2013. 6
+[41] Ngoc Long Nguyen, J´er´emy Anger, Axel Davy, Pablo Arias,
+and Gabriele Facciolo. Self-supervised multi-image super-
+resolution for push-frame satellite images. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 1121–1131, 2021. 1
+[42] Alex Nichol, Prafulla Dhariwal, Aditya Ramesh, Pranav
+Shyam, Pamela Mishkin, Bob McGrew, Ilya Sutskever, and
+Mark Chen. Glide: Towards photorealistic image generation
+and editing with text-guided diffusion models. arXiv preprint
+arXiv:2112.10741, 2021. 2
+[43] Mehdi Noroozi, Isma Hadji, Brais Martinez, Adrian Bulat,
+and Georgios Tzimiropoulos. You only need one step: Fast
+super-resolution with stable diffusion via scale distillation.
+In European Conference on Computer Vision, pages 145–
+161. Springer, 2024. 2
+[44] Maxime Oquab, Timoth´ee Darcet, Th´eo Moutakanni, Huy
+Vo, Marc Szafraniec, Vasil Khalidov, Pierre Fernandez,
+Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, et al.
+Dinov2: Learning robust visual features without supervision.
+arXiv preprint arXiv:2304.07193, 2023. 2, 5
+[45] PhoneArena Editorial Team. Google pixel 10 full specifica-
+tions, 2025. Camera sensor, aperture, focal length summary.
+2
+[46] PhoneArena Editorial Team. Samsung galaxy s25 ultra full
+specifications, 2025. Camera specifications (main 200 MP
+sensor, aperture, focal length).
+[47] PhoneArena Editorial Team. Apple iphone 17 pro full speci-
+fications, 2025. Main/ultra-wide/telephoto camera specifica-
+tions (48 MP modules). 2
+[48] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry,
+Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning
+transferable visual models from natural language supervi-
+sion. In International conference on machine learning, pages
+8748–8763. PmLR, 2021. 3
+[49] Aditya Ramesh, Mikhail Pavlov, Gabriel Goh, Scott Gray,
+Chelsea Voss, Alec Radford, Mark Chen, and Ilya Sutskever.
+Zero-shot text-to-image generation. In International confer-
+ence on machine learning, pages 8821–8831. Pmlr, 2021. 2
+[50] Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu,
+and Mark Chen. Hierarchical text-conditional image gener-
+ation with clip latents. arXiv preprint arXiv:2204.06125, 1
+(2):3, 2022.
+[51] Robin Rombach, Andreas Blattmann, Dominik Lorenz,
+Patrick Esser, and Bj¨orn Ommer.
+High-resolution image
+10
+
+synthesis with latent diffusion models.
+In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 10684–10695, 2022. 2, 3, 5, 6,
+8
+[52] Chitwan Saharia, William Chan, Saurabh Saxena, Lala
+Li, Jay Whang, Emily L Denton, Kamyar Ghasemipour,
+Raphael Gontijo Lopes, Burcu Karagol Ayan, Tim Salimans,
+et al. Photorealistic text-to-image diffusion models with deep
+language understanding.
+Advances in neural information
+processing systems, 35:36479–36494, 2022. 2, 3
+[53] Tim Salimans and Jonathan Ho.
+Progressive distillation
+for fast sampling of diffusion models.
+arXiv preprint
+arXiv:2202.00512, 2022. 2
+[54] Jacob Shermeyer and Adam Van Etten. The effects of super-
+resolution on object detection performance in satellite im-
+agery. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition Workshops, pages 0–0,
+2019. 1
+[55] Yang Song, Prafulla Dhariwal, Mark Chen, and Ilya
+Sutskever. Consistency models. 2023. 2
+[56] Karen Stengel, Andrew Glaws, Dylan Hettinger, and Ryan N
+King. Adversarial super-resolution of climatological wind
+and solar data. Proceedings of the National Academy of Sci-
+ences, 117(29):16805–16815, 2020. 1
+[57] Shaolin Su, Josep M Rocafort, Danna Xue, David Serrano-
+Lozano, Lei Sun, and Javier Vazquez-Corral.
+Rethink-
+ing image evaluation in super-resolution.
+arXiv preprint
+arXiv:2503.13074, 2025. 7
+[58] Lingchen Sun, Rongyuan Wu, Zhiyuan Ma, Shuaizheng Liu,
+Qiaosi Yi, and Lei Zhang.
+Pixel-level and semantic-level
+adjustable super-resolution: A dual-lora approach, 2025. 2,
+3, 4, 6, 8
+[59] Roger Y Tsai and Thomas S Huang.
+Multiframe image
+restoration and registration. Multiframe image restoration
+and registration, 1:317–339, 1984. 2
+[60] Thomas Vandal, Evan Kodra, Sangram Ganguly, Andrew
+Michaelis, Ramakrishna Nemani, and Auroop R Ganguly.
+Deepsd: Generating high resolution climate change projec-
+tions through single image super-resolution. In Proceedings
+of the 23rd acm sigkdd international conference on knowl-
+edge discovery and data mining, pages 1663–1672, 2017. 1
+[61] Jianyi Wang, Kelvin CK Chan, and Chen Change Loy. Ex-
+ploring clip for assessing the look and feel of images. In
+AAAI, 2023. 6
+[62] Jianyi Wang, Zongsheng Yue, Shangchen Zhou, Kelvin CK
+Chan, and Chen Change Loy. Exploiting diffusion prior for
+real-world image super-resolution. International Journal of
+Computer Vision, 132(12):5929–5949, 2024. 3, 8
+[63] Xintao Wang, Ke Yu, Shixiang Wu, Jinjin Gu, Yihao Liu,
+Chao Dong, Yu Qiao, and Chen Change Loy. Esrgan: En-
+hanced super-resolution generative adversarial networks. In
+Proceedings of the European conference on computer vision
+(ECCV) workshops, pages 0–0, 2018. 2, 3
+[64] Xintao Wang, Liangbin Xie, Chao Dong, and Ying Shan.
+Real-esrgan: Training real-world blind super-resolution with
+pure synthetic data. In Proceedings of the IEEE/CVF inter-
+national conference on computer vision, pages 1905–1914,
+2021. 2, 3, 4, 6, 8
+[65] Yufei Wang, Wenhan Yang, Xinyuan Chen, Yaohui Wang,
+Lanqing Guo, Lap-Pui Chau, Ziwei Liu, Yu Qiao, Alex C
+Kot, and Bihan Wen. Sinsr: diffusion-based image super-
+resolution in a single step. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition,
+pages 25796–25805, 2024. 2, 3, 4, 6, 8
+[66] Yan Wang, Shijie Zhao, Kai Chen, Kexin Zhang, Junlin Li,
+and Li Zhang. Gendr: Lightning generative detail restorator,
+2025. 3
+[67] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Si-
+moncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004. 6
+[68] Zhihao Wang, Jian Chen, and Steven CH Hoi. Deep learn-
+ing for image super-resolution: A survey. IEEE transactions
+on pattern analysis and machine intelligence, 43(10):3365–
+3387, 2020. 1
+[69] Zhengyi Wang, Cheng Lu, Yikai Wang, Fan Bao, Chongxuan
+Li, Hang Su, and Jun Zhu. Prolificdreamer: High-fidelity and
+diverse text-to-3d generation with variational score distilla-
+tion. Advances in neural information processing systems, 36:
+8406–8441, 2023. 3, 4
+[70] Pengxu Wei, Ziwei Xie, Hannan Lu, Zongyuan Zhan, Qix-
+iang Ye, Wangmeng Zuo, and Liang Lin.
+Component
+divide-and-conquer for real-world image super-resolution. In
+European conference on computer vision, pages 101–117.
+Springer, 2020. 5, 6, 8
+[71] Rongyuan Wu, Lingchen Sun, Zhiyuan Ma, and Lei Zhang.
+One-step effective diffusion network for real-world image
+super-resolution, 2024. 2, 3, 4, 5, 6, 8
+[72] Rongyuan Wu, Tao Yang, Lingchen Sun, Zhengqiang Zhang,
+Shuai Li, and Lei Zhang.
+Seesr:
+Towards semantics-
+aware real-world image super-resolution. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 25456–25467, 2024. 3, 6, 8
+[73] Zongliang Wu, Siming Zheng, Peng-Tao Jiang, and Xin
+Yuan. Realism control one-step diffusion for real-world im-
+age super-resolution, 2025. 3
+[74] Bin Xiao, Haiping Wu, Weijian Xu, Xiyang Dai, Houdong
+Hu, Yumao Lu, Michael Zeng, Ce Liu, and Lu Yuan.
+Florence-2: Advancing a unified representation for a vari-
+ety of vision tasks. arXiv preprint arXiv:2311.06242, 2023.
+4
+[75] Sidi Yang, Tianhe Wu, Shuwei Shi, Shanshan Lao, Yuan
+Gong, Mingdeng Cao, Jiahao Wang, and Yujiu Yang.
+Maniqa: Multi-dimension attention network for no-reference
+image quality assessment. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition,
+pages 1191–1200, 2022. 6
+[76] Fanghua Yu, Jinjin Gu, Zheyuan Li, Jinfan Hu, Xiangtao
+Kong, Xintao Wang, Jingwen He, Yu Qiao, and Chao Dong.
+Scaling up to excellence: Practicing model scaling for photo-
+realistic image restoration in the wild.
+In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 25669–25680, 2024. 3
+[77] Zongsheng Yue, Jianyi Wang, and Chen Change Loy.
+Resshift:
+Efficient diffusion model for image super-
+11
+
+resolution by residual shifting. Advances in Neural Infor-
+mation Processing Systems, 36:13294–13307, 2023. 3, 6, 8
+[78] Kai Zhang, Jingyun Liang, Luc Van Gool, and Radu Timofte.
+Designing a practical degradation model for deep blind im-
+age super-resolution. In Proceedings of the IEEE/CVF inter-
+national conference on computer vision, pages 4791–4800,
+2021. 3
+[79] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shecht-
+man, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 586–595, 2018. 6
+[80] Wei Zhou and Zhou Wang.
+Quality assessment of image
+super-resolution: Balancing deterministic and statistical fi-
+delity. In Proceedings of the 30th ACM international confer-
+ence on multimedia, pages 934–942, 2022. 7
+12

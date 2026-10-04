@@ -1,0 +1,775 @@
+Quadratic Continuous Quantum Optimization
+Sascha M¨ucke
+Lamarr Institute
+TU Dortmund University
+Dortmund, Germany
+sascha.muecke@tu-dortmund.de
+Thore Gerlach
+Lamarr Institute
+University of Bonn
+Bonn, Germany
+tgerlac1@uni-bonn.de
+Nico Piatkowski
+Lamarr Institute
+Fraunhofer IAIS
+Sankt-Augustin, Germany
+nico.piatkowski@iais.fraunhofer.de
+Abstract—Quantum annealers can solve QUBO problems ef-
+ficiently but struggle with continuous optimization tasks like
+regression due to their discrete nature. We introduce Quadratic
+Continuous Quantum Optimization (QCQO), an anytime algo-
+rithm that approximates solutions to unconstrained quadratic
+programs via a sequence of QUBO instances. Rather than
+encoding real variables as binary vectors, QCQO implicitly
+represents them using continuous QUBO weights and iteratively
+refines the solution by summing sampled vectors. This allows
+flexible control over the number of binary variables and adapts
+well to hardware constraints. We prove convergence properties,
+introduce a step size adaptation scheme, and validate the method
+on linear regression. Experiments with simulated and real quan-
+tum annealers show that QCQO achieves accurate results with
+fewer qubits, though convergence slows on noisy hardware. Our
+approach enables quantum annealing to address a wider class of
+continuous problems.
+Index Terms—Quantum Annealing, QUBO, Continuous Opti-
+mization, Anytime Algorithms, Linear Regression.
+I. INTRODUCTION
+Quantum Computing (QC) has emerged as a promising
+technology for accelerating algorithms, with well-known quan-
+tum subroutines such as Grover search [1] or Shor’s algo-
+rithm [2] allowing, in theory, for asymptotic speedups using
+quantum circuits. However, technical challenges such as quan-
+tum gate noise, decoherence and read-out errors prohibit large-
+scale application of quantum gate computing at the current
+point in time [3].
+Quantum Annealing (QA) is an alternative QC paradigm
+designed to solve one particular class of optimization prob-
+lems [4]. Although it is, unlike quantum circuits, not a
+universal computation model, QA has become a valuable
+tool in combinatorial optimization, as it can solve various
+problems from satisfyability [5] over graph problems [6] to
+machine learning [7]. Applications range from finance [8]
+over logistics [9], [10] to image processing [11]. The central
+optimization problem class that quantum annealers solve is
+QUBO.
+Definition 1 (QUBO). Let Q ∈Rn×n for some fixed n ∈N.
+The Quadratic Unconstrained Binary Optimization problem is
+This research has been funded by the Federal Ministry of Education and
+Research of Germany and the state of North Rhine-Westphalia as part of the
+Lamarr Institute for Machine Learning and Artificial Intelligence.
+to find a binary vector z∗∈Bn that minimizes the energy
+function
+EQ(z) = z⊺Qz =
+n
+X
+i=1
+n
+X
+j=1
+Qijzizj.
+We typically assume Q to be either symmetrical or an
+upper triangle matrix, such that it defines the energy function
+uniquely. Every non-symmetrical QUBO instance can be made
+symmetrical by applying Q ←(Q + Q⊺)/2. QUBO is gener-
+ally strongly NP-hard [12]. Besides QA, a range of solution
+or approximation strategies for QUBO exist, both heuristic and
+exact [13].
+A common approach in literature is to cast optimization
+problems arising in applications into QUBO form, solve them
+using a quantum annealer and interpreting the resulting min-
+imizing binary vector as the solution to the original problem.
+While this approach has proven very fruitful for a large number
+of problems [6], a strong limitation of QUBO is that it is fun-
+damentally combinatorial, having a discrete and finite domain.
+This makes it hard to apply it naturally to problems with
+a continuous solution space, such as regression or artificial
+neural network training, where the variables are real-valued
+weights. Nonetheless, QUBO formulations of both of these
+problems have been devised, using rough approximations. For
+instance, Date et al. [14] uses a precision vector p ∈Rp to
+interpret a binary vector z ∈Bnp as digits of a base, such
+that the real-valued solution is given by w = P z ∈Rn with
+P = 1n⊗p⊺, where 1n denotes the n×n identity matrix, and
+⊗is the Kronecker product. Naturally, the elements of w are
+still discrete, taking at most 2p distinct values. Moreover, the
+number of binary variables is O(np), meaning that doubling
+the precision implies doubling the number of variables, which
+is a prohibitive factor for contemporary QA hardware.
+In this article we present a novel approach to solving
+optimization problems with continuous domain on quantum
+annealers. To this end, we generalize the idea of precision
+vectors by representing numbers as sums of vectors we re-
+peatedly sample from a random distribution, refining the result
+with every QUBO instance we solve. Our contribution has
+a number of advantages: Firstly, we eliminate the necessity
+to explicitly represent real numbers as binary vectors by
+representing them implicitly through the QUBO weights, which
+are already continuous. Secondly, the number of vectors, i.e.,
+the number of binary variables to optimize per QUBO instance,
+arXiv:2512.24759v1 [quant-ph] 31 Dec 2025
+
+is a hyperparameter that can be chosen freely according to
+the hardware capacities, making this approach very flexible.
+Lastly, the resulting strategy is an anytime algorithm, as each
+consecutive QUBO solution is a refinement of the previous
+one. This allows for easy adaption to quantum annealers with
+a limited budget.
+This paper is structured as follows: In Section II we describe
+our proposed continuous optimization procedure. After a dis-
+cussion of its theoretical properties in Section III we put it into
+practice in Section IV, where we use our method to perform
+regression as an exemplary optimization task. We improve the
+performance by introducing a step size scheduling scheme in
+Section V. Section Section VI discusses the implications of
+possible future developments of this method and concludes
+this article.
+II. QUADRATIC CONTINUOUS QUANTUM OPTIMIZATION
+Given an optimization problem with a quadratic loss func-
+tion L : Rd →R of the form
+L(w) = w⊺Aw + a⊺w + c,
+(1)
+we want to find a vector of weights w∗∈Rd that minimizes L.
+Without loss of generality we can assume that A is symmet-
+rical (if it is not, we can set A ←(A + A⊺)/2). To further
+simplify, we can ignore c for the purpose of minimization.
+This problem is equivalent to quadratic programming without
+any linear constraints [15]. If A is indefinite, the problem is
+NP-hard.
+Now assume that w
+∈Rd is an initial guess or an
+intermediate result which we want to refine, e.g., w = 0.
+Given a matrix R ∈Rn×d, we can define a QUBO instance
+that finds
+z∗= arg min
+z∈Bn
+L(w + R⊺z),
+(2)
+where R⊺z can be interpreted as the sum of a subset of rows
+of R. We find that this update to the solution w has itself a
+quadratic form:
+L(w + R⊺z)
+= (w + R⊺z)⊺A(w + R⊺z) + a⊺(w + R⊺z)
+= w⊺Aw + w⊺AR⊺z + z⊺RAw + z⊺RAR⊺z
++ a⊺w + a⊺R⊺z
+= z⊺RAR⊺z + (2w⊺A + a⊺)R⊺z + const.
+As we can see, this is an n-variable QUBO instance with
+weight matrix
+Q(w, R) = RAR⊺+ diag[R(2Aw + a)],
+(3)
+where diag[x] = X constructs a diagonal matrix such that
+Xii = xi ∀i and Xij = 0 if i ̸= j.
+Solving this problem yields an indicator vector z∗∈Bn
+that lets us perform a weight update w′ ←w + R⊺z∗, such
+that L(w′) ≤L(w). The number of variables of the QUBO
+problem corresponds to the number of rows n of R, which is a
+hyperparameter: A large n allows for more row sums, and thus
+a higher probability of finding a weight update that improves
+the loss value, at the cost of a larger QUBO size. By repeating
+this weight update and sampling R from some probability
+distribution R over Rn×d every time, we can iteratively refine
+the solution. This idea is formalized in Alg. 1.
+Algorithm 1 Quadratic Continuous Quantum Optimization
+Input: Quadratic problem defined through A ∈Rd×d and
+a ∈Rd as in Eq. (1); probability distribution R over
+Rn×d; initial guess w0 ∈Rd; budget or stopping criterion
+Output: Improved solution w◦
+1: t ←0
+2: while stopping criterion unfulfilled or budget remains do
+3:
+Sample Rt ∼R
+4:
+Compute Q(wt, Rt) according to Eq. (3)
+5:
+z∗
+t ←arg minz EQ(z) {use quantum annealer}
+6:
+wt+1 ←wt + R⊺
+t z∗
+t
+7:
+t ←t + 1
+8: end while
+9: return wt
+A. Sampling the Matrix R
+The choice of distribution R is of central importance for the
+behavior of QCQO, as it controls the distribution of possible
+update steps R⊺z.
+While it is in principle possible to use an arbitrary matrix-
+valued distribution, we can sample the rows R1, . . . , Rn
+independently from some multivariate distribution, or even
+the individual elements Rij from some univariate distribution.
+If we sample row-wise and i.i.d. from a multivariate normal
+distribution with mean µ and covariance matrix Σ (denoted
+by N(µ, Σ)), it is easy to see that every point in Rd can be
+reached with a single update step, as follows from the fact
+that N(µ, Σ) has full support on Rd. However, we can show
+that the distribution of the update step U = R⊺z is closely
+related to the distribution of each row.
+Theorem 1. For an arbitrary but fixed n ∈N, if Ri is
+sampled i.i.e. from N(µ, Σ) for each row i ∈{1, . . . , n},
+the expected update step U in each iteration of Alg. 1 follows
+the distribution N(n/2µ, n/4Σ).
+Proof. Consider the random variable P = vec(R), which
+follows a multivariate normal distribution N(1n ⊗µ, In ⊗Σ),
+where 1n = [1, 1, . . . , 1]⊺∈Rn, In is the n × n identity
+matrix, and ⊗denotes the Kronecker product. Assuming a
+uniform distribution of binary vectors z ∈Bn, the update step
+is itself a random variable U defined as
+U = 1
+2n
+X
+z
+(z⊺⊗Id)P
+|
+{z
+}
+≡R⊺z
+=
+ 1
+2n
+X
+z
+z⊺
+
+⊗Id
+
+P
+= 1/2(1⊺
+n ⊗Id)
+|
+{z
+}
+=: ¯
+Z
+P .
+
+As this is a linear transformation on P , we can exploit the
+fact that X ∼N(µ, Σ) ⇒AX + b ∼N(Aµ + b, AΣA⊺)
+and find that U ∼N(µU, ΣU) with
+µU = ¯Z(1n ⊗µ)
+= 1/2(1⊺
+n ⊗Id)(1n ⊗µ)
+= 1/2(1⊺
+n1n) ⊗(Idµ)
+= n/2µ,
+ΣU = ¯Z(In ⊗Σ) ¯Z⊺
+= 1/4(1⊺
+n ⊗Id)(In ⊗Σ)(1n ⊗Id)
+= 1/4(1⊺
+nIn1n) ⊗(IdΣId)
+= n/4Σ.
+This implies that the update steps follow themselves a
+multivariate normal distribution across all iterations.
+III. THEORETICAL ANALYSIS
+We analyze the case when L(w) = w⊺Aw + a⊺w is
+convex.
+Theorem 2. The sequence of iterates wt generated by Alg. 1
+satisfies
+L(wt+1) −L(w∗) ≤∥A∥2∥w0 −w∗∥2
+2t
++ 1
+t
+t
+X
+t′=1
+ε⊺
+t R⊺
+t z∗
+t .
+Proof. For any w, w′ ∈Rd, we have
+∥∇L(w)−∇L(w′)∥2 = ∥A(w −w′)∥2 ≤∥A∥2 ∥w −w′∥2.
+Hence, ∇L is Lipschitz continuous with constant L = ∥A∥2.
+Thus, we have the quadratic upper bound [16]
+L(b) ≤L(c) + ∇L(c)⊺b −c + L/2∥b −c∥2
+2.
+Setting b = wt+1 and c = wt, we arrive at
+L(wt+1) ≤L(wt) + (Awt + a)⊺R⊺
+t z∗
+t + 1/2∥A∥2∥R⊺
+t z∗
+t ∥2
+2.
+Moreover,
+L(wt) ≤L(w∗) + 1/2∥A∥2∥wt −w∗∥2
+2,
+and thus
+L(wt+1) −L(w∗) ≤
+(Awt + a)⊺R⊺
+t z∗
+t + 1/2∥A∥2∥R⊺
+t z∗
+t ∥2
+2
++ 1/2∥A∥2∥wt −w∗∥2
+2.
+Now, let R⊺
+t z∗
+t = −∥A∥2(bAwt + a) + εt for all t. We find
+L(wt) ≤
+L(w∗) + 1/2∥A∥2(∥wt −w∗∥2
+2 −∥wt+1 −w∗∥2
+2)
++ ε⊺
+t R⊺
+t z∗
+t .
+Any function value L(wt′) with t′ < t cannot be closer to
+L(w∗) than the function value of the t-th iterate L(wt), and
+so is their average. Finally, we get
+L(wt+1) −L(w∗)
+≤1
+t
+t
+X
+t′=1
+L(wt′) −L(w∗)
+≤∥A∥2∥w0 −w∗∥2
+2t
++ 1
+t
+t
+X
+t′=1
+ε⊺
+t R⊺
+t z∗
+t .
+The result implies that Alg. 1 can enjoy (at least) the conver-
+gence speed of gradient descent (with fixed stepsize) when the
+distribution R is chosen appropriately. Note, however, that this
+result is very pessimistic, since gradient descent must perform
+a step is a neighborhood of wt while Alg. 1 may perform
+arbitrary large jumps. We postpone the analysis of such cases
+to future work.
+A. Number of Qubits
+Approaches comparable to QCQO use precision vectors to
+represent continuous values [7], [14]. For encoding a value
+in the unit interval [0, 1] using k (qu)bits, we can construct a
+vector p = (2i−1/2k −1)⊺
+i=1,...,k so that Xp = {p⊺z : z ∈
+Bk} samples the interval evenly in steps of size 2k −1,
+with p⊺0 = 0 and p⊺1 = 1. To represent any number
+within a neighborhood of size ϵ > 0 we need at least
+k ≥⌈log2(1/(2ϵ) + 1)⌉, or Θ(d log(1/ϵ)) (qu)bits.
+In contrast, QCQO makes the continuous values implicit
+and instead uses (qu)bits to encode the inclusion/exclusion
+of fixed summands in a sum. Consequently our method can
+encode any arbitrary vector x ∈Rd using just a single bit
+zi, by simply choosing Ri = x, i.e., we need Θ(1) binary
+variables in general. This allows us to choose the number of
+(qu)bits flexibly according to hardware limitations, requiring
+fewer qubits than explicit encodings.
+IV. APPLICATION: LINEAR REGRESSION
+Given a data matrix X ∈RN×d consisting of N rows of
+d-dimensional data points and a vector y ∈RN of target
+values, we want to find a weight vector w ∈Rd and a bias
+term b ∈R such that Xw + b is an approximation of y. The
+approximation quality is quantified by the Mean Squared Error
+(MSE) defined as
+MSE(w, b; X, y) = 1/N∥Xw + b1 −y∥2
+2.
+(4)
+For convenience, we fuse the bias term with the weight vector
+by assuming wd = b and Xi,d = 1 ∀i. This lets us write the
+MSE in matrix-vector form as
+MSE(w; X, y)
+(5)
+= 1/N(Xw −y)⊺(Xw −y)
+= 1/N(w⊺X⊺Xw −2y⊺Xw + y⊺y)
+= w⊺(1/NX⊺X
+|
+{z
+}
+=:A
+)w + (−2/NX⊺y
+|
+{z
+}
+=:a
+)⊺w + const.
+(6)
+
+0
+200
+400
+600
+800
+1000
+Iteration
+100
+101
+102
+103
+104
+105
+106
+Mean Squared Error (MSE)
+n = 8, σ = 0.1
+n = 8, σ = 1.0
+n = 16, σ = 0.1
+n = 16, σ = 1.0
+n = 24, σ = 0.1
+n = 24, σ = 1.0
+Fig. 1.
+Convergence behavior of QCQO on Linear Regression tasks with
+different choices of n (number of rows of update matrix R) and σ (standard
+deviation used for sampling the rows of R); MSE is averaged over 10 runs.
+Applying Eq. (3) by replacing A and a with above terms
+we obtain a QUBO instance with weight matrix
+QLR(w, R; X, y)
+= 1/N (RX⊺XR⊺+ 2 diag[RX⊺(Xw −y)]).
+A. Experimental Evaluation
+To test the convergence behavior of QCQO, we generate a
+synthetic regression data set with d = 16 and N = 105 by
+(i) sampling w ∈N(0d, Id), (ii) setting w ←100w/∥w∥2,
+such that the weight vector has a fixed Euclidean distance
+of 100 from the origin, (iii) sampling X ∈RN×d with
+Xi ∼N(0d, dId), (iv) setting Xi,d = 1 ∀i, and (v) computing
+y = Xw. Following this approach we obtain a regression
+data set with ground-truth weight vector w∗, which we try to
+recover using QCQO.
+To this end, we initialize Alg. 1 with A and a according
+to Eq. (6) and choose 0d as our initial guess for every run.
+The rows of R are sampled i.i.e. from a normal distribution
+N(0d, 4σ/nId), which by Theorem 1 results in update steps
+distributed as N(0d, σId) in expectation over uniform z. We
+choose all combinations of (n, σ) ∈{8, 16, 24} × {0.1, 1.0}.
+Due to the relatively small values of n, we use a brute-force
+QUBO solver.
+The results are shown in Fig. 1, from which we make two
+key observations: Firstly, we observe that convergence is faster
+with higher n. This is likely due to the larger number of sums
+that can be formed from the rows of R in each iterations.
+Increasing n leads to an exponentially larger set of possible
+steps in Rd, increasing the probability to find better solutions.
+Secondly, a larger σ leads to a steeper initial descent
+followed by a shallower descent after an MSE of around 103.
+We assume this change in behavior occurs when the distance
+between the current solution and the optimal solution becomes
+smaller than a standard deviation of U. This is analogous
+0
+200
+400
+600
+800
+1000
+Iteration
+100
+101
+102
+∥w −w∗∥2
+n = 8, σ = 0.1
+n = 8, σ = 1.0
+n = 16, σ = 0.1
+n = 16, σ = 1.0
+n = 24, σ = 0.1
+n = 24, σ = 1.0
+Fig. 2.
+Same experiment as Fig. 1, but showing the Euclidean distance
+between current solution w of each iteration and the globally optimal solution
+w∗, averaged over 10 runs.
+to the behavior of Gradient Descent around the optimum
+when the step size is too large and the current solution starts
+oscillating around the true optimum [16]. However, the key
+difference is that QCQO cannot move to a solution with higher
+loss value.
+The second observation suggests that QCQO would profit
+from a gradually decreasing σ, following some schedule
+similar to a learning rate schedule in evolutionary strategies
+or stochastic gradient descent learning [17], [18].
+Figure 2 shows the same experiment as Fig. 1, but reporting
+the Euclidean distance between the current solution wt of
+each iteration and the globally optimal vector w∗. The curves
+are very similar to the MSE, showing a steep approach up to
+around 80 iterations, after which the distance stagnates, with
+larger n leading to a smaller distance. Again, a lower σ leads
+to a slower initial approach, and a much smaller final distance
+after 1000 iterations.
+V. STEP SIZE SCHEDULING
+To introduce an adaptive step size, we modify QCQO
+slightly by (i) assuming that the distribution R is a row-wise
+isotropic multivariate normal distribution N(0d, 4σ/nId), and
+(ii) updating σ in every iteration based on a window of past
+update steps, for which (iii) we introduce a window size
+hyperparameter T ∈N.
+As explained before, a standard deviation of 4σ/n for the
+rows of R leads to an expected standard deviation of σ on
+the update step U = Ez[R⊺z] = 1/21⊺
+nR. By computing the
+average size of the past T update steps, we can deduce the
+approximate step size that should be taken that has lead to the
+largest improvement over the past T iterations.
+
+10−4
+10−2
+100
+102
+104
+106
+Mean Squared Error (MSE)
+n = 8
+n = 16
+n = 24
+0
+200
+400
+600
+800
+1000
+Iteration
+10−1
+σ
+Fig. 3.
+Convergence behavior of QCQO on Linear Regression tasks with
+different choices of n (number of rows of update matrix R) and σ (standard
+deviation used for sampling the rows of R), using the step size update rule
+described by Eq. (7); MSE is averaged over 10 runs.
+Algorithm 2 Quadratic Continuous Quantum Optimization
+with window-based step size adaption
+Input: Quadratic problem defined through A ∈Rd×d and
+a ∈Rd as in Eq. (1); number of rows n ∈N (QUBO
+size); window size T ∈N; initial guess w0 ∈Rd; budget
+or stopping criterion
+Output: Improved solution w◦
+1: t ←0
+2: while stopping criterion unfulfilled or budget remains do
+3:
+if t > T then
+4:
+σt ←1/T PT
+τ=1∥ut−τ∥2
+5:
+else
+6:
+σt ←1
+7:
+end if
+8:
+Sample every row of Rt i.i.d. from N(0d, σtId)
+9:
+Compute Q(wt, Rt) according to Eq. (3)
+10:
+z∗
+t ←arg minz EQ(z) {use quantum annealer}
+11:
+ut ←R⊺
+t z∗
+t
+12:
+wt+1 ←wt + ut
+13:
+t ←t + 1
+14: end while
+15: return wt
+To this end, let ut denote the update step in iteration t. We
+compute
+ht = 1/T
+T
+X
+τ=1
+∥ut−τ∥2 = 1/T
+T
+X
+τ=1
+v
+u
+u
+t
+d
+X
+i=1
+u2
+t−τ,i
+(7)
+as an online estimator of the square root of the 2nd moment
+of the update step, which we use as a new value of sigma,
+setting σ = ht. See Alg. 2 for an overview of the procedure.
+The results are shown in Fig. 3, again for multiple n on the
+same data set as before. As we expected, initially the value of
+0
+200
+400
+600
+800
+1000
+Iteration
+10−2
+10−1
+100
+101
+102
+∥w −w∗∥2
+n = 8
+n = 16
+n = 24
+Fig. 4.
+Same experiment as Fig. 3, but showing the Euclidean distance
+between current solution wt of each iteration and the globally optimal solution
+w∗, averaged over 10 runs.
+σ increases to around 10 before decreasing steadily, leading to
+a much lower MSE value after the budget of 1000 iterations
+was depleted. Like before, a larger n is beneficial for faster
+convergence at the cost of a larger QUBO search space.
+Again, the Euclidean distance between wt in each iteration
+and the globally optimal w∗is shown in Fig. 4, and again it is
+very similar to Fig. 3, leading to a much smaller final distance
+after 1000 iterations than without step size adaption.
+A. Evaluation on Quantum Annealer
+For small n < 30 we were able to compute the ground-
+truth optima of the QUBO instances in Algs. 1 and 2 by
+brute force, but this quickly becomes infeasible for larger
+n ≫30. To investigate the performance of QCQO using
+imperfect QUBO solvers, we run it using a D-Wave quantum
+annealer. Specifically, we use the Advantage 2 system 1.1,
+which comprises over 5,000 qubits and up to around 35,000
+couplings using the Pegasus topology [19], allowing for dense
+QUBO weight matrices of up to n = 180. We solve each
+QUBO instance with an annealing time of 20 ns and 100
+reads (“shots”): the annealing process is repeated 100 times
+per instance and the lowest-energy solution returned. Due to
+persisting challenges of real quantum hardware, this solution
+may not be optimal [20]. However, QCQO should still work,
+as long as the solution returned by the solver does not increase
+the loss value. This is highly unlikely, as 0n is always a valid
+solution leaving wt unchanged.
+We repeat the same experiment described in Section V,
+but replace the brute-force QUBO solver with calls to the
+D-Wave device. Additionally, we run the algorithm with
+n ∈{16, 32, 64}, as the QA device allows us to solve larger
+QUBO instances. The resulting MSE over time is shown in
+Fig. 5: We clearly observe a very similar behavior as in Fig. 3,
+although the decrease in MSE is less steep, leading to a final
+MSE of only around 10−1 after 1000 iterations for n = 64.
+
+10−1
+101
+103
+105
+Mean Squared Error (MSE)
+n = 16
+n = 32
+n = 64
+0
+50
+100
+150
+200
+250
+Iteration
+10−1
+101
+σ
+Fig. 5. Same experiment as Fig. 3, but run on a D-Wave quantum annealer,
+averaged over 10 runs.
+Interestingly, the final MSE is better for n = 32 than for
+n = 64, whereas using the brute-force solver a higher n always
+lead to a lower loss value. Presumably, this is due to imperfect
+solutions returned by the QA device, leading to higher-quality
+solutions for n = 32 than for n = 64, which seems to be more
+important for steady convergence than the additional update
+step directions introduced by more rows of R.
+VI. CONCLUSION
+In this work we have described the Quadratic Continu-
+ous Quantum Optimization (QCQO) algorithm, approximating
+solutions of unconstrained quadratic programming problems
+using a series of QUBO problems, which can be solved by
+QA. We demonstrated that the algorithm works and finds good
+solutions to an LR problem. In addition, we devised a step
+size adaption scheme that demonstrably improves convergence
+speed and solution quality. Lastly, we showed that QCQO
+also works on real quantum hardware by running it on a D-
+Wave Advantage 2, though the reduced solution quality leads
+to slower convergence.
+In the scope of this work, we only used LR as an exem-
+plary optimization problem, which has a closed-form solution,
+however, the class of problems that can be approached by
+QCQO is much larger and comprises harder problems. In
+particular, it can be applied naturally to all unconstrained
+quadratic programming problems with indefinite parameter
+matrix A, which arise in diverse settings, including relaxations
+of combinatorial problems such as Max-Cut and QUBO, as
+subproblems in robust and nonconvex optimization [21], or
+as intermediate formulations in finance and signal processing;
+our method thus offers potential utility as a heuristic in these
+domains. In future work, we will explore the efficiency of our
+approach on other problems, particularly such with non-convex
+loss functions.
+So far, the matrix R is always sampled from some distribu-
+tion. While this approach has desirable theoretical properties,
+the question arises if some fixed choice of R leads to the
+best possible coverage of the hyperball around wt across all
+z, or if we can adapt R (or its distribution parameters) based
+on the previous update steps, similarly to covariance matrix
+adaption [22].
+Our step size adaption scheme (Section V), while effective
+in our experiments, is largely heuristic. An in-depth analysis
+of different schemes and how they impact the convergence
+properties and efficiency of QCQO is left for future work.
+REFERENCES
+[1] L. K. Grover, “A fast quantum mechanical algorithm for database
+search,” in Proceedings of the 28th Annual ACM Symposium on the
+Theory of Computing, 1996, pp. 212–219.
+[2] P. W. Shor, “Polynomial-time algorithms for prime factorization and dis-
+crete logarithms on a quantum computer,” SIAM Journal on Computing,
+vol. 26, no. 5, pp. 1484–1509, 1997.
+[3] J. Preskill, “Quantum Computing in the NISQ era and beyond,” Quan-
+tum, vol. 2, p. 79, 2018.
+[4] T. Kadowaki and H. Nishimori, “Quantum annealing in the transverse
+Ising model,” Physical Review E, vol. 58, no. 5, pp. 53–55, 1998.
+[5] G. Kochenberger, F. Glover, B. Alidaee, and K. Lewis, “Using the uncon-
+strained quadratic program to model and solve Max 2-SAT problems,”
+Int. Journal of Operational Research, vol. 1, no. 1-2, pp. 89–100, 2005.
+[6] A. Lucas, “Ising formulations of many NP problems,” Frontiers in
+Physics, vol. 2, 2014.
+[7] P. Date, D. Arthur, and L. Pusey-Nazzaro, “QUBO Formulations for
+Training Machine Learning Models,” arXiv:2008.02369 [physics, stat],
+2020.
+[8] P. L. Hammer and E. Shlifer, “Applications of pseudo-Boolean methods
+to economic problems,” Theory and Decision. An International Journal
+for Multidisciplinary Advances in Decision Science, vol. 1, no. 3, pp.
+296–308, 1971.
+[9] F. Neukart, G. Compostella, C. Seidel, D. von Dollen, S. Yarkoni, and
+B. Parney, “Traffic Flow Optimization Using a Quantum Annealer,”
+Frontiers in ICT, vol. 4, 2017.
+[10] Y. Chai, L. Funcke, T. Hartung, K. Jansen, S. K¨uhn, P. Stornati, and
+T. Stollenwerk, “Optimal flight-gate assignment on a digital quantum
+computer,” Physical Review Applied, vol. 20, no. 6, p. 064025, 2023.
+[11] N. Piatkowski, T. Gerlach, R. Hugues, R. Sifa, C. Bauckhage, and
+F. Barbaresco, “Towards bundle adjustment for satellite imaging via
+quantum machine learning,” in 2022 25th International Conference on
+Information Fusion (FUSION), 2022, pp. 1–8.
+[12] E. C¸ ela and A. P. Punnen, “Complexity and polynomially solvable
+special cases of QUBO,” in The Quadratic Unconstrained Binary
+Optimization Problem: Theory, Algorithms, and Applications, 2022, pp.
+57–95.
+[13] A. P. Punnen, F. Glover, G. Kochenberger, Y. Du, E. C¸ ela, A. N.
+Letchford, E. Boros, R. Sotirov, K. Natarajan, Y. Wang, J.-K. Hao,
+and B. D. Woods, The Quadratic Unconstrained Binary Optimization
+Problem: Theory, Algorithms, and Applications, 2022.
+[14] P. Date and T. Potok, “Adiabatic quantum linear regression,” Scientific
+Reports, vol. 11, no. 1, 2021.
+[15] J. Nocedal and S. J. Wright, “Quadratic programming,” Numerical
+optimization, pp. 448–492, 2006.
+[16] Y. Nesterov, Introductory Lectures on Convex Optimization: A Basic
+Course, 1st ed., ser. Applied Optimization.
+Springer New York, 2004.
+[17] L. Bottou, F. E. Curtis, and J. Nocedal, “Optimization methods for large-
+scale machine learning,” SIAM Rev., vol. 60, no. 2, pp. 223–311, 2018.
+[18] T. Glasmachers, “Global convergence of the (1 + 1) evolution strategy
+to a critical point,” Evol. Comput., vol. 28, no. 1, pp. 27–53, 2020.
+[19] D-Wave Systems, Technical Description of the D-Wave Quantum Pro-
+cessing Unit, 2021.
+[20] ——,
+“Error
+sources
+for
+problem
+representation,”
+https://docs.dwavesys.com/docs/latest/c qpu ice.html, 2024.
+[21] R. E. Burkard, E. C¸ ela, P. M. Pardalos, and L. S. Pitsoulis, The Quadratic
+Assignment Problem.
+Springer US, 1998, pp. 1713–1809.
+[22] N. Hansen, S. D. M¨uller, and P. Koumoutsakos, “Reducing the time
+complexity of the derandomized evolution strategy with covariance
+matrix adaptation (cma-es),” Evolutionary computation, vol. 11, no. 1,
+pp. 1–18, 2003.

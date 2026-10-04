@@ -1,0 +1,1184 @@
+Align While Search: Belief-Guided Exploratory Inference
+for World-Grounded Embodied Agents
+Seohui Bae1
+Jeonghye Kim2
+Youngchul Sung2
+Woohyung Lim1
+1LG AI Research
+2KAIST
+{seohui.bae,w.lim}@lgresearch.ai, {jeonghye.kim,ycsung}@kaist.ac.kr
+Abstract
+In this paper, we propose a test-time adaptive agent that
+performs exploratory inference through posterior-guided be-
+lief refinement without relying on gradient-based updates or
+additional training for LLM agent operating under partial
+observability. Our agent maintains an external structured
+belief over the environment state, iteratively updates it via
+action-conditioned observations, and selects actions by max-
+imizing predicted information gain over the belief space. We
+estimate information gain using a lightweight LLM-based
+surrogate and assess world alignment through a novel re-
+ward that quantifies the consistency between posterior belief
+and ground-truth environment configuration. Experiments
+show that our method outperforms inference-time scaling
+baselines such as prompt-augmented or retrieval-enhanced
+LLMs, in aligning with latent world states with significantly
+lower integration overhead.
+1
+Introduction
+Agents operating in partially-observable environments
+continuously encounter incomplete information in the course
+of accomplishing their goals [14, 16]. The key capability
+required in such settings is exploratory decision making:
+The agent should not only act to achieve the objective but
+also to collect information that refines its belief about the
+world. The interaction between action, observation, and
+belief refinement forms the basis of effective behavior under
+uncertainty.
+In this paper, we consider such exploratory decision mak-
+ing under uncertainty with focus on search task, which is the
+basic task for more advanced tasks, and examine inference-
+time world understanding under partial observability. While
+large language models (LLMs) have shown promise in zero-
+shot task execution [2, 25], their static reasoning often fails
+to adapt to the unfolding dynamics of environments with
+partial observability. Prior approaches to such partial ob-
+servability include train-time policy optimization via super-
+vised or reinforcement learning training [8, 26, 29, 42] and
+Figure 1. Success rate vs. token usage on ALFWorld subtasks.
+AWS achieves higher success with 2-5× fewer tokens compared to
+strong inference-time baselines, highlighting efficient belief-guided
+exploration under partial observability. Full results in Appendix 20.
+inference-time scaling methods [21, 22, 30]. However, the
+former requires substantial training costs and limits deploy-
+ment flexibility, while the latter lacks adaptive interaction
+with the environment. More recent inference-time agents,
+such as Reflexion [33], RAP [10], RAFA [24], LAC [6], and
+ReflAct [17], couple LLMs with classical MDP planning or
+question-based belief summaries, but typically rely on addi-
+tional simulators or learned critics and do not maintain an
+explicit probability distribution over latent environment con-
+figurations and object locations. We instead view exploratory
+decision making for search under partial observability as
+an approximate Bayes-adaptive control problem: the agent
+maintains a posterior over latent environment configurations
+and selects actions that trade off task reward and information
+gain in belief space.
+With this perspective, we propose a novel, lightweight
+but effective agent architecture that performs inference-time
+exploratory reasoning through posterior-guided belief refine-
+ment. Our core idea is as follows: the agent maintains a struc-
+tured posterior belief over search action space, updates it
+1
+arXiv:2512.24461v1 [cs.AI] 30 Dec 2025
+
+based on environmental feedback, and selects actions that re-
+flect this evolving belief. Thus, our behavior policy is driven
+not by memorized patterns but by a dynamically refined
+understanding of the world. Crucially, all our adaptation
+occurs at test time without gradient updates, fine-tuning, or
+additional environment models. Empirical results show that
+our inference-time alignment strategy outperforms inference-
+time policy optimization baselines with substantially lower
+computational overhead, as shown in Fig 1. Our method
+generalizes across diverse object types, environments, and
+interaction histories without requiring task-specific training
+or reward-based tuning.
+Our contributions are summarized below:
+• We introduce Align While Search (AWS), a lightweight
+world-aligned agent that casts test-time control as belief-
+guided search over object-centric hypotheses, without any
+additional training or gradient updates.
+• We provide a Bayesian account of AWS by viewing it as ap-
+proximate Bayes-adaptive control: a latent generative model
+with amortized posterior belief refinement implemented by
+an LLM, and information-gain-driven action selection on the
+belief state.
+• Across ALFWorld, VirtualHome, and BabyAI, in both
+text-only and image-augmented settings, we show that AWS
+consistently improves search success–cost trade-offs over
+inference-time prompt/RAG scaling and train-time world-
+model or policy-gradient baselines, as seen in Fig. 1.
+2
+Preliminaries
+MDP/POMDP for LLM agents.
+Many language-agent
+settings can be cast as a Markov Decision Process (MDP)
+⟨S, A, T, R, γ⟩. In embodied environments such as ALF-
+World and VirtualHome, the (latent) world state s includes
+agent pose, object locations, container open/close states,
+and inventory. The agent issues high-level action a (e.g.,
+navigation, opening, manipulation) and receives textual ob-
+servations o describing the partially observed scene. Then,
+the world state s changes according to transition T based
+on the current state and agent action. For an LLM-based
+agent, the input is typically the interaction history [42],
+ht = {(oi, ai)}t
+i=1, or a textual/symbolic summary [33],
+and the LLM implements a policy π(at | ht). Concrete
+instantiations for ALFWorld/VirtualHome are given in Ap-
+pendix 9.2.
+Epistemic uncertainty and Bayes-adaptive MDPs.
+Be-
+cause the environment is only partially observed, LLM
+agents in ALFWorld and VirtualHome are naturally modeled
+as POMDPs [16]: at each step the agent receives partial
+observation o ∼O(o | s, a) about the environment state
+s. Beyond perceptual uncertainty, there is also epistemic
+uncertainty about latent environment parameters, such as ob-
+ject layouts or stochastic dynamics, which must be inferred
+from interaction. Bayes-adaptive MDPs (BAMDPs) [15, 45]
+make this explicit by introducing latent parameters ϕ ∈Φ
+with prior b0(ϕ) and treating the belief over ϕ as part of the
+state. Thus, in a BAMDP ⟨S, A, Φ, T, R, γ, b0⟩, the agent
+seeks a policy that maximizes expected return with posterior
+updates over ϕ induced by the history, thereby motivating
+information-seeking behavior.
+3
+Pitfalls and Opportunities in LLM Agents
+Modern language agents, both base models and those post-
+trained with supervised trajectories, tend to overfit to trained
+behaviors. In this section, we investigate this phenomenon
+in partially observed settings.
+3.1
+Failure modes in search tasks
+We conducted an experiment to investigate the diversity and
+test-time adaptation of generated action sequences of an
+agent. In each run of this experiment, the agent needs to
+search for an object in a household, yielding one action se-
+quence, and each run has a different room layout and a target
+location. The result is shown in Figure 2 (left), where the
+entropy represents the entropy of empirical distribution on
+the set of actions computed from all experiment runs, and
+the unique ratio represents the number of distinct action se-
+quences out of total action sequences. It is seen that the base
+model (GPT-4o-mini) exhibits low action entropy (1.94) and
+low distinct trajectory ratio (0.21) compared to our method
+3.11 and 0.5, respectively, revealing that the base LLM agent
+yields repetitive search behavior with low diversity in action,
+even though the environment changes run by run. More im-
+portantly, we observed that this behavior persists even after
+supervised fine-tuning (SFT) by which the base model is
+further trained on expert trajectories.
+Figure 2. Exploration Failure of Base and SFT Models. (Left)
+Trajectory diversity measured by entropy and the distinct trajectory
+ratio. (Right) A breakdown of SFT agent failures reveals that most
+errors occur due to rigid replay of train-time search patterns.
+Fig. 2 (right) and Appendix 10 focus on the case that the
+agent is given search tasks in unseen test-time environments
+in which the room layout is similar to the trained layout
+but object locations are different. In this case, the agent
+persistently reproduces train-time room visitation sequences
+in the test-time environments with 84.5% (=52.7+31.8) out
+of total search sequences. Notably, over 50% of failures
+occur in the case of train-like search sequences, indicating
+that the agent is not adapting based on what it observes but
+performs blindly as it is trained.
+3.2
+Opportunities for belief-augmented search
+Introducing and inferring a latent variable ϕ representing
+the environment type or configuration can enhance adap-
+2
+
+tation and efficient decision-making. It allows the agent
+to select context-appropriate actions, reduce uncertainty
+through targeted exploration, and generalize across similar
+environments. With the latent variable ϕ, given a trajectory
+τt = (o0, a0, o1, . . . , at), the agent maintains an explicit be-
+lief b := p(ϕ|τ) and selects actions to maximize expected
+information gain on the belief [4, 5, 23]. Our key obser-
+vation in this paper is that many task environments have
+well-defined latent semantic structure, such as rooms differ-
+ing by type (e.g., kitchen vs. bedroom) and associated object
+patterns so that we can adopt latent variable ϕ for such LLM
+agent’s environments.
+Figure 3. Object Counts per House Reveal Latent Diversity.
+(Left) PCA shows clustered object usage patterns across houses.
+(Right) Each cluster exhibits distinct object preferences, indicating
+latent user behavior differences.
+For example, as shown in Fig. 3 (left), households form
+natural clusters based on their living room object usage,
+while their corresponding cluster-wise object profile (Fig. 3
+(right)) reveals structured differences (e.g., tech-heavy or
+minimalist usage). The observations in Fig. 3 suggest that,
+during search, the difficulty does not stem from complex
+world configuration or dynamics but from the agent’s inabil-
+ity to efficiently exploit this well-defined latent structure. By
+adopting the latent semantic variable ϕ and constructing an
+explicit belief structure on ϕ, we can facilitate search task.
+In the next section, we formalize this idea.
+4
+Problem Formulation: Belief-Augmented
+Search
+We now introduce a formal abstraction of search task, which
+factors out world dynamics and focuses on the agent’s epis-
+temic uncertainty about object locations.
+Single-State MDP for Search in Embodied Worlds
+Search tasks occurs repeatedly inside ALFWorld and Vir-
+tualHome episodes: the LLM agent must locate a target
+object before it performs any actions that change the world
+(e.g., moving the objects, rearranging containers). At the
+search stage, the physical world state (including all object
+locations) is static; what changes over time is the agent’s be-
+lief about where the target is located. Rather than modeling
+full embodied dynamics during this phase, we follow re-
+cent object-search formulations that abstract away world
+dynamics and operate purely over a belief on candidate
+locations [20, 38]. Thus, we model the search task as a
+belief-augmented single-state decision problem [37, 38, 46].
+Formally, fix a search subgoal (e.g., find the apple) within
+an episode, and let L = ℓ1, . . . , ℓL denote the finite set of
+candidate locations or receptacles where the target might
+reside (rooms, containers, or surfaces determined by the
+underlying environment). We introduce an explicit belief
+state bt ∈∆L, where bt(ℓ) is the agent’s probability that the
+target object is at location ℓat search step t and ∆L is the
+set of all probability distributions over L.
+During a search task, we abstract the underlying world
+state s as fixed, and define a single-state MDP
+Msearch = ⟨{s⋆}, Asearch, Tsearch, Rsearch, γ⟩
+where s⋆is a dummy world state and all nontrivial dynamics
+are pushed into the belief. An action at ∈Asearch corre-
+sponds to checking a location, which in practice bundles
+navigation and low-level manipulation into an atomic opera-
+tion, e.g.,
+at = CHECK(ℓt),
+meaning go to ℓt, open if necessary, and inspect it. The
+environment returns a textual observation ot (e.g., “you see
+an apple” or “drawer is empty”).
+Belief-State Control Objective in Bayesian View
+Under
+the static-world assumption for the search phase, the true
+location of the target does not change; instead, only the
+agent’s belief is updated. We model this by a belief update
+operator BU(·) that defines the effective transition Tsearch
+in belief space [16], bt+1 = BU(bt, at, ot). The reward is
+sparse,
+Rsearch(bt, at, ot) =
+(
+1,
+if target is found,
+0,
+otherwise,
+and the search task terminates either when the target is found
+or when a step budget is exhausted. Thus, each search task is
+a bandit-like, single-state MDP [32] in which only the belief
+over locations evolves [20].
+Within a full episode, multiple such search subtasks may
+appear (e.g., “find the apple,” then later “find the mug”),
+each with its own candidate set L (possibly the same for
+different search subtasks) and initial belief b0. The main
+ALFWorld/VirtualHome task, which may include navigation
+between rooms and object manipulation after the target is
+found, remains a POMDP, but our Align While Search mod-
+ule operates specifically on the embedded search subtasks as
+an external belief module. Under this abstraction, our objec-
+tive is to improve search efficiency: for a fixed environment
+and step budget, maximize the probability of successfully
+finding the target and minimize the expected number of
+search steps by explicitly maintaining and updating bt.
+From a Bayesian RL perspective [7], this belief bt summa-
+rizes two coupled sources of epistemic uncertainty discussed
+in Section 3.2: a latent environment type ϕ (e.g., tech-heavy
+vs. minimalist households) and the resulting object-location
+patterns conditioned on ϕ. In principle, one could maintain
+3
+
+a joint posterior p(ϕ, ℓ| τt) and plan in the augmented state
+space (s⋆, bt). In practice, AWS instantiates a structured ap-
+proximation to this posterior: a global, language-level belief
+over latent environment hypotheses and a low-level belief
+over candidate check actions. The policy is then optimized
+in belief space, choosing actions based on their expected
+success and information gain with respect to these beliefs,
+which can be viewed as a contextual Bayesian bandit [1]
+adapted to single-state search subtasks.
+5
+Proposed Method: Align While Search
+Given the belief-augmented single-state search formulation
+in Section 4, we now describe Align While Search (AWS).
+AWS runs on top of an off-the-shelf LLM agent and is only
+invoked during search subtasks. It maintains a hierarchical
+belief over target-relevant structure, scores candidate CHECK
+actions using this belief, and returns the selected action to the
+base agent. We first introduce our belief parameterization,
+then explain how AWS performs exploratory action selection
+in belief space.
+5.1
+Hierarchical Belief Representation
+We represent the agent’s epistemic belief state with a hierar-
+chical pair (G, S):
+• G: a set of global hypotheses BG
+t over user habits and
+scene layout, stored as natural language (e.g., “the kitchen
+is well-organized; cabinets usually contain cups; mugs
+often appear near the sink”).
+• S: a low-level belief bS
+t over candidate symbolic actions,
+stored as a categorical distribution over locations or re-
+ceptacles (e.g., cabinet, countertop, drawer). An example
+distribution is visualized in Fig. 6 in Appendix 13.2.
+Concretely, the low-level belief bS is modeled as
+bS
+t (a) = Pr(object found after a), ∀a ∈LS (1)
+where LS denotes the set of symbolic CHECK actions that
+inspect a particular location (bundling navigation and low-
+level manipulation into one step). The global hypotheses G
+are initialized once per episode from the initial observation
+using a single LLM prompt; the exact templates are given in
+Appendix 13.2
+Bayesian Latent-Variable View and Amortized Updates
+The belief introduced above implicitly summarizes two
+sources of epistemic uncertainty: a latent environment type
+ϕ (e.g., user/household cluster as in Figure 3) and the result-
+ing object-location pattern. Let z = (ϕ, ℓ) denote the joint
+latent variable, where ℓindexes the target object location.
+In an ideal Bayesian formulation, we would maintain the
+posterior
+p(z | τt) ∝p(ot | at, z) p(z | τt−1),
+and plan in the augmented state space (s⋆, p(z | τt)), for
+example by maximizing information gain or expected task
+return. This latent-variable view is closely related to correla-
+tional object-search POMDPs [46], which explicitly model
+a joint latent distribution over object locations and exploit
+correlational structure during planning.
+In practice, AWS implements an amortized approxima-
+tion to this posterior [31]. Our hierarchical belief (G, S)
+induces a variational family
+qψ(z | τt) = qψ(ϕ | τt) qψ(ℓ| ϕ, τt),
+where qψ(ϕ | τt) is represented by the textual global hypothe-
+ses BG and qψ(ℓ| ϕ, τt) is represented by the action-level
+belief bS. The LLM-based update and projection operations,
+BG
+t
+πg
+BU ot
+−−−−→BG
+t+1
+and
+BG
+t+1
+πs
+BP
+−−−→bS
+t+1,
+can be viewed as a black-box amortized inference map
+Fψ(·) [18, 19]
+qψ(z | τt+1) = Fψ
+ qψ(z | τt), at, ot
+
+≈p(z | τt+1),
+implemented by prompting a frozen LLM. AWS then per-
+forms control directly in belief space, selecting actions ac-
+cording to their expected task reward and information gain
+under qψ, which can be seen as a contextual Bayesian bandit
+defined over single-state search subtasks.
+5.2
+Exploratory Action Selection
+Given the current belief bS
+t (and associated global hypotheses
+BG
+t ), AWS scores each candidate action a by its expected
+utility in belief space. We consider utilities that combine
+task reward and epistemic utility via information gain (IG).
+At time step t, we choose
+a∗
+t = arg max
+a∈Asearch
+Eˆo∼p(ˆo|a,bt)
+h
+U
+ bt, bt+1(bt, a, ˆo)
+i
+,
+(2)
+where bt+1 denotes the updated belief after taking a and
+observing ˆo, and U(·) is a posterior utility. In this work, we
+instantiate U as information gain,
+IG(a) = Eˆo
+
+H(bt) −H(bt+1 | a, ˆo)
+
+,
+(3)
+where H(·) is the entropy of the action-level belief. The
+expectation over ˆo is approximated using LLM-based obser-
+vation simulation; details are given in Appendix 13.1
+LLM-simulated belief update.
+The belief state at time t
+consists of textual global hypotheses BG
+t and numeric action-
+level scores bS
+t . For a candidate action a and a simulated
+observation ˆo, AWS updates belief in two stages:
+BG
+t
+πg
+BU(ˆo)
+−−−−−→BG
+t+1
+and
+BG
+t+1
+πs
+BP
+−−−→bS
+t+1.
+(4)
+The first map πg
+BU revises global hypotheses given ˆo (e.g.,
+removing “mugs are often in the sink” after observing an
+empty sink). The second map πs
+BP projects the updated
+textual belief to an actionable distribution over symbolic
+locations. We consider two projection variants:
+4
+
+Figure 4. Framework of Align While Search. Given the current trajectory, AWS maps language to a numeric belief via update→projection:
+observations update the global textual belief BG, which is then projected to a categorical action posterior bS(a) (Eq. (4)). Candidate actions
+are scored by expected IG (Eq. (3)) under simulated observations ˆo, and the top-ranked action is returned to the base agent.
+• Similarity-based projection: adjusts belief scores using
+lexical similarity between candidate symbols and the up-
+dated hypotheses.
+• LLM-based projection: queries an LLM to decide which
+symbols to boost or suppress given the hypotheses and
+location list.
+Both variants induce different patterns of belief evolution
+(local refinement vs. semantic jumps), leading to distinct
+exploration behaviors; we analyze these qualitatively in Ap-
+pendix 21. Prompt templates and exact score update rules
+(e.g., boost/suppress magnitudes) are provided in Appendix
+13.
+5.3
+Instance-Level Grounding and Termination
+The belief bS
+t is defined over symbolic locations (e.g.,
+cabinet, countertop). After AWS selects a symbolic
+action, the underlying environment requires a concrete in-
+stance (e.g., cabinet3). We therefore sample an instance
+uniformly from the set of objects associated with the chosen
+symbol and execute the corresponding environment action.
+The environment then returns a reward and observation, and
+AWS performs an actual belief update (Eq. 4) before pro-
+ceeding to the next step.
+Termination.
+The search loop terminates when the mis-
+sion is satisfied (target object found and placed) or when
+a step budget is exhausted. In practice, we also use an
+observation-alignment score to detect when the agent has
+converged to a stable hypothesis; details of this criterion and
+the full pseudocode are provided in Appendix 13.5.
+6
+Experiments
+We evaluated the effectiveness of our belief-guided agent
+in simulated environments under partial observability. Our
+experiments were designed to answer three key questions:
+• Does inference-time belief refinement improve search
+efficiency compared to static or prior-only baselines?
+• Is the predicted information gain (IG) aligned with
+actual improvements in belief accuracy?
+• What factors affect the success or failure of belief-based
+action?
+6.1
+Experimental Settings
+Environments
+We evaluated our method on two bench-
+marks with sparse rewards and distinct types of action space:
+ALFWorld(text, image) [34] and BabyAI [3] and Virtual-
+Home(text, image) [27] . For high-level actions, we evalu-
+ated on ALFWorld [34], a household object search bench-
+mark that requires goal-directed navigation and interaction.
+More generally, VirtualHome [27] provides a 3D, proce-
+durally richer benchmark with unseen-scene generalization.
+We followed Song et al. [36] and Wang et al. [39] for tra-
+jectory construction and supervised training for each. For
+low-level actions, we evaluated on BabyAI [3], a Grid World
+environment in which agents and objects are placed in an
+8x8 tile room (results in Appendix 18.1). Full dataset and
+environment details are provided in Appendix 17.
+Evaluation Metrics
+We report the Success Rate(%)(↑)
+as our primary metric. We also report Average Steps (↓)
+and Time/Token Cost (↓)(cost analysis in Appendix 20) for
+comprehensive comparison.
+Baselines
+We compared our method (AWS) against three
+categories of baselines: (1) Inference-time baseline, such as
+ReAct [42], Reflexion [33], RAP [10], RAFA [24], and Re-
+flAct [17]; (2) Training-time baselines, including ETO [36],
+WKM [28], and MPO [41] for ALFWorld; IPR [40] and
+STeCa [39] for VirtualHome; (3) LLM-based Embodied
+baselines, including ZSP [12], LLM-FT (a fine-tuned LLM),
+LLM-Planner [35], SayCanPay [11], WorMI [43] (results
+in Appendix 18.2). Verbal and schematic comparisons with
+AWS are provided in Appendix 15, and their reproduction
+details are presented in Appendix 16.
+Model Backbones
+We evaluated AWS using both open-
+source and proprietary LLMs: LLaMA2-7B [9], LLaMA3.1-
+5
+
+Backbone
+Method
+ALFWorld
+Avg.
+CLEAN COOL
+EXAMINE
+HEAT
+PICK
+PICK-2
+GPT-4
+ReAct [42]
+70.9
+0.00
+0.00
+0.00
+83.3
+35.2
+35.5
+Reflexion [33]
+64.5
+90.5
+100.
+95.7
+83.3
+58.8
+82.1
+RAP [10]
+70.9
+9.52
+5.55
+4.34
+79.1
+29.4
+33.2
+RAFA [24]
+35.5
+47.6
+55.6
+43.5
+58.3
+5.90
+41.0
+ReflAct [17]
+96.8
+95.2
+100.
+78.3
+95.8
+94.1
+93.3
+AWS (Ours)
+96.8
+100.0
+66.6
+91.3
+91.6
+94.1
+90.0
+LLaMA-70B
+ReAct [42]
+22.5
+0.00
+0.00
+0.00
+75.0
+35.2
+22.1
+Reflexion [33]
+54.8
+61.9
+27.8
+78.3
+50.0
+35.3
+51.3
+RAP [10]
+25.8
+4.76
+11.1
+4.34
+75.0
+35.2
+26.0
+RAFA [24]
+61.3
+38.1
+66.7
+30.4
+60.0
+0.00
+43.2
+ReflAct [17]
+38.7
+66.7
+72.2
+56.5
+83.3
+52.9
+60.5
+AWS (Ours)
+93.5
+80.9
+44.4
+65.2
+95.8
+76.4
+76.0
+Table 1. (left) ALFWorld sub-task performance compared to inference-time baselines across multiple LLM backbones (Bold indicates best
+performance, underline indicates second-best); (right) Illustration of belief-guided navigation in VirtualHome (a) →(b). ReAct (blue)
+wanders through low-probability rooms, resulting in a long and inefficient trajectory (8 steps). AWS (yellow) takes a substantially shorter
+route (4 steps) by committing early to a high-value hypothesis, corresponding to a rapid shift of belief mass from many low-probability
+rooms to a compact mode around the true target.
+VirtualHome
+ALFWorld
+Method
+Seen Unseen
+Method
+Seen Unseen
+SFT [44]
+64.9
+57.7
+SFT [44]
+79.3
+71.6
+ETO[36]
+66.6
+60.1
+ETO [36]
+77.1
+76.4
+IPR [40]
+67.6
+61.9
+WKM [28]
+77.1
+78.2
+STeCa [39]
+69.6
+63.6
+MPO [41]
+80.7
+81.3
+AWS (Ours) 69.6
+65.2
+AWS (Ours) 87.5
+85.3
+Table 2. Comparison with train-time baselines on VirtualHome
+and ALFWorld environments. Bold indicates best performance.
+8B [9], LLaMA3.1-70B [9], GPT-4o-mini [13], and GPT-
+4 [13]. Note that AWS requires πpred, πg
+BU and πs
+BP and
+uses the same LLM for all three with different prompting.
+Implementation details, including the exact API variants
+used, decoding settings, and per-backbone performance vari-
+ations, are provided in Appendix 17.
+6.2
+Main Results
+As shown in Table 1, Table 2 and Table 7 (in Appendix
+18.1), AWS provides strong inference-time gains over exist-
+ing methods. On ALFWorld (Table 1), AWS achieves the
+highest average success rate with the LLaMA-70B backbone
+(76.0%) and outperforms ReAct, RAP, RAFA, and Reflexion
+on almost all subtasks, while remaining highly competitive
+with GPT-4, where it ranks second in average performance
+(90.0%) and attains the best or tied-best score on several
+subtasks (CLEAN, COOL, PICK-2). Overall, AWS attains
+the best or tied-best performance on 7 out of 12 subtasks
+and stays within the top three on all subtasks. On BabyAI,
+AWS also shows consistently strong results compared to
+inference-time methods (Table 17).
+Compared to train-time baselines (Table 2), AWS
+achieves the highest performance on both text-based Vir-
+tualHome and ALFWorld, reaching 69.6%/65.2% on Vir-
+tualHome and 87.5%/85.3% on ALFWorld, outperforming
+state-of-the-art methods such as STeCa and MPO, despite
+using only inference-time belief refinement without updat-
+ing model weights.1 Hyperparameter sensitivity analysis is
+reported in Appendix 18.3.
+Generality on larger/multimodal settings
+To assess
+whether our formulation extends beyond text-rendered envi-
+ronments, we also report AWS’s search ability on the image-
+rendered multi-modal environment. In Table 8 of Appendix
+18.2, we further instantiate a multi-modal variant of AWS by
+pairing our belief module with a vision–language backbone.
+Without changing the search algorithm, this variant can op-
+erate on the same image-rendered environments, suggesting
+that our belief-guided exploratory inference is compatible
+with VLM-based embodied agents.
+6.3
+Ablation Studies
+To understand the contribution of individual components, we
+conducted controlled ablations and strategy replacements.
+Table 3 reports the success rate and efficiency of alternative
+search strategies. We tested four key variants: (1) random un-
+explored action (random), (2) no belief updates with greedy
+selection (fixed prior), (3) using a greedy action selection
+while updating beliefs (greedy), and (4) using an MCTS-
+style action selection without IG estimation (MCTS).
+Our results show that belief updates are essential for
+maintaining alignment over time-removing them leads
+1We fine-tune LLaMA-2-7B and LLaMA-3.1-8B cas backbones for
+VirtualHome and ALFWorld, respectively.
+6
+
+Method
+Prior Update IG MCTS SR (%) Steps (↓)
+Random Search
+×
+×
+×
+×
+74.6
+19.8
+Flat Prior Search
+✓
+×
+×
+×
+82.8
+14.5
+Greedy (No IG)
+✓
+✓
+×
+×
+82.4
+11.7
+MCTS (No IG)
+✓
+✓
+×
+✓
+85.0
+14.7
+Ours
+✓
+✓
+✓
+✓
+87.4
+13.8
+Table 3. Ablations. Removing either belief update or IG re-
+duces alignment and success rate, confirming both are essential for
+inference-time performance (bold = best, underline = second best).
+Base Model
+Method
+ALFWorld
+(A) Fine-tuned Models
+LLaMA-3.1-8B
+[44]
+Vanilla
+81.3
+LLM-Projection
+88.8 (+9.20%)
+Similarity-Projection
+91.7 (+12.8%)
+(B) Instruction-tuned Models
+LLaMA-3.1-8B
+(base model)
+Vanilla
+46.2
+LLM-Projection
+52.9 (+14.5%)
+Similarity-Projection
+67.9 (+46.8%)
+LLaMA-3.1-70B
+(base model)
+Vanilla
+85.0
+LLM-Projection
+91.0 (+7.06%)
+Similarity-Projection
+94.0 (+10.6%)
+GPT-4o-mini
+(base model)
+Vanilla
+76.8
+LLM-Projection
+86.6 (+12.7%)
+Similarity-Projection
+89.5 (+16.5%)
+Table 4. Comparison of two projection methods. Experiments
+across base models on ALFWorld-Text with MPO-inferred [41].
+to significant drops in success and increases in episode
+length. Notably, belief updates alone do not yield gains
+(Flat Prior→Greedy), but become evident when coupled
+with structured exploration.
+Similarly, removing IG
+(Ours→MCTS) results in inefficient exploration, confirming
+that our lightweight IG predictor provides a strong signal.
+Together, these results highlight that posterior-guided explo-
+ration is most effective when belief updates, IG estimation,
+and structured search operate in concert, enabling accurate
+alignment inference-time behavior.
+Two Projection Variants.
+Additionally, Table 4 further
+summarizes the impact of our two projection strategies. Both
+LLM-based and similarity-based projections consistently
+boost performance across a wide range of models, including
+LLaMA-3.1-8B-SFT(+12.8%), LLaMA-3.1-8B(+46.8%),
+LLaMA-3.1-70B(+10.6%), and GPT-4o-mini(+16.5%), for
+both fine-tuned and instruction-tuned settings. Notably, our
+method synergizes with alternative world models such as
+MPO [41], achieving new state-of-the-art results of 94.0%
+on text-based ALFWorld (Unseen). These results highlight
+that posterior-guided exploratory reasoning enables efficient
+inference-time adaptation and scalable deployment across
+environments and models.
+6.4
+Computational Cost
+Our method introduces higher inference-time overhead than
+ReAct due to LLM-based belief generation and updates.
+However, as in Figure 7 in Appendix 20, it achieves compa-
+rable success rates(↑) with reduced average steps(↓), execu-
+tion time(↓), and token usage per task(↓), against baselines,
+indicating more efficient trajectory generation.
+7
+Discussion
+7.1
+How IG Changes Belief for Better Search
+Entropy dynamics across search.
+To understand how IG
+reshapes belief, we measure the entropy of location-level
+beliefs for both AWS and the SFT baseline, using the same
+LLaMA 3.1 8B SFT backbone. Let L be the set of loca-
+tion symbols (e.g., cabinet, countertop) and Asearch
+the templated search actions. AWS maintains an explicit
+belief bS
+t over L. For the SFT agent, which has no explicit
+belief state, we construct an implicit belief by querying the
+backbone in scoring mode at each step t, obtaining log-
+probabilities log πSFT(a | ht) for all a ∈Asearch, normal-
+izing (Zt = P
+ℓ′∈L
+P
+a: g(a)=ℓ′ πSFT(a | ht)) them with a
+single softmax, and aggregating probabilities over actions
+that inspect the same location ℓ:
+bSFT
+t
+(ℓ) = 1
+Zt
+X
+a: g(a)=ℓ
+πSFT(a | ht)
+For both agents we then compute the entropy
+H(bt) = −
+X
+ℓ∈L
+bt(ℓ) log bt(ℓ),
+and define per-step information gain as ∆Ht = H(bt) −
+H(bt+1), with net entropy reduction ∆H = H(b0) −
+H(bend) between the beginning of search (t = 0) and the
+step when the goal object is first found. We say that an
+episode exhibits overall belief sharpening if the final belief
+is strictly sharper than the initial one (H(bend) < H(b0),
+and denote its frequency by Pr[∆H > 0]. Table 5 sum-
+marizes three statistics averaged over successful episodes:
+the mean per-step information gain ∆Ht, the net entropy
+drop ∆H, and the fraction of episodes with overall belief
+sharpening Pr[∆H > 0]. From a Bayesian perspective, the
+location-level belief bt can be viewed as an approximate
+posterior over the latent object location, so these quantities
+directly measure how effectively each agent reduces poste-
+rior uncertainty over the course of search. Empirically, AWS
+exhibits larger per-step updates and more than twice the cu-
+mulative entropy reduction of the SFT agent (∆H 0.87 vs.
+0.39), and belief sharpening occurs in a substantial higher
+fraction of episodes (84% vs. 59%). This indicates that IG
+7
+
+Agent
+∆Ht
+∆H
+Pr[∆H > 0]
+SFT (no IG)
+0.05
+0.39
+0.59
+AWS (ours)
+0.11
+0.87
+0.84
+Table 5. Entropy-based belief dynamics for the SFT baseline
+and AWS. We use the same LLaMA 3.1 8B backbone. ∆Ht
+denotes the average per-step information gain ∆Ht.
+Figure 5. Evaluating IG-Based Action Ranking and Belief Ac-
+curacy. (Left) Success rate under different IG-based selection
+strategies. (Right) Belief scores at visited locations, grouped by
+whether the target object was present (hit) or absent (miss).
+drives more decisive and consistently beneficial reallocation
+of probability mass onto the correct locations during search.
+Belief reshaping in a representative episode.
+Figure 9
+in Appendix 21.1 illustrates this pattern on a put mug in
+garbagecan task. Panels (a)–(b) show belief over two
+symbols (cabinet, countertop) for similarity-based
+vs. LLM-based projection. The similarity-based agent up-
+dates beliefs smoothly and locally, while the LLM-based
+agent makes larger semantic jumps, briefly allocating prob-
+ability to alternative receptacles. Panel (c) plots cabinet
+belief and entropy: for the LLM-based agent, entropy first
+rises when exploring semantically distant locations and then
+drops sharply once evidence supports cabinets, whereas the
+similarity-based agent shows milder changes. The corre-
+sponding action paths in panel (d) confirm this two-phase
+behavior: IG initially encourages broader exploration to de-
+bias wrong hypotheses, and subsequently focuses belief on
+a small set of plausible locations, enabling more efficient
+search.
+7.2
+Further Discussion on Performance Gain
+Observation alignment increases throughout AWS.
+We
+measure an alignment reward that compares the LLM-
+predicted observation with the actual environment feedback
+after executing an action. As shown in Figure 8(left) in Ap-
+pendix 19, this alignment score increases over search steps,
+indicating that AWS progressively refines its belief toward
+observations that are consistent with the true world state.
+Information gain and observation alignment correlates.
+We group steps into deciles according to their predicted
+IG score and track the change in alignment reward ∆Ralign.
+Higher-IG bins exhibit larger positive alignment gains (Fig-
+ure 8(right) in Appendix 19), showing that IG serves as a
+reliable ordinal signal for belief-improving actions.
+Max information gain achieves the best in downstream
+task.
+To assess how IG affects control, we vary which
+action is chosen from the IG ranking. Selecting the top-IG
+action yields the highest success rates, while forcing the
+second-best or lowest-IG action leads to progressively worse
+performance (Figure 5(left); Appendix 19), confirming that
+IG provides an effective relative ranking for exploration.
+Belief prior aligns with actual object presence.
+We also
+compare belief scores at visited locations depending on
+whether the target object is present. Hit locations receive sub-
+stantially higher probabilities than misses (Figure 5(right);
+0.45 vs. 0.31, p ≪10−10; Appendix 19), indicating that
+the belief prior is well aligned with true object presence and
+actively guides the agent toward promising receptacles.
+7.3
+Limitations
+Our approach has several limitations. First, AWS inherits
+the strengths and weaknesses of the underlying language
+model. Performance depends on the base model’s ability to
+simulate plausible household dynamics and object layouts;
+smaller models (e.g., Mistral-7B, DeepSeek-8B) often fail
+to generate reliable hypothetical observations, and their IG
+rankings collapse toward nearly static priors. In addition,
+AWS increases test-time cost: for each search step, we sim-
+ulate observations and perform belief updates for multiple
+candidate actions, which adds wall-clock and token overhead
+compared to a single-pass SFT agent.
+Second, our formulation explicitly targets a single-state
+search regime where the physical world is effectively static
+during search and episodes factor into FIND-THEN-ACT sub-
+tasks. This matches ALFWorld and VirtualHome, but does
+not directly handle environments with non-stationary object
+locations, concurrent agents, or more entangled long-horizon
+objectives.
+Finally, the belief update and information-gain computa-
+tion rely on hand-designed surrogates. The approximate pos-
+terior qψ(z | τ) is implemented via prompting and similarity-
+based or boost/suppress projection rules, and IG is used pri-
+marily as an ordinal ranking signal rather than a calibrated
+quantity. As a result, AWS offers no formal optimality guar-
+antees, and its behavior can be sensitive to prompt design
+and hyperparameters; learning world models and trained
+belief updaters is an important direction for future work.
+8
+Conclusion
+This work proposes a belief-augmented single-state
+search module that uses information gain in belief space to
+guide LLM agents under partial observability. By maintain-
+ing hierarchical hypotheses over environment structure and
+updating them at inference time, AWS turns static prompt-
+based agents into adaptive explorers, improving success and
+search efficiency in embodied benchmarks. Future work
+includes learning the belief updater and extending AWS
+beyond static search subtasks to dynamic, multimodal envi-
+ronments and richer forms of world alignment.
+8
+
+References
+[1] Shipra Agrawal and Navin Goyal. Thompson sampling for
+contextual bandits with linear payoffs. In International con-
+ference on machine learning, pages 127–135. PMLR, 2013.
+4
+[2] Tom Brown, Benjamin Mann, Nick Ryder, et al. Language
+models are few-shot learners. NeurIPS, 2020. 1
+[3] Thomas Carta, Clément Romac, Thomas Wolf, Sylvain Lam-
+prier, Olivier Sigaud, and Pierre-Yves Oudeyer. Grounding
+large language models in interactive environments with on-
+line reinforcement learning. In International Conference on
+Machine Learning, pages 3676–3713. PMLR, 2023. 5
+[4] Kathryn Chaloner and Isabella Verdinelli. Bayesian experi-
+mental design: A review. Statistical science, pages 273–304,
+1995. 3
+[5] Morris H DeGroot. Optimal statistical decisions. John Wiley
+& Sons, 2005. 3
+[6] Heng Dong, Kefei Duan, and Chongjie Zhang. Enhancing
+decision-making of large language models via actor-critic.
+arXiv preprint arXiv:2506.06376, 2025. 1
+[7] Michael O’Gordon Duff. Optimal Learning: Computational
+procedures for Bayes-adaptive Markov decision processes.
+University of Massachusetts Amherst, 2002. 3
+[8] Luyu Gao et al. Pal: Program-aided language models. In
+ICLR, 2022. 1
+[9] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Ab-
+hinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha
+Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al.
+The llama 3 herd of models. arXiv preprint arXiv:2407.21783,
+2024. 5, 6
+[10] Shibo Hao, Yi Gu, Haodi Ma, Joshua Jiahua Hong, Zhen
+Wang, Daisy Zhe Wang, and Zhiting Hu. Reasoning with
+language model is planning with world model. arXiv preprint
+arXiv:2305.14992, 2023. 1, 5, 6
+[11] Rishi Hazra, Pedro Zuidberg Dos Martires, and Luc De Raedt.
+Saycanpay: Heuristic planning with large language models us-
+ing learnable domain knowledge. In Proceedings of the AAAI
+Conference on Artificial Intelligence, pages 20123–20133,
+2024. 5
+[12] Andy Huang et al. Language models as agents. arXiv preprint
+arXiv:2207.04612, 2022. 5
+[13] Aaron Hurst, Adam Lerer, Adam P Goucher, Adam Perelman,
+Aditya Ramesh, Aidan Clark, AJ Ostrow, Akila Welihinda,
+Alan Hayes, Alec Radford, et al. Gpt-4o system card. arXiv
+preprint arXiv:2410.21276, 2024. 6
+[14] Maximilian Igl, Luisa Zintgraf, Tuan Anh Le, Frank Wood,
+and Shimon Whiteson. Deep variational reinforcement learn-
+ing for pomdps. In ICML, 2018. 1
+[15] Jihwan Jeong, Xiaoyu Wang, Jingmin Wang, Scott Sanner,
+and Pascal Poupart. Reflect-then-plan: Offline model-based
+planning through a doubly bayesian lens. arXiv preprint
+arXiv:2506.06261, 2025. 2
+[16] Leslie Pack Kaelbling, Michael L Littman, and Anthony R
+Cassandra.
+Planning and acting in partially observable
+stochastic domains. Artificial intelligence, 101(1-2):99–134,
+1998. 1, 2, 3
+[17] Jeonghye Kim, Sojeong Rhee, Minbeom Kim, Dohyung Kim,
+Sangmook Lee, Youngchul Sung, and Kyomin Jung. Reflact:
+World-grounded decision making in llm agents via goal-state
+reflection. arXiv preprint arXiv:2505.15182, 2025. 1, 5, 6
+[18] Minsoo Kim. Qube: Question-based belief enhancement
+for agentic llm reasoning. arXiv preprint arXiv:2505.22660,
+2025. 4
+[19] Diederik P Kingma and Max Welling. Auto-encoding varia-
+tional bayes. arXiv preprint arXiv:1312.6114, 2013. 4
+[20] Andrey Kurenkov, Michael Lingelbach, Tanmay Agarwal,
+Emily Jin, Chengshu Li, Ruohan Zhang, Li Fei-Fei, Jiajun
+Wu, Silvio Savarese, and Roberto Martın-Martın. Modeling
+dynamic environments with scene graph memory. In Interna-
+tional Conference on Machine Learning, pages 17976–17993.
+PMLR, 2023. 3
+[21] Patrick Lewis, Ethan Perez, et al. Retrieval-augmented gen-
+eration for knowledge-intensive nlp tasks. In NeurIPS, 2020.
+1
+[22] Xinya Li and Percy Liang. Prefix-tuning: Optimizing contin-
+uous prompts for generation. In ACL, 2021. 1
+[23] Dennis V Lindley. On a measure of the information provided
+by an experiment. The Annals of Mathematical Statistics, 27
+(4):986–1005, 1956. 3
+[24] Zhihan Liu, Hao Hu, Shenao Zhang, Hongyi Guo, Shuqi Ke,
+Boyi Liu, and Zhaoran Wang. Reason for future, act for now:
+A principled architecture for autonomous llm agents. In Forty-
+first International Conference on Machine Learning, 2024. 1,
+5, 6
+[25] OpenAI.
+Gpt-4 technical report.
+arXiv preprint
+arXiv:2303.08774, 2023. 1
+[26] Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Car-
+roll Wainwright, Pamela Mishkin, Chong Zhang, Sandhini
+Agarwal, Katarina Slama, Alex Ray, et al. Training language
+models to follow instructions with human feedback. Advances
+in neural information processing systems, 35:27730–27744,
+2022. 1
+[27] Xavier Puig, Kevin Ra, Marko Boben, Jiaman Li, Tingwu
+Wang, Sanja Fidler, and Antonio Torralba. Virtualhome: Sim-
+ulating household activities via programs. In Proceedings of
+the IEEE conference on computer vision and pattern recogni-
+tion, pages 8494–8502, 2018. 5
+[28] Shuofei Qiao, Runnan Fang, Ningyu Zhang, Yuqi Zhu, Xiang
+Chen, Shumin Deng, Yong Jiang, Pengjun Xie, Fei Huang,
+and Huajun Chen. Agent planning with world knowledge
+model. Advances in Neural Information Processing Systems,
+37:114843–114871, 2024. 5, 6
+[29] Ramin Rafailov et al. Direct preference optimization: Your
+language model is secretly a reward model. ICLR, 2023. 1
+[30] Omer Ram et al. Contextual compression: Context com-
+pression improves multi-hop qa with open-domain retrieval.
+ICLR, 2023. 1
+[31] Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wier-
+stra. Stochastic backpropagation and approximate inference
+in deep generative models. In International conference on
+machine learning, pages 1278–1286. PMLR, 2014. 4
+[32] Sohan Rudra, Saksham Goel, Anirban Santara, Claudio Gen-
+tile, Laurent Perron, Fei Xia, Vikas Sindhwani, Carolina
+9
+
+Parada, and Gaurav Aggarwal. A contextual bandit approach
+for learning to plan in environments with probabilistic goal
+configurations. arXiv preprint arXiv:2211.16309, 2022. 3
+[33] Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik
+Narasimhan, and Shunyu Yao. Reflexion: Language agents
+with verbal reinforcement learning. Advances in Neural In-
+formation Processing Systems, 36:8634–8652, 2023. 1, 2, 5,
+6
+[34] Mohit Shridhar, Xingdi Yuan, Marc-Alexandre Côté, Yonatan
+Bisk, Adam Trischler, and Matthew Hausknecht. Alfworld:
+Aligning text and embodied environments for interactive
+learning. arXiv preprint arXiv:2010.03768, 2020. 5
+[35] Chan Hee Song, Jiaman Wu, Clayton Washington, Brian M
+Sadler, Wei-Lun Chao, and Yu Su. Llm-planner: Few-shot
+grounded planning for embodied agents with large language
+models. In Proceedings of the IEEE/CVF international con-
+ference on computer vision, pages 2998–3009, 2023. 5
+[36] Yifan Song, Xiang Yue Da Yin, Jie Huang, Sujian Li, and
+Bill Yuchen Lin. Trial and error: Exploration-based trajec-
+tory optimization for llm agents, 2024. URL https://arxiv.
+org/abs/2403.02502, 2024. 5, 6
+[37] Lawrence D Stone. Theory of optimal search. Elsevier, 1976.
+3
+[38] Arthur Wandzel, Yoonseon Oh, Michael Fishman, Nishanth
+Kumar, Lawson LS Wong, and Stefanie Tellex. Multi-object
+search using object-oriented pomdps. In 2019 International
+Conference on Robotics and Automation (ICRA), pages 7194–
+7200. IEEE, 2019. 3
+[39] Mengqi Wang et al. Steca: Structured textual caching for long-
+horizon language agents. arXiv preprint arXiv:2402.13330,
+2024. 5, 6
+[40] Charles Xiong et al. Ipr: Improving planning robustness
+of language agents with in-context action rewrites. arXiv
+preprint arXiv:2402.08094, 2024. 5, 6
+[41] Weimin Xiong, Yifan Song, Qingxiu Dong, Bingchan Zhao,
+Feifan Song, Xun Wang, and Sujian Li. Mpo: Boosting
+llm agents with meta plan optimization.
+arXiv preprint
+arXiv:2503.02682, 2025. 5, 6, 7
+[42] Shinn Yao et al. React: Synergizing reasoning and acting in
+language models. arXiv preprint arXiv:2210.03629, 2022. 1,
+2, 5, 6
+[43] Minjong Yoo, Jinwoo Jang, Sihyung Yoon, and Honguk Woo.
+World model implanting for test-time adaptation of embodied
+agents. arXiv preprint arXiv:2509.03956, 2025. 5
+[44] Aohan Zeng, Mingdao Liu, Rui Lu, Bowen Wang, Xiao Liu,
+Yuxiao Dong, and Jie Tang. Agenttuning: Enabling general-
+ized agent abilities for llms. arXiv preprint arXiv:2310.12823,
+2023. 6, 7
+[45] Shenao Zhang, Yaqing Wang, Yinxiao Liu, Tianqi Liu, Peter
+Grabowski, Eugene Ie, Zhaoran Wang, and Yunxuan Li. Be-
+yond markovian: Reflective exploration via bayes-adaptive rl
+for llm reasoning. arXiv preprint arXiv:2505.20561, 2025. 2
+[46] Kaiyu Zheng, Rohan Chitnis, Yoonchang Sung, George
+Konidaris, and Stefanie Tellex. Towards optimal correla-
+tional object search. In 2022 International Conference on
+Robotics and Automation (ICRA), pages 7313–7319. IEEE,
+2022. 3, 4
+10

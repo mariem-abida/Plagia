@@ -1,0 +1,1479 @@
+Edit3r: Instant 3D Scene Editing from Sparse Unposed Images
+Jiageng Liu∗
+University of Massachusetts Amherst
+jiagengliu@umass.edu
+Weijie Lyu∗
+University of California, Merced
+wlyu3@ucmerced.edu
+Xueting Li
+NVIDIA
+xuetingl@nvidia.com
+Yejie Guo
+Shanghai Jiao Tong University
+gyj123@sjtu.edu.cn
+Ming-Hsuan Yang
+University of California, Merced
+myang37@ucmerced.edu
+View-Inconsistent 
+2D Editing
+Input 
+Im ages
+Edit3r
+View-Consistent 
+3D Render ing
+Edited 3D Scene
+~ 0.5s
+Image 
+Editing
+Image 
+Editing
+View 1
+View 2
+Edited View 1
+Edited View 2
+"Add bulletin 
+board."
+"Paint cart 
+blue."
+Figure 1. Overview. Edit3r takes view-inconsistent, 2D edited images as input and generates a view-consistent 3D scene for novel view
+synthesis in only 0.5 seconds. It supports diverse editing tasks, including insertion, removal, color changes, and weather changes, etc.
+Abstract
+We present Edit3r, a feed-forward framework that recon-
+structs and edits 3D scenes in a single pass from unposed,
+view-inconsistent, instruction-edited images. Unlike prior
+methods requiring per-scene optimization, Edit3r directly
+predicts instruction-aligned 3D edits, enabling fast and
+photorealistic rendering without optimization or pose esti-
+mation. A key challenge in training such a model lies in the
+absence of multi-view consistent edited images for super-
+vision. We address this with (i) a SAM2-based recoloring
+strategy that generates reliable, cross-view-consistent su-
+pervision, and (ii) an asymmetric input strategy that pairs
+a recolored reference view with raw auxiliary views, en-
+couraging the network to fuse and align disparate obser-
+vations. At inference, our model effectively handles images
+edited by 2D methods such as InstructPix2Pix, despite not
+being exposed to such edits during training. For large-scale
+*These authors contributed equally.
+quantitative evaluation, we introduce DL3DV-Edit-Bench,
+a benchmark built on the DL3DV test split, featuring 20 di-
+verse scenes, 4 edit types and 100 edits in total. Compre-
+hensive quantitative and qualitative results show that Edit3r
+achieves superior semantic alignment and enhanced 3D
+consistency compared to recent baselines, while operating
+at significantly higher inference speed, making it promis-
+ing for real-time 3D editing applications. Project page:
+https://edit3r.github.io/edit3r/.
+1. Introduction
+3D scene editing is a long-standing problem in computer
+vision. By offering intuitive control over content creation,
+it plays a crucial role in diverse applications such as visual
+effects [45], augmented and virtual reality (AR/VR) [23],
+game design [39], and digital twins [24]. Recent advance-
+ments in 3D scene representation and reconstruction [17,
+26] have sparked a surge of interest in editing 3D scenes
+1
+arXiv:2512.25071v1 [cs.CV] 31 Dec 2025
+
+using text prompts. Existing methods [12, 19, 37] typically
+combine neural reconstruction with text-driven image edit-
+ing in a reconstruct-edit-refit pipeline. Given a collection
+of posed images and a textual instruction, these approaches
+first reconstruct the scene using a neural 3D representation,
+then apply 2D generative editing to the rendered images,
+and finally refit (or re-optimize) the 3D representation to
+incorporate the edits. While this pipeline achieves impres-
+sive visual quality and alignment with instruction prompts,
+it is limited by slow per-scene optimization and retraining,
+which limits practical usability. Moreover, these methods
+often introduce multi-view inconsistencies, revealing a sub-
+stantial gap between current 3D editing frameworks and the
+need for fast, interactive scene manipulation in real-world
+applications.
+Conversely, the rapid development of Large Reconstruc-
+tion Models (LRMs) [3, 4, 15, 36, 41, 43] offers a more
+efficient paradigm for 3D scene reconstruction by amor-
+tizing computation across large datasets and removing per-
+scene optimization. Notably, Gaussian-based LRMs enable
+rapid, photorealistic rendering suited for real-time applica-
+tions, thanks to the Gaussian splatting technique.
+Motivated by these advancements, we propose Edit3r,
+a feed-forward approach that reconstructs and edits a 3D
+scene in a single pass. Beginning with a pair of unposed
+views, we edit them using a 2D image editor. These poten-
+tially inconsistent edited views serve as inputs for Edit3r,
+which directly predicts 3D Gaussian splats aligned with the
+edited views while eliminates the inconsistency, seamlessly
+unifying reconstruction and editing without the need for
+per-scene optimization.
+Training such a feed-forward reconstruction-editing
+model introduces two practical challenges. First, ground-
+truth edited images for supervision are unavailable.
+To
+address this, we leverage SAM2-based recoloring [31] for
+cross-view-consistent supervision, providing reliable labels
+and masks. We find that our model, though trained only
+on a recoloring task, it effectively handles images edited by
+2D diffusion models at inference. Second, edited inputs can
+remain semantically and visually inconsistent across views.
+To tackle this, we design an asymmetric input scheme that
+pairs recolored reference views with other views in their
+original appearance, encouraging the network to fuse and
+align edited and unedited observations.
+Moreover, the lack of established benchmarks limits fair
+and scalable evaluation in 3D scene editing. We introduce
+DL3DV-Edit-Bench, a standardized benchmark built on the
+DL3DV [20] test split to systematically assess multi-view
+consistency and inference efficiency, setting a foundation
+for reproducible and rigorous comparisons. Our contribu-
+tions are summarized as follows:
+• We introduce Edit3r, a feed-forward framework that si-
+multaneously reconstructs 3D scenes and generates edited
+Gaussian splats aligned to a text prompt.
+• We develop a SAM2-based recoloring technique for
+view-consistent supervision during training and introduce
+an asymmetric input scheme to bolster robustness against
+cross-view inconsistencies.
+• We present DL3DV-Edit-Bench, a scene-level, multi-view
+3D editing benchmark built on the DL3DV test split.
+• Extensive quantitative and qualitative experiments show
+Edit3r is significantly faster than previous approaches,
+achieving higher visual quality and semantic consistency
+while demonstrating practical real-world potential.
+2. Related Work
+2.1. 2D Image and Video Editing
+Recent
+diffusion-based
+editors
+enable
+high-quality,
+instruction-conditioned edits through techniques such as
+noise-to-image guidance [25], cross-attention manipula-
+tion [13], instruction tuning [2], and structure-conditional
+control [44].
+While effective for single images, naively
+applying them per frame leads to flicker and identity drift.
+To address temporal coherence, video extensions em-
+ploy attention/token propagation [11], edit-specific atten-
+tion alignment [21, 29], optical-flow guidance [40], and
+implicit canonicalization [28]. Despite strong short-range
+coherence, these approaches remain fundamentally 2D
+and lack explicit 3D scene reasoning, leading to view-
+inconsistent artifacts when lifted to 3D supervision.
+2.2. 3D Scene Editing
+Neural reconstruction methods such as NeRF [26] and 3D
+Gaussian Splatting [17] enable photorealistic rendering,
+motivating integration with semantic editing. Existing ap-
+proaches typically follow a reconstruct-edit-refit pipeline.
+Instruct-NeRF2NeRF [12] reconstructs scenes with NeRF,
+edits multi-view renderings using InstructPix2Pix [2], and
+re-optimizes the scene with edited images.
+GaussianC-
+trl [37] employs ControlNet [44] with depth conditioning
+and attention-based alignment for view consistency, while
+GaussianEditor [5] introduces Gaussian semantic tracing
+for precise editing control. Though achieving impressive
+quality, these methods require slow per-scene optimization
+and are prone to multi-view inconsistencies.
+2.3. Generalizable Feed-forward Reconstructors
+Large reconstruction models (LRMs) [3, 4, 7, 10, 32, 33,
+41, 43] have revolutionized 3D reconstruction by learn-
+ing generalizable priors from large-scale datasets like Ob-
+javerse [8]. Leveraging transformer architectures [9, 35],
+these models enable rapid inference of NeRF or Gaussian
+representations from sparse views without per-scene opti-
+mization. Methods such as PixelSplat [3] utilize epipolar
+geometry, while many other methods [4, 6, 7, 38] construct
+2
+
+cost volumes for multi-view aggregation. Despite their ef-
+ficiency in reconstruction, the application of feed-forward
+reconstructors to 3D scene editing remains largely unex-
+plored, which our work addresses.
+3. Method
+We propose a novel feed-forward framework for 3D scene
+editing. Given multi-view images and a text prompt, our
+method first applies 2D edits [2, 18, 27] to the input im-
+ages, and then reconstructs a 3D scene that is aligned with
+the text prompt, even when the edited images introduce
+multi-view inconsistencies.
+In contrast to optimization-
+based approaches [5, 12, 37], our pipeline enables real-
+time, instruction-guided editing by leveraging the efficient
+reconstruction capabilities of LRMs. Furthermore, Edit3r
+is highly modular and can seamlessly integrate any 2D
+image editing technique, such as Instruct-Pix2Pix [2] and
+FLUX [18], thereby substantially enhancing the diversity
+and flexibility of the generated results.
+3.1. Preliminaries
+Given a sequence of unposed images with corresponding
+camera intrinsics {(Iv, kv)}V −1
+v=0 and an editing text prompt
+T, where V is the number of input views, our goal is to
+reconstruct a geometrically consistent 3D scene ST that is
+semantically aligned with T.
+During training, our pipeline takes one recolored image
+(I′
+0, k0) and another original image (I1, k1) from the un-
+posed sequence as inputs to a feed-forward reconstruction
+model fθ with learnable parameters θ. Instead of explic-
+itly estimating camera poses or meshes, we approach recon-
+struction by lifting the unposed images into a canonical 3D
+Gaussian scene. Given views with unknown extrinsics, the
+network predicts a set of anisotropic Gaussian primitives in
+a fixed world frame. Each primitive encodes both geome-
+try (location and shape) and appearance attributes (radiance
+and opacity). Formally, we learn a function that maps image
+evidence to this representation:
+G = fθ({(I′
+0, k0), (I1, k1)})
+where G = {(µj, Σj, cj, αj)}V −1
+j=0 denotes the predicted set
+of 3D Gaussians. µ ∈R3 is the center, Σ ∈R3×3 is the
+covariance, c is a vector of spherical-harmonic color coeffi-
+cients, and α is opacity.
+Pose-Free 3D Scene Reconstruction. Our approach adopts
+the pose-free 3D reconstruction framework of NoPoS-
+plat [41]. Given sparse unposed multi-view images, we em-
+bed the camera intrinsics for each view using a small MLP
+ϕ : Rd →RD concatenate these embeddings with the im-
+age token sequences to obtain the input tokens zv:
+zv =
+
+img_tokens(Iv) ⊕ϕ(kv)
+
+,
+A vision transformer (ViT) [9] encoder with shared weights
+processes each view independently, taking zv as input and
+producing per-view features fv in a unified feature space.
+The set of features {fv}V −1
+v=0 is then fused using a ViT de-
+coder that leverages both self-attention and cross-view at-
+tention, enabling the model to resolve occlusions and ap-
+pearance variations between views. This decoder outputs
+fused features {ffused}V −1
+v=0 , which are subsequently passed
+to two lightweight Gaussian heads. Each Gaussian head
+contains two DPT-based [36] predictors: one predicts the
+3D centers of the Gaussians using only transformer features
+to ensure geometric stability; the other incorporates both the
+transformer features and RGB image shortcuts to estimate
+additional attributes, such as opacity, covariance, and low-
+order spherical harmonics for view-dependent color. For
+every input, the model produces a dense set of Gaussian
+primitives, which are concatenated in a canonical frame and
+rendered by standard 3D Gaussian splatting. The model is
+trained using photometric losses, eliminating the need for
+explicit pose input or pose-based warping and resulting in a
+pose-free, feed-forward pipeline.
+3.2. SAM2-Based Recoloring
+A key challenge in training our feed-forward 3D scene edit-
+ing framework is the lack of multi-view consistent images
+paired with realistic edited inputs for supervision. To over-
+come this, we propose to approximate the editing task with
+recoloring. Specifically, we build upon SAM2 [31] and de-
+sign an object-aware segmentation and recoloring pipeline:
+the recoloring branch generates multi-view consistent su-
+pervision targets, while SAM2’s masks enable object-level
+appearance augmentations. These object-level augmenta-
+tions play a crucial role in bridging the gap between our
+recolored training data and the edited images encountered
+at inference, ultimately enhancing the model’s generaliza-
+tion and performance. The overall data processing pipeline
+is illustrated in Fig. 3.
+Object-Level Multi-Frame Segmentation via SAM2.
+Given multi-view video frames {Iv}V −1
+v=0 , we apply the au-
+tomatic mask generator (AMG) from SAM2 on the first
+frame I0 to automatically identify all candidate objects,
+without the need for manual prompts. Each AMG proposal
+m provides a soft mask, area, stability score, predicted IoU,
+and a bounding box b = (x, y, w, h), enabling efficient ob-
+ject selection and subsequent recoloring across views.
+We keep a proposal if it passes a deterministic multi-
+criterion filter: (1) area ≥Amin; (2) stability ≥smin;
+(3) predicted IoU ≥qmin; (4) aspect ratio w/h within
+[rmin, rmax]; (5) the box has at least medge pixels of mar-
+gin to the image boundary. These parameter details are pro-
+vided in the appendix. All retained instances are assigned
+persistent IDs and used to prompt the SAM2 video segmen-
+tation predictor (VSP) at t=0.
+3
+
+SAM-2
+LRM
+Edit3r
+Geometry
+Loss
+Render
+Input
+Views
+Supervision
+Views
+Figure 2. Training pipeline of Edit3r. Green-framed images are input views and purple-framed images are supervision views (ground-
+truth and rendered results). We first apply SAM2-based recoloring to both inputs and supervision views, then feed an asymmetric pair (one
+recolored view and one original view) into Edit3r to predict a 3D Gaussian scene, which is rendered and supervised with reconstruction
+losses against the recolored supervision views (right). In parallel, a frozen LRM reconstructs the scene from the original inputs and provides
+3D supervision via geometry losses that regularize Edit3r’s Gaussian predictions in 3D space.
+Origin scene
+SAM2 segments
+Recolor
+Figure 3. Example of SAM2-based recoloring process.
+Next, we apply the VSP to the video sequence. For each
+frame Iv, the model identifies the set of active object IDs Ov
+and corresponding per-object mask logits Z(r)
+v
+which indi-
+cate foreground probabilities. Binary masks are obtained
+by thresholding the logits at zero, with pixels having log-
+its greater than zero designated as foreground. To mitigate
+identity drift, we only process a frame v if its object-ID set
+Ov sufficiently overlaps with that of the most recently pro-
+cessed frame v−. Formally, we define the overlap ratio as
+|Ov∩Ov−|
+max(|Ov|,|Ov−|). If this ratio falls below 0.5, frame Iv is
+skipped and excluded from all subsequent stages. For all re-
+maining (non-skipped) frames v in the video, this stage pro-
+duces per-object binary masks {M (r)
+v }r∈Ov, which guide
+the subsequent region-wise recoloring process.
+Region-Wise Recoloring With Cross-View Consistency.
+We perform region-aware color augmentation by sequen-
+tially applying a composite color transform CΘr to each re-
+gion. This transform consists of ColorJitter, gamma correc-
+tion, PCA-based lighting offset, a fixed RGB-channel per-
+mutation, and optional grayscale conversion. The augmen-
+tation parameters Θr are sampled once per region and then
+reused across all frames and views to ensure consistent ap-
+pearance. When regions overlap, we re-normalize the per-
+pixel soft masks so that the mask weights sum to one over
+all overlapping regions (with a small ε added to the denom-
+inator for numerical stability). The recolored image is then
+synthesized by soft blending:
+I′
+t =
+X
+r∈R
+ˆα(r)
+t
+⊙CΘr(It) +
+
+1 −
+X
+r∈R
+ˆα(r)
+t
+
+⊙It
+Here, ⊙denotes element-wise multiplication, and ˆα(r)
+t
+is
+the per-pixel renormalized mask weight for region r; the re-
+maining weight 1 −P r ∈Rˆα(r)
+t
+at each pixel is assigned
+to the original image. With a single region, this reduces to
+standard alpha blending between the transformed and orig-
+inal image.
+3.3. Loss Functions
+We train the model using both 2D supervision signals and
+3D geometric constraints. For each view v, given the ren-
+dered prediction ˆIv produced by our model and the corre-
+sponding ground-truth image Iv, we optimize the model pa-
+rameters by minimizing a weighted sum of three comple-
+4
+
+mentary loss terms across all views:
+min
+θ
+V −1
+X
+v=0
+h
+LCLIP(ˆIv, Iv) + LLPIPS(ˆIv, Iv) + LMSE(ˆIv, Iv)
+i
++ Lcenter + Lgeom.
+where the terms are weighted by their coefficients respec-
+tively The loss functions are defined as follows: a) a CLIP-
+based image-image loss LCLIP(ˆIv, Iv) that aligns the pre-
+dictions with the targets in a semantic embedding space,
+providing a robust global supervision signal; b) a VGG-
+based perceptual loss LLPIPS(ˆIv, Iv) that enhances mid- and
+high-frequency details such as edges and textures, improv-
+ing perceptual fidelity beyond pixel-level matching; and c) a
+low-frequency MSE loss LMSE(ˆIv, Iv) that enforces consis-
+tency in color, exposure, and illumination while remaining
+tolerant to small reprojection errors.
+Beyond the 2D rendering losses, we introduce 3D regu-
+larization on the predicted Gaussian centers to stabilize the
+scene structure during editing. Because the editing applied
+to input images may distort depth cues and cause geomet-
+ric inconsistencies across views, we leverage the pretrained
+LRM (NoPoSplat [41]) to extract reference Gaussian cen-
+ters Gref from the unedited images.
+During training, the
+edited Gaussians Gedit are constrained to align with these
+reference centers using two complementary regularization
+terms. First, a center-matching loss encourages each pre-
+dicted Gaussian to remain close to its corresponding refer-
+ence location, formulated as a Huber loss [16] between the
+predicted and reference 3D centers:
+Lcenter = SmoothL1(ˆµ, µref).
+This term preserves geometric fidelity to the original scene
+while permitting local deformations consistent with the ap-
+plied edits. Second, a multi-view consistency loss enforces
+structural coherence across different edited views by min-
+imizing the pairwise Chamfer-L1 distance between ran-
+domly sampled Gaussian centers from each view:
+Lgeom =
+1
+V (V −1)
+X
+i<j
+ChamferL1(ˆµi, ˆµj)
+This encourages a consistent 3D configuration across views,
+reducing depth-layer separation and suppressing “floating”
+artifacts caused by view-dependent misalignment.
+To-
+gether, Lcenter anchors the edited scene to the base ge-
+ometry learned by the pretrained reconstruction model,
+while Lgeom encourages smooth geometric alignment across
+views. These 3D regularization terms complement the 2D
+perceptual and semantic losses by enforcing structural sta-
+bility in the canonical Gaussian space, ensuring that scene
+edits remain spatially coherent and physically plausible.
+Origin views
+Image edit
+Single view Gauss
+(c) Final renders
+(a)
+(b)
+Figure 4. Example of inference-time editing. (a) First input
+view, its edited result, and the corresponding single-view Gaus-
+sian rendering. (b) Second input view, its edited result, and the
+corresponding single-view Gaussian rendering. (c) Final render-
+ing obtained by combining Gaussians from both views. Prompt:
+Add a cactus garden.
+3.4. Inference
+Although our model is trained solely on recolored images, it
+generalizes effectively to images edited by various 2D edit-
+ing methods [2, 18]. Unlike optimization-based pipelines
+that require iterative test-time fitting, inference in our sys-
+tem is fully feed-forward. Since the 2D editing stage oper-
+ates independently from both the feed-forward reconstruc-
+tion and the training procedure, our approach is highly
+flexible and can accommodate diverse image editing tech-
+niques [18, 27, 34]. For experiments and evaluations, we
+primarily employ commonly used IP2P [2] as the 2D editor,
+while additional editors are included in ablation studies.
+As illustrated in Fig. 1, given a multi-view sequence
+{Iv}V −1
+v=0 and a text instruction E, we first generate per-
+frame edited images {I⋆
+v}V −1
+v=0 with a 2D image editor. This
+differs from the training setup, where only the first frame is
+edited; at inference, all frames are edited to maximize cross-
+view evidence. We then perform a single feed-forward pass
+of Edit3r to produce the edited 3D Gaussians and render
+novel views. Fig. 4 provides a more concrete example: we
+visualize the Gaussians generated from the two input views
+separately in (a) and (b). Due to the inconsistency intro-
+duced by the 2D image editor, pixels in the second view can
+conflict with those in the first view; in these regions, the
+Gaussians from the second view automatically reduce their
+opacity to mitigate the conflict. Panel (c) shows the final
+rendering obtained by combining the Gaussians from both
+views, demonstrating view-consistent results.
+3.5. DL3DV-Edit-Bench
+Motivation and Scope.
+Most existing 3D editing eval-
+uations [12] either focus on single-object or toy scenes
+rather than full scene editing (e.g., limited context and oc-
+clusions), or rely on ad-hoc, privately curated data with-
+out a standardized protocol. This hampers fair compari-
+5
+
+son: methods differ in scene diversity, edit categories, and
+evaluation criteria. We therefore build DL3DV-Edit-Bench
+on top of the DL3DV [20] test split, covering diverse in-
+door/outdoor real scenes and four text-driven edit types:
+Add, Remove, Modify (attribute/material/appearance), and
+Global (style/exposure). The benchmark targets scene-level
+editing under multi-view inputs and measures both edit ef-
+fectiveness and cross-view consistency in realistic settings.
+Generation Pipeline. We start from the DL3DV test set
+and sample 20 real-world scenes (indoor / outdoor). We first
+run Grounding-DINO [22] on all views to obtain object-
+level labels and region proposals. The per-scene image set
+and extracted labels are then fed to a large language model
+to synthesize candidate prompts for the four edit categories
+(Add / Remove / Modify / Global). We manually vet and
+keep 5 valid prompts per scene, resulting in 100 total edit
+instances. To ensure multi-view consistency during editing,
+we fix the 2D image editor, share the same random seed and
+textual prompt across all views of a scene, and confine lo-
+cal edits with masks derived from the proposals. All editor
+hyperparameters (CFG, steps, strength schedule) are docu-
+mented and kept constant unless otherwise stated.
+4. Experiments
+4.1. Implementation Details
+Our main experiments are conducted on the DL3DV-Edit-
+Bench that we curate to serve as our primary evaluation
+benchmark. For the 2D image-editing module, we use In-
+structPix2Pix [2] as the default editor to ensure comparabil-
+ity, and we evaluate more editors in ablations. All experi-
+ments are run on a single NVIDIA RTX 6000 GPU.
+4.2. Baselines
+We compare against three methods:
+(1) EditSplat [19]
+(optimization-based) with its original 2D editor, Instruct-
+Pix2Pix, kept unchanged to avoid re-tuning and ensure fair-
+ness; (2) GaussCtrl [37] (optimization-based) likewise re-
+taining the authors’ ControlNet module. Both optimization-
+based baselines are compute-intensive and, in addition to
+the text prompt, require a pre-reconstructed DL3DV scene,
+which we supply from standardized baseline reconstruc-
+tions for parity. (3) NoPoSplat [41] (feedforward-based),
+which runs the released checkpoint and consumes only the
+multi-view inputs for reconstruction, serving as a lower
+bound on cross-view edit consistency and isolating the con-
+tribution of our cross-view fusion in the feed-forward de-
+sign.
+4.3. Main Experiments
+Evaluation Metrics. Similar to prior works [12, 19, 37,
+42], we evaluate effectiveness from two angles: (1) whether
+the method performs the intended scene edits; (2) whether
+the 3D reconstruction is plausible across viewpoints. For
+(1), acknowledging the subjectivity of 3D scene generation,
+we adopt CLIP [30] image-text similarity, which scores the
+absolute alignment between the edited render and the tar-
+get description. For (2), we report C-FID [14], which mea-
+sures distribution-level realism by computing the Fréchet
+distance between feature distributions of edited renders and
+reference views, and C-KID [1], which measures the ker-
+nel MMD between the same feature distributions and is
+more reliable with moderate sample sizes. Here, the prefix
+"C-" indicates that both metrics are computed in a scene-
+conditioned manner. Together they quantify overall real-
+ism/naturalness across views.
+Quantitative Comparison.
+As summarized in Tab. 1,
+Edit3r achieves the best quality-speed trade-off. In terms
+of runtime, feed-forward methods are dramatically faster
+than optimization-based ones; Edit3r processes a view in
+0.51 s (vs. 325.53–584.46 s for optimization-based base-
+lines). Edit3r also attains the highest CLIPt2i(text prompts
+to rendered images), indicating stronger instruction follow-
+ing and more effective scene edits. By design, GaussianC-
+trl applies only minor modifications, which keeps outputs
+close to the original and thus boosts C-FID and C-KID,
+but it underperforms on text alignment due to limited edit
+strength. EditSplat makes moderate edits and is relatively
+stable, yet remains conservative overall.
+NoPoSplat fo-
+cuses on reconstruction rather than explicit editing; when
+input views are inconsistent, it tends to average conflicting
+evidence, producing blurred renders and uniformly lower
+scores (CLIPt2i, C-FID and C-KID). Overall, Edit3r best
+balances instruction following with multi-view realism, im-
+proving C-FID and C-KID over other feed-forward base-
+lines while preserving semantics and structure nearly as
+well as the most conservative optimizer.
+Qualitative Comparison. Fig. 5 presents four examples
+(a–d) of scene editing by EditSplat [19], GaussCtrl [37],
+NoPoSplat [41], and Edit3r. The small inset at the bottom-
+right of each panel shows the result from another viewpoint
+of the same scene. EditSplat achieves partially successful
+edits in (a, c, d), but it also alters regions that should re-
+main unchanged, such as the sky and ground in (c). Gauss-
+Ctrl is almost entirely unsuccessful across (a–d), producing
+chaotic or ineffective edits when applied to scenes that are
+unseen during its training. NoPoSplat generally generates
+plausible results, but its quality is highly sensitive to the in-
+consistency between input views: when cross-view incon-
+sistency is large, it suffers from blur in (a,d), whereas for
+more consistent inputs in (b,c), the reconstruction quality is
+much better. In contrast, our method delivers stable, high-
+quality edits across all four scenes, maintaining consistency
+across views while preserving the original scene structure.
+6
+
+Add string lights at porch
+Original Scene
+EditSplat
+GaussCtrl
+NoPoSplat
+Ours
+Remove two chairs
+Paint the building purple
+(a)
+(d)
+(c)
+(b)
+Add flower bed along curb
+Figure 5. Qualitative comparison among four methods. The first row shows the original scene and the editing prompt; the remaining four
+rows show the results, each paired with an additional view.
+Table 1.
+Quantitative comparison on optimization-based and
+feed-forward methods.
+Category
+Method
+Time (s) (↓) CLIPt2i(↑) C-FID (↓) C-KID (↓)
+Optimization GaussCtrl [37]
+325.53
+0.227
+135.0
+0.091
+Editsplat [19]
+584.46
+0.241
+174.1
+0.122
+Feed-forward NoPoSplat [41]
+0.61
+0.253
+180.6
+0.125
+Edit3r (Ours)
+0.51
+0.266
+171.3
+0.116
+4.4. Ablation Study
+We validate our design choices by comparing Edit3r against
+different training and inference variants. Unless otherwise
+stated, the default configuration uses SAM2-based recolor-
+ing for supervision, the asymmetric input scheme, our full
+training losses (2D appearance + 3D regularization), ran-
+Table 2. Ablation quantitative comparison on different training
+strategies in our method.
+Method
+CLIPt2i (↑)
+C-FID (↓)
+C-KID (↓)
+Edit3r
+0.266
+171.3
+0.116
++w/o Recolor
+0.243
+215.0
+0.141
++w/o 3D Loss
+0.237
+278.4
+0.182
++w/o SAM
+0.248
+179.6
+0.127
++w/o R-Drop
+0.252
+183.1
+0.130
+domly dropping the first view’s Gaussian with p=0.5 dur-
+ing training; and InstructPix2Pix as the editing front-end at
+inference.
+Recolor/Image Editing For Training. Directly training on
+multi-view images produced by a 2D editor inevitably in-
+troduces substantial cross-view inconsistencies that act as
+7
+
+Origin views
+IP2P
+GPT
+Gemini
+FLUX
+Figure 6. Ablation qualitative comparison among four image
+editors. Prompt: Paint the door red.
+label noise and hinder convergence. We therefore super-
+vise training with SAM2-based recoloring: object masks are
+extracted and recolored consistently across views, yielding
+stable, view-aligned targets. As Table 2 shows, in our abla-
+tions, replacing recoloring data with direct multi-view edit-
+ing degrades multi-view consistency and increases artifacts,
+confirming the need for view-consistent supervision.
+Training Loss. Because recoloring/editing can shift pre-
+dicted Gaussian centers, relying solely on 2D losses (recon-
+struction/style) permits geometry drift: the rendering may
+look plausible while Gaussian primitives misalign in 3D.
+We ablate our 3D regularizers, and results are shown in
+Tab. 2 . Removals lead to larger center deviation and dimin-
+ished cross-view coherence. Using the full loss stabilizes
+geometry and improves semantic fidelity without sacrific-
+ing appearance.
+SAM2 Segmentation For Augmentation. To narrow the
+distribution gap between recolored training images and
+edited images at inference, we augment training data with
+SAM2-derived mask jittering (dilation/erosion), palette per-
+turbation, and limited background leakage. Ablating these
+SAM2-based augmentations by training with plain recolor-
+ing only, reduces robustness and increases failure cases un-
+der stronger edits, indicating that modest variability during
+training is beneficial. Results are shown in Tab. 2.
+Random Drop the First View’s Gaussian.
+Given the
+asymmetric inputs, the edited reference view can dominate
+the learned style. We introduce random drop during train-
+ing: with probability 0.5, we discard the Gaussians asso-
+ciated with the first view when forming supervision, forc-
+ing the network to propagate the edit semantics from the
+reference to the auxiliaries. Ablations on the drop proba-
+bility, results in Tab. 2, show that removing random drop
+causes overfitting to the reference viewpoint, while exces-
+sively high drop rates weaken edit strength.
+Image Editing For Inference.
+Our pipeline decou-
+ples 2D editing from feed-forward reconstruction, allow-
+ing different editors at test time.
+We evaluate IP2P [2]
+and alternatives including (1) OpenAI GPT-Image-1 [27]
+(GPT) (2) Google Gemini-2.5-Flash-Image [34] (Gemini)
+Table 3. Ablation quantitative comparison on different image
+editors in our method.
+Method
+CLIPt2i (↑)
+C-FID (↓)
+C-KID (↓)
+IP2P [2]
+0.266
+171.3
+0.116
+GPT [27]
+0.261
+166.2
+0.102
+Gemini [34]
+0.246
+150.3
+0.098
+FLUX [18]
+0.276
+169.9
+0.112
+(3) FLUX [18]. As shown in Fig.6 and Tab.3, FLUX pro-
+duces the highest visual edit quality but its edited regions
+are sometimes mislocalized; GPT and Gemini accurately
+identify the intended edit regions but tend to modify other
+parts of the image, while IP2P yields weak perceptual edit
+quality among the four. Across editors, Edit3r preserves its
+advantages in speed and consistency; stronger editors can
+improve local edit quality, while our model continues to en-
+force cross-view coherence. This indicates that Edit3r is
+editor-agnostic and can benefit from future improvements
+in 2D editing.
+5. Conclusion
+We introduced Edit3r, a pose-free, feed-forward frame-
+work that unifies reconstruction and instruction-driven edit-
+ing of 3D scenes from unposed, instruction-edited im-
+ages.
+By directly predicting edited 3D Gaussian splats
+in a single pass—without test-time optimization or pose
+estimation—our approach departs from the conventional
+reconstruct-edit-refit pipeline and enables fast, photorealis-
+tic, and instruction-aligned rendering. Two design choices
+are key to making this practical at scale: (i) a SAM2-
+based recoloring strategy that provides reliable, cross-view-
+consistent supervision despite the lack of true multi-view
+edited ground truth; and (ii) an asymmetric input scheme
+that pairs an edited reference view with unedited auxil-
+iary views, encouraging the network to fuse disparate ob-
+servations while preserving scene structure. Coupled with
+lightweight 3D regularization on Gaussian centers, these
+components yield robust multi-view coherence even when
+the input edits are imperfect or inconsistent.
+To enable fair and reproducible comparisons, we pro-
+posed DL3DV-Edit-Bench, a scene-level benchmark span-
+ning 20 diverse scenes and four edit types (Add / Remove
+/ Modify / Global). On this benchmark, Edit3r achieves
+stronger text-image alignment and improved 3D consis-
+tency than recent optimization-based and feed-forward
+baselines, while being orders of magnitude faster at infer-
+ence. Ablations confirm the necessity of view-consistent re-
+coloring, asymmetric inputs, and 3D geometric losses, and
+demonstrate that our method is editor-agnostic and general-
+izing to a range of 2D editing front-ends.
+Limitations and Future Work. Although recoloring pro-
+vides stable supervision, it does not fully capture large
+geometric changes (e.g., substantial add/remove edits) or
+8
+
+extreme material and illumination shifts. Looking ahead,
+promising directions include expanding supervision beyond
+recoloring with view-consistent generative augmentation,
+learning per-object disentangled controls for precise 3D
+edits, incorporating uncertainty-aware rendering to han-
+dle ambiguous or conflicting edits, extending to dynamic
+scenes and longer view sequences, and further enriching
+DL3DV-Edit-Bench with more diverse and complex scenes.
+References
+[1] Mikołaj Bi´nkowski, Danica J. Sutherland, Michael Arbel,
+and Arthur Gretton. Demystifying mmd gans, 2021. 6
+[2] Tim Brooks, Aleksander Holynski, and Alexei A. Efros. In-
+structpix2pix: Learning to follow image editing instructions.
+In CVPR, 2023. 2, 3, 5, 6, 8
+[3] David Charatan, Sizhe Lester Li, Andrea Tagliasacchi, and
+Vincent Sitzmann. pixelsplat: 3d gaussian splats from image
+pairs for scalable generalizable 3d reconstruction. In CVPR,
+2024. 2
+[4] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang,
+Fanbo Xiang, Jingyi Yu, and Hao Su. Mvsnerf: Fast general-
+izable radiance field reconstruction from multi-view stereo.
+In ICCV, 2021. 2
+[5] Yiwen Chen, Zilong Chen, Chi Zhang, Feng Wang, Xiaofeng
+Yang, Yikai Wang, Zhongang Cai, Lei Yang, Huaping Liu,
+and Guosheng Lin. Gaussianeditor: Swift and controllable
+3d editing with gaussian splatting. In CVPR, 2024. 2, 3
+[6] Yuedong Chen, Chuanxia Zheng, Haofei Xu, Bohan Zhuang,
+Andrea Vedaldi, Tat-Jen Cham, and Jianfei Cai. Mvsplat360:
+Feed-forward 360 scene synthesis from sparse views.
+In
+NeurIPS, 2024. 2
+[7] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang,
+Marc Pollefeys, Andreas Geiger, Tat-Jen Cham, and Jianfei
+Cai. Mvsplat: Efficient 3d gaussian splatting from sparse
+multi-view images. In ECCV, 2025. 2
+[8] Matt Deitke, Dustin Schwenk, Jordi Salvador, Luca Weihs,
+Oscar Michel, Eli VanderBilt, Ludwig Schmidt, Kiana
+Ehsani, Aniruddha Kembhavi, and Ali Farhadi.
+Obja-
+verse: A universe of annotated 3d objects. arXiv preprint
+arXiv:2212.08051, 2022. 2
+[9] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov,
+Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner,
+Mostafa Dehghani, Matthias Minderer, Georg Heigold, Syl-
+vain Gelly, Jakob Uszkoreit, and Neil Houlsby. An image is
+worth 16x16 words: Transformers for image recognition at
+scale. ICLR, 2021. 2, 3
+[10] Zhiwen Fan, Jian Zhang, Wenyan Cong, Peihao Wang,
+Renjie Li, Kairun Wen, Shijie Zhou, Achuta Kadambi,
+Zhangyang Wang, Danfei Xu, Boris Ivanovic, and Marco
+Pavone. Large spatial model: End-to-end unposed images
+to semantic 3d. In NeurIPS, 2024. 2
+[11] Michal Geyer, Omer Bar-Tal, Shai Bagon, and Tali Dekel.
+Tokenflow: Consistent diffusion features for consistent video
+editing, 2023. 2
+[12] Ayaan Haque, Matthew Tancik, Alexei Efros, Aleksander
+Holynski, and Angjoo Kanazawa. Instruct-nerf2nerf: Edit-
+ing 3d scenes with instructions. In ICCV, 2023. 2, 3, 5, 6
+[13] Amir Hertz, Ron Mokady, Jay Tenenbaum, Kfir Aberman,
+Yael Pritch, and Daniel Cohen-Or. Prompt-to-prompt image
+editing with cross attention control, 2022. 2
+[14] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner,
+Bernhard Nessler, and Sepp Hochreiter. Gans trained by a
+two time-scale update rule converge to a local nash equilib-
+rium, 2018. 6
+[15] Yicong Hong, Kai Zhang, Jiuxiang Gu, Sai Bi, Yang Zhou,
+Difan Liu, Feng Liu, Kalyan Sunkavalli, Trung Bui, and Hao
+Tan. LRM: large reconstruction model for single image to
+3d. In ICLR, 2024. 2
+[16] Peter J. Huber. Robust estimation of a location parameter.
+Annals of Mathematical Statistics, 1964. 5
+[17] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis.
+3d gaussian splatting for real-time
+radiance field rendering. In ACM TOG, 2023. 1, 2
+[18] Black Forest Labs, Stephen Batifol, Andreas Blattmann,
+Frederic Boesel, Saksham Consul, Cyril Diagne, Tim Dock-
+horn, Jack English, Zion English, Patrick Esser, Sumith Ku-
+lal, Kyle Lacey, Yam Levi, Cheng Li, Dominik Lorenz, Jonas
+Müller, Dustin Podell, Robin Rombach, Harry Saini, Axel
+Sauer, and Luke Smith.
+Flux.1 kontext: Flow matching
+for in-context image generation and editing in latent space,
+2025. 3, 5, 8
+[19] Dong In Lee, Hyeongcheol Park, Jiyoung Seo, Eunbyung
+Park, Hyunje Park, Ha Dam Baek, Sangheon Shin, Sangmin
+Kim, and Sangpil Kim. Editsplat: Multi-view fusion and
+attention-guided optimization for view-consistent 3d scene
+editing with 3d gaussian splatting, 2025. 2, 6, 7
+[20] Lu Ling, Yichen Sheng, Zhi Tu, Wentian Zhao, Cheng
+Xin, Kun Wan, Lantao Yu, Qianyu Guo, Zixun Yu, Yawen
+Lu, Xuanmao Li, Xingpeng Sun, Rohan Ashok, Aniruddha
+Mukherjee, Hao Kang, Xiangrui Kong, Gang Hua, Tianyi
+Zhang, Bedrich Benes, and Aniket Bera.
+Dl3dv-10k: A
+large-scale scene dataset for deep learning-based 3d vision,
+2023. 2, 6
+[21] Shaoteng Liu, Yuechen Zhang, Wenbo Li, Zhe Lin, and Jiaya
+Jia. Video-p2p: Video editing with cross-attention control,
+2023. 2
+[22] Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao
+Zhang, Jie Yang, Qing Jiang, Chunyuan Li, Jianwei Yang,
+Hang Su, Jun Zhu, and Lei Zhang. Grounding dino: Marry-
+ing dino with grounded pre-training for open-set object de-
+tection, 2024. 6
+[23] Vivek Madhavaram, Shivangana Rawat, Chaitanya Devagup-
+tapu, Charu Sharma, and Manohar Kaul. Towards a training
+free approach for 3d scene editing, 2024. 1
+[24] Andrew Melnik, Benjamin Alt, Giang Nguyen, Artur
+Wilkowski, Maciej Stefa´nczyk, Qirui Wu, Sinan Harms,
+Helge Rhodin, Manolis Savva, and Michael Beetz. Digital
+twin generation from visual data: A survey, 2025. 1
+[25] Chenlin Meng, Yutong He, Yang Song, Jiaming Song, Jia-
+jun Wu, Jun-Yan Zhu, and Stefano Ermon. Sdedit: Guided
+image synthesis and editing with stochastic differential equa-
+tions, 2022. 2
+[26] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+9
+
+Representing scenes as neural radiance fields for view syn-
+thesis. In ECCV, 2020. 1, 2
+[27] OpenAI, :, Aaron Hurst, Adam Lerer, Adam P. Goucher,
+Adam Perelman, Aditya Ramesh, Aidan Clark, AJ Ostrow,
+Akila Welihinda, Alan Hayes, Alec Radford, Aleksander
+M ˛adry, Alex Baker-Whitcomb, Alex Beutel, Alex Borzunov,
+Alex Carney, Alex Chow, Alex Kirillov, Alex Nichol, Alex
+Paino, Alex Renzin, Alex Tachard Passos, Alexander Kir-
+illov, Alexi Christakis, Alexis Conneau, Ali Kamali, Al-
+lan Jabri, Allison Moyer, Allison Tam, Amadou Crookes,
+Amin Tootoochian, Amin Tootoonchian, Ananya Kumar,
+Andrea Vallone, Andrej Karpathy, Andrew Braunstein, An-
+drew Cann, Andrew Codispoti, Andrew Galu, Andrew Kon-
+drich, Andrew Tulloch, Andrey Mishchenko, Angela Baek,
+Angela Jiang, Antoine Pelisse, Antonia Woodford, Anuj
+Gosalia, Arka Dhar, Ashley Pantuliano, Avi Nayak, Avi-
+tal Oliver, Barret Zoph, Behrooz Ghorbani, Ben Leim-
+berger, Ben Rossen, Ben Sokolowsky, Ben Wang, Benjamin
+Zweig, Beth Hoover, Blake Samic, Bob McGrew, Bobby
+Spero, Bogo Giertler, Bowen Cheng, Brad Lightcap, Bran-
+don Walkin, Brendan Quinn, Brian Guarraci, Brian Hsu,
+Bright Kellogg, Brydon Eastman, Camillo Lugaresi, Car-
+roll Wainwright, Cary Bassin, Cary Hudson, Casey Chu,
+Chad Nelson, Chak Li, Chan Jun Shern, Channing Con-
+ger, Charlotte Barette, Chelsea Voss, Chen Ding, Cheng
+Lu, Chong Zhang, Chris Beaumont, Chris Hallacy, Chris
+Koch, Christian Gibson, Christina Kim, Christine Choi,
+Christine McLeavey, Christopher Hesse, Claudia Fischer,
+Clemens Winter, Coley Czarnecki, Colin Jarvis, Colin Wei,
+Constantin Koumouzelis, Dane Sherburn, Daniel Kappler,
+Daniel Levin, Daniel Levy, David Carr, David Farhi, David
+Mely, David Robinson, David Sasaki, Denny Jin, Dev Val-
+ladares, Dimitris Tsipras, Doug Li, Duc Phong Nguyen,
+Duncan Findlay, Edede Oiwoh, Edmund Wong, Ehsan As-
+dar, Elizabeth Proehl, Elizabeth Yang, Eric Antonow, Eric
+Kramer, Eric Peterson, Eric Sigler, Eric Wallace, Eugene
+Brevdo, Evan Mays, Farzad Khorasani, Felipe Petroski
+Such, Filippo Raso, Francis Zhang, Fred von Lohmann,
+Freddie Sulit, Gabriel Goh, Gene Oden, Geoff Salmon,
+Giulio Starace, Greg Brockman, Hadi Salman, Haiming
+Bao, Haitang Hu, Hannah Wong, Haoyu Wang, Heather
+Schmidt, Heather Whitney, Heewoo Jun, Hendrik Kirchner,
+Henrique Ponde de Oliveira Pinto, Hongyu Ren, Huiwen
+Chang, Hyung Won Chung, Ian Kivlichan, Ian O’Connell,
+Ian O’Connell, Ian Osband, Ian Silber, Ian Sohl, Ibrahim
+Okuyucu, Ikai Lan, Ilya Kostrikov, Ilya Sutskever, Ing-
+mar Kanitscheider, Ishaan Gulrajani, Jacob Coxon, Jacob
+Menick, Jakub Pachocki, James Aung, James Betker, James
+Crooks, James Lennon, Jamie Kiros, Jan Leike, Jane Park,
+Jason Kwon, Jason Phang, Jason Teplitz, Jason Wei, Jason
+Wolfe, Jay Chen, Jeff Harris, Jenia Varavva, Jessica Gan Lee,
+Jessica Shieh, Ji Lin, Jiahui Yu, Jiayi Weng, Jie Tang, Jieqi
+Yu, Joanne Jang, Joaquin Quinonero Candela, Joe Beutler,
+Joe Landers, Joel Parish, Johannes Heidecke, John Schul-
+man, Jonathan Lachman, Jonathan McKay, Jonathan Uesato,
+Jonathan Ward, Jong Wook Kim, Joost Huizinga, Jordan
+Sitkin, Jos Kraaijeveld, Josh Gross, Josh Kaplan, Josh Sny-
+der, Joshua Achiam, Joy Jiao, Joyce Lee, Juntang Zhuang,
+Justyn Harriman, Kai Fricke, Kai Hayashi, Karan Singhal,
+Katy Shi, Kavin Karthik, Kayla Wood, Kendra Rimbach,
+Kenny Hsu, Kenny Nguyen, Keren Gu-Lemberg, Kevin But-
+ton, Kevin Liu, Kiel Howe, Krithika Muthukumar, Kyle
+Luther, Lama Ahmad, Larry Kai, Lauren Itow, Lauren Work-
+man, Leher Pathak, Leo Chen, Li Jing, Lia Guy, Liam Fe-
+dus, Liang Zhou, Lien Mamitsuka, Lilian Weng, Lindsay
+McCallum, Lindsey Held, Long Ouyang, Louis Feuvrier,
+Lu Zhang, Lukas Kondraciuk, Lukasz Kaiser, Luke He-
+witt, Luke Metz, Lyric Doshi, Mada Aflak, Maddie Simens,
+Madelaine Boyd, Madeleine Thompson, Marat Dukhan,
+Mark Chen, Mark Gray, Mark Hudnall, Marvin Zhang, Mar-
+wan Aljubeh, Mateusz Litwin, Matthew Zeng, Max John-
+son, Maya Shetty, Mayank Gupta, Meghan Shah, Mehmet
+Yatbaz, Meng Jia Yang, Mengchao Zhong, Mia Glaese, Mi-
+anna Chen, Michael Janner, Michael Lampe, Michael Petrov,
+Michael Wu, Michele Wang, Michelle Fradin, Michelle
+Pokrass, Miguel Castro, Miguel Oom Temudo de Cas-
+tro, Mikhail Pavlov, Miles Brundage, Miles Wang, Mi-
+nal Khan, Mira Murati, Mo Bavarian, Molly Lin, Murat
+Yesildal, Nacho Soto, Natalia Gimelshein, Natalie Cone,
+Natalie Staudacher, Natalie Summers, Natan LaFontaine,
+Neil Chowdhury, Nick Ryder, Nick Stathas, Nick Turley,
+Nik Tezak, Niko Felix, Nithanth Kudige, Nitish Keskar,
+Noah Deutsch, Noel Bundick, Nora Puckett, Ofir Nachum,
+Ola Okelola, Oleg Boiko, Oleg Murk, Oliver Jaffe, Olivia
+Watkins, Olivier Godement, Owen Campbell-Moore, Patrick
+Chao, Paul McMillan, Pavel Belov, Peng Su, Peter Bak, Pe-
+ter Bakkum, Peter Deng, Peter Dolan, Peter Hoeschele, Peter
+Welinder, Phil Tillet, Philip Pronin, Philippe Tillet, Prafulla
+Dhariwal, Qiming Yuan, Rachel Dias, Rachel Lim, Rahul
+Arora, Rajan Troll, Randall Lin, Rapha Gontijo Lopes, Raul
+Puri, Reah Miyara, Reimar Leike, Renaud Gaubert, Reza
+Zamani, Ricky Wang, Rob Donnelly, Rob Honsby, Rocky
+Smith, Rohan Sahai, Rohit Ramchandani, Romain Huet,
+Rory Carmichael, Rowan Zellers, Roy Chen, Ruby Chen,
+Ruslan Nigmatullin, Ryan Cheu, Saachi Jain, Sam Altman,
+Sam Schoenholz, Sam Toizer, Samuel Miserendino, Sand-
+hini Agarwal, Sara Culver, Scott Ethersmith, Scott Gray,
+Sean Grove, Sean Metzger, Shamez Hermani, Shantanu
+Jain, Shengjia Zhao, Sherwin Wu, Shino Jomoto, Shirong
+Wu, Shuaiqi, Xia, Sonia Phene, Spencer Papay, Srinivas
+Narayanan, Steve Coffey, Steve Lee, Stewart Hall, Suchir
+Balaji, Tal Broda, Tal Stramer, Tao Xu, Tarun Gogineni,
+Taya Christianson, Ted Sanders, Tejal Patwardhan, Thomas
+Cunninghman, Thomas Degry, Thomas Dimson, Thomas
+Raoux, Thomas Shadwell, Tianhao Zheng, Todd Under-
+wood, Todor Markov, Toki Sherbakov, Tom Rubin, Tom
+Stasi, Tomer Kaftan, Tristan Heywood, Troy Peterson, Tyce
+Walters, Tyna Eloundou, Valerie Qi, Veit Moeller, Vinnie
+Monaco, Vishal Kuo, Vlad Fomenko, Wayne Chang, Weiyi
+Zheng, Wenda Zhou, Wesam Manassra, Will Sheu, Woj-
+ciech Zaremba, Yash Patil, Yilei Qian, Yongjik Kim, You-
+long Cheng, Yu Zhang, Yuchen He, Yuchen Zhang, Yujia
+Jin, Yunxing Dai, and Yury Malkov. Gpt-4o system card,
+2024. 3, 5, 8
+[28] Hao Ouyang, Qiuyu Wang, Yuxi Xiao, Qingyan Bai, Juntao
+Zhang, Kecheng Zheng, Xiaowei Zhou, Qifeng Chen, and
+10
+
+Yujun Shen. Codef: Content deformation fields for tempo-
+rally consistent video processing, 2024. 2
+[29] Chenyang Qi, Xiaodong Cun, Yong Zhang, Chenyang Lei,
+Xintao Wang, Ying Shan, and Qifeng Chen. Fatezero: Fus-
+ing attentions for zero-shot text-based video editing, 2023.
+2
+[30] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry,
+Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen
+Krueger, and Ilya Sutskever.
+Learning transferable visual
+models from natural language supervision, 2021. 6
+[31] Nikhila Ravi, Valentin Gabeur, Yuan-Ting Hu, Ronghang
+Hu, Chaitanya Ryali, Tengyu Ma, Haitham Khedr, Roman
+Rädle, Chloe Rolland, Laura Gustafson, et al.
+Sam 2:
+Segment anything in images and videos.
+arXiv preprint
+arXiv:2408.00714, 2024. 2, 3
+[32] Stanislaw Szymanowicz, Christian Rupprecht, and Andrea
+Vedaldi.
+Splatter image: Ultra-fast single-view 3d recon-
+struction. In CVPR, 2024. 2
+[33] Jiaxiang Tang, Zhaoxi Chen, Xiaokang Chen, Tengfei Wang,
+Gang Zeng, and Ziwei Liu. LGM: large multi-view gaus-
+sian model for high-resolution 3d content creation. In ECCV,
+2024. 2
+[34] Gemini Team, Rohan Anil, Sebastian Borgeaud, Jean-
+Baptiste Alayrac, Jiahui Yu, Radu Soricut, Johan Schalk-
+wyk, Andrew M. Dai, Anja Hauth, Katie Millican, David
+Silver, Melvin Johnson, Ioannis Antonoglou, Julian Schrit-
+twieser, Amelia Glaese, Jilin Chen, Emily Pitler, Timothy
+Lillicrap, Angeliki Lazaridou, Orhan Firat, James Molloy,
+Michael Isard, Paul R. Barham, Tom Hennigan, Benjamin
+Lee, Fabio Viola, Malcolm Reynolds, Yuanzhong Xu, Ryan
+Doherty, Eli Collins, Clemens Meyer, Eliza Rutherford, Er-
+ica Moreira, Kareem Ayoub, Megha Goel, Jack Krawczyk,
+Cosmo Du, Ed Chi, Heng-Tze Cheng, Eric Ni, Purvi Shah,
+Patrick Kane, Betty Chan, Manaal Faruqui, Aliaksei Sev-
+eryn, Hanzhao Lin, YaGuang Li, Yong Cheng, Abe Itty-
+cheriah, Mahdis Mahdieh, Mia Chen, Pei Sun, Dustin Tran,
+Sumit Bagri, Balaji Lakshminarayanan, Jeremiah Liu, An-
+dras Orban, Fabian Güra, Hao Zhou, Xinying Song, Aurelien
+Boffy, Harish Ganapathy, Steven Zheng, HyunJeong Choe,
+Ágoston Weisz, Tao Zhu, Yifeng Lu, Siddharth Gopal, Jar-
+rod Kahn, Maciej Kula, Jeff Pitman, Rushin Shah, Emanuel
+Taropa, Majd Al Merey, Martin Baeuml, Zhifeng Chen, Lau-
+rent El Shafey, Yujing Zhang, Olcan Sercinoglu, George
+Tucker, Enrique Piqueras, Maxim Krikun, Iain Barr, Niko-
+lay Savinov, Ivo Danihelka, Becca Roelofs, Anaïs White,
+Anders Andreassen, Tamara von Glehn, Lakshman Ya-
+gati, Mehran Kazemi, Lucas Gonzalez, Misha Khalman,
+Jakub Sygnowski, Alexandre Frechette, Charlotte Smith,
+Laura Culp, Lev Proleev, Yi Luan, Xi Chen, James Lottes,
+Nathan Schucher, Federico Lebron, Alban Rrustemi, Na-
+talie Clay, Phil Crone, Tomas Kocisky, Jeffrey Zhao, Bartek
+Perz, Dian Yu, Heidi Howard, Adam Bloniarz, Jack W.
+Rae, Han Lu, Laurent Sifre, Marcello Maggioni, Fred Al-
+cober, Dan Garrette, Megan Barnes, Shantanu Thakoor, Ja-
+cob Austin, Gabriel Barth-Maron, William Wong, Rishabh
+Joshi, Rahma Chaabouni, Deeni Fatiha, Arun Ahuja, Gau-
+rav Singh Tomar, Evan Senter, Martin Chadwick, Ilya Ko-
+rnakov, Nithya Attaluri, Iñaki Iturrate, Ruibo Liu, Yunx-
+uan Li, Sarah Cogan, Jeremy Chen, Chao Jia, Chenjie Gu,
+Qiao Zhang, Jordan Grimstad, Ale Jakse Hartman, Xavier
+Garcia, Thanumalayan Sankaranarayana Pillai, Jacob De-
+vlin, Michael Laskin, Diego de Las Casas, Dasha Valter,
+Connie Tao, Lorenzo Blanco, Adrià Puigdomènech Badia,
+David Reitter, Mianna Chen, Jenny Brennan, Clara Rivera,
+Sergey Brin, Shariq Iqbal, Gabriela Surita, Jane Labanowski,
+Abhi Rao, Stephanie Winkler, Emilio Parisotto, Yiming
+Gu, Kate Olszewska, Ravi Addanki, Antoine Miech, An-
+nie Louis, Denis Teplyashin, Geoff Brown, Elliot Catt, Jan
+Balaguer, Jackie Xiang, Pidong Wang, Zoe Ashwood, An-
+ton Briukhov, Albert Webson, Sanjay Ganapathy, Smit Sang-
+havi, Ajay Kannan, Ming-Wei Chang, Axel Stjerngren, Josip
+Djolonga, Yuting Sun, Ankur Bapna, Matthew Aitchison,
+Pedram Pejman, Henryk Michalewski, Tianhe Yu, Cindy
+Wang, Juliette Love, Junwhan Ahn, Dawn Bloxwich, Ke-
+hang Han, Peter Humphreys, Thibault Sellam, James Brad-
+bury, Varun Godbole, Sina Samangooei, Bogdan Damoc,
+Alex Kaskasoli, Sébastien M. R. Arnold, Vijay Vasudevan,
+Shubham Agrawal, Jason Riesa, Dmitry Lepikhin, Richard
+Tanburn, Srivatsan Srinivasan, Hyeontaek Lim, Sarah Hod-
+kinson, Pranav Shyam, Johan Ferret, Steven Hand, Ankush
+Garg, Tom Le Paine, Jian Li, Yujia Li, Minh Giang, Alexan-
+der Neitz, Zaheer Abbas, Sarah York, Machel Reid, Eliza-
+beth Cole, Aakanksha Chowdhery, Dipanjan Das, Dominika
+Rogozi´nska, Vitaliy Nikolaev, Pablo Sprechmann, Zachary
+Nado, Lukas Zilka, Flavien Prost, Luheng He, Marianne
+Monteiro, Gaurav Mishra, Chris Welty, Josh Newlan, Dawei
+Jia, Miltiadis Allamanis, Clara Huiyi Hu, Raoul de Liedek-
+erke, Justin Gilmer, Carl Saroufim, Shruti Rijhwani, Shaobo
+Hou, Disha Shrivastava, Anirudh Baddepudi, Alex Goldin,
+Adnan Ozturel, Albin Cassirer, Yunhan Xu, Daniel Sohn,
+Devendra Sachan, Reinald Kim Amplayo, Craig Swan-
+son, Dessie Petrova, Shashi Narayan, Arthur Guez, Sid-
+dhartha Brahma, Jessica Landon, Miteyan Patel, Ruizhe
+Zhao, Kevin Villela, Luyu Wang, Wenhao Jia, Matthew
+Rahtz, Mai Giménez, Legg Yeung, James Keeling, Petko
+Georgiev, Diana Mincu, Boxi Wu, Salem Haykal, Rachel
+Saputro, Kiran Vodrahalli, James Qin, Zeynep Cankara, Ab-
+hanshu Sharma, Nick Fernando, Will Hawkins, Behnam
+Neyshabur, Solomon Kim, Adrian Hutter, Priyanka Agrawal,
+Alex Castro-Ros, George van den Driessche, Tao Wang, Fan
+Yang, Shuo yiin Chang, Paul Komarek, Ross McIlroy, Mario
+Luˇci´c, Guodong Zhang, Wael Farhan, Michael Sharman,
+Paul Natsev, Paul Michel, Yamini Bansal, Siyuan Qiao, Kris
+Cao, Siamak Shakeri, Christina Butterfield, Justin Chung,
+Paul Kishan Rubenstein, Shivani Agrawal, Arthur Mensch,
+Kedar Soparkar, Karel Lenc, Timothy Chung, Aedan Pope,
+Loren Maggiore, Jackie Kay, Priya Jhakra, Shibo Wang,
+Joshua Maynez, Mary Phuong, Taylor Tobin, Andrea Tac-
+chetti, Maja Trebacz, Kevin Robinson, Yash Katariya, Se-
+bastian Riedel, Paige Bailey, Kefan Xiao, Nimesh Ghelani,
+Lora Aroyo, Ambrose Slone, Neil Houlsby, Xuehan Xiong,
+Zhen Yang, Elena Gribovskaya, Jonas Adler, Mateo Wirth,
+Lisa Lee, Music Li, Thais Kagohara, Jay Pavagadhi, So-
+phie Bridgers, Anna Bortsova, Sanjay Ghemawat, Zafarali
+Ahmed, Tianqi Liu, Richard Powell, Vijay Bolina, Mariko
+11
+
+Iinuma, Polina Zablotskaia, James Besley, Da-Woon Chung,
+Timothy Dozat, Ramona Comanescu, Xiance Si, Jeremy
+Greer, Guolong Su, Martin Polacek, Raphaël Lopez Kauf-
+man, Simon Tokumine, Hexiang Hu, Elena Buchatskaya,
+Yingjie Miao, Mohamed Elhawaty, Aditya Siddhant, Ne-
+nad Tomasev, Jinwei Xing, Christina Greer, Helen Miller,
+Shereen Ashraf, Aurko Roy, Zizhao Zhang, Ada Ma, Ange-
+los Filos, Milos Besta, Rory Blevins, Ted Klimenko, Chih-
+Kuan Yeh, Soravit Changpinyo, Jiaqi Mu, Oscar Chang,
+Mantas Pajarskas, Carrie Muir, Vered Cohen, Charline Le
+Lan, Krishna Haridasan, Amit Marathe, Steven Hansen,
+Sholto Douglas, Rajkumar Samuel, Mingqiu Wang, Sophia
+Austin, Chang Lan, Jiepu Jiang, Justin Chiu, Jaime Alonso
+Lorenzo, Lars Lowe Sjösund, Sébastien Cevey, Zach Gle-
+icher, Thi Avrahami, Anudhyan Boral, Hansa Srinivasan,
+Vittorio Selo, Rhys May, Konstantinos Aisopos, Léonard
+Hussenot, Livio Baldini Soares, Kate Baumli, Michael B.
+Chang, Adrià Recasens, Ben Caine, Alexander Pritzel, Filip
+Pavetic, Fabio Pardo, Anita Gergely, Justin Frye, Vinay
+Ramasesh, Dan Horgan, Kartikeya Badola, Nora Kassner,
+Subhrajit Roy, Ethan Dyer, Víctor Campos Campos, Alex
+Tomala, Yunhao Tang, Dalia El Badawy, Elspeth White,
+Basil Mustafa, Oran Lang, Abhishek Jindal, Sharad Vikram,
+Zhitao Gong, Sergi Caelles, Ross Hemsley, Gregory Thorn-
+ton, Fangxiaoyu Feng, Wojciech Stokowiec, Ce Zheng,
+Phoebe Thacker, Ça˘glar Ünlü, Zhishuai Zhang, Mohammad
+Saleh, James Svensson, Max Bileschi, Piyush Patil, Ankesh
+Anand, Roman Ring, Katerina Tsihlas, Arpi Vezer, Marco
+Selvi, Toby Shevlane, Mikel Rodriguez, Tom Kwiatkowski,
+Samira Daruki, Keran Rong, Allan Dafoe, Nicholas FitzGer-
+ald, Keren Gu-Lemberg, Mina Khan, Lisa Anne Hendricks,
+Marie Pellat, Vladimir Feinberg, James Cobon-Kerr, Tara
+Sainath, Maribeth Rauh, Sayed Hadi Hashemi, Richard Ives,
+Yana Hasson, Eric Noland, Yuan Cao, Nathan Byrd, Le
+Hou, Qingze Wang, Thibault Sottiaux, Michela Paganini,
+Jean-Baptiste Lespiau, Alexandre Moufarek, Samer Hassan,
+Kaushik Shivakumar, Joost van Amersfoort, Amol Mand-
+hane, Pratik Joshi, Anirudh Goyal, Matthew Tung, An-
+drew Brock, Hannah Sheahan, Vedant Misra, Cheng Li, Ne-
+manja Raki´cevi´c, Mostafa Dehghani, Fangyu Liu, Sid Mit-
+tal, Junhyuk Oh, Seb Noury, Eren Sezener, Fantine Huot,
+Matthew Lamm, Nicola De Cao, Charlie Chen, Sidharth
+Mudgal, Romina Stella, Kevin Brooks, Gautam Vasudevan,
+Chenxi Liu, Mainak Chain, Nivedita Melinkeri, Aaron Co-
+hen, Venus Wang, Kristie Seymore, Sergey Zubkov, Rahul
+Goel, Summer Yue, Sai Krishnakumaran, Brian Albert, Nate
+Hurley, Motoki Sano, Anhad Mohananey, Jonah Joughin,
+Egor Filonov, Tomasz K˛epa, Yomna Eldawy, Jiawern Lim,
+Rahul Rishi, Shirin Badiezadegan, Taylor Bos, Jerry Chang,
+Sanil Jain, Sri Gayatri Sundara Padmanabhan, Subha Putta-
+gunta, Kalpesh Krishna, Leslie Baker, Norbert Kalb, Vamsi
+Bedapudi, Adam Kurzrok, Shuntong Lei, Anthony Yu, Oren
+Litvin, Xiang Zhou, Zhichun Wu, Sam Sobell, Andrea Sicil-
+iano, Alan Papir, Robby Neale, Jonas Bragagnolo, Tej Toor,
+Tina Chen, Valentin Anklin, Feiran Wang, Richie Feng, Mi-
+lad Gholami, Kevin Ling, Lijuan Liu, Jules Walter, Hamid
+Moghaddam, Arun Kishore, Jakub Adamek, Tyler Mer-
+cado, Jonathan Mallinson, Siddhinita Wandekar, Stephen
+Cagle, Eran Ofek, Guillermo Garrido, Clemens Lombriser,
+Maksim Mukha, Botu Sun, Hafeezul Rahman Mohammad,
+Josip Matak, Yadi Qian, Vikas Peswani, Pawel Janus, Quan
+Yuan, Leif Schelin, Oana David, Ankur Garg, Yifan He,
+Oleksii Duzhyi, Anton Älgmyr, Timothée Lottaz, Qi Li,
+Vikas Yadav, Luyao Xu, Alex Chinien, Rakesh Shivanna,
+Aleksandr Chuklin, Josie Li, Carrie Spadine, Travis Wolfe,
+Kareem Mohamed, Subhabrata Das, Zihang Dai, Kyle
+He, Daniel von Dincklage, Shyam Upadhyay, Akanksha
+Maurya, Luyan Chi, Sebastian Krause, Khalid Salama,
+Pam G Rabinovitch, Pavan Kumar Reddy M, Aarush Sel-
+van, Mikhail Dektiarev, Golnaz Ghiasi, Erdem Guven, Hi-
+manshu Gupta, Boyi Liu, Deepak Sharma, Idan Heimlich
+Shtacher, Shachi Paul, Oscar Akerlund, François-Xavier
+Aubet, Terry Huang, Chen Zhu, Eric Zhu, Elico Teixeira,
+Matthew Fritze, Francesco Bertolini, Liana-Eleonora Mari-
+nescu, Martin Bölle, Dominik Paulus, Khyatti Gupta, Tejasi
+Latkar, Max Chang, Jason Sanders, Roopa Wilson, Xuewei
+Wu, Yi-Xuan Tan, Lam Nguyen Thiet, Tulsee Doshi, Sid
+Lall, Swaroop Mishra, Wanming Chen, Thang Luong, Seth
+Benjamin, Jasmine Lee, Ewa Andrejczuk, Dominik Rabiej,
+Vipul Ranjan, Krzysztof Styrc, Pengcheng Yin, Jon Simon,
+Malcolm Rose Harriott, Mudit Bansal, Alexei Robsky, Geoff
+Bacon, David Greene, Daniil Mirylenka, Chen Zhou, Obaid
+Sarvana, Abhimanyu Goyal, Samuel Andermatt, Patrick
+Siegler, Ben Horn, Assaf Israel, Francesco Pongetti, Chih-
+Wei "Louis" Chen, Marco Selvatici, Pedro Silva, Kathie
+Wang, Jackson Tolins, Kelvin Guu, Roey Yogev, Xiaochen
+Cai, Alessandro Agostini, Maulik Shah, Hung Nguyen,
+Noah Ó Donnaile, Sébastien Pereira, Linda Friso, Adam
+Stambler, Adam Kurzrok, Chenkai Kuang, Yan Romanikhin,
+Mark Geller, ZJ Yan, Kane Jang, Cheng-Chun Lee, Wo-
+jciech Fica, Eric Malmi, Qijun Tan, Dan Banica, Daniel
+Balle, Ryan Pham, Yanping Huang, Diana Avram, Hongzhi
+Shi, Jasjot Singh, Chris Hidey, Niharika Ahuja, Pranab
+Saxena, Dan Dooley, Srividya Pranavi Potharaju, Eileen
+O’Neill, Anand Gokulchandran, Ryan Foley, Kai Zhao,
+Mike Dusenberry, Yuan Liu, Pulkit Mehta, Ragha Kotikala-
+pudi, Chalence Safranek-Shrader, Andrew Goodman, Joshua
+Kessinger, Eran Globen, Prateek Kolhar, Chris Gorgolewski,
+Ali Ibrahim, Yang Song, Ali Eichenbaum, Thomas Brov-
+elli, Sahitya Potluri, Preethi Lahoti, Cip Baetu, Ali Ghor-
+bani, Charles Chen, Andy Crawford, Shalini Pal, Mukund
+Sridhar, Petru Gurita, Asier Mujika, Igor Petrovski, Pierre-
+Louis Cedoz, Chenmei Li, Shiyuan Chen, Niccolò Dal
+Santo, Siddharth Goyal, Jitesh Punjabi, Karthik Kappagan-
+thu, Chester Kwak, Pallavi LV, Sarmishta Velury, Himadri
+Choudhury, Jamie Hall, Premal Shah, Ricardo Figueira, Matt
+Thomas, Minjie Lu, Ting Zhou, Chintu Kumar, Thomas Ju-
+rdi, Sharat Chikkerur, Yenai Ma, Adams Yu, Soo Kwak,
+Victor Ähdel, Sujeevan Rajayogam, Travis Choma, Fei Liu,
+Aditya Barua, Colin Ji, Ji Ho Park, Vincent Hellendoorn,
+Alex Bailey, Taylan Bilal, Huanjie Zhou, Mehrdad Khatir,
+Charles Sutton, Wojciech Rzadkowski, Fiona Macintosh,
+Roopali Vij, Konstantin Shagin, Paul Medina, Chen Liang,
+Jinjing Zhou, Pararth Shah, Yingying Bi, Attila Dankovics,
+Shipra Banga, Sabine Lehmann, Marissa Bredesen, Zifan
+Lin, John Eric Hoffmann, Jonathan Lai, Raynald Chung,
+12
+
+Kai Yang, Nihal Balani, Arthur Bražinskas, Andrei Sozan-
+schi, Matthew Hayes, Héctor Fernández Alcalde, Peter
+Makarov, Will Chen, Antonio Stella, Liselotte Snijders,
+Michael Mandl, Ante Kärrman, Paweł Nowak, Xinyi Wu,
+Alex Dyck, Krishnan Vaidyanathan, Raghavender R, Jes-
+sica Mallet, Mitch Rudominer, Eric Johnston, Sushil Mittal,
+Akhil Udathu, Janara Christensen, Vishal Verma, Zach Irv-
+ing, Andreas Santucci, Gamaleldin Elsayed, Elnaz Davoodi,
+Marin Georgiev, Ian Tenney, Nan Hua, Geoffrey Cideron,
+Edouard Leurent, Mahmoud Alnahlawi, Ionut Georgescu,
+Nan Wei, Ivy Zheng, Dylan Scandinaro, Heinrich Jiang,
+Jasper Snoek, Mukund Sundararajan, Xuezhi Wang, Zack
+Ontiveros, Itay Karo, Jeremy Cole, Vinu Rajashekhar, Lara
+Tumeh, Eyal Ben-David, Rishub Jain, Jonathan Uesato,
+Romina Datta, Oskar Bunyan, Shimu Wu, John Zhang, Pi-
+otr Stanczyk, Ye Zhang, David Steiner, Subhajit Naskar,
+Michael Azzam, Matthew Johnson, Adam Paszke, Chung-
+Cheng Chiu, Jaume Sanchez Elias, Afroz Mohiuddin, Faizan
+Muhammad, Jin Miao, Andrew Lee, Nino Vieillard, Jane
+Park, Jiageng Zhang, Jeff Stanway, Drew Garmon, Abhi-
+jit Karmarkar, Zhe Dong, Jong Lee, Aviral Kumar, Lu-
+owei Zhou, Jonathan Evens, William Isaac, Geoffrey Irv-
+ing, Edward Loper, Michael Fink, Isha Arkatkar, Nanxin
+Chen, Izhak Shafran, Ivan Petrychenko, Zhe Chen, Johnson
+Jia, Anselm Levskaya, Zhenkai Zhu, Peter Grabowski, Yu
+Mao, Alberto Magni, Kaisheng Yao, Javier Snaider, Norman
+Casagrande, Evan Palmer, Paul Suganthan, Alfonso Cas-
+taño, Irene Giannoumis, Wooyeol Kim, Mikołaj Rybi´nski,
+Ashwin Sreevatsa, Jennifer Prendki, David Soergel, Adrian
+Goedeckemeyer, Willi Gierke, Mohsen Jafari, Meenu Gaba,
+Jeremy Wiesner, Diana Gage Wright, Yawen Wei, Harsha
+Vashisht, Yana Kulizhskaya, Jay Hoover, Maigo Le, Lu Li,
+Chimezie Iwuanyanwu, Lu Liu, Kevin Ramirez, Andrey
+Khorlin, Albert Cui, Tian LIN, Marcus Wu, Ricardo Aguilar,
+Keith Pallo, Abhishek Chakladar, Ginger Perng, Elena Al-
+lica Abellan, Mingyang Zhang, Ishita Dasgupta, Nate Kush-
+man, Ivo Penchev, Alena Repina, Xihui Wu, Tom van der
+Weide, Priya Ponnapalli, Caroline Kaplan, Jiri Simsa,
+Shuangfeng Li, Olivier Dousse, Fan Yang, Jeff Piper, Nathan
+Ie, Rama Pasumarthi, Nathan Lintz, Anitha Vijayakumar,
+Daniel Andor, Pedro Valenzuela, Minnie Lui, Cosmin Padu-
+raru, Daiyi Peng, Katherine Lee, Shuyuan Zhang, Somer
+Greene, Duc Dung Nguyen, Paula Kurylowicz, Cassidy
+Hardin, Lucas Dixon, Lili Janzer, Kiam Choo, Ziqiang Feng,
+Biao Zhang, Achintya Singhal, Dayou Du, Dan McKin-
+non, Natasha Antropova, Tolga Bolukbasi, Orgad Keller,
+David Reid, Daniel Finchelstein, Maria Abi Raad, Remi
+Crocker, Peter Hawkins, Robert Dadashi, Colin Gaffney,
+Ken Franko, Anna Bulanova, Rémi Leblond, Shirley Chung,
+Harry Askham, Luis C. Cobo, Kelvin Xu, Felix Fischer, Jun
+Xu, Christina Sorokin, Chris Alberti, Chu-Cheng Lin, Colin
+Evans, Alek Dimitriev, Hannah Forbes, Dylan Banarse, Zora
+Tung, Mark Omernick, Colton Bishop, Rachel Sterneck,
+Rohan Jain, Jiawei Xia, Ehsan Amid, Francesco Piccinno,
+Xingyu Wang, Praseem Banzal, Daniel J. Mankowitz, Alex
+Polozov, Victoria Krakovna, Sasha Brown, MohammadHos-
+sein Bateni, Dennis Duan, Vlad Firoiu, Meghana Thotakuri,
+Tom Natan, Matthieu Geist, Ser tan Girgin, Hui Li, Jiayu Ye,
+Ofir Roval, Reiko Tojo, Michael Kwong, James Lee-Thorp,
+Christopher Yew, Danila Sinopalnikov, Sabela Ramos, John
+Mellor, Abhishek Sharma, Kathy Wu, David Miller, Nico-
+las Sonnerat, Denis Vnukov, Rory Greig, Jennifer Beattie,
+Emily Caveness, Libin Bai, Julian Eisenschlos, Alex Ko-
+rchemniy, Tomy Tsai, Mimi Jasarevic, Weize Kong, Phuong
+Dao, Zeyu Zheng, Frederick Liu, Fan Yang, Rui Zhu,
+Tian Huey Teh, Jason Sanmiya, Evgeny Gladchenko, Nejc
+Trdin, Daniel Toyama, Evan Rosen, Sasan Tavakkol, Lint-
+ing Xue, Chen Elkind, Oliver Woodman, John Carpenter,
+George Papamakarios, Rupert Kemp, Sushant Kafle, Tanya
+Grunina, Rishika Sinha, Alice Talbert, Diane Wu, Denese
+Owusu-Afriyie, Cosmo Du, Chloe Thornton, Jordi Pont-
+Tuset, Pradyumna Narayana, Jing Li, Saaber Fatehi, John
+Wieting, Omar Ajmeri, Benigno Uria, Yeongil Ko, Laura
+Knight, Amélie Héliou, Ning Niu, Shane Gu, Chenxi Pang,
+Yeqing Li, Nir Levine, Ariel Stolovich, Rebeca Santamaria-
+Fernandez, Sonam Goenka, Wenny Yustalim, Robin Strudel,
+Ali Elqursh, Charlie Deck, Hyo Lee, Zonglin Li, Kyle Levin,
+Raphael Hoffmann, Dan Holtmann-Rice, Olivier Bachem,
+Sho Arora, Christy Koh, Soheil Hassas Yeganeh, Siim
+Põder, Mukarram Tariq, Yanhua Sun, Lucian Ionita, Mo-
+jtaba Seyedhosseini, Pouya Tafti, Zhiyu Liu, Anmol Gu-
+lati, Jasmine Liu, Xinyu Ye, Bart Chrzaszcz, Lily Wang,
+Nikhil Sethi, Tianrun Li, Ben Brown, Shreya Singh, Wei
+Fan, Aaron Parisi, Joe Stanton, Vinod Koverkathu, Christo-
+pher A. Choquette-Choo, Yunjie Li, TJ Lu, Abe Ittycheriah,
+Prakash Shroff, Mani Varadarajan, Sanaz Bahargam, Rob
+Willoughby, David Gaddy, Guillaume Desjardins, Marco
+Cornero, Brona Robenek, Bhavishya Mittal, Ben Albrecht,
+Ashish Shenoy, Fedor Moiseev, Henrik Jacobsson, Alireza
+Ghaffarkhah, Morgane Rivière, Alanna Walton, Clément
+Crepy, Alicia Parrish, Zongwei Zhou, Clement Farabet,
+Carey Radebaugh, Praveen Srinivasan, Claudia van der
+Salm, Andreas Fidjeland, Salvatore Scellato, Eri Latorre-
+Chimoto, Hanna Klimczak-Pluci´nska, David Bridson, Dario
+de Cesare, Tom Hudson, Piermaria Mendolicchio, Lexi
+Walker, Alex Morris, Matthew Mauger, Alexey Guseynov,
+Alison Reid, Seth Odoom, Lucia Loher, Victor Cotruta,
+Madhavi Yenugula, Dominik Grewe, Anastasia Petrushk-
+ina, Tom Duerig, Antonio Sanchez, Steve Yadlowsky, Amy
+Shen, Amir Globerson, Lynette Webb, Sahil Dua, Dong Li,
+Surya Bhupatiraju, Dan Hurt, Haroon Qureshi, Ananth Agar-
+wal, Tomer Shani, Matan Eyal, Anuj Khare, Shreyas Ram-
+mohan Belle, Lei Wang, Chetan Tekur, Mihir Sanjay Kale,
+Jinliang Wei, Ruoxin Sang, Brennan Saeta, Tyler Liechty,
+Yi Sun, Yao Zhao, Stephan Lee, Pandu Nayak, Doug
+Fritz, Manish Reddy Vuyyuru, John Aslanides, Nidhi Vyas,
+Martin Wicke, Xiao Ma, Evgenii Eltyshev, Nina Martin,
+Hardie Cate, James Manyika, Keyvan Amiri, Yelin Kim,
+Xi Xiong, Kai Kang, Florian Luisier, Nilesh Tripuraneni,
+David Madras, Mandy Guo, Austin Waters, Oliver Wang,
+Joshua Ainslie, Jason Baldridge, Han Zhang, Garima Pruthi,
+Jakob Bauer, Feng Yang, Riham Mansour, Jason Gelman,
+Yang Xu, George Polovets, Ji Liu, Honglong Cai, Warren
+Chen, XiangHai Sheng, Emily Xue, Sherjil Ozair, Christof
+Angermueller, Xiaowei Li, Anoop Sinha, Weiren Wang, Ju-
+lia Wiesinger, Emmanouil Koukoumidis, Yuan Tian, Anand
+13
+
+Iyer, Madhu Gurumurthy, Mark Goldenson, Parashar Shah,
+MK Blake, Hongkun Yu, Anthony Urbanowicz, Jennimaria
+Palomaki, Chrisantha Fernando, Ken Durden, Harsh Mehta,
+Nikola Momchev, Elahe Rahimtoroghi, Maria Georgaki,
+Amit Raul, Sebastian Ruder, Morgan Redshaw, Jinhyuk Lee,
+Denny Zhou, Komal Jalan, Dinghua Li, Blake Hechtman,
+Parker Schuh, Milad Nasr, Kieran Milan, Vladimir Miku-
+lik, Juliana Franco, Tim Green, Nam Nguyen, Joe Kelley,
+Aroma Mahendru, Andrea Hu, Joshua Howland, Ben Var-
+gas, Jeffrey Hui, Kshitij Bansal, Vikram Rao, Rakesh Ghiya,
+Emma Wang, Ke Ye, Jean Michel Sarr, Melanie Moran-
+ski Preston, Madeleine Elish, Steve Li, Aakash Kaku, Jigar
+Gupta, Ice Pasupat, Da-Cheng Juan, Milan Someswar, Tejvi
+M., Xinyun Chen, Aida Amini, Alex Fabrikant, Eric Chu,
+Xuanyi Dong, Amruta Muthal, Senaka Buthpitiya, Sarthak
+Jauhari, Nan Hua, Urvashi Khandelwal, Ayal Hitron, Jie
+Ren, Larissa Rinaldi, Shahar Drath, Avigail Dabush, Nan-
+Jiang Jiang, Harshal Godhia, Uli Sachs, Anthony Chen,
+Yicheng Fan, Hagai Taitelbaum, Hila Noga, Zhuyun Dai,
+James Wang, Chen Liang, Jenny Hamer, Chun-Sung Ferng,
+Chenel Elkind, Aviel Atias, Paulina Lee, Vít Listík, Mathias
+Carlen, Jan van de Kerkhof, Marcin Pikus, Krunoslav Za-
+her, Paul Müller, Sasha Zykova, Richard Stefanec, Vitaly
+Gatsko, Christoph Hirnschall, Ashwin Sethi, Xingyu Fed-
+erico Xu, Chetan Ahuja, Beth Tsai, Anca Stefanoiu, Bo
+Feng, Keshav Dhandhania, Manish Katyal, Akshay Gupta,
+Atharva Parulekar, Divya Pitta, Jing Zhao, Vivaan Bhatia,
+Yashodha Bhavnani, Omar Alhadlaq, Xiaolin Li, Peter Da-
+nenberg, Dennis Tu, Alex Pine, Vera Filippova, Abhipso
+Ghosh, Ben Limonchik, Bhargava Urala, Chaitanya Krishna
+Lanka, Derik Clive, Yi Sun, Edward Li, Hao Wu, Kevin
+Hongtongsak, Ianna Li, Kalind Thakkar, Kuanysh Omarov,
+Kushal Majmundar, Michael Alverson, Michael Kucharski,
+Mohak Patel, Mudit Jain, Maksim Zabelin, Paolo Pela-
+gatti, Rohan Kohli, Saurabh Kumar, Joseph Kim, Swetha
+Sankar, Vineet Shah, Lakshmi Ramachandruni, Xiangkai
+Zeng, Ben Bariach, Laura Weidinger, Tu Vu, Alek Andreev,
+Antoine He, Kevin Hui, Sheleem Kashem, Amar Subra-
+manya, Sissie Hsiao, Demis Hassabis, Koray Kavukcuoglu,
+Adam Sadovsky, Quoc Le, Trevor Strohman, Yonghui Wu,
+Slav Petrov, Jeffrey Dean, and Oriol Vinyals. Gemini: A
+family of highly capable multimodal models, 2025. 5, 8
+[35] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszko-
+reit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia
+Polosukhin. Attention is all you need, 2023. 2
+[36] Shuzhe Wang,
+Vincent Leroy,
+Yohann Cabon,
+Boris
+Chidlovskii, and Jerome Revaud. Dust3r: Geometric 3d vi-
+sion made easy. In CVPR, 2024. 2, 3
+[37] Jing Wu, Jia-Wang Bian, Xinghui Li, Guangrun Wang, Ian
+Reid, Philip Torr, and Victor Prisacariu. GaussCtrl: Multi-
+View Consistent Text-Driven 3D Gaussian Splatting Editing.
+ECCV, 2024. 2, 3, 6, 7
+[38] Haofei Xu, Anpei Chen, Yuedong Chen, Christos Sakaridis,
+Yulun Zhang, Marc Pollefeys, Andreas Geiger, and Fisher
+Yu. Murf: Multi-baseline radiance fields. In CVPR, 2024. 2
+[39] Yongzhi Xu, Yonhon Ng, Yifu Wang, Inkyu Sa, Yunfei
+Duan, Yang Li, Pan Ji, and Hongdong Li. Sketch2scene: Au-
+tomatic generation of interactive 3d game scenes from user’s
+casual sketches, 2024. 1
+[40] Shuai Yang, Yifan Zhou, Ziwei Liu, and Chen Change
+Loy. Rerender a video: Zero-shot text-guided video-to-video
+translation, 2023. 2
+[41] Botao Ye, Sifei Liu, Haofei Xu, Xueting Li, Marc Pollefeys,
+Ming-Hsuan Yang, and Songyou Peng. No pose, no problem:
+Surprisingly simple 3d gaussian splats from sparse unposed
+images. arXiv preprint arXiv:2410.24207, 2024. 2, 3, 5, 6, 7
+[42] Junqi You, Chieh Hubert Lin, Weijie Lyu, Zhengbo Zhang,
+and Ming-Hsuan Yang. Instainpaint: Instant 3d-scene in-
+painting with masked large reconstruction model, 2025. 6
+[43] Kai Zhang, Sai Bi, Hao Tan, Yuanbo Xiangli, Nanxuan Zhao,
+Kalyan Sunkavalli, and Zexiang Xu. Gs-lrm: Large recon-
+struction model for 3d gaussian splatting. ECCV, 2024. 2
+[44] Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Adding
+conditional control to text-to-image diffusion models, 2023.
+2
+[45] Xuanqi Zhang, Jieun Lee, Chris Joslin, and Wonsook Lee.
+Advancing 3d gaussian splatting editing with complemen-
+tary and consensus information, 2025. 1
+14

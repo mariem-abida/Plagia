@@ -1,0 +1,920 @@
+1
+An Adaptive, Disentangled Representation for
+Multidimensional MRI Reconstruction
+Ruiyang Zhao and Fan Lam
+Abstract— We present a new approach for representing
+and reconstructing multidimensional magnetic resonance
+imaging (MRI) data. Our method builds on a novel, learned
+feature-based image representation that disentangles dif-
+ferent types of features, such as geometry and contrast,
+into distinct low-dimensional latent spaces, enabling bet-
+ter exploitation of feature correlations in multidimensional
+images and incorporation of pre-learned priors specific
+to different feature types for reconstruction. More specif-
+ically, the disentanglement was achieved via an encoder-
+decoder network and image transfer training using large
+public data, enhanced by a style-based decoder design. A
+latent diffusion model was introduced to impose stronger
+constraints on distinct feature spaces. New reconstruc-
+tion formulations and algorithms were developed to in-
+tegrate the learned representation with a zero-shot self-
+supervised learning adaptation and subspace modeling.
+The proposed method has been evaluated on accelerated
+T1 and T2 parameter mapping, achieving improved perfor-
+mance over state-of-the-art reconstruction methods, with-
+out task-specific supervised training or fine-tuning. This
+work offers a new strategy for learning-based multidimen-
+sional image reconstruction where only limited data are
+available for problem-specific or task-specific training.
+Index Terms— Disentangled image representation, La-
+tent diffusion model, Multidimensional MR imaging, Self-
+supervised MRI reconstruction, Quantitative MRI.
+I. INTRODUCTION
+The success of deep learning has facilitated the paradigm
+shift in image reconstruction from generic “hand-crafted” reg-
+ularization/priors to learning and incorporating domain/task-
+specific priors via data-driven methods. In the realm of MRI,
+one mainstream approach is unrolling iterative optimization al-
+gorithms into cascaded deep neural networks that map directly
+from an initial reconstruction (or k-space measurements) to the
+reconstructed image. These networks are trained end-to-end in
+a supervised fashion when high-quality, fully-sampled images
+are available [1]–[4], or in a self-supervised manner leveraging
+only noisy or incomplete measurements [5]–[7]. While both
+training strategies have demonstrated impressive performance,
+they typically require large quantities of training data to
+achieve reliable results. Furthermore, the task-specific nature
+This work was supported in part by the following grants: NSF-CBET
+1944249, NIH/NIGMS 5R35GM14296.
+R. Zhao is with the Department of Electrical and Computer Engi-
+neering and Beckman Institute for Advanced Science and Technology,
+University of Illinois Urbana-Champaign.
+F. Lam is with the Department of Bioengineering and Beckman
+Institute for Advanced Science and Technology, University of Illinois
+Urbana-Champaign, IL 61801 USA (e-mail: fanlam1@illinois.edu).
+of these approaches renders the learned models vulnerable to
+variations in acquisition protocols, data quality, and domain
+shifts [8], [9].
+An alternative learning-based image reconstruction ap-
+proach is to pre-learn a “prior” that can be flexibly incor-
+porated (or “plugged in”) into iterative algorithms considering
+task-specific forward models, rather than learning the inverse
+mapping end-to-end. For example, prior learning techniques
+such as score-based diffusion models have been extensively
+investigated [10]–[12], along with various algorithms designed
+to integrate these learned priors [13]–[16]. These methods
+circumvent the need of retraining for each new reconstruction
+task and can be more robust to acquisition and domain varia-
+tions. While promising, their application in multidimensional
+imaging remains largely unexplored due to the scarcity of
+training data and challenges in effectively leveraging feature
+correlations across multiple image dimensions. For example,
+in multidimensional MRI applications such as quantitative
+parameter mapping [17]–[19], MR spectroscopic imaging [20],
+[21], or dynamic imaging [22], [23], acquiring large and
+diverse datasets for learning the entire spatiotemporal prior
+is often prohibitive considering the resources needed. Even
+with adequate data, strategies to more effectively exploit
+multidimensional feature correlations are needed.
+Another approach that has attracted more attention recently
+is using network-based representation of unknown images for
+zero-shot learning-based reconstruction. In this approach, the
+target image is modeled as the output of a network, typically
+via a decoder architecture that maps a low-dimensional feature
+vector (latent) into images. Compared to other learning-based
+methods, it offers several advantages: (1) it substantially
+reduces the degrees of freedom by reformulating image re-
+construction as the recovery of low-dimensional latents; (2) it
+enhances generalizability across tasks, since the network learns
+image representations rather than direct inverse mapping; (3) it
+offers flexibility in data-limited settings, as the representation
+can be implemented using untrained networks (e.g., deep
+image prior [24], [25]), pre-trained networks (e.g., generative
+adversarial networks [26] and latent diffusion models [27]), or
+pre-trained networks plus experiment/task-specific fine-tuning
+or adaptation [28], [29]; and (4) by describing images via a set
+of features rather than individual voxel values, it enables new
+ways to constrain multidimensional images that often exhibit
+correlated features. For example, in quantitative MRI (qMRI),
+image contrast changes with acquisition parameters while the
+underlying anatomy (geometry) remains unchanged. There-
+fore, network-based representation offers a potential solution
+arXiv:2512.24674v1 [eess.IV] 31 Dec 2025
+
+2
+to the data scarcity and generalization challenges, particularly
+in multidimensional acquisition settings.
+In this work, we proposed a new network-based representa-
+tion for reconstructing multidimensional MR images. Specif-
+ically, we introduced a model and learning strategy that sep-
+arate different types of image features such as geometry and
+contrast into distinct low-dimensional latent spaces, reducing
+the degrees of freedom for multidimensional images and en-
+abling flexible constraints on individual features. Latent diffu-
+sion models were employed to provide feature-level generative
+priors on the disentangled latents for constrained reconstruc-
+tion. To mitigate potential mismatch between representations
+pre-trained using large public datasets and application-specific
+data, we developed a novel algorithm that combines pretrained
+representations with task-specific adaptation through zero-shot
+self-supervised learning. We demonstrated effective disentan-
+glement achieved for geometry and contrast features in multi-
+contrast images and evaluated its utility in multidimensional
+MR applications such as accelerated T1 and T2 mapping.
+The remaining of the paper is organized as follows: Section
+II provides some background on feature-base image represen-
+tation and its use in image reconstruction. Section III describes
+the proposed problem formulation and algorithm in details.
+Section IV evaluates the proposed method in two application
+examples, accelerated T1 and T2 mapping. Section V and VI
+provide some technical discussion and conclude the paper.
+II. BACKGROUND
+A. Feature-based Representation and Reconstruction
+In feature-based representation, the image of interest X is
+described as: X = Dθ(z), with z denoting a set of latent
+variables (typically lower dimensional than X) and Dθ(.)
+a network parameterized by θ mapping the latent to image
+space. Compared to the earlier kernel-based representation
+[30], [31], these network-based models offer more flexibility
+and circumvent the need to choose a specific kernel. With
+this model, the reconstruction problem can be formulated as
+estimating z and/or the network parameters θ by solving:
+ˆz, ˆθ = arg min
+z,θ ∥A(Dθ(z)) −y∥2
+2 ,
+(1)
+where A and y denote the forward model and measured
+data, respectively. Since the reconstruction is constrained to lie
+within the range space of Dθ(·), this approach may introduce
+substantial modeling errors from several sources: mismatch
+between the training data for representation learning and test
+data, low-dimensionality of z, and limitations of optimization
+algorithms. This issue has been observed in methods based on
+pretrained GANs that update only the latent variables z [26].
+While jointly updating both z and θ can mitigate this issue,
+it requires early stopping and/or other careful regularizations
+to prevent overfitting to noise and artifacts.
+To reduce representation error while maintaining effec-
+tive constraints, we will introduce a second-stage refinement
+network combined with a zero-shot self-supervised learning
+strategy to update the network parameters and latent-diffusion-
+based constraints. In addition, the proposed network is adapted
+Fig. 1.
+A disentangled representation (using “geometry” and “contrast”
+features as examples): Once learned, geometry and contrast latents
+can be sampled from respective distributions and combined to generate
+images with target geometry or contrast.
+from a style-based architecture [32], [33], which has demon-
+strated stronger image representation capability than earlier
+generations of GANs, particularly for high-resolution images.
+B. Multidimensional Image Representation
+A straightforward extension of feature-based image repre-
+sentation to multidimensional imaging is to assign separate
+latents and network parameters to each image, i.e.,
+X1 = Dθ1(z1), X2 = Dθ2(z2), . . . , XNt = DθNt(zNt),
+(2)
+where {X1, X2, . . . , XNt} denote the images acquired at dif-
+ferent times or parameters. However, modeling each image in-
+dependently ignores their inherent correlations and introduces
+unnecessarily more unknowns. To this end, a common strategy
+is to enforce shared network parameters across all images
+(θ1 = θ2 = · · · = θNt) and explore correlations in latent
+space. For example, similarity constraints can be introduced
+on adjacent latents (e.g., zi ≈zi+1) by assuming that images
+acquired at neighboring time points share similar features.
+Additionally, multi-resolution architectures like StyleGAN can
+be utilized to impose invariance on certain latent components
+across images [32]–[34]. Although helpful, these methods rely
+on generic similarity assumptions that do not capture the true
+relationships among the latents for multidimensional images.
+To better model feature correlations in the latent space,
+we propose learning a disentangled representation that de-
+composes the latent space into semantically distinct com-
+ponents. Considering contrast and geometry variations as
+an
+example,
+images
+with
+different
+contrast
+weightings
+{Xc1, Xc2, . . . , XcNt} are acquired in many applications such
+as quantitative MRI. If contrast variations can be modeled
+separately from geometry in the latent space (see Fig. 1), each
+image can be modeled using a shared geometry latent zg and
+contrast-specific latents {zc1, zc2, . . . , zcNt}, which leads to:
+Xci = Dθ(zg, zci) for i = 1, 2, . . . , Nt. This disentangled
+representation better exploits feature correlations and enables
+explicit control over distinct image features. The next section
+describes our detailed methodology.
+
+3
+Fig. 2.
+(a) The proposed representation learning strategy. Image
+transfer losses are used to train the disentangled representation. The
+decoder combines geometry latents from Xgi,ci with contrast latents
+from Xgj,cj to generate a new image (see right), which can be inter-
+preted as contrast transfer for Xgi,ci or geometry transfer for Xgj,cj .
+(b) The FiLM block for feature combination. At resolution l, the encoder
+feature maps Fl
+enc are transformed into zl
+c through global average
+pooling (GAP) and a fully connected (FC) layer. The resulting zl
+c is
+then split into modulation parameters γl
+c and βcl, which are applied
+to modulate the decoder feature maps Fl
+dec at the same level.
+III. PROPOSED METHOD
+A. Learning A Disentangled Image Representation
+Our target is to learn a model that enables explicit control of
+different features in the target images. To this end, we propose
+a two-step learning strategy. The first step involves training
+an autoencoder to enable feature disentanglement through
+image transfer and latents regularization, while the second
+step focuses on learning priors distributions for disentangled
+latents using diffusion models. In this paper, we investigate
+the disentanglement of contrast and geometry features, with a
+specific focus on reconstructing images with different contrast-
+weightings, while the approach can be generalized to other
+types of features.
+More specifically, we first represent multicontrast images
+using two distinct sets of latents, i.e., geometry and contrast.
+Two separate image encoders, Eg(·) and Ec(·), were employed
+to extract geometry and contrast information, respectively. The
+resulting latents were then combined by a decoder Dθ(·) for
+image synthesis (Fig. 2). The autoencoder training is based
+on image transfer, where the decoder combines a geometry
+latent from one image with a contrast latent from another
+to synthesize cross-composed images, minimizing an image
+transfer loss:
+Lt =
+
+Xgi,cj −Dθ(Eg(Xgi,ci), Ec(Xgj,cj))
+
+2
+F ,
+(3)
+where Xgi,ci and Xgj,cj denotes image pairs with geometry
+gi and gj and contrast ci and cj. The target Xgi,cj corresponds
+Fig. 3.
+Feature disentanglement achieved: High-quality T1w (first) and
+T2w (last) images can be generated by sampling a geometry latent
+zg1 from our learned latent diffusion model and combining it with two
+different contrast latents zcT1 and zcT2 , using the trained decoder.
+Interpolation between zcT1 and zcT2 produced images with consistent
+geometry but varying contrasts (middle images). Combining a different
+geometry latent with zcT1 produced the same T1 contrast but with
+different anatomical features (bottom).
+to an image sharing the same geometry as Xgi,ci and the same
+contrast as Xgj,cj.
+To further promote disentanglement, we introduced a multi-
+resolution, StyleGAN-like architecture. The contrast encoder
+Ec(·) produces latents at multiple resolutions, which are
+injected into the decoder via Feature-wise Linear Modulation
+(FiLM) [35]. For example, as shown in Fig. 2(b), the feature
+map Fl
+enc extracted by Ec(·) at a given resolution level l
+is transformed into scale and shift vectors γl, βl ∈RB×Cl,
+where B denotes the batch size and Cl the number of channels.
+The corresponding decoder features Fl
+dec ∈RB×Cl×Hl×Wl
+are modulated as:
+FiLM
+
+Fl
+dec
+ γl, βl
+= γl ⊙Fl
+dec + βl,
+(4)
+where ⊙is element-wise multiplication, with γl and βl
+broadcasted over the spatial dimensions (Hl, Wl). This mech-
+anism encourages the model to represent contrast as global,
+layer-wise intensity transformations while preserving spatial
+structure in the decoder. By explicitly modulating feature at
+multiple resolutions, FiLM offers an effective way to control
+contrast-related variations without altering spatial content,
+thereby promoting geometry–contrast disentanglement.
+To model the distributions of latents zg (geometry) and
+zc (contrast), we trained a latent diffusion model that learns
+“disentangled” generative priors for multicontrast images. The
+loss function for training the diffusion model is defined as:
+LLDMg/c = Ezg/c,ϵ∼N (0,1),t
+h
+
+ϵ −ϵθg/c
+ zg/c, t
+
+
+2
+F
+i
+.
+(5)
+where t is the time step in diffusion models, θg and θc
+denotes the parameters for the score functions of zg and
+zc, respectively. We used a time-conditioned UNet as the
+backbone of ϵθg/c [36]. The model was trained using large-
+scale public datasets including HCP and Kirby21 datasets [37],
+[38].
+
+4
+Algorithm 1 The Proposed Reconstruction Algorithm with the Learned Representation and Latent Diffusion Prior
+Require: Measurements d, Forward Operator A(·), Decoder Dθ(·), Refinement Network NθN (·), Pretrained Noise Predictor
+ϵθg(·), Diffusion Parameters ¯αtd, η, δ, Hyperparameter γ, Data Consistency Update Steps C
+1: Initialize {zgt,Td}, {zct} ∼N(0, I) and refinement params θN
+2: for td = Td −1, . . . , 0 do
+3:
+Diffusion step: Predict noise {ˆϵt,td+1} = ϵθg({zgt,td+1}, td + 1)
+4:
+Estimate clean latent via Tweedie’s formula: {¯zgt,0} =
+1
+√
+¯αtd+1
+
+{zgt,td+1} −√1 −¯αtd+1{ˆϵt,td+1}
+
+5:
+Update via DDIM: {z′
+gt,td} = √¯αtd{¯zgt,0} +
+p
+1 −¯αtd −ηδ2{ˆϵt,td+1} + ηδ{ϵ}, where ϵ ∼N(0, I)
+6:
+if t ∈C (data consistency steps) then
+7:
+Data consistency update:
+{ˆzgt}, {ˆzct}, ˆθN = arg
+min
+{zgt},{zct},θN ∥AΘ({Dθ(zgt, zct)}) −dΘ∥2
+F
+|
+{z
+}
+measured part
++ ∥AΛ(NθN ({Dθ(zgt, zct)}, dΘ, AΘ)) −dΛ∥2
+F
+|
+{z
+}
+held-out part
+8:
+Resample(blend DDIM and DC): {zgt,td} = StochasticResample({ˆzgt}, {z′
+gt,td}, γ)
+9:
+else
+10:
+{zgt,td} = {z′
+gt,td}
+11:
+end if
+12: end for
+13: Final reconstruction: X = NˆθN ({Dθ(ˆzgt, ˆzct)}, d, A)
+B. Reconstruction Formulation and Algorithm
+Leveraging the pre-trained representation Dθ(.), we propose
+the following multidimensional reconstruction formulation:
+{ˆzgt}, {ˆzct}, ˆθN = arg
+min
+{zgt},{zct},θN∥A(X) −d∥2
+F
++
+Nt
+X
+t=1
+λgtRg(zgt), s.t. X = NθN ({Dθ(zgt, zct)}).
+(6)
+The first term in Eq. (6) enforces data consistency. A is the
+encoding operator, X ∈CN×Nt is the unknown image with
+N voxels and Nt ”time” points, and d represents the acquired
+data. The second term regularizes the geometry latents zgt with
+Rg, realized via a latent diffusion prior (see Section III.A).
+Although both geometry and contrast priors can be learned
+and applied, only the geometry latent diffusion prior was
+adopted, due to a distribution mismatch between the training
+and experimental data (see Section III-C). Finally, X is con-
+strained within the range space of the adaptive representation
+NθN ({Dθ(zgt, zct)}), where a refinement network NθN (.)
+further adapts decoder outputs {Dθ(zgt, zct)} (a set of images
+across ”time”) to the acquired data domain to reduce any
+representation bias. A zero-shot learning strategy is employed
+to estimate the parameters θN using only the acquired data.
+This formulation enables effective exploitation of redun-
+dancy in multidimensional images. For image sequences with
+varying contrasts, the anatomy remains unchanged. We can
+enforce shared geometry latents, e.g., zg1 = zg2 = · · · =
+zgNt, reducing the number of unknowns (see specific cases in
+Section IV). Moreover, the disentangled representation allows
+geometry priors learned from large public datasets with many
+subjects but limited contrasts to be transferred to specific
+applications which may have richer contrast variations.
+To solve Eq.(6), we adapted the algorithm from [27] to
+incorporate data consistency constraints during the reverse
+latent diffusion steps that enforces pre-learned feature-level
+prior. The overall algorithm is summarized in Algorithm 1.
+More specifically, starting from Gaussian noise, the geometry
+latents {zgt,td+1} (at diffusion step td + 1) are progressively
+denoised via an unconditional reverse process of a Denoising
+Diffusion Implicit Model (DDIM) [39], where Tweedie’s for-
+mula provides an estimate of the clean latent {¯zgt,0} at each
+step. At selected reverse diffusion steps, a conditional update
+was applied to adjust {zgt}, {zct} and θN by minimizing the
+data consistency loss as follows:
+{ˆzgt}, {ˆzct}, ˆθN =
+arg
+min
+{zgt},{zct},θN∥A(NθN ({Dθ(zgt, zct)})) −d∥2
+F ,
+(7)
+which can be optimized using gradient descent. The updated
+geometry latents {ˆzgt} are then stochastically resampled back
+to continue the reverse diffusion process. Finally, the decoder
+and refinement network are applied to {ˆzgt} and {ˆzct} to
+produce the reconstructed image.
+Directly updating θN may lead to overfitting due to the large
+number of parameters. Thus, we adopted the data partitioning
+strategy from the SSDU approach [5]. Data were partitioned
+into two disjoint subsets: d = dΘ∪dΛ (with matched forward
+operators AΘ and AΛ), leading to the following modified data
+consistency loss:
+{ˆzgt},{ˆzct}, ˆθN =
+arg
+min
+{zgt},{zct},θN∥AΘ({Dθ(zgt, zct)}) −dΘ∥2
+F
++ ∥AΛ(NθN ({Dθ(zgt, zct)}, dΘ, AΘ)) −dΛ∥2
+F .
+(8)
+In this formulation, the first term enforces data consistency
+with respect to (w.r.t.) {zgt} and {zct} using dΘ as the target.
+The second term corresponds to the SSDU reconstruction
+loss, where the refinement network takes both the decoder
+output {Dθ(zgt, zct)} and dΘ as input and uses the other
+partition dΛ as the target. The loss is minimized w.r.t. {zgt},
+{zct}, and θN. This “joint” update of {zgt}, {zct}, and
+
+5
+Fig. 4.
+Reconstructed images (top left panel) from experimental T1 mapping data and the corresponding error maps (top right panel) at AF=6.
+Images acquired with different flip angles are shown in different columns while results from different methods in respective rows. Zoomed-in regions
+from the images are shown in the bottom panel with artifacts that were reduced by our method indicated by blue arrows. Mean-squared errors and
+SSIM values are shown in the the error maps. The proposed method achieved the lowest error and highest SSIM, with most noise-like residuals.
+θN is computationally more efficient than solving latent first
+followed by the SSDU-based adaptation. The first term can be
+viewed as a regularization on {zgt} and {zct} for the SSDU
+loss, facilitating convergence with a small number of update
+steps. During each gradient descent step, different partitions
+were created as ’data augmentation’ [40]. The refinement
+network NθN (·) was implemented as an unrolled network
+adapted from [3]. Combining the proposed representation with
+the refinement network achieved better performance compared
+to SSDU-based reconstruction alone or reconstruction using
+only the learned representation (see Results).
+C. Training and Other Implementation Details
+We pre-trained our representation model using the HCP
+and Kirby21 datasets [37], [38]. T1-weighted (T1w) and T2-
+weighted (T2w) images from the HCP database, and T1w,
+FLAIR, T1 mapping (flip angles = 15◦and 60◦), and T2
+mapping (TE = 30 ms and 80 ms) data from the Kirby21
+database were used. The proposed reconstruction method was
+evaluated using in-house T1 and T2 mapping data, where
+data from one subject were used for hyperparameter tuning
+(validation) and data from two subjects were used for testing.
+Network training and reconstruction were performed on a
+Linux server with an NVIDIA A40 GPU and implemented in
+PyTorch 2.0.1. The Adam optimizer was used with a batch
+size of 64 for both the autoencoder and diffusion model
+training. Reconstruction methods based on joint sparsity and
+low-rank plus joint sparsity for comparison were implemented
+in MATLAB R2020b.
+IV. EXPERIMENTS AND RESULTS
+A. Effective Feature Disentanglement
+We first evaluated the feature disentanglement of the pro-
+posed representation. As shown in Fig. 3, with the geometry
+latents of two images with the same anatomy fixed, inter-
+polating between their respective contrast latents generated
+images with varying contrasts but identical anatomy, demon-
+strating effective separation of geometric and contrast features.
+These results also support that images with different contrast
+weightings can be produced by combining a shared geometry
+latent with varying contrast latents, a strong constraint for
+multicontrast image reconstruction.
+This disentanglement property directly motivates the appli-
+cation of our learned representation to MR parameter mapping,
+where sequences of images with varying contrasts are recon-
+structed and quantified. In this work, we evaluated the utility
+of the proposed representation and image reconstruction using
+quantitative T1 and T2 mapping tasks.
+
+6
+Fig. 5.
+T1 mapping results at 6× acceleration (AF=6; brain masked).
+The proposed method preserved spatial details better with the high-
+est mapping accuracy, as shown in the estimated T1 maps (middle),
+zoomed-in regions (top), and the corresponding error maps (bottom).
+The overall errors and SSIM values for T1 maps are shown.
+B. In Vivo Experiments
+All in vivo experiments were performed with local IRB
+approval. T1 mapping data were acquired using a variable flip
+angles (vFAs) protocol with a spoiled gradient echo sequence
+on a 3T scanner equipped with a 20-channel head coil [41].
+Acquisition parameters were: TR/TE = 40/12 ms, flip angles
+= 5◦, 10◦, 15◦, 20◦, 30◦, 40◦, field of view (FOV) = 210 ×
+210 × 107 mm3 , and matrix size = 192 × 192 × 32.
+T2 mapping data were acquired using a multi-slice multi-
+spin-echo sequence on a 3T scanner with a 20-channel head
+coil [42]. Parameters were: TR = 3110 ms, 15 echoes with
+TE1 = 11.5 ms and echo spacing ∆TE = 11.5 ms. 8 slices
+were acquired, each with FOV = 220×200 mm2, matrix size
+= 224 × 192, and slice thickness = 3 mm.
+For both types of acquisitions, fully sampled data were
+acquired and retrospectively undersampled using a variable
+density random phase encoding mask (center fully sampled
+with Gaussian density decay toward the periphery) with dif-
+ferent acceleration factors (AFs). Coil sensitivity maps were
+estimated via ESPIRiT [43], using 18 central k-space lines
+from the first flip angle/TE. In the T2 mapping experiment,
+6 central k-space lines at all TEs were additionally acquired
+for subspace estimation [44]. For accelerated T1 mapping, 6
+central k-space lines were acquired at remaining flip angles,
+but no subspace estimation was performed because only six
+flip angles were available.
+C. T1 mapping Results
+For T1 mapping, we compared the proposed method with
+a joint sparsity constrained reconstruction [45] and a state-of-
+the-art zero-shot self-supervised reconstruction method (ZS-
+SSDU) [40]. We selected ZS-SSDU as a primary base-
+line because our method also follows a zero-shot learning
+paradigm, requiring no supervised re-training or fine-tuning
+on domain-specific datasets. Representative reconstructed im-
+ages at AF=6 are shown in Fig. 4. The proposed method
+consistently produced reconstructions with improved quality
+Fig. 6.
+T2 mapping results (first row) and error maps (second row)
+from different methods at AF=8; The overall errors and SSIM for T2
+maps were also shown in the error maps (top left corners). As can be
+seen, lower reconstruction error and better preservation of details were
+observed for the proposed method (last column). Zoomed-in regions
+further illustrate the reduced errors achieved.
+and reduced errors across different contrasts (FAs) compared
+to other methods. The corresponding T1 maps are shown
+in Fig. 5. The proposed method achieved the most accurate
+T1 estimates w.r.t. the fully sampled reference as shown by
+the lowest relative ℓ2 errors and highest SSIM values, ef-
+fectively suppressing artifacts. The zoomed-in regions further
+demonstrate a better preservation of structural details by the
+proposed method. The ZS-SSDU method, although produced
+lower errors than the joint sparsity method, seemed to result in
+strong bias in certain localized areas (Fig. 5, last row). These
+results demonstrated that the proposed representation can work
+synergistically with zero-shot self-supervised learning, leading
+to improved reconstruction and quantification performance.
+More quantitative comparisons under different AFs are shown
+in Fig. 7.
+D. T2 mapping Results
+For T2 mapping, the proposed method was further combined
+with low-rank/subspace modeling [46]. Specifically, the under-
+lying image X ∈CN×Nt can be modeled as: X = U ˆV, where
+U ∈CN×r represents the spatial coefficients, ˆV ∈Cr×Nt a
+set of temporal basis, and r the subspace order/rank. ˆV can
+be pre-determined from central k-space data. This introduced
+a complementary constraint to the learned representation. As
+a result, the loss function in Eq. (8) is changed into:
+{ˆzgt}, {ˆzct}, ˆθN =
+arg
+min
+{zgt},{zct},θN∥AΘ({Dθ(zgt, zct)} ˆVH ˆV) −dΘ∥2
+F +
+∥AΛ(NθN ({Dθ(zgt, zct)} ˆVH, dΘ, AΘ, ˆV) ˆV) −dΛ∥2
+F .
+(9)
+In the first term, the representation is projected onto the sub-
+space (assuming orthonormal temporal basis). In the second
+term, instead of adapting all images directly, we perform
+refinement only on the spatial coefficients, which reduces the
+
+7
+Fig. 7.
+Parameter mapping errors at different AFs for the T1 (left) and
+T2 (right) mapping data. The proposed method consistently achieved
+the lowest errors across all AFs, with more pronounced improvements
+at higher AFs. Error bars denote standard deviation of errors across all
+subjects and slices.
+number of trainable parameters in the refinement network
+and improves the efficiency of zero-shot learning [47]. The
+refinement network takes both the spatial coefficients estimate
+{Dθ(zgt, zct)} ˆVH and the temporal basis ˆV as input (for
+the data consistency block during unrolling). The output are
+refined spatial coefficients, which are then recombined with
+ˆV as: NθN ({Dθ(zgt, zct)} ˆVH, dΘ, AΘ, ˆV) ˆV to generate the
+full set of reconstructed images.
+Fig. 6 compares T2 mapping results estimated from recon-
+structions produced by different methods at AF = 8. The over-
+all estimation errors and SSIM values w.r.t. the fully sampled
+data were computed within the brain regions with T2 values
+lower than 500 ms. The proposed method integrating our
+disentangled representation and subspace modeling yielded
+superior performance over a subspace reconstruction method
+with joint sparsity regularization [44] and the ZS-SSDU
+method. These results also demonstrated the flexibility of the
+proposed representation to be combined with complementary
+constraints. Fig. 7 further demonstrates lower reconstruction
+errors consistently achieved by the proposed method across
+different AFs.
+V. DISCUSSION
+We presented an adaptive, feature-disentangled represen-
+tation for multidimensional MRI reconstruction. A unique
+feature of our approach is its ability to more explicitly exploit
+feature correlations through disentanglement, where geometry
+and contrast variations are captured by distinct latent spaces.
+This design substantially reduces the degrees of freedom while
+enabling flexible and semantically meaningful constraints. An-
+other key component is the second-stage refinement network,
+which adapts the pretrained representation to application-
+specific domains. By employing a zero-shot self-supervised
+learning strategy, the proposed refinement effectively circum-
+vents the overfitting issue often observed in methods that
+jointly update both latent variables and network parameters.
+One important design choice is whether geometry latents
+should be shared across all images with different contrasts.
+To evaluate this, we conducted abalation studies using T1
+mapping data, first comparing reconstructions using a single
+shared geometry latent across all FAs versus FA-dependent ge-
+ometry latents. Fig. 8 shows that enforcing a shared geometry
+latent across all FAs produced better reconstruction in terms
+Fig. 8.
+An ablation study using the T1 mapping data (AF= 8); Map-
+ping errors (mean ± standard deviation) summarized across different
+subjects and slices are shown in the reconstructed T1 maps. Recon-
+structions without the refinement network exhibit substantially higher
+errors. Compared to using independent latents, the proposed method
+with shared geometry latents yielded slightly lower reconstruction errors
+and variability. Error maps further highlight stronger artifacts when the
+shared latent constraint is not enforced.
+of quantitative T1 maps, indicating the benefit of degrees-
+of-freedom reduction leveraging shared geometry features.
+Another ablation study shows that removing the refinement
+network deteriorated the results substantially (Without refine-
+ment network case in Fig. 8), supporting its role in reducing
+representation errors and domain shifts. These results demon-
+strate the importance of adapting pretrained representations to
+application-specific domains, particularly when only limited
+or mismatched training data are available.
+An important question that may be raised is whether ge-
+ometry and contrast can be fundamentally disentangled. In
+practice, the definition of these two, especially for “contrast”,
+is not absolute. In our formulation, the “geometry” latent
+essentially captures structural features shared across multiple
+MR contrasts, while the “contrast” latent represents image-
+specific variations driven by acquisition parameters or relax-
+ation effects. While the proposed disentanglement is learned
+in a data-driven manner within the MRI domain, it may be
+extended to more general multimodal settings (e.g., MRI and
+CT). However, this would require rethinking how geometry
+and contrast are defined, as the underlying imaging physics and
+signal characteristics differ substantially. Achieving modality
+invariant geometry representations may require training on
+co-registered multimodal data and the design of specialized
+training strategies. Several recent studies have explored the
+disentanglement concepts for multimodal tasks such as joint
+MRI-CT image analysis and segmentation [48], [49]. These
+methods typically aim to separate modality invariant fea-
+tures from modality specific appearance to facilitate down
+stream tasks. Extending such approaches to image recon-
+struction, however, would require more effective utilization
+of multimodal feature correlations and careful consideration
+of representation accuracy. Multimodal reconstruction using
+disentangled representations remains an open and promising
+direction for future research.
+We adopted the StochasticResample strategy proposed in
+
+8
+[27] in our algorithm (Algorithm 1), to map the data consis-
+tency update output ˆzgt back to the diffusion sampling trajec-
+tory zgt,td. Compared to directly adding noise to the latents
+(e.g., applying the forward diffusion process), this strategy can
+reduce variance and lead to less noisy reconstruction [27].
+Mathematically, the StochasticResample can be expressed as
+sampling from the following distribution:
+p(zgt,td | ˆzgt, z′
+gt,td)
+= N
+ 
+σ2
+t
+√¯αtˆzgt + (1 −¯αt) z′
+gt,td
+σ2
+t + (1 −¯αt)
+,
+σ2
+t (1 −¯αt)
+σ2
+t + (1 −¯αt)I
+!
+,
+(10)
+where the mean can be viewed as the a weighted combina-
+tion of data consistency update output ˆzgt and the uncon-
+ditional DDIM latent sample z′
+gt,td. σ2
+t is defined as σ2
+t =
+γ
+
+1−¯αt−1
+¯αt
+ 
+1 −
+¯αt
+¯αt−1
+
+. In this framework, γ controls the
+tradeoff between prior consistency and data consistency. For
+example, if γ →0, zgt,td will reduce to z′
+gt,td, which result in
+unconditional DDIM sampling and poor data consistency. In
+practice, we found a relatively large range of γ can result in
+similar reconstruction results. We set γ = 35, which worked
+robustly across different cases investigated here.
+Another issue is reconstruction time. For the reverse pro-
+cess of diffusion model, we employed 500 DDIM steps
+and performed data consistency update every 20 steps. Each
+data consistency update involves 30 iterations of gradient
+descent to optimize {zgt}, {zct}, θN. Under these settings,
+the reconstruction requires approximately 15 minutes for T1
+mapping and 25 minutes for T2 mapping. While the proposed
+representation provides a strong initialization that reduces
+the number of steps needed for self-supervised training, and
+the integration with subspace modeling further decreases the
+number of trainable parameters, updating the parameters for
+NθN (·) remains computationally expensive. Future work may
+address this issue by pre-training the refinement network on a
+small quantity of in-domain data, thereby reducing the number
+of online adaptation steps required.
+In this work, disentanglement was enforced through an im-
+age transfer strategy. Future research may explore approaches
+that enforce disentanglement more explicitly in the latent
+space. For example, contrastive learning techniques could be
+employed to promote latent similarity across shared features
+and improve separation between geometry and contrast fea-
+tures [50], [51]. Alternative generative priors can be explored.
+For instance, models based on flow matching may accel-
+erate the sampling process, thus accelerating reconstruction
+[52]. Beyond MR parameter mapping, our method could
+be extended to other multidimensional MRI applications. In
+quantitative cardiovascular imaging, for example, modeling
+motion and contrast variation is essential [53] and may require
+specialized network architectures with tailored feature disen-
+tanglement strategies. For applications involving inherently
+noisy data, such as low-field MRI or spectroscopic imaging,
+self-supervised denoising strategies could be integrated with
+autoencoder training and refinement network updates to en-
+hance SNR.
+VI. CONCLUSION
+This work presented a novel approach for multidimen-
+sional MRI reconstruction that leverages adaptive, feature-
+based disentangled representations. The learned disentangled
+representation effectively exploits shared and distinct image
+features in multidimensional data, where the associated feature
+priors can be pre-trained on large public data and adapted
+to specific applications. Our reconstruction method uses a
+zero-shot, self-supervised fine-tuning strategy, eliminating the
+need for extensive task-specific training data while maintaining
+strong generalization across acquisition settings. Experimental
+results from accelerated T1 and T2 mapping demonstrated the
+effectiveness of our proposed method. Our approach offers
+a promising direction for learning-based multidimensional
+image reconstruction with limited data for task/application-
+specific supervised training.
+REFERENCES
+[1] K. Hammernik et al., “Learning a variational network for reconstruction
+of accelerated mri data,” Magn. Reson. Med., vol. 79, pp. 3055–3071,
+2018.
+[2] J. Sun et al., “Deep ADMM-Net for compressive sensing MRI,” Proc.
+NeurIPS, vol. 29, 2016.
+[3] H. K. Aggarwal et al., “MoDL: Model-based deep learning architecture
+for inverse problems,” IEEE Trans. Med. Imag., vol. 38, pp. 394–405,
+2019.
+[4] V. Monga et al., “Algorithm unrolling: Interpretable, efficient deep
+learning for signal and image processing,” IEEE Signa. Proc. Mag.,
+vol. 38, pp. 18–44, 2021.
+[5] B. Yaman et al., “Self-supervised learning of physics-guided recon-
+struction neural networks without fully sampled reference data,” Magn.
+Reson. Med., vol. 84, pp. 3172–3191, 2020.
+[6] M. Akcakaya et al., “Unsupervised deep learning methods for biological
+image reconstruction and enhancement: An overview from a signal
+processing perspective,” IEEE Signa. Proc. Mag., vol. 39, pp. 28–44,
+2022.
+[7] C. Millard and M. Chiew, “A theoretical framework for self-supervised
+MR image reconstruction using sub-sampling via variable density Nois-
+ier2Noise,” IEEE Trans. Comput. Imag., vol. 9, pp. 707–720, 2023.
+[8] M. Z. Darestani et al., “Measuring robustness in deep learning based
+compressive sensing,” in Proc. ICML, 2021, pp. 2433–2444.
+[9] R. Heckel et al., “Deep learning for accelerated and robust MRI
+reconstruction,” Magn. Reson. Mater. Phys. Biol. Med., vol. 37, pp. 335–
+368, 2024.
+[10] P. Vincent, “A connection between score matching and denoising au-
+toencoders,” Neural Comput., vol. 23, pp. 1661–1674, 2011.
+[11] J. Ho et al., “Denoising diffusion probabilistic models,” in Proc.
+NeurIPS, vol. 33, 2020, pp. 6840–6851.
+[12] Y. Song and S. Ermon, “Generative modeling by estimating gradients
+of the data distribution,” in Proc. NeurIPS, vol. 32, 2019, p. 6392.
+[13] A. G¨ung¨or et al., “Adaptive diffusion priors for accelerated MRI
+reconstruction,” Med. Imag. Anal., vol. 88, p. 102872, 2023.
+[14] U. S. Kamilov et al., “Plug-and-play methods for integrating physical
+and learned models in computational imaging: Theory, algorithms, and
+applications,” IEEE Signal Proc. Mag., vol. 40, pp. 85–97, 2023.
+[15] H. Chung et al., “Diffusion posterior sampling for general noisy inverse
+problems,” in Proc. ICLR, 2023.
+[16] G. Webber and A. J. Reader, “Diffusion models for medical image
+reconstruction,” BJR— Artificial Intelligence, vol. 1, p. ubae013, 2024.
+[17] D. Ma et al., “Magnetic resonance fingerprinting,” Nature, vol. 495, pp.
+187–192, 2013.
+[18] S. Ma et al., “Three-dimensional simultaneous brain T1, T2, and ADC
+mapping with MR multitasking,” Magn. Reson. Med., vol. 84, pp. 72–88,
+2020.
+[19] Z. Meng et al., “Accelerating T2 mapping of the brain by integrating
+deep learning priors with low-rank and sparse modeling,” Magn. Reson.
+Med., vol. 85, pp. 1455–1467, 2021.
+[20] S. Posse et al., “MR spectroscopic imaging: principles and recent
+advances,” J. Magn. Reson. Imag., vol. 37, pp. 1301–1325, 2013.
+
+9
+[21] F. Lam et al., “High-Dimensional MR spatiospectral imaging by in-
+tegrating physics-based modeling and data-driven machine learning:
+current progress and future directions,” IEEE Signal Proc. Mag., vol. 40,
+pp. 101–115, 2023.
+[22] J. A. Oscanoa et al., “Deep learning-based reconstruction for cardiac
+MRI: a review,” Bioengineering, vol. 10, p. 334, 2023.
+[23] A. G. Christodoulou and S. G. Lingala, “Accelerated dynamic magnetic
+resonance imaging using learned representations: A new frontier in
+biomedical imaging,” IEEE Signal Proc. Mag., vol. 37, pp. 83–93, 2020.
+[24] D. Ulyanov et al., “Deep image prior,” in Proc. IEEE CVPR, 2018, pp.
+9446–9454.
+[25] J. Yoo et al., “Time-dependent deep image prior for dynamic MRI,”
+IEEE Trans. Med. Imag., vol. 40, pp. 3337–3348, 2021.
+[26] A. Bora et al., “Compressed sensing using generative models,” in Proc.
+ICML, 2017, pp. 537–546.
+[27] B. Song et al., “Solving inverse problems with latent diffusion models
+via hard data consistency,” in Proc. ICLR, 2024.
+[28] S. A. Hussein et al., “Image-adaptive GAN based reconstruction,” in
+Proc. AAAI Conf. Artif. Intell., vol. 34, no. 04, 2020, pp. 3121–3129.
+[29] D. Narnhofer et al., “Inverse GANs for accelerated MRI reconstruction,”
+in Wavelets and Sparsity XVIII, vol. 11138, 2019, pp. 381–392.
+[30] G. Wang and J. Qi, “PET image reconstruction using kernel method,”
+IEEE Trans. Med. Imag., vol. 34, pp. 61–71, 2014.
+[31] Y. Li et al., “Constrained MRSI reconstruction using water side infor-
+mation with a kernel-based method,” in Proc. Int. Soc. Magn. Reson.
+Med., 2018, p. 0166.
+[32] T. Karras et al., “A style-based generator architecture for generative
+adversarial networks,” in Proc. IEEE CVPR, 2019, pp. 4401–4410.
+[33] T. Karras et al., “Analyzing and improving the image quality of
+stylegan,” in Proc. IEEE CVPR, 2020, pp. 8110–8119.
+[34] V. A. Kelkar and M. Anastasio, “Prior image-constrained reconstruction
+using style-based generative models,” in Proc. ICML, 2021, pp. 5367–
+5377.
+[35] E. Perez et al., “Film: Visual reasoning with a general conditioning
+layer,” in Proc. AAAI Conf. Artif. Intell., vol. 32, no. 1, 2018.
+[36] R. Rombach et al., “High-resolution image synthesis with latent diffu-
+sion models,” in Proc. CVPR, 2022, pp. 10 684–10 695.
+[37] D. C. Van Essen et al., “The WU-Minn human connectome project: an
+overview,” Neuroimage, vol. 80, pp. 62–79, 2013.
+[38] B. A. Landman et al., “Multi-parametric neuroimaging reproducibility:
+a 3-T resource study,” Neuroimage, vol. 54, pp. 2854–2866, 2011.
+[39] J. Song et al., “Denoising diffusion implicit models,” in Proc. ICLR,
+2021.
+[40] B. Yaman et al., “Zero-shot self-supervised learning for MRI reconstruc-
+tion,” in Proc. ICLR, 2022.
+[41] W. Bian et al., “Improving quantitative MRI using self-supervised
+deep learning with model reinforcement: demonstration for rapid T1
+mapping,” Magn. Reson. Med., vol. 92, pp. 98–111, 2024.
+[42] X. Peng et al., “Accelerated exponential parameterization of T2 re-
+laxation with model-driven low rank and sparsity priors (MORASA),”
+Magn. Reson. Med., vol. 76, pp. 1865–1878, 2016.
+[43] M. Uecker et al., “ESPIRiT—an eigenvalue approach to autocalibrating
+parallel MRI: where SENSE meets GRAPPA,” Magn. Reson. Med.,
+vol. 71, pp. 990–1001, 2014.
+[44] B. Zhao et al., “Accelerated MR parameter mapping with low-rank and
+sparsity constraints,” Magn. Reson. Med., vol. 74, pp. 489–498, 2015.
+[45] A. Majumdar and R. K. Ward, “Accelerating multi-echo T2 weighted
+MR imaging: analysis prior group-sparse optimization,” J. Magn. Reson,
+vol. 210, pp. 90–97, 2011.
+[46] Z.-P. Liang, “Spatiotemporal imaging with partially separable functions,”
+in Proc. IEEE Int. Symp. Biomed. Imag., 2007, pp. 988–991.
+[47] M. Zhang et al., “Zero-shot self-supervised joint temporal image and
+sensitivity map reconstruction via linear latent space,” in Proc. MIDL,
+2024, pp. 1713–1725.
+[48] A. Chartsias et al., “Disentangled representation learning in cardiac
+image analysis,” Med. Imag. Anal., vol. 58, p. 101535, 2019.
+[49] J. Jiang and H. Veeraraghavan, “Unified cross-modality feature disentan-
+gler for unsupervised multi-domain MRI abdomen organs segmentation,”
+in Proc. MICCAI, 2020, pp. 347–358.
+[50] A. Radford et al., “Learning transferable visual models from natural
+language supervision,” in Proc. ICML, 2021, pp. 8748–8763.
+[51] J. Ouyang et al., “Representation disentanglement for multi-modal brain
+MRI analysis,” in Proc. IPMI, 2021, pp. 321–333.
+[52] Y. Lipman et al., “Flow matching for generative modeling,” in Proc.
+ICLR, 2023.
+[53] A. G. Christodoulou et al., “Magnetic resonance multitasking for
+motion-resolved quantitative cardiovascular imaging,” Nature Biomed.
+Eng., vol. 2, pp. 215–226, 2018.

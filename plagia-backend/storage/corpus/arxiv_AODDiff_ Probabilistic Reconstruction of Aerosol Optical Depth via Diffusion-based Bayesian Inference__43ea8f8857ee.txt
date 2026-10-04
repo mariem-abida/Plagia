@@ -1,0 +1,844 @@
+AODDiff: Probabilistic Reconstruction of Aerosol
+Optical Depth via Diffusion-based Bayesian Inference
+Linhao Fan1
+Hongqiang Fang2
+Jingyang Dai1
+Yong Jiang1
+Qixing Zhang1∗
+1State Key Laboratory of Fire Science, University of Science and Technology of China
+2Fire Research Division, National Institute of Standards and Technology
+{fan7tree,djy2001}@mail.ustc.edu.cn
+hongqiang.fang@nist.gov
+{yjjiang, qixing}@ustc.edu.cn
+Abstract
+High-quality reconstruction of Aerosol Optical Depth (AOD) fields is critical for
+Atmosphere monitoring, yet current models remain constrained by the scarcity of
+complete training data and a lack of uncertainty quantification.To address these
+limitations, we propose AODDiff, a probabilistic reconstruction framework based
+on diffusion-based Bayesian inference. By leveraging the learned spatiotemporal
+probability distribution of the AOD field as a generative prior, this framework can
+be flexibly adapted to various reconstruction tasks without requiring task-specific
+retraining. We first introduce a corruption-aware training strategy to learns a spa-
+tiotemporal AOD prior solely from naturally incomplete data. Subsequently, we
+employ a decoupled annealing posterior sampling strategy that enables the more
+effective and integration of heterogeneous observations as constraints to guide
+the generation process. We validate the proposed framework through extensive
+experiments on Reanalysis data. Results across downscaling and inpainting tasks
+confirm the efficacy and robustness of AODDiff, specifically demonstrating its
+advantage in maintaining high spatial spectral fidelity. Furthermore, as a gener-
+ative model, AODDiff inherently enables uncertainty quantification via multiple
+sampling, offering critical confidence metrics for downstream applications.
+1
+Introduction
+Aerosols are vital atmospheric components that profoundly influence surface radiation balance and
+regional climate through the scattering and absorption of solar radiation [1–3]. Among aerosol
+characterization parameters, Aerosol Optical Depth (AOD) [4] serves as a fundamental and widely
+adopted metric. It quantifies the total extinction effect of aerosols along the atmospheric column
+and serves as a fundamental parameter in atmospheric physics and climate modeling [1, 5]. This
+importance becomes even more pronounced during sudden high-intensity aerosol events, such as
+wildfire smoke outbreaks, where high spatiotemporal resolution AOD observations are crucial.
+However, AOD retrieval relies on remote sensing satellites and sparse ground networks, which
+struggle to achieve high resolution simultaneously in both spatial and temporal dimensions [6]. For
+instance, polar-orbiting satellites (e.g., MODIS and VIIRS) offer kilometer-level spatial resolution but
+represent limited temporal coverage (1 or 2 passes daily) [7]. Conversely, geostationary satellites (e.g.,
+Himawari-8) provide high temporal resolution (15 minutes) but coarser spatial resolution and limited
+coverage [8]. Moreover, the efficacy of AOD retrieval is frequently impeded by physical constraints,
+including cloud contamination and heavy aerosol loading (e.g., dense wildfire smoke plumes [9]),
+∗Corresponding author
+Preprint. Work in progress.
+arXiv:2512.24847v1 [cs.LG] 31 Dec 2025
+
+resulting in pervasive and systematic missing values in observations. These systematic spatiotemporal
+gaps severely restrict downstream applications, such as fire emission estimation [9, 10] and air
+quality forecasting [11]. Consequently, efficient AOD field reconstruction is critical. Mathematically,
+this represents an challenging inverse problem: recovering a high-dimensional, complete state x
+from incomplete, noisy observations y. This problem domain typically addresses three interrelated
+challenges: missing data imputation, spatial downscaling, and temporal interpolation [12].
+To tackle these complex tasks, several distinct paradigms have emerged, among which Data Assimila-
+tion (DA) systems have long served as the standard approach for this inverse problem in atmospheric
+science. Current state-of-the-art operational aerosol reanalysis products, such as NASA’s MERRA-2
+[13] and ECMWF’s CAMS [14], primarily utilize three- or four-dimensional variational assimilation
+techniques to integrate discrete observationas into numerical models governed by fluid dynamics
+and atmospheric chemistry equations. While theoretically rigorous, DA systems face prohibitive
+computational costs [15], necessitating significant compromises in spatial resolution. To address these
+computational bottlenecks, researchers have transitioned toward more flexible statistical learning
+paradigms. Early efforts in AOD gap-filling relied on geostatistical interpolation methods [16, 17],
+such as Inverse Distance Weighting (IDW) and Kriging. These approaches, typically predicated on
+assumptions of spatial stationarity, often struggle with real-world aerosol fields characterized by
+pronounced non-stationarity and anisotropy. Consequently, those interpolation methods act effectively
+as low-pass filters: they tend to blur the high-frequency textures and fine-scale details essential for
+accurate representation [18].
+Recently, deep learning (DL) has been widely adopted for AOD reconstruction due to its robust
+nonlinear mapping capabilities, achieving accuracies that significantly surpass traditional methods
+[19–21]. However, current DL models, which treat AOD reconstruction as a standard regression task,
+face some inherent deficiencies when addressing this inverse problem. First, the supervised learning
+paradigm suffers from data dependencies and limited task generalizability. The foundation of these
+models is the availability of high-quality paired datasets. The inherent systematic missingness of AOD
+observations makes constructing such enough paired datasets extremely difficult. Furthermore, this
+strict reliance on fixed training pairs confines models to a single optimization objective. Consequently,
+they often lack the generalizability to handle unified applications across diverse tasks, such as
+spatiotemporal imputation, interpolation, and multi-source fusion. Second, at the methodological
+level, existing frameworks adopt a deterministic, point-estimate learning paradigm. From a statistical
+standpoint, such formulations implicitly encourage the model to approximate the central tendency
+of the conditional posterior distribution. Since a single degraded input corresponds to an infinite
+manifold of plausible high-frequency solutions, this paradigm inevitably yields predictions that
+resemble an "average" over all possibilities [22]. As a consequence, critical high-frequency textures
+and extreme pollution peaks are systematically suppressed, manifesting as a pronounced attenuation
+of the Power Spectral Density (PSD) in high-wavenumber regions [23]. Third, deterministic models
+yield only point estimates, neglecting the quantification of uncertainty. This limitation is critical for
+risk-related downstream tasks (e.g., wildfire monitoring), where the lack of predictive confidence
+intervals can lead to an underestimation of potential hazards.
+To address these limitations, this study reframes AOD reconstruction from a standard regression task
+to a conditional probabilistic generation task. Leveraging the rapid development of diffusion models
+[24, 25], this approach provides a powerful paradigm for learning the probability distribution of
+high-dimensional data. It naturally integrates observational constraints during the sampling process,
+enabling direct sampling from the posterior distribution [26]. This diffusion-based Bayesian inverse
+problem-solving framework [27] has achieved state-of-the-art results in image [28], medical imaging
+[29] and flow field [30] reconstruction and is progressively being introduced into meteorological
+observation reconstruction [31–35]. This study applies this framework to the AOD reconstruction
+task, developing a probabilistic generative reconstruction model tailored to the characteristics of
+AOD data. The main content and contributions are summarized as follows:
+• We propose AODDiff, a diffusion-based Bayesian inference framework that learns the
+spatiotemporal AOD distribution as a generative prior, allowing a unified and retraining-free
+solution to diverse AOD reconstruction tasks.
+• We introduce a corruption-aware training strategy designed to learn a spatiotemporal AOD
+prior directly from incomplete observations.
+• We employ a decoupled annealing posterior sampling strategy that enables the more effective
+integration of heterogeneous observations as constraints to guide the generation process.
+2
+
+2
+Problem Setting and Data Construction
+2.1
+Formulation of AOD Reconstruction Problem
+We model the AOD as a continuous spatiotemporal field, denoted by X. The observed data, Y, is
+derived from X through a physical degradation process, formally defined as:
+Y = A(X) + ϵ,
+ϵ ∼N(0, σ2
+yI)
+where A is an observation operator representing physical degradation (e.g., downsampling or mask-
+ing). The term ϵ represents observational noise, modeled as Gaussian white noise with zero mean
+and variance σ2
+y. The AOD field reconstruction problem is therefore framed as an inverse problem:
+given the observations Y and the operator A, the objective is to estimate the complete AOD field X
+at the target spatiotemporal resolution.
+However, evaluating the performance of reconstruction models in real-world scenarios faces a
+fundamental challenge: a "ground truth" AOD field that possesses both the ideal spatiotemporal
+resolution and is entirely gap-free is practically unobtainable. To enable quantitative and controlled
+evaluation, this study thus formulates a proxy task where the ground truth field is explicitly available.
+To implement this proxy task, it is essential to use a dataset that serves as a reliable surrogate for the
+true atmospheric state. Specifically, we adopt reanalysis data as the reference data, selected for its
+spatiotemporal continuity and physical consistency. It facilitates for the simulation of observational
+degradation processes with high precision and control. Critically, when the observation operators
+(A) are defined to closely reflect actual sensing constraints, the resulting evaluation becomes directly
+informative for practical reconstruction tasks. Successful reconstruction, where the estimated field ˆX
+accurately matches the reference data XGT in this high-fidelity proxy environment, demonstrates the
+model’s potential to handle real-world tasks. This setup effectively transforms the problem into a
+controllable,quantitatively evaluable framework, thereby guaranteeing the reliability and practical
+relevance of the model validation and subsequent conclusions.The specific dataset used for this study
+will be detailed in Section 2.2, while the precise definition of the observation operator A is provided
+in Section 2.3.
+2.2
+Training Data Construction
+In this study, we employ the MERRA-2 as the reference data. MERRA-2 is a state-of-the-art reanalysis
+product and one of the most widely adopted datasets in atmospheric science and aerosol research,
+offering spatiotemporally continuous and physically consistent fields. Specifically, the AOD data are
+obtained from the Total Aerosol Optical Depth at 550 nm within the hourly time-averaged aerosol
+collection. This dataset features a horizontal resolution of 0.5◦in latitude and 0.625◦in longitude,
+with an hourly temporal resolution. The study domain covers East and South Asia (5.5◦N–55◦N,
+73◦E–135◦E), as illustrated in Figure 1. This region exhibits substantial spatiotemporal variability
+in AOD, making it a suitable testbed for evaluating reconstruction algorithms. For model training,
+we compile a 10-year dataset spanning 2015–2024, while data from 2025 is reserved exclusively for
+model validation.
+To effectively handle the heavy-tailed distribution and extreme positive outliers inherent in the AOD
+data, we implement a robust standardization strategy. The logarithmic transformation is applied to the
+raw AOD data to suppress the effects of outliers and manage the heavy tailed distribution, followed
+by a quantile-based robust scaling:
+Xlog = log(1 + X)
+Xnorm = 2 ×
+ Xlog −Q0.01
+Q0.99 −Q0.01
+
+−1
+Here, Q0.01 and Q0.99 denote the 1st and 99th percentile values of the log-transformed AOD field,
+estimated exclusively from the entire training dataset. This robust scaling ensures that the vast
+majority of the data is mapped to the target range, thereby achieving zero-centering and maintaining
+resilience against extreme outliers.
+3
+
+Figure 1: Spatiotemporal Scope and Train/Validation Split of the AOD Dataset
+2.3
+Observation Operators
+This study defines two corresponding observation operators, AMask and ADS, to specifically tackle
+the primary AOD reconstruction tasks of missing data imputation and downscaling, respectively.
+These operators are applied to the reference data XGT to generate simulated observations that mimic
+realistic degradation processes, such as cloud-induced gaps and spatial coarsening, as illustrated in
+the workflow of Figure 2.
+Figure 2: Workflow of the observation operators. The reference field XGT is processed by the masking
+operator AMask to simulate cloud-occluded gaps, and the downsampling operator ADS to generate
+low-resolution representations.
+4
+
+2.3.1
+Masking Operator
+Missing AOD data in real satellite products are dominated by cloud obstruction, producing complex
+spatial structures and strong temporal correlations that simple random or block masks cannot replicate.
+To generate physically realistic missingness patterns M, we derive them from the Total Cloud Cover
+(TCC) variable of the ERA5 reanalysis dataset [36]. Hourly ERA5 TCC fields (2015–2024) are first
+resampled to the exact grid of XGT , yielding TCC(t, i, j) for each time step t and grid cell (i, j).
+Here, i and j denote the indices for latitude and longitude, respectively. A cloud-threshold parameter
+γ ∈[0, 1] is then applied: grid cells with mean cloud cover exceeding γ are marked as missing, while
+those below the threshold are retained:
+M(t, i, j) =
+0
+if TCC(t, i, j) > γ
+1
+otherwise
+Because this cloud-based mask preserves the true spatial morphology and temporal evolution of
+real missing AOD, it provides a high-fidelity proxy for evaluating inpainting performance.The final
+masked observation is obtained via element-wise degradation:
+YMask = AMask(XGT ) = M ⊙XGT + ϵm
+where ϵm ∼N(0, σ2
+m) represents the independent additive Gaussian white noise that simulates
+sensor measurement errors in the masking process.
+2.3.2
+Downsampling Operator
+Low-resolution satellite retrievals typically represent aggregated signals over a sensor’s instantaneous
+field of view. To emulate this physical process, spatial downsampling is implemented using average
+pooling. Let sstep denote the spatial downscaling factor. A low-resolution field is produced by
+applying an sstep × sstep average pooling operation to the high-resolution ground truth. If temporal
+sampling is also reduced, a temporal step factor tstep is used to subsample the pooled sequence:
+YDS = ADS(XGT ) = AvgPoolsstep(XGT )t∈{tstep} + ϵm
+where YDS denotes the simulated low-resolution observation. The operator performs spatial average
+pooling with factor sstep and temporal subsampling at every tstep interval.
+3
+Method
+3.1
+Diffusion-based Bayesian Inference Framework
+In this study, the reconstruction of the AOD field is formulated as a probabilistic generative problem,
+specifically as solving and sampling from the posterior distribution p(X | Y ), where x denotes the
+target AOD field and y represents the available observational data.
+To model the probability distribution of the high-dimensional AOD field, we leverage a framework
+based on Score-Based Diffusion Model [37]. It is built upon a pair of interconnected processes, which
+govern how the model learns to characterize a complex distribution.
+1. Forward Diffusion Process: A Stochastic Differential Equation (SDE) is used to progres-
+sively add Gaussian noise to the data z0 ∼p(z), driving it into a standard normal distribution
+z1 ∼N(0, I):
+dzτ = f(zτ, τ) dτ + g(τ) dwτ
+Here, wτ is the standard Wiener process, and f and g are the predefined drift and diffusion
+coefficients. And τ denotes the continuous diffusion time, which represents the progress of
+the diffusion process.
+5
+
+2. Reverse Sampling Process:The process of recovering the data z0 from the noise z1 is
+governed by the time-reversed SDE:
+dzτ = [f(zτ, τ) −g(τ)2∇zτ log p(zτ)] dτ + g(τ) d ¯wτ
+The crucial term is the Score Function ∇zτ log pτ(zτ), the gradient of the log probability
+density. It provides the necessary gradient information to effectively reverse the process.
+A parameterized neural network sθ(z, τ) is trained to approximate this function, thereby
+learning the structure of the target distribution p(z)
+Considering that directly modeling the conditional distribution p(x | y) is computationally chal-
+lenging, we further adopt the diffusion-based Bayesian inverse problem-solving framework [38]. It
+decomposes the posterior score into two components:
+∇xτ log p(xτ | y) = ∇xτ log p(xτ)
+|
+{z
+}
+Prior Score
++ ∇xτ log p(y | xτ)
+|
+{z
+}
+Likelihood Score
+The Prior Score is provided by the trained diffusion model (the neural network sθ), which encodes
+the prior knowledge of the AOD field. The Likelihood Score is the gradient of the likelihood function
+with respect to the measurement data, serving to inject the observational constraints y into the
+sampling process. And this framework offers high flexibility: the Likelihood Score is independent of
+the specific observation operator, allowing the method to naturally accommodate diverse types of
+observations without retraining the core prior model.
+This decomposition strategy allows us to sequentially address the modeling challenges: Section
+3.2 details the unconditional prior score modeling within the AODDiff framework, and Section 3.3
+elucidates the mechanism for providing effective posterior guidance during the sampling phase.
+3.2
+Learning AOD Prior Distributions through Score-based Diffusion Model
+Considering the inherent incompleteness of AOD data, this study dispenses with the assumption
+of complete data availability for model training. Instead, the prior distribution of AOD is learned
+solely from the available data. And the AOD field behaves as a dynamic system with complex
+spatiotemporal couplings. To capture temporal dependencies without the intractability of modeling
+infinite sequences, we adopt the Pseudo-Markov Blanket assumption [39]. This assumption posits
+that the state xi at any time i is primarily dependent on the states within a finite, local time window.
+Consequently, we define our modeling unit as the data cube xi−k:i+k spanning w = 2k + 1 time
+steps. The network sθ is then tasked with approximating the joint Score Function of this local
+spatiotemporal segment.
+To handle missing values during training, we introduce a corruption-aware training scheme inspired
+by the Ambient Diffusion framework [40], visually detailed in Figure 3(a).
+Given a data segment x0
+i−k:i+k (containing original observational gaps), we first sample a noise
+level τ ∼PEDM(τ) and add Gaussian noise ϵ according to the EDM [41] formulation, yielding the
+noisy state xτ
+i−k:i+k. We define A as the inherent observation mask (where 1 denotes observed and 0
+denotes missing). Simultaneously, we generate an additional random dropout mask B. These are
+combined to form the training mask ˜A = A ⊙B (logical intersection of valid regions). The final
+input to the network is the noisy data masked by ˜A, denoted as ˜xτ
+i−k:i+k = xτ
+i−k:i+k ⊙˜A. Crucially,
+the mask ˜A is concatenated with the data ˜xτ
+i−k:i+k and fed into the network. This concatenation
+serves to explicitly provide the model with the location of missing regions (the corruption operator),
+which is essential for the network to perform conditional score estimation.
+The Local Score Network sθ, illustrated in Figure 3(a), employs a U-Net architecture adapted for
+spatiotemporal data [30, 42]. It treats the time window w as a depth dimension, processing the input
+effectively like a 3D volume. The encoder progressively reduces the spatial resolution to extract
+multi-scale features, while the decoder reconstructs the signal. Skip connections preserve high-
+frequency details. To effectively model long-range dependencies within the window, we integrate
+a Spatial-Temporal Attention mechanism at the bottleneck layer, allowing the model to attend to
+relevant features across both space and time frames.
+6
+
+The network is trained to predict the clean signal x0 from the corrupted, noisy input. The loss function
+is a weighted Mean Squared Error, calculated on the regions that were originally observed (A). We
+formulate the Ambient Score Matching loss as:
+L = Eτ,x,ϵ
+
+λ(τ)
+
+A ⊙
+
+sθ(˜xτ
+i−k:i+k, ˜A, τ) −x0
+i−k:i+k
+
+
+2
+2
+
+where λ(τ) is the weighting function dependent on the noise level. This objective ensures the
+model learns to hallucinate plausible structures in missing regions consistent with the observed
+spatiotemporal context.
+Figure 3: Overall framework of the AODDiff: (a) The corruption-aware training process, where
+the score network learns the spatiotemporal prior from incomplete observations. (b) The inference
+process, which employs decoupled annealing posterior sampling strategy to reconstruct the AOD
+field.
+3.3
+Posterior Sampling Strategy for AOD Conditional Reconstruction
+Based on the Bayesian Inference framework established in Section 3.1, our goal is to sample from
+the posterior distribution p(x | y). To achieve a robust and flexible solution,we adopt the Decoupled
+Annealing Posterior Sampling (DAPS) strategy [43]. Unlike stepwise guidance approaches (e.g.,
+7
+
+DPS) that repeatedly inject observation corrections during sampling and may introduce artifacts or
+distupte the learned prior distribution [30, 32], DAPS avoids such instability by decoupling constraint
+enforcement from the diffusion trajectory and it enables the exploration of a larger solution space.
+As illustrated in Figure 3(b), this method decouples the reverse diffusion step from the measurement
+consistency step, allowing for flexible and accurate guidance.The sampling process iterates from
+noise τ = 1 to clean data τ = 0. At each integration step τ, the update consists of three distinct
+phases: Prior Estimation (Reverse Diddusion), Observation Guidance (Langevin Dynamics), and
+Noise Annealing.
+First, we estimate the clean data ˆx0 from the current noisy state xτ using our pre-trained Prior Model.
+Since our model sϕ is trained on local spatiotemporal cubes (Section 3.2), we employ a sliding
+window inference strategy to ensure global consistency while preserving local temporal dependencies.
+For every time step i in the sequence, we extract the local window xτ[i −k : i + k]. This window is
+fed into the network sθ to predict the score. Crucially, to aggregate these predictions into a coherent
+global field, we only extract the score corresponding to the center frame (index k + 1) of the output:
+∇xτ [i] log p(xτ) ≈sθ(xτ[i −k : i + k], τ)[k + 1]
+Using this synthesized global score, we apply a standard solver (e.g., Euler ODE solver) to predict
+the clean data estimate, denoted as ˆx0(xτ). This represents the model’s "best guess" of the AOD field
+based solely on learned prior knowledge, without yet considering the specific observations y.
+To incorporate the observational data y, we construct an approximation of the posterior p(x0 | xτ, y).
+Following the DAPS formulation, we perform Langevin Dynamics initialized at the prior estimate
+ˆx0(xτ). This process iteratively refines the estimate to satisfy the likelihood p(y | x) while remaining
+within the high-probability region of the prior. To approximate the intractable conditional distribution
+p(x0 | xτ), DAPS employs a Gaussian approximation centered at ˆx0(xτ). Leveraging this, we define
+the guidance objective function J over the clean data estimate x0 to support multiple heterogeneous
+observation sources:
+J (x0) =
+1
+2σ2
+prior
+∥x0 −ˆx0(xτ)∥2
+2
+|
+{z
+}
+Prior Consistency
++
+M
+X
+m=1
+λm ∥Am(x0) −ym∥2
+2
+|
+{z
+}
+Observation Fidelity
+where x0 is the iterative variable in the Langevin loop, σprior controls the adherence to the prior
+estimate. The second term aggregates constraints from M observation sources, where Am and λm
+represent the forward operator and weight coefficient for the m-th observation source, respectively.
+The estimate x0 is iteratively updated for N steps using the Langevin Dynamics equation:
+x(j+1)
+0
+= x(j)
+0
+−η∇x0J (x(j)
+0 ) +
+p
+2ηϵj,
+ϵj ∼N(0, I)
+where η is the step size. After J iterations, the final sample x(J)
+0
+is treated as the observation-guided
+estimate, which we denote as x0(xτ, y). The refined sample x0(xτ, y) represents the clean data
+at τ = 0. To proceed to the next diffusion time step τ −∆τ, we must decouple the consecutive
+samples as per the DAPS strategy. We reinject Gaussian noise into x0(xτ, y) scaled to the target
+noise variance σ2
+τ−∆τ:
+xτ−∆τ = ˆx0(xτ, y) + στ−∆τϵ,
+ϵ ∼N(0, I)
+This "annealing" step ensures the trajectory remains consistent with the diffusion schedule, allowing
+the process to iteratively refine the result from pure noise to a complete, high-fidelity AOD field.
+8
+
+4
+Result
+4.1
+Evaluation of Learned Prior Distribution
+This section evaluates the effectiveness of the trained model (detailed in Section 3.2) in learning
+the probability distribution of the AOD field, especially when the training data was incomplete. To
+verify the model’s capacity to learn the prior distribution of the AOD field, we generate samples
+unconditionally and quantify the consistency between the learned distribution and the true AOD field
+distribution by comparing their statistical characteristics.
+This study constructs the following sample sets for the calculation of statistical characteristics:
+• Ground Truth Sample Sets (DGT):
+– Base Set (DBase
+GT ): Consists of the complete AOD sequence for the year 2024. This set
+serves as the benchmark distribution for subsequent evaluations.
+– Contrast Set (DCtr
+GT): Consists of the complete AOD sequence for the year 2023. This
+set is used to measure the natural variation range of the true data distribution under
+limited sample size, providing a reference scale for comparing the subsequent generated
+samples.
+• Generated Sample Sets (DGen):
+– Uncorrupted Training Generation (DUnc
+Gen): One year-long AOD sequence sample gener-
+ated unconditionally by the model trained on the uncorrupted AOD dataset.
+– Corrupted Training Generation (DCorr
+Gen ): One year-long AOD sequence sample generated
+unconditionally by the model trained on the corrupted AOD dataset.
+Specifically, if the statistical characteristics of DGen closely match those of DBase
+GT and the discrepancy
+does not exceed the natural variation observed between DCtr
+GT and DBase
+GT , it strongly indicates that the
+model has successfully learned the prior distribution of the AOD field. We first conduct a quantitative
+assessment of the generated samples sets using common metrics from computer vision generation
+tasks. The results are presented in Table 1, where the comparison is anchored against the Ground
+Truth Base Set (DBase
+GT ). FID quantifies the similarity between the distribution of generated samples
+and the real data in a deep feature space. Both DUnc
+Gen and DCorr
+Gen achieve comparable FID scores,
+affirming that the models have learned a distribution close to the true AOD field. Precision measures
+the proportion of generated samples falling near the manifold of real data, reflecting fidelity. Recall
+measures the extent to which the real data manifold is covered by the generated samples, reflecting
+diversity. DCorr
+Gen exhibits slightly lower Precision and Recall compared to DUnc
+Gen, suggesting a minor
+reduction in both the coverage of the generated distribution due to training on inherently incomplete
+data. LPIPS is a perceptual distance metric used here to measure the average pairwise dissimilarity
+within a sample set. The similarity among generated samples is on par with the similarity among real
+samples. It indicated the model has not exhibited mode collapse, where generated samples become
+overly similar.
+Table 1: Comparison of Sample Sets using Generative Metrics
+Sample Set
+FID (↓)
+Precision (↑)
+Recall (↑)
+LPIPS (↑)
+DCtr
+GT
+32.52
+0.97
+0.98
+0.3356
+DUnc
+Gen
+38.14
+0.91
+0.92
+0.3188
+DCorr
+Gen
+44.34
+0.82
+0.86
+0.3015
+Then We computed the spatial mean and standard deviation for each sample set to evaluate the
+generative model’s ability to capture the macroscopic structure and spatial variability of the AOD
+field. Figure 4(a) presents the annual average spatial distribution of AOD across the four sample
+sets. The strong agreement between the generated and true data demonstrates the model’s capacity to
+accurately reproduce the macroscopic spatial features of the AOD field. Crucial structures, such as
+the low-value AOD areas dictated by geographical features (e.g., the Tibetan Plateau) and the spatial
+extent of highly polluted regions, are successfully replicated in the generated mean fields (DUnc
+Gen and
+DCorr
+Gen ). Figure 4(b) illustrates the spatial standard deviation, which quantifies the spatiotemporal
+variability at each location. The spatial distribution of the standard deviation for the generated
+samples generally aligns well with the true data distribution, particularly in major high-variability
+areas like known pollution centers and regional boundaries. However, a closer examination reveals a
+9
+
+subtle but important difference: the Ground Truth samples (DBase
+GT and DCtr
+GT) consistently exhibit more
+intense, localized high-value peaks in the standard deviation plots. In contrast, the corresponding
+Generated samples (DUnc
+Gen and DCorr
+Gen ) show a standard deviation pattern that is smoother and slightly
+less intense in these specific high-variability areas. This discrepancy suggests a potential smoothing
+effect inherent in the generation process, where the model slightly underestimates the variability
+associated with localized, extreme AOD events.
+Figure 4: Comparison of (a) Spatial Mean and (b) Standard Deviation of Ground Truth and Generated
+Sample Sets.
+We further examine the generated samples in the frequency and time domains by comparing the
+Rotational Average Power Spectral Density (RAPSD) and the Spatially. Averaged Temporal Auto-
+correlation Function (ACF). RAPSD provides a critical quantitative measure of how the variance
+(or "energy") is distributed across different spatial scales. Figure 5(a) demonstrates that the RAPSD
+curves for the generated samples (DGen) closely align with the ground truth samples (DGT) across
+the entire spectrum. This high degree of spectral consistency confirms the model’s robust ability to
+accurately capture the distribution of energy from large-scale (low wavenumber) macroscopic struc-
+tures down to small-scale (high wavenumber) fine details. This verifies that the model is generating
+textures and structures at all relevant spatial resolutions with high fidelity. To evaluate the model’s
+fidelity in reproducing the temporal persistence characteristic of the AOD field, we computed the
+temporal autocorrelation function (ACF) for the sample sets. Figure 5(b) displays the ACF, which
+measures the correlation between the field at a given time and a later time (lag). The generated
+samples closely match the decay rate observed in the ground truth, particularly for short lags. This
+agreement indicates that the model successfully captures the physical memory of the AOD field,
+producing sequences that are statistically consistent and realistic over time.
+Figure 5: Comparison of (a) Rotational Average Power Spectral Density (RAPSD) and (b) Spatially
+Averaged Temporal Autocorrelation (ACF) across Ground Truth and Generated Sample Sets.
+10
+
+Those results above show that the generated samples closely match the statistical characteristics of
+the true data. Even with incomplete training data, the model effectively learns the spatiotemporal
+probability distribution of AOD and can generate diverse, realistic samples through its powerful
+implicit modeling capability.
+4.2
+Performance Evaluation of the Posterior Guidance Strategy
+This section evaluates the effectiveness of AODDiff on two core tasks critical for AOD reconstruction:
+Downscaling and Inpainting. The models are tested using a dataset covering the period from January
+to August 2025. We compare the performance of the decoupled annealing posterior sampling (DAPS)
+strategy (employed in our AODDiff) against the modified step-wise diffusion posterior sampling
+(DPS) strategy (employed in [32, 39]). Furthermore, we examine the impact of prior model selection
+by benchmarking reconstruction results generated from the prior trained on uncorrupted (clean) data
+(sUnc
+θ
+) against those from the prior trained on corrupted data (sCorr
+θ
+). Performance is quantified using
+two metrics:
+• Normalized Root Mean Square Error (nRMSE): This metric measures the overall re-
+construction fidelity by assessing the average error relative to the intrinsic variability of the
+data.
+nRMSE = 1
+T
+T
+X
+t=1
+
+
+q
+1
+Ngrid
+PNgrid
+i=1 (ˆxt,i −xt,i)2
+σx
+
+
+where ˆxt,i and xt,i are the reconstructed and ground truth values at time t and spatial location
+i, respectively, Ngrid is the total number of grid points, and σx is the standard deviation of
+the entire ground truth dataset.
+• Mean Energy Log-Ratio (MELR): This metric quantifies the model’s ability to preserve the
+correct distribution of energy across various spatial scales (wavenumbers), thereby assessing
+spatial spectral fidelity. A lower MELR indicates that the generated samples accurately
+reproduce both the large-scale structures and the fine-scale texture of the AOD field. MELR
+is defined as the mean of the absolute logarithm ratio of the radial average power spectral
+densities (RAPSD):
+MELR = 1
+T
+T
+X
+t=1
+ 
+1
+K
+K
+X
+k=1
+log
+RAPSDGen(t, k)
+RAPSDGT(t, k)
+
+!
+where T is the total number of time steps in the evaluation period, K is the total number
+of wavenumbers, and PSDGen and PSDGT are the power spectral densities of the generated
+sample and the ground truth, respectively, at time t and wavenumber k.
+Figures 6 and 7 present the quantitative performance of AODDiff across two core tasks: Downscaling
+and Inpainting, evaluating overall reconstruction fidelity (nRMSE) and spatial spectral preservation
+(MELR). A primary observation from both figures is that generative-based approaches significantly
+outperform traditional deterministic baselines. Notably, as the reconstruction difficulty intensifies
+(higher downsampling factors or increased missing ratios), the MELR of traditional methods exhibits
+a rapid surge. In contrast, generative models consistently maintain MELR at a much lower and
+stable level. This indicates that deterministic interpolation relies primarily on local smoothness
+assumptions and therefore fails to recover the fine-scale textures and high-frequency atmospheric
+structures inherent in AOD fields. By contrast, generative models leverage learned prior distributions
+to synthesize physically plausible high-frequency structures, thereby preserving high spectral fidelity
+even under severe data loss.
+Regarding prior model, the results demonstrate that the prior trained on naturally corrupted data
+(sCorr
+θ
+) achieves performance highly comparable to the prior trained on uncorrupted data (sUnc
+θ
+). The
+absence of significant degradation confirms the effectiveness of the corruption-aware training strategy.
+Notably, in the Inpainting task (Figure 7a), when the missing ratio exceeds 60%, the corrupted
+prior (sCorr
+θ
+) even exhibits a slightly lower nRMSE than the clean prior. This can be attributed to
+the fact that sCorr
+θ
+is optimized directly on incomplete observations via corruption-aware training
+strategy. By learning from the specific noise and masking patterns present in real-world data, the
+model develops a stronger adaptive capability, allowing it to generalize better to high missing ratio
+scenarios. Furthermore, the DAPS strategy used in AODDiff consistently outperforms the modified
+11
+
+Figure 6: Comparison of (a) nRMSE and (b) MELR for different methods in the Downscaling task.
+Figure 7: Comparison of (a) nRMSE and (b) MELR for different methods in the Inpainting task.
+DPS approach across all test cases. This suggests that the decoupled guidance mechanism is more
+effective for AOD field reconstruction than the stepwise injection used in DPS. While DPS often
+introduces smoothing artifacts or boundary instabilities due to its rigid guidance trajectory, DAPS
+facilitates a broader exploration of the solution space. It ensures that the generated AOD fields are
+not only numerically accurate but also structurally coherent, featuring sharp and realistic spectral
+characteristics.
+4.3
+Case Study: Reconstruction Visualization and Uncertainty Analysis
+To provide a qualitative intuition of the AODDiff framework’s performance and flexibility, we present
+a case study using a representative sequence from August 1st, 2025. As illustrated in Figure 8, the
+reconstruction result is visualized to demonstrate the model’s behavior under various observational
+constraints. For all tasks in this section, we utilize the prior trained on naturally corrupted data (sCorr
+θ
+)
+combined with the DAPS guidance strategy to sample from the corresponding posterior distributions.
+The first row shows the ground truth fields (xGT ) as a reference, where samples are visualized at
+6-hour intervals to capture the spatiotemporal evolution of AOD distributions throughout the day.
+The second and fourth rows depict the simulated observations generated by the downscaling operator
+(yDS, with a 4x spatial factor) and the masking operator (yM, with an average missing ratio of
+approximately 45%), respectively. To evaluate the model’s ability to capture temporal dependencies,
+we applied temporal downsampling such that observations are provided only every four hours. This
+creates scenarios where no observational data is available at specific timestamps (e.g., 06:30 and
+18:30, marked as N/A in the observation rows).
+The third and fifth rows show samples drawn from the posterior distributions under the constraints
+of the downsampled observations (Sample ∼P(x|yDS) and the masked observations (Sample ∼
+12
+
+P(x|yM), respectively. The visualization results demonstrate that AODDiff successfully restores high-
+frequency details consistent with the reference XGT and effectively infills systematic missing regions.
+Even at timestamps without direct observations (marked as ’N/A’), the model leverages learned
+spatiotemporal dependencies to achieve accurate recovery, showcasing its generative capability in
+maintaining field continuity. The final row demonstrates the flexibility of AODDiff in simultaneously
+incorporating multiple heterogeneous observations. By sampling from the joint posterior distribution
+P(x|yDS, yM), the model effectively fuses the global structural guidance of the downsampled data
+(yDS) with the local high-fidelity details from the unmasked portions of yM. And this multi-source
+integration leads to significant improvements in reconstruction quality, exhibiting sharper spatial
+details and smoother temporal transitions compared to single-constraint results.
+Figure 8: Visual Comparison of AODDiff Reconstruction under Different Observation Scenarios
+Figure 9 illustrates the spatial distribution of reconstruction errors and predictive uncertainty at
+the 12:30 timestamp. The assessment was conducted by performing multiple posterior sampling
+operations to calculate the pixel-wise standard deviation, which serves as a metric for predictive
+uncertainty, while the reconstruction mean is compared against the ground truth to derive absolute
+error maps.
+In the Downscaling task (left column), both the reconstruction error and predictive uncertainty
+are uniformly distributed across the spatial domain. This global consistency is expected, as the
+information loss associated with spatial downsampling is uniform, making high-frequency recovery
+equally challenging across the entire field. In contrast, the Inpainting task (middle column) exhibits a
+highly distinct error distribution, with significant concentrations of error and uncertainty localized
+within the masked regions. The deep blue areas in the uncertainty map highlight the ill-posed nature
+of inpainting in regions where no observational data is available to constrain the generative process.
+13
+
+The advantage of the AODDiff is evident in the Joint task (right column), where the incorporation
+of dual observational constraints (P(x|yDS, yM)) significantly mitigates the aforementioned issues.
+The error maps show a marked reduction in intensity compared to single-task baselines, while the
+uncertainty maps demonstrate a substantial contraction in variance. Specifically, the low-frequency
+information provided by yDS effectively "anchors" the reconstruction in areas where yM is missing.
+This synergy between heterogeneous observation sources significantly reduces generative variance
+and confirms that the unified probabilistic framework effectively leverages diverse data modalities to
+enhance both reconstruction confidence and accuracy.
+Figure 9: Spatial distribution of reconstruction error and predictive uncertainty at 12:30. (a): Pixel-
+wise absolute error maps. (b): Uncertainty maps (Standard Deviation) derived from multiple posterior
+samples. Columns represent the Downscaling task, Inpainting task, and Joint task, respectively.
+5
+Conclusion
+In this study, we proposed AODDiff, a diffusion-based Bayesian inference framework that reframes
+AOD reconstruction as a probabilistic generation task. By integrating a corruption-aware training
+strategy with decoupled nnealing posterior sampling strategy, the model successfully learns robust
+spatiotemporal priors directly from incomplete data and flexibly incorporates heterogeneous observa-
+tional constraints without retraining. Extensive validation on MERRA-2 reanalysis data demonstrated
+the superior performance of AODDiff over traditional interpolation methods and standard diffusion
+guidance baselines. It overcomes the spectral smoothing inherent in traditional methods, preserving
+high-frequency spatial details even under severe data loss. And the framework supports the scalable
+integration of heterogeneous observation, leading to progressively improved reconstruction fidelity
+as more comprehensive observational information becomes available. Furthermore, the framework
+inherently quantifies predictive uncertainty by computing the standard deviation across multiple
+posterior samples, offering essential confidence metrics for risk-sensitive applications. Ultimately,
+AODDiff demonstrates significant potential for reconstructing spatiotemporally continuous AOD
+fields, offering a promising solution to the inherent incompleteness of current satellite retrievals to
+produce high-fidelity, gap-free aerosol records.
+Acknowledgments
+This work was supported by the National Natural Science Foundation of China
+(Grant No. 32471866). The authors, except Hongqiang Fang, also thank the USTC Supercomputing
+Center for providing the necessary computational resources.
+14
+
+References
+[1] VCPJ Ramanathan, Paul J Crutzen, JT Kiehl, and Daniel Rosenfeld. Aerosols, climate, and the
+hydrological cycle. science, 294(5549):2119–2124, 2001.
+[2] Kimberly A Prather, Courtney D Hatch, and Vicki H Grassian. Analysis of atmospheric aerosols.
+Annu. Rev. Anal. Chem., 1(1):485–514, 2008.
+[3] Olivier Boucher. Atmospheric aerosols. In Atmospheric Aerosols: Properties and Climate
+Impacts, pages 9–24. Springer, 2015.
+[4] Brent N Holben, T. F. Eck, I al Slutsker, Didier Tanre, JP Buis, A Setzer, E Vermote, John A
+Reagan, YJ Kaufman, T Nakajima, et al. Aeronet—a federated instrument network and data
+archive for aerosol characterization. Remote sensing of environment, 66(1):1–16, 1998.
+[5] Yoram J Kaufman, Didier Tanré, and Olivier Boucher. A satellite view of aerosols in the climate
+system. Nature, 419(6903):215–223, 2002.
+[6] Xiaoli Wei, Ni-Bin Chang, Kaixu Bai, and Wei Gao. Satellite remote sensing of aerosol optical
+depth: Advances, challenges, and perspectives. Critical Reviews in Environmental Science and
+Technology, 50(16):1640–1725, 2020.
+[7] Robert C Levy, S Mattoo, LA Munchak, LA Remer, AM Sayer, F Patadia, and NC Hsu. The
+collection 6 modis aerosol products over land and ocean. Atmospheric Measurement Techniques,
+6(11):2989–3034, 2013.
+[8] Kotaro Bessho, Kenji Date, Masahiro Hayashi, Akio Ikeda, Takahito Imai, Hidekazu Inoue,
+Yukihiro Kumagai, Takuya Miyakawa, Hidehiko Murata, Tomoo Ohno, et al. An introduction
+to himawari-8/9—japan’s new-generation geostationary meteorological satellites. Journal of
+the Meteorological Society of Japan. Ser. II, 94(2):151–183, 2016.
+[9] Yunyao Li, Daniel Tong, Yeseul Jeon, Benjamin Seiyon Lee, Jaewoo Park, Shobha Kondragunta,
+Xiaoyang Zhang, Naphat Siripun, Stephanie Song, Charu Mehta, et al. Using aod and uvai to
+reduce the uncertainties in wildfire emission and air quality modeling. Journal of Geophysical
+Research: Atmospheres, 130(7):e2024JD041816, 2025.
+[10] Xiaotong Ye, Tianhai Cheng, Xiaoyang Li, and Hao Zhu. Impact of satellite aod data on
+top-down estimation of biomass burning particulate matter emission. Science of The Total
+Environment, 864:161055, 2023.
+[11] Seunghee Lee, Seohui Park, Myong-In Lee, Ganghan Kim, Jungho Im, and Chang-Keun Song.
+Air quality forecasts improved by combining data assimilation and machine learning with
+satellite aod. Geophysical Research Letters, 49(1):e2021GL096066, 2022.
+[12] Veronika Eyring, William D Collins, Pierre Gentine, Elizabeth A Barnes, Marcelo Barreiro,
+Tom Beucler, Marc Bocquet, Christopher S Bretherton, Hannah M Christensen, Katherine
+Dagon, et al. Pushing the frontiers in climate modelling and analysis with machine learning.
+Nature Climate Change, 14(9):916–928, 2024.
+[13] Ronald Gelaro, Will McCarty, Max J Suárez, Ricardo Todling, Andrea Molod, Lawrence
+Takacs, Cynthia A Randles, Anton Darmenov, Michael G Bosilovich, Rolf Reichle, et al. The
+modern-era retrospective analysis for research and applications, version 2 (merra-2). Journal of
+climate, 30(14):5419–5454, 2017.
+[14] Vincent-Henri Peuch, Richard Engelen, Michel Rixen, Dick Dee, Johannes Flemming, Martin
+Suttie, Melanie Ades, Anna Agustí-Panareda, Cristina Ananasso, Erik Andersson, et al. The
+copernicus atmosphere monitoring service: From research to operations.
+Bulletin of the
+American Meteorological Society, 103(12):E2650–E2668, 2022.
+[15] Romit Maulik, Vishwas Rao, Jiali Wang, Gianmarco Mengaldo, Emil Constantinescu, Bethany
+Lusch, Prasanna Balaprakash, Ian Foster, and Rao Kotamarthi. Efficient high-dimensional
+variational data assimilation with machine-learned reduced-order models. Geoscientific Model
+Development, 15(8):3433–3445, 2022.
+[16] Tao Zhang, Yuyu Zhou, Kaiguang Zhao, Zhengyuan Zhu, Ghassem R Asrar, and Xia Zhao.
+Gap-filling modis daily aerosol optical depth products by developing a spatiotemporal fitting
+algorithm. GIScience & Remote Sensing, 59(1):762–781, 2022.
+[17] Jing Yang and Maogui Hu. Filling the missing data gaps of daily modis aod using spatiotemporal
+interpolation. Science of the Total Environment, 633:677–683, 2018.
+15
+
+[18] Binjie Chen, Yang Ye, Cheng Tong, Jinsong Deng, Ke Wang, and Yang Hong. A novel big data
+mining framework for reconstructing large-scale daily maiac aod data across china from 2000
+to 2020. GIScience & Remote Sensing, 59(1):670–685, 2022.
+[19] Kaixu Bai, Ke Li, Liuqing Shao, Xinran Li, Chaoshun Liu, Zhengqiang Li, Mingliang Ma,
+Di Han, Yibing Sun, Zhe Zheng, et al. Lghap v2: a global gap-free aerosol optical depth and pm
+2.5 concentration dataset since 2000 derived via big earth data analytics. Earth System Science
+Data Discussions, 2024:1–29, 2024.
+[20] Xiaoli Wei, Kaixu Bai, Ni-Bin Chang, and Wei Gao. Multi-source hierarchical data fusion
+for high-resolution aod mapping in a forest fire event. International Journal of Applied Earth
+Observation and Geoinformation, 102:102366, 2021.
+[21] Lu Liang, Jacob Daniels, Michael Biancardi, and Yuye Zhou. Reconstructing aerosol optical
+depth using spatiotemporal long short-term memory convolutional autoencoder. Scientific Data,
+10(1):842, 2023.
+[22] Xuan Wang, Jinglei Yi, Jian Guo, Yongchao Song, Jun Lyu, Jindong Xu, Weiqing Yan, Jindong
+Zhao, Qing Cai, and Haigen Min. A review of image super-resolution approaches based on
+deep learning and applications in remote sensing. Remote Sensing, 14(21):5423, 2022.
+[23] Tobias Bischoff and Katherine Deck. Unpaired downscaling of fluid flows with diffusion
+bridges. Artificial Intelligence for the Earth Systems, 3(2):e230039, 2024.
+[24] Ling Yang, Zhilong Zhang, Yang Song, Shenda Hong, Runsheng Xu, Yue Zhao, Wentao Zhang,
+Bin Cui, and Ming-Hsuan Yang. Diffusion models: A comprehensive survey of methods and
+applications. ACM computing surveys, 56(4):1–39, 2023.
+[25] Chieh-Hsin Lai, Yang Song, Dongjun Kim, Yuki Mitsufuji, and Stefano Ermon. The principles
+of diffusion models. arXiv preprint arXiv:2510.21890, 2025.
+[26] Hyungjin Chung, Jeongsol Kim, Michael T Mccann, Marc L Klasky, and Jong Chul Ye. Diffu-
+sion posterior sampling for general noisy inverse problems. arXiv preprint arXiv:2209.14687,
+2022.
+[27] Giannis Daras, Hyungjin Chung, Chieh-Hsin Lai, Yuki Mitsufuji, Jong Chul Ye, Peyman
+Milanfar, Alexandros G Dimakis, and Mauricio Delbracio. A survey on diffusion models for
+inverse problems. arXiv preprint arXiv:2410.00083, 2024.
+[28] Ziwei Luo, Fredrik Gustafsson, Zheng Zhao, Jens Sjölund, and Thomas Schön. Taming diffusion
+models for image restoration: a review. Philosophical Transactions A, 383(2299):20240358,
+2025.
+[29] Amirhossein Kazerouni, Ehsan Khodapanah Aghdam, Moein Heidari, Reza Azad, Mohsen
+Fayyaz, Ilker Hacihaliloglu, and Dorit Merhof. Diffusion models in medical imaging: A
+comprehensive survey. Medical image analysis, 88:102846, 2023.
+[30] Zeyu Li, Wang Han, Yue Zhang, Qingfei Fu, Jingxuan Li, Lizi Qin, Ruoyu Dong, Hao Sun, Yue
+Deng, and Lijun Yang. Learning spatiotemporal dynamics with a pretrained generative model.
+Nature Machine Intelligence, 6(12):1566–1579, 2024.
+[31] Siwei Tu, Ben Fei, Weidong Yang, Fenghua Ling, Hao Chen, Zili Liu, Kun Chen, Hang
+Fan, Wanli Ouyang, and Lei Bai. Satellite observations guided diffusion model for accurate
+meteorological states at arbitrary resolution. In Proceedings of the Computer Vision and Pattern
+Recognition Conference, pages 28071–28080, 2025.
+[32] Jonathan Schmidt, Luca Schmidt, Felix M Strnad, Nicole Ludwig, and Philipp Hennig. A
+generative framework for probabilistic, spatiotemporally coherent downscaling of climate
+simulation. npj Climate and Atmospheric Science, 8(1):270, 2025.
+[33] Philipp Hess, Michael Aich, Baoxiang Pan, and Niklas Boers.
+Fast, scale-adaptive and
+uncertainty-aware downscaling of earth system model fields with generative machine learning.
+Nature Machine Intelligence, pages 1–11, 2025.
+[34] Morteza Mardani, Noah Brenowitz, Yair Cohen, Jaideep Pathak, Chieh-Yu Chen, Cheng-Chin
+Liu, Arash Vahdat, Mohammad Amin Nabian, Tao Ge, Akshay Subramaniam, et al. Residual
+corrective diffusion modeling for km-scale atmospheric downscaling. Communications Earth
+& Environment, 6(1):124, 2025.
+16
+
+[35] Fenghua Ling, Zeyu Lu, Jing-Jia Luo, Lei Bai, Swadhin K Behera, Dachao Jin, Baoxiang Pan,
+Huidong Jiang, and Toshio Yamagata. Diffusion model-based probabilistic downscaling for
+180-year east asian climate reconstruction. npj Climate and Atmospheric Science, 7(1):131,
+2024.
+[36] Hans Hersbach, Bill Bell, Paul Berrisford, Shoji Hirahara, András Horányi, Joaquín Muñoz-
+Sabater, Julien Nicolas, Carole Peubey, Raluca Radu, Dinand Schepers, et al. The era5 global
+reanalysis. Quarterly journal of the royal meteorological society, 146(730):1999–2049, 2020.
+[37] Yang Song, Jascha Sohl-Dickstein, Diederik P Kingma, Abhishek Kumar, Stefano Ermon, and
+Ben Poole. Score-based generative modeling through stochastic differential equations. arXiv
+preprint arXiv:2011.13456, 2020.
+[38] Hyungjin Chung, Jeongsol Kim, and Jong Chul Ye. Diffusion models for inverse problems.
+arXiv preprint arXiv:2508.01975, 2025.
+[39] François Rozet and Gilles Louppe. Score-based data assimilation. Advances in Neural Informa-
+tion Processing Systems, 36:40521–40541, 2023.
+[40] Giannis Daras, Kulin Shah, Yuval Dagan, Aravind Gollakota, Alex Dimakis, and Adam Klivans.
+Ambient diffusion: Learning clean distributions from corrupted data. Advances in Neural
+Information Processing Systems, 36:288–313, 2023.
+[41] Tero Karras, Miika Aittala, Timo Aila, and Samuli Laine.
+Elucidating the design space
+of diffusion-based generative models. Advances in neural information processing systems,
+35:26565–26577, 2022.
+[42] Jonathan Ho, William Chan, Chitwan Saharia, Jay Whang, Ruiqi Gao, Alexey Gritsenko,
+Diederik P Kingma, Ben Poole, Mohammad Norouzi, David J Fleet, et al. Imagen video: High
+definition video generation with diffusion models. arXiv preprint arXiv:2210.02303, 2022.
+[43] Bingliang Zhang, Wenda Chu, Julius Berner, Chenlin Meng, Anima Anandkumar, and Yang
+Song.
+Improving diffusion inverse problem solving with decoupled noise annealing.
+In
+Proceedings of the Computer Vision and Pattern Recognition Conference, pages 20895–20905,
+2025.
+17

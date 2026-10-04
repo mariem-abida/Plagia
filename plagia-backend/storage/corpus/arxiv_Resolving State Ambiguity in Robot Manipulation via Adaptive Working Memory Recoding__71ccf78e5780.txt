@@ -1,0 +1,871 @@
+Resolving State Ambiguity in Robot Manipulation via Adaptive
+Working Memory Recoding
+Qingda Hu1, Ziheng Qiu1, Zijun Xu1, Kaizhao Zhang1, Xizhou Bu1, Zuolei Sun2,
+Bo Zhang2, Jieru Zhao3, Zhongxue Gan1, and Wenchao Ding1
+Abstract— State ambiguity is common in robotic manipula-
+tion. Identical observations may correspond to multiple valid
+behavior trajectories. The visuomotor policy must correctly
+extract the appropriate types and levels of information from
+the history to identify the current task phase. However, naively
+extending the history window is computationally expensive and
+may cause severe overfitting. Inspired by the continuous nature
+of human reasoning and the recoding of working memory,
+we introduce PAM, a novel visuomotor Policy equipped with
+Adaptive working Memory. With minimal additional training
+cost in a two-stage manner, PAM supports a 300-frame history
+window while maintaining high inference speed. Specifically, a
+hierarchical frame feature extractor yields two distinct repre-
+sentations for motion primitives and temporal disambiguation.
+For compact representation, a context router with range-
+specific queries is employed to produce compact context features
+across multiple history lengths. And an auxiliary objective of
+reconstructing historical information is introduced to ensure
+that the context router acts as an effective bottleneck. We
+meticulously design 7 tasks and verify that PAM can handle
+multiple scenarios of state ambiguity simultaneously. With a
+history window of approximately 10 seconds, PAM still supports
+stable training and maintains inference speeds above 20Hz. The
+project page is https://tinda24.github.io/pam/.
+I. INTRODUCTION
+In recent years, a series of visuomotor policies [1]–[6]
+based on behavioral cloning have emerged, enabling end-to-
+end learning of a wide range of skills. Most existing methods
+[7]–[10] rely on the Markov assumption and predict future
+trajectories by conditioning only on short-term observations,
+thereby neglecting longer-term temporal dependencies. How-
+ever, state ambiguity is common in robotic manipulation
+[11]–[13]. Identical observations may correspond to multiple
+valid trajectories with the lack of contextual information.
+During data collection, human operators act as continuous
+reasoners with full awareness of the task context. For policy
+learning, many crucial cues for temporal disambiguation
+cannot be reflected from short observations.
+Despite the importance of long history, it’s challenging
+to extend the history window in imitation learning. Naively
+extending the history window is computationally expensive
+[14]–[16] and may cause severe overfitting [17]. Further-
+more, manually crafted historical representations [14], [18]
+entail substantial annotation effort and struggle to handle
+1 Fudan Academy for Engineering and Technology, Fudan University
+2 Westwell
+3 Department of Computer Science and Engineering, Shanghai Jiao Tong
+University, China
+Email:qdhu24@m.fudan.edu.cn,
+dingwenchao@fudan.edu.cn
+diverse scenarios of state ambiguity. The history window
+length is crucial. Some tasks, such as Wipe the table twice
+(details in Figure 3), may require information from up to 7
+seconds earlier to resolve state ambiguity. However, encoding
+long histories entails a trade-off between historical modeling
+capacity and inference cost, making stable and affordable
+training more challenging.
+Moreover, different tasks require distinct types of histori-
+cal information and varying lengths of history window. We
+identify five categories of scenarios illustrated in Figure 1:
+(a) Bidirectional overlap patterns; (b) Fixed-duration static
+posture; (c) Sequential subtask dependencies; (d) Repetitive
+temporal cycles; (e) Dynamic interaction response. As shown
+in Figure 1, take the hold the pot lid as an example. During
+the back-and-forth motion, the robot must determine whether
+it should move upward or downward. When holding the pot
+lid, it needs to determine whether to continue holding it or
+to put it back.
+Human reasoning is inherently continuous rather than
+static, retaining the task context in working memory instead
+of discarding it. Meanwhile, working memory representa-
+tions are not necessarily yoked to the sensory presentation
+format. Rather, our brain can flexibly recode information
+depending on task demands [19], [20]. Robotic long-history
+encoding can draw on human working memory in continuous
+reasoning processes by (1) forming adaptive working mem-
+ory representations by recoding and (2) leveraging working
+memory to enable continuous reasoning over an extended
+history window, without processing all observations at each
+inference step.
+Building on these insights, we introduce PAM, a novel
+visuomotor policy equipped with adaptive working memory.
+PAM allows a history window of up to 300 frames (the
+rationale for the length is detailed in Section III-A). During
+inference, a frame-level feature extractor fuses multimodal
+inputs, such as vision and language. The module employs
+two types of query tokens: one extracts motion primitives
+directly relevant to action execution, while the other captures
+context features representing task progression and envi-
+ronmental changes, effectively serving as recoded working
+memory. Next, a context router receives context features
+from historical inference steps and utilizes a set of query
+tokens spanning different history lengths to produce compact
+representation. Then it serves as supplementary context clues
+alongside the motion primitives to condition flow matching
+[21] for predicting future action trajectories. Besides, humans
+recall past information when verification is needed. Thus a
+arXiv:2512.24638v1 [cs.RO] 31 Dec 2025
+
+Fig. 1: Left: We illustrate a representative example of state ambiguity and elaborate on its various scenarios. State ambiguity
+is common in robotic manipulation, and the relevant state transitions do not follow the Markov assumption; therefore, a
+long history window is essential. Right: Existing methods and our method for encoding long history. Analogous to human
+continuous reasoning, PAM’s inference process is temporally dependent, extending the history window by maintaining a
+long-term adaptive working memory. The model only needs to encode the current observation at each inference step.
+similar auxiliary objective is introduced in PAM to ensure
+the context router functions as an effective bottleneck. Our
+contributions are as follows:
+1) Inspired by the continuous nature of human reasoning
+and the recoding of working memory, we propose PAM,
+a novel visuomotor policy equipped with adaptive work-
+ing memory. Adaptive recoding enables PAM to adapt
+effectively across diverse scenarios, without requiring
+additional annotations.
+2) PAM supports a long history window with a maxi-
+mum length of 300 frames. It alleviates reliance on
+the Markov assumption and substantially extends the
+history window in a more efficient and stable manner,
+while preserving real-time inference at 20 Hz. Besides,
+PAM is interpretable, revealing which historical seg-
+ments and modalities are used for disambiguation.
+3) We carefully design 7 tasks covering different scenarios
+of state ambiguity. Compared to existing methods whose
+history windows are sufficient for these tasks, PAM
+achieves the best performance. In addition, PAM also
+achieves competitive performance on long-horizon tasks
+in Libero-Long.
+II. RELATED WORK
+A. History-Aware Visuomotor Policy
+History-aware visuomotor policies take various forms.
+Many works are dedicated to establishing manual represen-
+tations for long historical features. TraceVLA [14] provides
+rendered spatial traces that explicitly encode past motion.
+HistRISE [18] leverages object-centric tracking as additional
+input. Diff-control [22] and UniVLA [23] refer to historical
+actions when generating actions. These representations par-
+tially supplement missing clues but are limited in capacity
+and may incur high annotation costs.
+Memory-bank approaches compress history into sparse
+tokens for storage. 4DVLA [24] performs dynamic sampling
+based on inter-frame differences. MemoryVLA [25] designs
+retrieval, fusion, and consolidation mechanisms for memory
+bank. They preserve keyframes over long history windows
+but require complex design for selective memory storage,
+integration and retrieval. And it is challenging to design rules
+for encoding information like duration and repetition.
+Another approach is multi-frame feature learning. Con-
+textVLA [16] utilizes a vision-language model to understand
+image sequences. LongDP [17] and CronusVLA [26] use
+concatenated multi-frame perceptual features as denoising
+conditions, whereas UVA [27] first feeds them into a video
+generation model [28]. However, directly using features
+from a sliding window lacks adaptability and may cause
+feature confusion, while longer history windows increase
+costs and can hurt performance. PAM effectively enhances
+the adaptability of historical representations while mitigating
+the negative effects associated with longer history windows.
+B. Temporally Dependent Inference
+Recent advancements in many fields have increasingly
+adopted temporally dependent inference models [29]–[31]
+that leverage temporal feature fusion or internal state evolu-
+tion. HPNet [32] for vehicle trajectory prediction adopts his-
+torical prediction attention to enhance prediction consistency
+and accuracy. GhostShell [33] exploits the streaming output
+of large language models to drive robotic actions in paral-
+lel. OmniNav [34] integrates a central memory module to
+
+Fig. 2: Overview of PAM. PAM uses two distinct types of features to guide action generation: motion primitives extracted from the
+current frame and compact context features drawn from the extended history window. The context features serve as working memory. (a)
+illustrates the frame feature extractor used to obtain these features. The extractor employs a query-based mechanism to recode multimodal
+inputs, enabling adaptive working memory recoding. (b) illustrates the context router, which receives the the context features and utilizes
+a set of query tokens spanning different history lengths to produce compact context features. PAM is trained in a two-stage manner. As
+shown in the figure, different subsets of model parameters are progressively activated across the two stages.
+support streaming inference in navigation. Meanwhile, some
+approaches employ evolving internal states to dynamically
+model the environment. RoboVLMs [35] and RoboFlamingo
+[36] utilize memory-based LSTM networks to fuse temporal
+information across frames. MTIL [13] encodes the full tra-
+jectory history by transmitting hidden states. These methods
+remain challenged by training cost and stability.
+III. METHOD
+A. Overview of PAM
+Problem Setup. We aim to develop a visuomotor policy
+with a long history to resolve state ambiguity. Consider
+a multi-task dataset D, where each task is specified by
+a language instruction l. Each task trajectory consists of
+observations (o1, . . . , oT ), joint states (s1, . . . , sT ), and ex-
+ecuted actions (a1, . . . , aT ). The variable T represents the
+number of task frames. In a single inference step t, the
+policy outputs a sequence of future actions AH
+t , where
+H is the length of the predicted action chunks. PAM has
+a maximum history window length of 300 frames, while
+maintaining high-speed inference and stable training, which
+is unprecedented. The 300-frame history window covers the
+vast majority of scenarios requiring historical information
+(for details, see task analysis in Section IV-A). And scenarios
+that require longer context can be handled by the high-level
+task planner in robot system.
+Temporally Dependent Inference. We reformulate policy
+inference as a temporally dependent process rather than as a
+set of independent steps. Most visuomotor policies operate
+with short history windows and predict in a static manner.
+At time step t, with a history window of length h:
+AH
+t = F(l, ot−h, . . . , ot, st−h, . . . , st)
+At each time step t, PAM encodes only the current observa-
+tion while maintaining the context features ct as working
+memory across inference steps. Furthermore, the context
+features are leveraged in an auxiliary objective to predict
+embeddings of historical images.
+AH
+t , ct, E−L
+t
+= F
+ l, ot, st, Chist
+t
+
+(1)
+where the E−L
+t
+is the historical image embeddings and Chist
+t
+denotes the set of context features from the history window.
+Adaptive Working Memory Recoding. A key design
+decision in temporally dependent inference is determining
+which features should be propagated across inference steps,
+serving as working memory. Naively concatenating motion
+primitive features extracted from multimodal inputs intro-
+duces redundancy and produces contextual signals that lack
+essential contextual clues. Meanwhile, extracting working
+memory from the flow-matching-based action head is also
+suboptimal. In addition to limited representational capacity,
+the intermediate states generated over multiple denoising
+steps lack clear semantic grounding, making them unsuitable.
+The human brain can flexibly recode information depending
+on task demands. Similarly, PAM employs a context query
+to recode information, forming an effective representation of
+working memory. Enabled by causal attention, this context
+query can jointly attend to low-level perceptual cues and
+high-level decision-relevant features.
+
+B. Model Architecture
+Casual Frame Feature Extractor. In PAM, a DINOv2
+[37] image encoder with adapter layers is employed to
+encode raw RGB images into a compact representation et.
+The language instruction is encoded using a lightweight 6-
+layer version of MiniLM [38] to obtain the embedding l.
+And a 3-layer MLP is adopted to encode the robot proprio-
+ception message as st. The extractor employs a Transformer
+architecture with a causal mask and processes the encoded
+multimodal inputs as a sequence. The input sequence is
+extended with two query tokens, qact and qctx. qact is used
+to encode the information for action primitives eact
+t
+. And as
+adaptive working memory recoding, the context query qctx
+is used to encode the contextual features ct.
+Context Router. Unlike RNN-style approaches that propa-
+gate contextual features over time, the contextual features are
+fed into a context router as a sequence to produce compact
+representation. The context router is analogous to the neural
+systems that integrate and mobilize working-memory repre-
+sentations. This design effectively reduces feature confusion
+and overfitting, which is verified in ablation studies (Section
+IV-D). For the set of context features Chist
+t
+from the history
+window, a set of context-query tokens spanning different
+history lengths extracts key information from these features.
+This design yields a hierarchical summary that captures both
+short-horizon and long-horizon information. For inference
+steps where the available history is shorter than the maximum
+history window, a masking strategy is applied by overlaying
+a validity mask on top of the original attention-span mask.
+Then, as illustrated in Figure 2(c), the features are processed
+by a self-attention layer followed by a feed-forward layer,
+yielding the compact representation ectx
+t
+.
+Multi-conditioned Action Head. Conditioned on the
+action features eact
+t
+and the compact context features ectx
+t
+,
+the multi-conditioned action head predicts a sequence of
+action chunks based on flow matching. Specifically, the
+action head predicts the velocity field that transports an
+initial action state Anoise
+t
+toward the target action AH
+t . Ainterm
+t
+denotes the intermediate feature produced during this flow-
+matching process. The flow-matching objective supervises
+the predicted velocity uθ at flow matching step tfm to align
+with this vector field:
+LFM = Etfm
+h
+
+uθ(Ainterm
+t
+, eact
+t , ectx
+t , tfm) −(AH
+t −Anoise
+t
+)
+
+2i
+Four variants are considered for injecting multiple condi-
+tioning signals into the prediction network uθ: (1) Concate-
+nate the two conditions; (2) Apply multi-head cross attention
+in a staggered manner, starting with motion primitives; (3)
+Apply multi-head cross attention in a staggered manner,
+starting with context features; (4) A ControlNet-style multi-
+condition injection following the design in ControlVLA
+[39]. The second variant is adopted as the default in our
+experiments, with corresponding ablation results presented
+in Section IV-D.
+Auxiliary Objective. Motivated by human recall pro-
+cesses, the module predicts past image features or trajec-
+tories, conditioned solely on ectx
+t . The effectiveness of multi-
+modal output has also been validated in previous works [9],
+[17]. Through early experiments, we found that predicting
+historical image embeddings is more effective in our settings.
+Following the architecture in DINO-world [40], we employ
+a decoder-only transformer architecture to predict past image
+embeddings. The patch features of historical observations are
+encoded using a VAE-based [41] autoencoder, yielding the
+sequence E−L
+t
+, where L is the sequence length. The auxiliary
+objective is defined as:
+Laux,img = ∥ˆE−L
+t
+−E−L
+t
+∥2
+2.
+C. Training Recipe
+Temporally dependent inference modeling presents signif-
+icant challenges for the training recipe. PAM is trained in a
+two-stage manner and maintains efficient parallel sampling
+in both stages. It avoids the instability and high training
+cost associated with training temporally dependent inference
+models in a sequential way [13], [42]. And this strategy is
+scalable to larger models.
+Stage 1: Learning Motion Primitives As shown in Figure
+2(a), in the first stage, the action head directly takes the
+motion primitives eact and predicts future action chunks. The
+parameters related to ectx are not activated. When encounter-
+ing state ambiguity, the predicted trajectories often fluctuate
+across multiple modes. This stage aims to train a stable
+multimodal frame extractor in preparation for the subsequent
+stage. For tasks without pronounced state ambiguity, the
+policy is already capable of completing them effectively.
+Stage 2: Temporal Disambiguation After the first stage,
+the extractor is frozen, and the key–value states are cached
+for subsequent training, as illustrated in Figure 2(b). Conse-
+quently, this stage no longer requires raw perceptual inputs
+and maintains efficient parallel sampling. The stage enables
+PAM to develop robust temporal disambiguation capabilities.
+The overall loss is:
+L = LFM + λaux Laux,
+where λaux balances action learning and contextual verifica-
+tion. λaux is set to 0.4.
+IV. EXPERIMENTS
+In the following sections, we first evaluate PAM’s ability
+to resolve state ambiguity in real-world tasks (Sections IV-A
+and IV-B). We then assess its performance on Libero-Long
+[43] long-horizon tasks (Section IV-C). Lastly, we perform
+ablation studies to examine the efficacy of each module and
+the impact of various parameter configurations on overall
+performance (Section IV-D).
+A. Real-World Experimental Setting
+Platform. For our real-world experiments, we employ
+an Agilex Piper, a six-axis robotic arm equipped with a
+parallel gripper. The visual input consists of RGB images at a
+resolution of 320x240, captured a fixed global camera and a
+wrist camera. The action space is defined by the robot’s joint
+angles and the gripper’s state. For each task, we collected 50
+
+Fig. 3: Real-world Tasks. We carefully designed a set of real-world tasks as shown in the figure, with the primary types of state ambiguity
+indicated in the top-right corner. Each task comprises multiple subtasks, and to provide a more fine-grained evaluation, the task success
+rate is computed as the average completion rate across its subtasks.
+expert trajectories at a frequency of 30 Hz using a master-
+slaver teleoperation setup.
+Task Settings. We design a suite of tasks to evaluate the
+model’s capability under diverse state ambiguity scenarios.
+The task procedures for the 7 tasks are illustrated in Figure 3.
+Two representative tasks are Wipe Two Times and Guessing
+Game. In Wipe Two Times, the end effector passes through
+the right side of the table three times, each marking a
+distinct task phase: (i) initiating the first wipe after picking
+up the sponge, (ii) starting the second wipe after the first
+is completed, and (iii) returning the sponge to its original
+position. Approximately 210 frames elapse between the first
+and third passes. Since the two wiping passes follow identical
+trajectories, the robot must consider the full observation
+history; otherwise, it is prone to stereotypical behaviors,
+such as redundant wiping, premature returning, or decision
+instability. In Guessing Game, the robot must maintain its
+working memory during a significant delay; approximately
+100 frames elapse from the moment the block positions
+are occluded until the robot is permitted to act. Distinct
+from the prior task, it relies on passive observation rather
+than active interaction for information acquisition. These two
+tasks exemplify scenarios that require a long history window,
+which is fully supported by PAM with a maximum length of
+300 frames.
+Baselines. We choose two representative history aware
+visuomotor policies in real-world experiments: MTIL [13]
+and the LongDP [17]. Like PAM, they also need no manual
+annotations and are trained from scratch. LongDP enhances
+long-horizon temporal modeling by incorporating a self-
+supervised objective to reconstruct past action tokens. During
+inference, LongDP combines multi-frame perceptual repre-
+sentation to perform action decoding. MTIL uses a selective
+state-space model to encode full trajectory history into a
+compact latent state, allowing the policy to be conditioned
+on a comprehensive temporal context.
+Implementations and metrics. For real-world evaluation,
+all policies are trained on an A100 GPU and depolyed on
+an RTX4060 GPU. The inference frequency of PAM is
+set at 20Hz. For MTIL and LongDP, we have determined
+their maximum feasible frequencies as 20Hz and 5Hz. Both
+PAM and MTIL adpot the temporal aggregation strategies
+[1]. And for LongDP, a self-verification step selects action
+samples most consistent with predicted trajectories. PAM
+is trained as a unified multi-task policy for all scenarios
+in both real-world and simulation environments. LongDP
+and MTIL follow a single-task training paradigm, where
+separate models are optimized for each task. Apart from
+the image and language encoders, all parameters of these
+models are trained from scratch. Each policy is evaluated
+over 20 independent trials per task. Given that our tasks
+typically comprise 2–3 sequential sub-tasks, we report the
+overall success rate as the mean success rate across these
+internal stages, averaged over the 20 trials.
+B. Main Results in Real-World Tasks
+Table I reports the experimental results. PAM demonstrates
+strong performance across all tasks requiring diverse con-
+
+TABLE I: Performance comparison across diverse real-world tasks.
+Method
+History
+Window
+Buttons in
+Sequence
+Hold the
+Pot Lid
+Sponge
+and Square
+Exchange
+Objects
+Wipe the
+Table Once
+Wipe the
+Table Twice
+Guessing
+Game
+Average
+LongDP
+300
+0.51
+0.55
+0.77
+0.62
+0.70
+0.56
+0.57
+0.61
+MTIL
+∞
+0.45
+0.20
+0.60
+0.44
+0.50
+0.35
+0.60
+0.45
+PAM (ours)
+300
+0.80
+0.95
+0.96
+0.90
+1.00
+0.89
+0.90
+0.91
+PAM w/ aux. head
+300
+0.76
+0.95
+0.95
+0.80
+1.00
+0.92
+0.97
+0.91
+Fig. 4: PAM exhibits strong interpretability. Left: The attention maps of the context router reveal which history portions PAM references
+to resolve state ambiguity, accurately identifying key frames from preceding task stages in Wipe the Table Twice. Right: The attention
+maps of extractor indicate which modalities PAM uses for working memory encoding. In Guessing Game, the context query extracts
+historical cues from visual observation of the block’s position, while the motion primitives attends to joint states for posture maintenace.
+In Wipe the Table Twice, both visual observations and joint states provide effective contextual cues, demonstrating the effectiveness of
+our adaptive working memory encoding.
+textual cues. Notably, PAM maintains high and consistent
+success rates (averaging 0.91) across various scenarios. This
+represents a significant performance gain of 49.2% over the
+LongDP (0.61) baseline and an over twofold improvement
+(102.2%) compared to MTIL (0.45). PAM’s advantages are
+particularly pronounced in several challenging scenarios.
+For instance, in the Hold the Pot Lid and Wipe the Table
+Twice tasks, the baselines encounter substantial difficulties;
+in contrast, PAM achieves success rates of 0.95 and 0.92, a
+performance gap that is largely attributable to PAM’s ability
+to learn highly discriminative history representations.
+LongDP achieves strong performance on several tasks,
+such as Sponge and Square and Wipe One Time. How-
+ever, because it directly conditions its denoising process
+on raw multi-frame perceptual features, it frequently en-
+counters perceptual confusion in multi-stage tasks like Wipe
+Two Times. Furthermore, this high-dimensional condition-
+ing leads to significant computational overhead, resulting
+in slower inference. MTIL employs a forward-propagated
+hidden state as its working memory and is theoretically
+capable of supporting an unbounded history window. In
+practice, however, this hidden state is highly susceptible to
+representational distortion. This often manifests as impulsive
+or erratic actions during the initial task phases. And the robot
+exhibits pronounced jitter and jittery trajectories during the
+initial stages of a task. To overcome these challenges, PAM
+employs adaptive recoding to distill compact, informative
+representations for temporal disambiguation. Its ability to
+perform seven tasks simultaneously using shared parameters
+demonstrates the efficacy of the context router in distilling
+task-relevant compact representations.
+Moreover, PAM’s overall performance is largely consistent
+with or without the auxiliary prediction head. The auxiliary
+objective is disabled during inference, thus the inference
+cost remains identical. However, its impact varies across
+tasks. In Guessing Game, the auxiliary head yields a marked
+improvement in success rate. We attribute this to the fact
+that predicting historical image embeddings encourages more
+focused attention on early visual cues and thereby stabilizes
+the spatial memory of the cube’s initial location. At the same
+time, we find that assigning excessively large weights to the
+auxiliary objective can reduce the smoothness of the arm’s
+motion.
+Beyond performance, PAM exhibits strong interpretability
+through its structured representational space. As illustrated
+in Figure 4, the attention maps of the context router and
+the extractor visualize the policy’s decision-making logic,
+revealing which historical segments and sensory modalities
+are leveraged to resolve state ambiguity.
+
+C. Evaluation on Libero-Long Long-Horizon Tasks
+Beyond its capacity to resolve state ambiguity, PAM
+demonstrates robust performance across a diverse range
+of manipulation challenges. Libero-Long [43] provides a
+procedurally generated suite of long-horizon robotic manip-
+ulation tasks. We evaluated PAM’s performance on 10 tasks
+from Libero-Long to assess its capabilities in long-horizon
+manipulation.
+We utilize the official LIBERO-Long dataset, with each
+task consisting of 50 expert trajectories. To benchmark
+PAM’s performance, we compare it against several strong
+baselines: OpenVLA [6], Diffusion Policy(DP) [2], MDT
+[10], and π0 [3]. The default image size of 128×128 is used
+for learning. Given that these tasks do not exhibit pronounced
+state ambiguity, the history window of PAM is set to 50.
+For evaluation, each task is tested across five random seeds,
+totaling 100 trials per task. We report the average success
+rate in Table II.
+TABLE II: Results on the Libero-Long 10 tasks.
+Method
+OpenVLA
+DP-T
+MDT
+π0
+PAM
+(ours)
+Avg. Success Rate
+0.544
+0.582
+0.653
+0.852
+0.847
+PAM reaches an 84.7% average success rate, match-
+ing π0 and significantly exceeding other baselines. This
+demonstrates that PAM’s architecture, though designed for
+state disambiguation, generalizes effectively to long-horizon
+manipulation tasks.
+D. Ablation Studies
+Our ablation studies focus on 4 critical factors: (1) visual
+encoder selection; (2) multi-condition injection mechanism
+(details in Section III-B); (3) variants of the context router;
+(4) sampling interval for the context features. The configu-
+ration we ultimately adopt is highlighted, corresponding to
+the setup in IV-B.
+Visual Encoder. As shown in Table III, employing a
+lightweight DINOv2 encoder [37] leads to a substantial
+performance degradation. Empirical observations suggest
+that the policy exhibits more stereotypical behaviors in this
+configuration. For instance, in Guessing Game, the policy
+tends to bias its predictions toward a specific direction.
+This is because the history representation must have access
+to sufficient information to extract relevant contextual cues
+for temporal disambiguation. In this case, the red cube’s
+low pixel occupancy renders it susceptible to insufficient
+representation or perceptual confusion when processed by
+a lightweight encoder.
+Condition Type. While recoding the working memory is
+essential, the mechanism for deploying it alongside motion
+primitives to guide action generation is equally critical.
+In PAM, the two conditions have clear roles: one pro-
+vides motion primitives, and the other supplies contextual
+cues. According to results in Table III, the most effective
+variants are either sequential cross-attention (applying eact
+TABLE III: Success rates in ablation studies
+Variant
+Average
+Visual Encoder
+ViT-Base
+0.91
+ViT-Small
+0.72
+Condition Type
+Later Inject Context Features
+0.91
+Parallel Inject
+0.89
+First Inject Context Features
+0.72
+Concatenate
+0.69
+Context Router
+Avg Token (No Router)
+0.59
+1 Query Token
+0.75
+3 Query Tokens
+0.91
+5 Query Tokens
+0.80
+3 Query Tokens + Avg Token
+0.71
+Sample interval
+5
+0.81
+10
+0.81
+15
+0.91
+20
+0.86
+25
+0.83
+followed by ectx) or incorporating the working memory via
+a ControlNet-style adapter. We found that early injection of
+motion primitives is essential for guiding the action manifold
+transition. Suboptimal results from the other two variants
+suggest that an improper conditional order or method fails
+to provide the structured guidance necessary for coherent
+action decoding.
+Context Router. As shown in Table III, replacing the
+context router with a simple average pooling of all context
+features yielded the poorest performance. Since the query
+tokens attend to different history lengths in a staged manner,
+using too few query tokens fails to effectively integrate
+contextual cues, which are often distributed across multiple
+historical frames. Conversely, employing too many query
+tokens results in less compact representations, imposing
+additional burden on action decoding.
+Sample Interval. Considering the minimal changes be-
+tween adjacent frames and the duration of visual persistence,
+we adopt interval sampling as a trade-off between computa-
+tional cost and information density. An overly small sampling
+interval leads to highly redundant representations, hindering
+the learning of compact and effective features. Conversely,
+an excessively large interval reduces information density,
+potentially missing critical contextual cues and increasing the
+policy’s sensitivity to distribution shifts during inference.
+V. CONCLUSION
+In this work, we introduce PAM, a visuomotor policy
+equipped with adaptive working memory and a 300-frame
+history window. By combining the training scheme with
+compatible model architectures, It supports efficient parallel
+sampling to develop the ability of temporal disambiguation.
+We provide a clear and practical way to obtain a long
+history window with affordable cost while maintaining high
+inference speed. PAM demonstrates strong performance on
+tasks requiring diverse contextual cues while also exhibiting
+
+great versatility. It also has good performance in long-horizon
+tasks. Furthermore, PAM’s architecture and design principles
+are simple, facilitating extension to larger models.
+REFERENCES
+[1] T. Z. Zhao, V. Kumar, S. Levine, and C. Finn, “Learning fine-grained
+bimanual manipulation with low-cost hardware,” arXiv preprint
+arXiv:2304.13705, 2023.
+[2] C. Chi, Z. Xu, S. Feng, E. Cousineau, Y. Du, B. Burchfiel, R. Tedrake,
+and S. Song, “Diffusion policy: Visuomotor policy learning via action
+diffusion,” The International Journal of Robotics Research, vol. 44,
+no. 10-11, pp. 1684–1704, 2025.
+[3] K. Black, N. Brown, D. Driess, A. Esmail, M. Equi, C. Finn, N. Fusai,
+L. Groom, K. Hausman, B. Ichter, et al., “π0: A vision-language-
+action flow model for general robot control. corr, abs/2410.24164,
+2024. doi: 10.48550,” arXiv preprint ARXIV.2410.24164.
+[4] B. Zitkovich, T. Yu, S. Xu, P. Xu, T. Xiao, F. Xia, J. Wu, P. Wohlhart,
+S. Welker, A. Wahid, et al., “Rt-2: Vision-language-action models
+transfer web knowledge to robotic control,” in Conference on Robot
+Learning.
+PMLR, 2023, pp. 2165–2183.
+[5] O. M. Team, D. Ghosh, H. Walke, K. Pertsch, K. Black, O. Mees,
+S. Dasari, J. Hejna, T. Kreiman, C. Xu, et al., “Octo: An open-source
+generalist robot policy,” arXiv preprint arXiv:2405.12213, 2024.
+[6] M. J. Kim, K. Pertsch, S. Karamcheti, T. Xiao, A. Balakrishna,
+S. Nair, R. Rafailov, E. Foster, G. Lam, P. Sanketi, et al., “Open-
+vla: An open-source vision-language-action model,” arXiv preprint
+arXiv:2406.09246, 2024.
+[7] S. Xia, H. Fang, C. Lu, and H.-S. Fang, “Cage: Causal attention
+enables data-efficient generalizable robotic manipulation,” in 2025
+IEEE International Conference on Robotics and Automation (ICRA).
+IEEE, 2025, pp. 13 242–13 249.
+[8] K. Rana, R. Lee, D. Pershouse, and N. Suenderhauf, “Imle policy: Fast
+and sample efficient visuomotor policy learning via implicit maximum
+likelihood estimation,” arXiv preprint arXiv:2502.12371, 2025.
+[9] W. Zhang, H. Liu, Z. Qi, Y. Wang, X. Yu, J. Zhang, R. Dong,
+J. He, F. Lu, H. Wang, et al., “Dreamvla: a vision-language-action
+model dreamed with comprehensive world knowledge,” arXiv preprint
+arXiv:2507.04447, 2025.
+[10] M. Reuss, ¨O. E. Ya˘gmurlu, F. Wenzel, and R. Lioutikov, “Multimodal
+diffusion transformer: Learning versatile behavior from multimodal
+goals,” arXiv preprint arXiv:2407.05996, 2024.
+[11] H. Fang, M. Grotz, W. Pumacay, Y. R. Wang, D. Fox, R. Krishna,
+and J. Duan, “Sam2act: Integrating visual foundation model with
+a memory architecture for robotic manipulation,” arXiv preprint
+arXiv:2501.18564, 2025.
+[12] N. Chung, T. Hanyu, T. Nguyen, H. Le, F. Bumgarner, D. M. H.
+Nguyen, K. Vo, K. Yamazaki, C. Rainwater, T. Kieu, et al., “Rethink-
+ing progression of memory state in robotic manipulation: An object-
+centric perspective,” arXiv preprint arXiv:2511.11478, 2025.
+[13] Y. Zhou, Y. Lin, F. Peng, J. Chen, K. Huang, H. Yang, and Z. Yin,
+“Mtil: Encoding full history with mamba for temporal imitation
+learning,” IEEE Robotics and Automation Letters, 2025.
+[14] R. Zheng, Y. Liang, S. Huang, J. Gao, H. Daum´e III, A. Kolobov,
+F. Huang, and J. Yang, “Tracevla: Visual trace prompting enhances
+spatial-temporal awareness for generalist robotic policies,” arXiv
+preprint arXiv:2412.10345, 2024.
+[15] H. Liu, X. Li, P. Li, M. Liu, D. Wang, J. Liu, B. Kang, X. Ma, T. Kong,
+and H. Zhang, “Towards generalist robot policies: What matters in
+building vision-language-action models,” 2025.
+[16] H. Jang, S. Yu, H. Kwon, H. Jeon, Y. Seo, and J. Shin, “Contextvla:
+Vision-language-action model with amortized multi-frame context,”
+arXiv preprint arXiv:2510.04246, 2025.
+[17] M.
+Torne,
+A.
+Tang,
+Y.
+Liu,
+and
+C.
+Finn,
+“Learning
+long-
+context diffusion policies via past-token prediction,” arXiv preprint
+arXiv:2505.09561, 2025.
+[18] J. Chen, H. Fang, C. Wang, S. Wang, and C. Lu, “History-
+aware visuomotor policy learning via point tracking,” arXiv preprint
+arXiv:2509.17141, 2025.
+[19] Y. Kwak and C. E. Curtis, “Unveiling the abstract format of mnemonic
+representations,” Neuron, vol. 110, no. 11, pp. 1822–1828, 2022.
+[20] K. C. Adam, L.-I. Klatt, J. A. Miller, M. R¨osner, K. Fukuda, and
+A. Kiyonaga, “Beyond routine maintenance: Current trends in working
+memory research,” Journal of Cognitive Neuroscience, vol. 37, no. 6,
+pp. 1035–1052, 2025.
+[21] Y. Lipman, R. T. Chen, H. Ben-Hamu, M. Nickel, and M. Le, “Flow
+matching for generative modeling,” arXiv preprint arXiv:2210.02747,
+2022.
+[22] X. Liu, Y. Zhou, F. Weigend, S. Sonawani, S. Ikemoto, and H. B.
+Amor, “Diff-control: A stateful diffusion-based policy for imitation
+learning,” in 2024 IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS).
+IEEE, 2024, pp. 7453–7460.
+[23] Q. Bu, Y. Yang, J. Cai, S. Gao, G. Ren, M. Yao, P. Luo, and H. Li,
+“Univla: Learning to act anywhere with task-centric latent actions,”
+arXiv preprint arXiv:2505.06111, 2025.
+[24] J. Zhang, Y. Chen, Y. Xu, Z. Huang, Y. Zhou, Y.-J. Yuan,
+X. Cai, G. Huang, X. Quan, H. Xu, et al., “4d-vla: Spatiotemporal
+vision-language-action pretraining with cross-scene calibration,” arXiv
+preprint arXiv:2506.22242, 2025.
+[25] H. Shi, B. Xie, Y. Liu, L. Sun, F. Liu, T. Wang, E. Zhou, H. Fan,
+X. Zhang, and G. Huang, “Memoryvla: Perceptual-cognitive memory
+in vision-language-action models for robotic manipulation,” arXiv
+preprint arXiv:2508.19236, 2025.
+[26] H. Li, S. Yang, Y. Chen, Y. Tian, X. Yang, X. Chen, H. Wang,
+T. Wang, F. Zhao, D. Lin, et al., “Cronusvla: Transferring latent motion
+across time for multi-frame prediction in manipulation,” arXiv preprint
+arXiv:2506.19816, 2025.
+[27] S. Li, Y. Gao, D. Sadigh, and S. Song, “Unified video action model,”
+arXiv preprint arXiv:2503.00200, 2025.
+[28] K. He, X. Chen, S. Xie, Y. Li, P. Doll´ar, and R. Girshick, “Masked
+autoencoders are scalable vision learners,” in Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition,
+2022, pp. 16 000–16 009.
+[29] S. Somvanshi, M. M. Islam, M. S. Mimi, S. B. B. Polock, G. Chhetri,
+and S. Das, “From s4 to mamba: A comprehensive survey on struc-
+tured state space models,” arXiv preprint arXiv:2503.18970, 2025.
+[30] J. Kim, H. Kim, H. Kim, D. Lee, and S. Yoon, “A comprehensive
+survey of deep learning for time series forecasting: architectural
+diversity and open challenges,” Artificial Intelligence Review, vol. 58,
+no. 7, pp. 1–95, 2025.
+[31] Z. Lian, Y. Zhan, W. Zhang, Z. Wang, W. Liu, and X. Huang, “Recent
+advances in deep learning-based spatiotemporal fusion methods for
+remote sensing images,” Sensors, vol. 25, no. 4, p. 1093, 2025.
+[32] X. Tang, M. Kan, S. Shan, Z. Ji, J. Bai, and X. Chen, “Hpnet:
+Dynamic trajectory forecasting with historical prediction attention,”
+in Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, 2024, pp. 15 261–15 270.
+[33] J. Gong, Y. Huang, B. Yuan, M. Zhu, Z. Liao, J. Liang, J. Zhan,
+J. Wang, H. Shu, M. Xiong, et al., “Ghostshell: Streaming llm
+function calls for concurrent embodied programming,” arXiv preprint
+arXiv:2508.05298, 2025.
+[34] X. Xue, J. Hu, M. Luo, X. Shichao, J. Chen, Z. Xie, Q. Kuichen,
+G. Wei, M. Xu, and Z. Chu, “Omninav: A unified framework
+for prospective exploration and visual-language navigation,” arXiv
+preprint arXiv:2509.25687, 2025.
+[35] X. Li, P. Li, M. Liu, D. Wang, J. Liu, B. Kang, X. Ma, T. Kong,
+H. Zhang, and H. Liu, “Towards generalist robot policies: What
+matters in building vision-language-action models,” arXiv preprint
+arXiv:2412.14058, 2024.
+[36] X. Li, M. Liu, H. Zhang, C. Yu, J. Xu, H. Wu, C. Cheang, Y. Jing,
+W. Zhang, H. Liu, et al., “Vision-language foundation models as
+effective robot imitators,” arXiv preprint arXiv:2311.01378, 2023.
+[37] M. Oquab, T. Darcet, T. Moutakanni, H. Vo, M. Szafraniec, V. Khali-
+dov, P. Fernandez, D. Haziza, F. Massa, A. El-Nouby, et al., “Dinov2:
+Learning robust visual features without supervision,” arXiv preprint
+arXiv:2304.07193, 2023.
+[38] W. Wang, F. Wei, L. Dong, H. Bao, N. Yang, and M. Zhou, “Minilm:
+Deep self-attention distillation for task-agnostic compression of pre-
+trained transformers,” Advances in neural information processing
+systems, vol. 33, pp. 5776–5788, 2020.
+[39] P. Li, Y. Wu, Z. Xi, W. Li, Y. Huang, Z. Zhang, Y. Chen, J. Wang,
+S.-C. Zhu, T. Liu, et al., “Controlvla: Few-shot object-centric adap-
+tation for pre-trained vision-language-action models,” arXiv preprint
+arXiv:2506.16211, 2025.
+[40] F. Baldassarre, M. Szafraniec, B. Terver, V. Khalidov, F. Massa,
+Y. LeCun, P. Labatut, M. Seitzer, and P. Bojanowski, “Back to the
+features: Dino as a foundation for video world models,” arXiv preprint
+arXiv:2507.19468, 2025.
+[41] D. P. Kingma and M. Welling, “Auto-encoding variational bayes,”
+arXiv preprint arXiv:1312.6114, 2013.
+
+[42] X. Tang, M. Kan, S. Shan, Z. Ji, J. Bai, and X. Chen, “Hpnet:
+Dynamic trajectory forecasting with historical prediction attention,”
+in Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, 2024, pp. 15 261–15 270.
+[43] B. Liu, Y. Zhu, C. Gao, Y. Feng, Q. Liu, Y. Zhu, and P. Stone,
+“Libero: Benchmarking knowledge transfer for lifelong robot learn-
+ing,” Advances in Neural Information Processing Systems, vol. 36,
+pp. 44 776–44 791, 2023.

@@ -1,0 +1,669 @@
+MUSIC: MUlti-Step Instruction Contrast for
+Multi-Turn Reward Models
+Wenzhe Li1,*, Shujian Zhang2, Wenxuan Zhou2, John Lambert2, Chi Jin1, Andrew Hard2, Rajiv Mathews2 and
+Lun Wang2
+1Princeton University, 2Google DeepMind, *Work done as a student researcher at Google DeepMind.
+Evaluating the quality of multi-turn conversations is crucial for developing capable Large Language
+Models (LLMs), yet remains a significant challenge, often requiring costly human evaluation. Multi-
+turn reward models (RMs) offer a scalable alternative and can provide valuable signals for guiding
+LLM training. While recent work has advanced multi-turn training techniques, effective automated
+evaluation specifically for multi-turn interactions lags behind. We observe that standard preference
+datasets, typically contrasting responses based only on the final conversational turn, provide insufficient
+signal to capture the nuances of multi-turn interactions. Instead, we find that incorporating contrasts
+spanning multiple turns is critical for building robust multi-turn RMs. Motivated by this finding, we
+propose MUlti-Step Instruction Contrast (MUSIC), an unsupervised data augmentation strategy that
+synthesizes contrastive conversation pairs exhibiting differences across multiple turns. Leveraging
+MUSIC on the Skywork preference dataset, we train a multi-turn RM based on the Gemma-2-9B-Instruct
+model. Empirical results demonstrate that our MUSIC-augmented RM outperforms baseline methods
+, achieving higher alignment with judgments from advanced proprietary LLM judges on multi-turn
+conversations, crucially, without compromising performance on standard single-turn RM benchmarks.
+1. Introduction
+The ability of Large Language Models (LLMs) to engage in coherent, multi-turn conversations is
+a hallmark of advanced AI systems (Turing, 1950). While recent LLMs demonstrate remarkable
+proficiency in single-turn instruction following and short dialogues (Adler et al., 2024; Ouyang et al.,
+2022; Team et al., 2023), extending this capability to complex, long-horizon interactions remains
+a critical frontier (Abdulhai et al., 2023; Deshpande et al., 2025; He et al., 2024; Zheng et al.,
+2023). Significant effort has focused on developing Reinforcement Learning from Human Feedback
+(RLHF) techniques tailored for multi-turn dynamics (Abdulhai et al., 2025; Gao et al., 2024; He et al.,
+2025; Jiang et al., 2025; Shani et al., 2024; Shi et al., 2024; Zhou et al., 2024), aiming to improve
+conversational performance beyond standard single-turn RLHF methods.
+Despite advances in multi-turn training, robust automated evaluation of these interactions presents
+a persistent challenge. High-quality, model-based evaluators, or specifically reward models (RMs), are
+crucial, serving not only as direct performance metrics but also providing signals during training and
+inference (Lambert et al., 2024; Malik et al., 2025). However, evaluating multi-turn conversations is
+fundamentally more complex than single-turn assessment. It requires judging not only the response
+quality at each turn but also inter-turn properties like coherence, consistency, and effective use of
+conversational history (Deshpande et al., 2025; He et al., 2024). Consequently, training powerful
+multi-turn RMs typically necessitates large volumes of high-quality preference data reflecting these
+nuances (Liu et al., 2024; Wang et al., 2024b,c).
+Acquiring such data via human annotation is prohibitively expensive. Comparing two lengthy
+conversations, potentially differing subtly across multiple turns, is significantly more demanding
+and time-consuming than annotating single-turn preferences (Deshpande et al., 2025). As a result,
+© 2026 Google. All rights reserved
+arXiv:2512.24693v1 [cs.CL] 31 Dec 2025
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+widely used preference datasets (Bai et al., 2022; Cui et al., 2023; Ethayarajh et al., 2022; Ganguli
+et al., 2022; Liu et al., 2024) often contain predominantly single-turn pairs or multi-turn pairs where
+the difference is confined to the final turn. While practical for efficient data collection, this data
+characteristic may limit the ability of RMs trained on them to capture holistic conversational quality.
+This motivates our central research question:
+Can we develop a scalable approach to synthesize contrastive data spanning multiple turns to train more
+effective multi-turn RMs?
+To address this data gap, we propose MUlti-Step Instruction Contrast (MUSIC), an unsupervised
+data augmentation strategy designed to generate contrastive conversation pairs with meaningful
+quality differences distributed across multiple turns, without human annotation. By introducing
+controlled variations of instructions during the generation process, one conversation in the pair is
+constructed to be qualitatively better (e.g., more consistent, exhibiting better instruction following)
+than the other across multiple turns. This creates contrastive data specifically highlighting multi-turn
+phenomena where the quality distinction is woven throughout the conversation. MUSIC can be readily
+applied to augment existing preference datasets, enriching them with multi-turn contrast signals.
+We demonstrate the efficacy of MUSIC by applying it to the Skywork preference dataset (Liu et al.,
+2024) and subsequently fine-tuning a Gemma-2-9B-Instruct model on this augmented data. Our
+experiments show that the resulting MUSIC-augmented RM maintains strong performance on standard
+single-turn benchmarks like RewardBench (Lambert et al., 2024). More importantly, compared to
+baseline models trained without MUSIC, our RM exhibits higher agreement with judgments from the
+advanced Gemini 1.5 Pro model when assessing the quality of multi-turn conversations.
+Our contributions are threefold:
+1. We identify a critical limitation in standard preference datasets for training multi-turn RMs: the
+predominant focus on final-turn contrasts, which hinders the learning of holistic conversational
+quality assessment.
+2. We propose MUSIC, a scalable, unsupervised method to synthesize contrastive conversation
+pairs with meaningful quality differences spanning multiple turns, directly addressing the
+identified data gap.
+3. We demonstrate empirically that RMs trained with MUSIC achieve improved alignment with
+advanced LLM judges on multi-turn tasks, without sacrificing performance on single-turn
+benchmarks, validating the effectiveness of our approach.
+2. Related Work
+Preference Learning and Reward Modeling.
+Aligning LLMs with human values has evolved
+significantly since the foundational frameworks of Reinforcement Learning from Human Feedback
+(RLHF) were established (Christiano et al., 2017; Ziegler et al., 2019). The standard pipeline relies
+on learning a reward model (RM) from human preferences to guide policy optimization (Bai et al.,
+2022; Ouyang et al., 2022). While alternatives like Direct Preference Optimization (DPO) (Rafailov
+et al., 2023) bypass explicit reward modeling, RMs remain essential for scalable oversight, rejection
+sampling, and guiding search (Lambert et al., 2024), especially in domains without verifiable rewards.
+Recent literature on RMs has bifurcated into two distinct streams:
+• Outcome Reward Models (ORMs): These models typically assign a single scalar score to
+an entire LLM generation (e.g., a full response or conversational turn) based on its overall
+2
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+Previous turns
+User 𝒊
+User 𝒊′
+Contrast
+Asst. 𝒊
+Asst. 𝒊′
+User 𝒊+ 𝟏′
+User 𝒊+ 𝟏′′
+Contrast
+User 𝒊+ 𝟏
+Asst. 𝒊+ 𝟏
+⋯
+Asst. 𝐢+ 𝟏′′
+⋯
+chosen
+rejected
+Figure 1 | Overview of the MUSIC data augmentation procedure. Given seed contexts from existing
+datasets, we generate multi-turn rollouts where LLM simulators generate contrastive pairs, and use a
+contrastive instruction prompt to induce quality degradation in the rejected branch. The augmented
+preference pairs are used to train a multi-turn reward model along with the original dataset. Black
+arrows represent ephemeral changes that are provided to the assistant once, but not persisted. For
+each augmented pair, the chosen example consists of turns with blue borders, while the rejected
+example consists of turns with red borders.
+quality (Cobbe et al., 2021; Liu et al., 2024; Wang et al., 2024a,c). They are widely used for
+general instruction following, dialogue, and reasoning tasks.
+• Process Reward Models (PRMs): These provide denser supervision by evaluating intermediate
+steps within a generation process, such as individual reasoning steps in mathematical proofs
+or lines of code (Lightman et al., 2023; Uesato et al., 2022; Wang et al., 2023a), and recently
+extending to more general domains (Yin et al., 2025b; Zeng et al., 2025). However, PRMs
+require more fine-grained annotations and thus are more expensive to train compared to ORMs.
+Our work focuses on enhancing ORMs for open-ended multi-turn conversations, where "steps" are
+conversational turns and the quality signal is often implicit and distributed rather than discrete and
+verifiable. While standard ORM training often relies on preference data where contrasts are localized
+(e.g., single-turn differences or final-turn edits in dialogues), MUSIC acts as a data augmentation
+technique. It synthesizes preference pairs where the quality difference is intentionally distributed
+across multiple turns. By training standard ORM architectures on MUSIC-augmented data, we aim to
+improve their ability to capture holistic multi-turn properties like coherence and consistency, which
+are often underspecified by conventional preference datasets and distinct from the step-level focus of
+PRMs.
+Multi-Turn Alignment.
+Extending alignment to multi-turn interactions introduces significant com-
+plexity due to long-term credit assignment challenges (Abdulhai et al., 2023). Early dialogue systems
+often use handcrafted reward functions based on heuristics (Li et al., 2016) for RL on small-scale
+models, while more recent approaches investigate RL techniques on LLM tailored for multi-turn
+alignment, including but not limited to hierarchical RL (Zhou et al., 2024), value-based Jiang et al.
+(2025) and self-play or multi-agent Shani et al. (2024); Wu et al. (2025b) methods. However, these
+advanced policy optimization methods depend critically on robust reward signals. While existing
+multi-turn benchmarks (Deshpande et al., 2025; He et al., 2024, 2025) leverage human annotations
+or rubric-based methods for evaluation, such efforts are often costly and not scalable for training. Our
+work complements this line of work by enhancing the underlying reward models through MUSIC,
+thereby improving the overall multi-turn alignment process.
+3
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+Algorithm 1 MUlti-Step Instruction Contrast (MUSIC) Data Generation
+Require: Seed conversation context 𝐶prefix, LLM user simulator 𝑀𝑢, LLM assistant simulator 𝑀𝑎, max
+simulation turns 𝑇, instruction contrast prompt Contrast(·)
+Initialize 𝐶chosen ←𝐶prefix, 𝐶rejected ←𝐶prefix
+for 𝑡= 1 to 𝑇do
+Generate next user utterance: 𝑢chosen
+𝑡
+←𝑀𝑢(𝐶chosen), 𝑢rejected
+𝑡
+←𝑀𝑢(𝐶rejected)
+Generate chosen assistant response: 𝑎chosen
+𝑡
+←𝑀𝑎(𝐶chosen ⊕𝑢chosen
+𝑡
+)
+Generate rejected assistant response: 𝑎rejected
+𝑡
+←𝑀𝑎(𝐶rejected ⊕Contrast(𝑢rejected
+𝑡
+))
+Append turn to the context:
+𝐶chosen ←𝐶chosen ⊕(𝑢chosen
+𝑡
+, 𝑎chosen
+𝑡
+),
+𝐶rejected ←𝐶rejected ⊕(𝑢rejected
+𝑡
+, 𝑎rejected
+𝑡
+)
+end for
+return (𝐶chosen, 𝐶rejected)
+Synthetic Data for Alignment.
+The scarcity of high-quality human annotations has driven a
+shift toward synthetic data generation. Recent work demonstrates that LLMs could generate their
+own fine-tuning data (Dubois et al., 2023; Wang et al., 2023b) and provide feedback signals for
+improvement (Chen et al., 2024; Yuan et al., 2024b). This paradigm is also used to generate multi-turn
+conversations for LLM training more recently (Wu et al., 2025a; Yin et al., 2025a). Unlike these
+methods, which primarily focus on generating data for SFT or RL, MUSIC focuses specifically on
+synthesizing contrastive preference pairs to train a multi-turn RM. We automate the creation of chosen
+and rejected trajectories by injecting controlled noise, thereby providing the necessary discriminative
+signals.
+3. Method
+We introduce MUlti-Step Instruction Contrast (MUSIC), a scalable, unsupervised method for synthe-
+sizing contrastive conversation pairs that exhibit meaningful quality differences across multiple turns.
+This synthesized data is designed to augment existing preference datasets, enabling the training of
+more effective multi-turn RMs. The core process involves three stages:
+• Initialization: We sample conversational prefixes (seed contexts) from an existing multi-turn
+dataset to initiate the augmentation process.
+• Multi-turn Rollouts with MUSIC: Starting from each seed context, we employ LLM-based user
+and assistant simulators to generate paired conversations. Crucially, at each turn, a contrastive
+instruction prompt guides the assistant simulator to produce a lower-quality response for one
+conversation in the pair.
+• Multi-turn RM Training: The conversation pairs generated by MUSIC are combined with the
+original preference data. A multi-turn RM is then trained on this augmented dataset using
+standard preference learning techniques.
+In this section, we first review the preliminaries for training model-based RMs, and then describe
+each stage of our pipeline in detail.
+4
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+3.1. Preliminaries
+We focus on ORMs, where the model 𝑅𝜃maps a conversation (or parts thereof) to a scalar score (Liu
+et al., 2024; Wang et al., 2024c). Training typically involves maximizing the log-likelihood of observing
+human preferences under the Bradley-Terry (BT) model (Bradley and Terry, 1952):
+L(𝜃, D) = 𝔼𝐶chosen,𝐶rejected∼D log 𝜎 𝑅𝜃(𝐶chosen) −𝑅𝜃(𝐶rejected)
+(1)
+where D is a preference dataset of conversation pairs (𝐶chosen, 𝐶rejected), and 𝜎is the sigmoid function,
+respectively. In practice, 𝑅𝜃is often implemented by fine-tuning a pre-trained or instruction-tuned
+LLM, adding a linear layer to map a representation (e.g., the last-layer hidden state of the final token)
+to the scalar reward score.
+3.2. Initialization
+We assume access to an existing multi-turn preference dataset D = {(𝐶(𝑖)
+chosen, 𝐶(𝑖)
+rejected)}𝑁
+𝑖=1. As noted
+earlier, such datasets (Bai et al., 2022; Ganguli et al., 2022; Liu et al., 2024) often contain pairs
+differing only in the final turn, providing limited signal for multi-turn phenomena. However, the
+initial turns often represent valid, human-generated conversational trajectories. We leverage this
+by sampling seed contexts from D. Specifically, for conversation 𝐶(𝑖) in the dataset of 𝐻turns, we
+sample a turn index ℎ∼𝑈(1, 𝐻) uniformly at random and extract the first ℎturns as the seed context
+𝐶prefix = 𝐶(𝑖)
+1:ℎ. This approach balances the reuse of high-quality human-curated conversational prefixes
+with the generation of novel multi-turn contrasts via MUSIC.
+3.3. Multi-turn Rollouts with MUSIC
+Given a set of seed contexts, we apply the MUSIC algorithm (Algorithm 1) to generate contrastive
+conversation pairs DMUSIC. This process simulates multi-turn interactions using LLMs as proxies for
+both the user (𝑀𝑢) and the assistant (𝑀𝑎), inspired by work on generative agents (Park et al., 2023,
+2024).
+The core idea of MUSIC is to introduce controlled quality degradation in one branch of the
+simulated conversation pair at each turn. This is achieved via the instruction contrast prompt,
+Contrast(·). For the chosen conversation path 𝐶chosen, the simulated assistant 𝑀𝑎responds directly
+to the simulated user’s utterance 𝑢chosen
+𝑡
+. For the rejected path 𝐶rejected, however, the user’s utterance
+𝑢rejected
+𝑡
+is first transformed by Contrast(·) into a modified instruction, which prompts 𝑀𝑎to generate
+a response 𝑎rejected
+𝑡
+that is intentionally suboptimal relative to the original user utterance 𝑢rejected
+𝑡
+(e.g.,
+less helpful, inconsistent with previous turns, or failing to follow a specific constraint). As shown in
+Figure 1, the instruction contrast prompt implicitly guides the assistant to generate responses through
+ephemeral modifications, ensuring the rejected trajectory remains coherent yet qualitatively inferior
+to its chosen counterpart. The design details of Contrast(·) are provided in Appendix A.3, drawing
+inspiration from (Wang et al., 2024b).
+By repeating this process for 𝑇turns, MUSIC generates paired conversations (𝐶chosen, 𝐶rejected)
+where 𝐶chosen is superior by construction, and the quality difference is distributed across multiple
+turns rather than being localized. This yields preference data specifically designed to train RMs
+sensitive to multi-turn conversational dynamics.
+5
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+3.4. Multi-turn RM Training
+After generating the MUSIC dataset DMUSIC, we create the final augmented training dataset Daug =
+D ∪DMUSIC. We then train our multi-turn RM 𝑅𝜃on Daug by optimizing the BT loss objective in
+Equation 1. We train for a small number of epochs (e.g., less than two) to mitigate potential overfitting
+to the combined dataset. The resulting RM 𝑅𝜃is expected to have improved sensitivity to multi-turn
+conversational properties due to its exposure to the contrastive examples synthesized by MUSIC.
+4. Experiments
+Our experiments are designed to investigate the efficacy of MUSIC by addressing the following research
+questions: (a) Does MUSIC improve the effectiveness of RMs for assessing multi-turn conversations?
+(b) Does augmenting training data with MUSIC negatively impact the RM’s performance on standard
+single-turn RM benchmarks?
+To answer (a), we evaluate the performance of a MUSIC-augmented RM against a baseline RM
+(trained without MUSIC) in a multi-turn Best-of-N (BoN) inference task. This task requires the RM to
+iteratively select the best response from 𝑁candidates generated by an assistant LLM at each turn
+of a conversation. The quality of the resulting multi-turn conversations serves as a proxy for the
+RM’s effectiveness. To answer (b), we evaluate both RMs on RewardBench (Lambert et al., 2024), a
+standard benchmark primarily focused on single-turn evaluation capabilities.
+4.1. Experimental Setup
+Dataset Construction.
+We use Skywork-Reward-Preference-80K-v0.2 as the RM training dataset as
+it is used to train several state-of-the-art RMs (Dorka, 2024; Liu et al., 2024; Shiwen et al., 2024).
+This dataset is representative of standard preference data, containing mostly single-turn pairs and
+multi-turn pairs differing only in the final turn, making it a suitable candidate for augmentation
+with MUSIC. Specifically, we filter the dataset to include only dialogues with at most five turns and
+uniformly sample the seed contexts as described in Section 3.2. For MUSIC augmentation, we use
+Gemini 1.5 Pro as both user and assistant simulators with distinct prompts (see Appendix A.1 and A.2),
+and set the maximum simulation turns 𝑇= 5. Both D and DMUSIC are preprocessed by filtering out
+conversations exceeding 2048 tokens (the maximum sequence length for training). Our final datasets
+consist of approximately 73k pairs from the original Skywork-Reward-Preference-80K-v0.2 dataset
+and 31k pairs from the MUSIC augmentation.
+Training Details.
+We fine-tune Gemma-2-9B-Instruct (Team et al., 2024) to create our RMs. A
+linear layer is added on top of the transformer’s final hidden state output to produce a scalar reward
+score. We train two main models:
+1. Baseline RM: Trained on D.
+2. MUSIC-Augmented RM: Trained on Daug.
+Both models are trained using the AdamW optimizer (Loshchilov and Hutter, 2017) with a learning
+rate of 2 × 10−6, a global batch size of 64, and a maximum sequence length of 2048. We use a cosine
+learning rate decay schedule and train for 2500 steps to minimize the Bradley-Terry loss (Equation 1).
+Evaluation Details.
+We compare the Baseline RM and the MUSIC-Augmented RM on the following
+tasks:
+6
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+N=2
+N=4
+N=8
+Non-Augmented BoN vs Greedy
+MUSIC-Augmented BoN vs Greedy
+MUSIC-Augmented BoN vs Non-Augmented BoN
+0.548
+0.551
+0.553
+0.543
+0.579
+0.600
+0.510
+0.523
+0.527
+Anthropic HH
+N=2
+N=4
+N=8
+0.577
+0.605
+0.627
+0.578
+0.618
+0.649
+0.518
+0.505
+0.527
+UltraInteract
+0.40
+0.45
+0.50
+0.55
+0.60
+0.65
+Win Rate
+Figure 2 | Winrates comparing conversations generated via Best-of-N (𝑁∈{2, 4, 8}) guided by the
+MUSIC-Augmented RM versus the Baseline (non-augmented) RM, evaluated by Gemini 1.5 Pro on
+subsets of Anthropic HH and UltraInteract. Comparisons against greedy decoding are also shown.
+1. Multi-Turn Best-of-N (BoN) Inference: Best-of-N is an effective approach to leverage single-
+turn RMs to improve LLMs’ single-turn capability (Brown et al., 2024; Snell et al., 2024; Wu
+et al., 2024). This task assesses the RM’s ability to guide an LLM assistant towards generating
+higher-quality multi-turn conversations. We simulate interactions between a user (Gemini 1.5
+Pro) and an assistant (Gemma-2-9B-Instruct). Conversations are initiated using 1000 prompts
+sampled from subsets of Anthropic HH (Bai et al., 2022) and UltraInteract (Yuan et al., 2024a),
+following (Gao et al., 2024). At each of 𝐻= 3 turns, the assistant generates 𝑁∈{2, 4, 8}
+candidate responses at a fixed temperature. The RM being tested selects the response with
+the highest score, which is then used to continue the conversation. The number of turns 𝐻= 3
+was chosen to accommodate the 2048 context length of the RMs and assistant. After 𝐻turns,
+the quality of the full conversation generated using the MUSIC-Augmented RM is compared
+against the conversation generated using the Baseline RM. We use Gemini 1.5 Pro as an LLM
+judge, prompting it to select the better conversation based on criteria adapted from (Zheng
+et al., 2023) (prompt in Appendix A.4). To mitigate positional bias, each pair of conversations is
+evaluated twice with the order swapped, and we report the average winrate. We also compare
+against greedy decoding from the assistant as a reference.
+2. RewardBench: To assess single-turn performance, we evaluate both RMs on RewardBench (Lam-
+bert et al., 2024). Following the standard protocol, we report pairwise accuracy across its four
+main categories (Chat, Chat Hard, Safety, Reasoning) and the overall average accuracy.
+4.2. Results on Multi-Turn Best-of-N Inference
+Figure 2 presents the winrates from the multi-turn BoN evaluation. We compare conversations
+generated using BoN guided by the MUSIC-Augmented RM against those guided by the Baseline RM,
+as judged by Gemini 1.5 Pro. For reference, we also include comparisons against greedy decoding
+from the assistant LLM.
+Across both the Anthropic HH and UltraInteract initial prompts, the results consistently demon-
+strate that conversations guided by the MUSIC-Augmented RM are preferred over those guided by
+the Baseline RM. Furthermore, the performance gap generally widens as 𝑁increases, indicating that
+the MUSIC-Augmented RM effectively leverages the stronger candidate pool provided by larger 𝑁.
+Both BoN methods outperform the greedy baseline substantially. This provides strong evidence for
+7
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+Table 1 | RewardBench accuracy (%) results. We compare the RM trained on the original Skywork
+dataset and the RM trained on the MUSIC-augmented dataset. Both use Gemma-2-9B-Instruct as the
+base model.
+Model
+Overall
+Chat
+Chat Hard
+Safety
+Reasoning
+Gemma-2-9B-Instruct w/ Skywork
+85.7
+91.9
+83.8
+88.4
+78.6
+Gemma-2-9B-Instruct w/ Skywork + MUSIC
+87.2
+91.6
+85.1
+89.7
+82.5
+research question (a): MUSIC successfully enhances the RM’s ability to identify and promote
+higher-quality multi-turn interactions, leading to demonstrably better conversational outputs as
+judged by an advanced LLM.
+4.3. Results on RewardBench
+Table 1 shows the performance of the Baseline and MUSIC-Augmented RMs on RewardBench. Ad-
+dressing research question (b), we observe that augmenting the training data with MUSIC does
+not sacrifice single-turn evaluation performance. In fact, the MUSIC-Augmented RM achieves
+slightly better or comparable accuracy across the Chat, Chat Hard, and Safety categories.
+Surprisingly, we observe a notable improvement (+3.9%) in the Reasoning category for the
+MUSIC-Augmented RM. While MUSIC synthesizes multi-turn conversational data and is not explicitly
+designed for single-turn reasoning tasks, this suggests a potential positive transfer. We hypothesize
+that exposure to coherent, logically structured multi-turn dialogues during training may implicitly
+enhance the RM’s ability to assess reasoning steps, even when presented in single turns. Overall,
+these results indicate that MUSIC not only improves multi-turn evaluation capabilities but does
+so without compromising, and potentially even slightly enhancing, performance on standard
+single-turn benchmarks.
+5. Conclusion
+In this work, we addressed the challenge of evaluating multi-turn conversations by introducing MUlti-
+Step Instruction Contrast (MUSIC), a scalable, unsupervised data augmentation technique. MUSIC
+synthesizes contrastive conversation pairs where quality differences are intentionally distributed
+across multiple turns, enriching standard preference datasets that often focus on final-turn contrasts.
+We demonstrated that training a multi-turn RM on a MUSIC-augmented dataset leads to improved
+performance in guiding multi-turn interactions, as measured by alignment with judgments from an
+advanced LLM judge in a Best-of-N setting. Crucially, these gains in multi-turn evaluation capability
+were achieved without compromising, and potentially even slightly enhancing, performance on
+standard single-turn benchmarks like RewardBench. Our results validate MUSIC as an effective
+strategy for training more robust multi-turn RMs, mitigating the need for expensive human annotation
+of complex conversational preferences.
+6. Limitations and Future Work
+While promising, our work has several limitations that suggest avenues for future research.
+Reliance on LLM Simulators and Judges: Both the MUSIC data generation process (using 𝑀𝑢and
+𝑀𝑎) and the primary multi-turn evaluation (BoN judged by Gemini 1.5 Pro) rely heavily on LLMs.
+8
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+While practical and scalable, these models may introduce their own biases or fail to capture the full
+spectrum of human conversational nuances and preferences. Future work could explore incorporating
+real human interactions or judgments, potentially through targeted human-in-the-loop refinement or
+evaluation on human-annotated multi-turn benchmarks, to further validate and potentially improve
+the approach.
+Conversation Length and Model Scale: Our experiments were constrained by computational
+resources and model context windows, limiting MUSIC rollouts to 𝑇= 5 turns and BoN evaluation
+to 𝐻= 3 turns. The effectiveness of MUSIC for significantly longer conversations remains to be
+explored. Scaling the approach to larger base models with longer context windows is a natural next
+step, potentially unlocking benefits for evaluating more complex, extended dialogues.
+Addressing these limitations represents promising directions for advancing automated evaluation
+of complex, multi-turn LLM interactions.
+9
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+References
+M. Abdulhai, I. White, C. Snell, C. Sun, J. Hong, Y. Zhai, K. Xu, and S. Levine. Lmrl gym: Benchmarks
+for multi-turn reinforcement learning with language models. arXiv preprint arXiv:2311.18232,
+2023.
+M. Abdulhai, R. Cheng, D. Clay, T. Althoff, S. Levine, and N. Jaques. Consistently simulating human
+personas with multi-turn reinforcement learning. arXiv preprint arXiv:2511.00222, 2025.
+S. Adler, S. Agarwal, L. Ahmad, I. Akkaya, F. L. Aleman, D. Almeida, J. Altenschmidt, S. Altman,
+S. Anadkat, R. Avila, et al. Gpt-4 technical report, 2024. URL https://arxiv. org/abs/2303.08774, 2:
+6, 2024.
+Y. Bai, A. Jones, K. Ndousse, A. Askell, A. Chen, N. DasSarma, D. Drain, S. Fort, D. Ganguli, T. Henighan,
+et al. Training a helpful and harmless assistant with reinforcement learning from human feedback.
+arXiv preprint arXiv:2204.05862, 2022.
+R. A. Bradley and M. E. Terry. Rank analysis of incomplete block designs: I. the method of paired
+comparisons. Biometrika, 39(3/4):324–345, 1952.
+B. Brown, J. Juravsky, R. Ehrlich, R. Clark, Q. V. Le, C. Ré, and A. Mirhoseini. Large language monkeys:
+Scaling inference compute with repeated sampling. arXiv preprint arXiv:2407.21787, 2024.
+Z. Chen, Y. Deng, H. Yuan, K. Ji, and Q. Gu. Self-play fine-tuning converts weak language models to
+strong language models. arXiv preprint arXiv:2401.01335, 2024.
+P. F. Christiano, J. Leike, T. Brown, M. Martic, S. Legg, and D. Amodei. Deep reinforcement learning
+from human preferences. Advances in neural information processing systems, 30, 2017.
+K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser, M. Plappert, J. Tworek, J. Hilton,
+R. Nakano, et al. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168,
+2021.
+G. Cui, L. Yuan, N. Ding, G. Yao, W. Zhu, Y. Ni, G. Xie, Z. Liu, and M. Sun. Ultrafeedback: Boosting
+language models with high-quality feedback, 2023.
+K. Deshpande, V. Sirdeshmukh, J. B. Mols, L. Jin, E.-Y. Hernandez-Cardona, D. Lee, J. Kritz, W. E.
+Primack, S. Yue, and C. Xing. Multichallenge: A realistic multi-turn conversation evaluation
+benchmark challenging to frontier llms. In Findings of the Association for Computational Linguistics:
+ACL 2025, pages 18632–18702, 2025.
+N. Dorka. Quantile regression for distributional reward models in rlhf. arXiv preprint arXiv:2409.10164,
+2024.
+Y. Dubois, C. X. Li, R. Taori, T. Zhang, I. Gulrajani, J. Ba, C. Guestrin, P. S. Liang, and T. B. Hashimoto.
+Alpacafarm: A simulation framework for methods that learn from human feedback. Advances in
+Neural Information Processing Systems, 36:30039–30069, 2023.
+Y. Dubois, B. Galambosi, P. Liang, and T. B. Hashimoto. Length-controlled alpacaeval: A simple way
+to debias automatic evaluators. arXiv preprint arXiv:2404.04475, 2024.
+K. Ethayarajh, Y. Choi, and S. Swayamdipta. Understanding dataset difficulty with V-usable informa-
+tion. In K. Chaudhuri, S. Jegelka, L. Song, C. Szepesvari, G. Niu, and S. Sabato, editors, Proceedings
+of the 39th International Conference on Machine Learning, volume 162 of Proceedings of Machine
+Learning Research, pages 5988–6008. PMLR, 17–23 Jul 2022.
+10
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+D. Ganguli, L. Lovitt, J. Kernion, A. Askell, Y. Bai, S. Kadavath, B. Mann, E. Perez, N. Schiefer,
+K. Ndousse, et al. Red teaming language models to reduce harms: Methods, scaling behaviors, and
+lessons learned. arXiv preprint arXiv:2209.07858, 2022.
+Z. Gao, W. Zhan, J. D. Chang, G. Swamy, K. Brantley, J. D. Lee, and W. Sun. Regressing the relative
+future: Efficient policy optimization for multi-turn rlhf. arXiv preprint arXiv:2410.04612, 2024.
+Y. He, D. Jin, C. Wang, C. Bi, K. Mandyam, H. Zhang, C. Zhu, N. Li, T. Xu, H. Lv, et al. Multi-if: Bench-
+marking llms on multi-turn and multilingual instructions following. arXiv preprint arXiv:2410.15553,
+2024.
+Y. He, W. Li, H. Zhang, S. Li, K. Mandyam, S. Khosla, Y. Xiong, N. Wang, S. Peng, B. Li, et al. Rubric-
+based benchmarking and reinforcement learning for advancing llm instruction following. arXiv
+preprint arXiv:2511.10507, 2025.
+D. R. Jiang, J. Bhandari, Y. Yang, R. Munos, and T. Lu. Aligning llms toward multi-turn conversational
+outcomes using iterative ppo. arXiv preprint arXiv:2511.21638, 2025.
+N. Lambert, V. Pyatkin, J. Morrison, L. Miranda, B. Y. Lin, K. Chandu, N. Dziri, S. Kumar, T. Zick,
+Y. Choi, et al. Rewardbench: Evaluating reward models for language modeling. arXiv preprint
+arXiv:2403.13787, 2024.
+J. Li, W. Monroe, A. Ritter, D. Jurafsky, M. Galley, and J. Gao. Deep reinforcement learning for
+dialogue generation. In Proceedings of the 2016 conference on empirical methods in natural language
+processing, pages 1192–1202, 2016.
+H. Lightman, V. Kosaraju, Y. Burda, H. Edwards, B. Baker, T. Lee, J. Leike, J. Schulman, I. Sutskever,
+and K. Cobbe. Let’s verify step by step. In The Twelfth International Conference on Learning
+Representations, 2023.
+C. Y. Liu, L. Zeng, J. Liu, R. Yan, J. He, C. Wang, S. Yan, Y. Liu, and Y. Zhou. Skywork-reward: Bag of
+tricks for reward modeling in llms. arXiv preprint arXiv:2410.18451, 2024.
+I. Loshchilov and F. Hutter. Decoupled weight decay regularization. arXiv preprint arXiv:1711.05101,
+2017.
+S. Malik, V. Pyatkin, S. Land, J. Morrison, N. A. Smith, H. Hajishirzi, and N. Lambert. Rewardbench 2:
+Advancing reward model evaluation. arXiv preprint arXiv:2506.01937, 2025.
+L. Ouyang, J. Wu, X. Jiang, D. Almeida, C. Wainwright, P. Mishkin, C. Zhang, S. Agarwal, K. Slama,
+A. Ray, et al. Training language models to follow instructions with human feedback. Advances in
+neural information processing systems, 35:27730–27744, 2022.
+J. S. Park, J. O’Brien, C. J. Cai, M. R. Morris, P. Liang, and M. S. Bernstein. Generative agents:
+Interactive simulacra of human behavior. In Proceedings of the 36th annual acm symposium on user
+interface software and technology, pages 1–22, 2023.
+J. S. Park, C. Q. Zou, A. Shaw, B. M. Hill, C. Cai, M. R. Morris, R. Willer, P. Liang, and M. S. Bernstein.
+Generative agent simulations of 1,000 people. arXiv preprint arXiv:2411.10109, 2024.
+R. Rafailov, A. Sharma, E. Mitchell, C. D. Manning, S. Ermon, and C. Finn.
+Direct preference
+optimization: Your language model is secretly a reward model. Advances in Neural Information
+Processing Systems, 36:53728–53741, 2023.
+11
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+L. Shani, A. Rosenberg, A. Cassel, O. Lang, D. Calandriello, A. Zipori, H. Noga, O. Keller, B. Piot,
+I. Szpektor, et al. Multi-turn reinforcement learning from preference human feedback. arXiv preprint
+arXiv:2405.14655, 2024.
+W. Shi, M. Yuan, J. Wu, Q. Wang, and F. Feng. Direct multi-turn preference optimization for language
+agents. arXiv preprint arXiv:2406.14868, 2024.
+T. Shiwen, Z. Liang, C. Y. Liu, L. Zeng, and Y. Liu.
+Skywork critic model series.
+https:
+//huggingface.co/Skywork, September 2024. URL https://huggingface.co/Skywork.
+C. Snell, J. Lee, K. Xu, and A. Kumar. Scaling llm test-time compute optimally can be more effective
+than scaling model parameters. arXiv preprint arXiv:2408.03314, 2024.
+G. Team, R. Anil, S. Borgeaud, J.-B. Alayrac, J. Yu, R. Soricut, J. Schalkwyk, A. M. Dai, A. Hauth, K. Mil-
+lican, et al. Gemini: a family of highly capable multimodal models. arXiv preprint arXiv:2312.11805,
+2023.
+G. Team, M. Riviere, S. Pathak, P. G. Sessa, C. Hardin, S. Bhupatiraju, L. Hussenot, T. Mesnard,
+B. Shahriari, A. Ramé, et al. Gemma 2: Improving open language models at a practical size. arXiv
+preprint arXiv:2408.00118, 2024.
+A. M. Turing. Computing machinery and intelligence. Mind, 59(236):433–460, 1950.
+J. Uesato, N. Kushman, R. Kumar, F. Song, N. Siegel, L. Wang, A. Creswell, G. Irving, and I. Hig-
+gins. Solving math word problems with process-and outcome-based feedback. arXiv preprint
+arXiv:2211.14275, 2022.
+H. Wang, Y. Lin, W. Xiong, R. Yang, S. Diao, S. Qiu, H. Zhao, and T. Zhang. Arithmetic control of llms
+for diverse user preferences: Directional preference alignment with multi-objective rewards. In
+ACL, 2024a.
+P. Wang, L. Li, Z. Shao, R. Xu, D. Dai, Y. Li, D. Chen, Y. Wu, and Z. Sui. Math-shepherd: Verify and
+reinforce llms step-by-step without human annotations. arXiv preprint arXiv:2312.08935, 2023a.
+T. Wang, I. Kulikov, O. Golovneva, P. Yu, W. Yuan, J. Dwivedi-Yu, R. Y. Pang, M. Fazel-Zarandi,
+J. Weston, and X. Li. Self-taught evaluators. arXiv preprint arXiv:2408.02666, 2024b.
+Y. Wang, Y. Kordi, S. Mishra, A. Liu, N. A. Smith, D. Khashabi, and H. Hajishirzi. Self-instruct: Aligning
+language models with self-generated instructions. In Proceedings of the 61st annual meeting of the
+association for computational linguistics (volume 1: long papers), pages 13484–13508, 2023b.
+Z. Wang, Y. Dong, O. Delalleau, J. Zeng, G. Shen, D. Egert, J. J. Zhang, M. N. Sreedhar, and O. Kuchaiev.
+Helpsteer2: Open-source dataset for training top-performing reward models.
+arXiv preprint
+arXiv:2406.08673, 2024c.
+J. Wu, C. Wang, T. Su, J. Yang, H. Lin, C. Zhang, M. Peng, K. Shi, S. Yang, B. Pan, et al. Instruct:
+A review-driven multi-turn conversations generation method for large language models. arXiv
+preprint arXiv:2505.11010, 2025a.
+S. Wu, Y. R. Fung, C. Qian, J. Kim, D. Hakkani-Tur, and H. Ji. Aligning llms with individual preferences
+via interaction. In Proceedings of the 31st International Conference on Computational Linguistics,
+pages 7648–7662, 2025b.
+Y. Wu, Z. Sun, S. Li, S. Welleck, and Y. Yang. Inference scaling laws: An empirical analysis of compute-
+optimal inference for problem-solving with language models. arXiv preprint arXiv:2408.00724,
+2024.
+12
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+S. Yin, Z. Wei, X. Zhu, W.-L. Chen, and Y. Meng. Aligning large language models via fully self-synthetic
+data. arXiv preprint arXiv:2510.06652, 2025a.
+Z. Yin, Q. Sun, Z. Zeng, Q. Cheng, X. Qiu, and X.-J. Huang. Dynamic and generalizable process reward
+modeling. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics
+(Volume 1: Long Papers), pages 4203–4233, 2025b.
+L. Yuan, G. Cui, H. Wang, N. Ding, X. Wang, J. Deng, B. Shan, H. Chen, R. Xie, Y. Lin, Z. Liu, B. Zhou,
+H. Peng, Z. Liu, and M. Sun. Advancing llm reasoning generalists with preference trees, 2024a.
+W. Yuan, R. Y. Pang, K. Cho, X. Li, S. Sukhbaatar, J. Xu, and J. E. Weston. Self-rewarding language
+models. In Forty-first International Conference on Machine Learning, 2024b.
+T. Zeng, S. Zhang, S. Wu, C. Classen, D. Chae, E. Ewer, M. Lee, H. Kim, W. Kang, J. Kunde, et al.
+Versaprm: Multi-domain process reward model via synthetic reasoning data.
+arXiv preprint
+arXiv:2502.06737, 2025.
+L. Zheng, W.-L. Chiang, Y. Sheng, S. Zhuang, Z. Wu, Y. Zhuang, Z. Lin, Z. Li, D. Li, E. Xing, et al.
+Judging llm-as-a-judge with mt-bench and chatbot arena. Advances in Neural Information Processing
+Systems, 36:46595–46623, 2023.
+Y. Zhou, A. Zanette, J. Pan, S. Levine, and A. Kumar. Archer: Training language model agents via
+hierarchical multi-turn rl. arXiv preprint arXiv:2402.19446, 2024.
+D. M. Ziegler, N. Stiennon, J. Wu, T. B. Brown, A. Radford, D. Amodei, P. Christiano, and G. Irving.
+Fine-tuning language models from human preferences. arXiv preprint arXiv:1909.08593, 2019.
+13
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+A. Prompt Design
+A.1. User Simulator Prompt
+The prompt template for the user simulator is adapted from (Dubois et al., 2024; Gao et al., 2024;
+Rafailov et al., 2023):
+Below is a dialogue between the user and the assistant. Pretend you are the user in this
+conversation. What question would you ask next?
+{{previous turns}}
+### Instructions:
+FIRST, provide a justification of the question you want to ask.
+SECOND, on a new line, state only the question.
+Your response should use the format:
+Justification:
+Question:
+A.2. Assistant Simulator Prompt
+For the assistant LLM, we directly follow the prompt template provided in (Team et al., 2024):
+<start_of_turn>user
+{{1st turn instruction}}<end_of_turn>
+<start_of_turn>model
+{{1st turn response}}<end_of_turn>
+<start_of_turn>user
+{{2nd turn instruction}}<end_of_turn>
+<start_of_turn>model
+{{2nd turn response}}<end_of_turn>
+...
+<start_of_turn>user
+{{last turn instruction}}<end_of_turn>
+<start_of_turn>model
+A.3. Instruction Contrast Prompt
+The instruction contrast prompt is the core to synthesize turn-level differences in MUSIC. Inspired
+by (Wang et al., 2024b), we directly encode the instruction contrast prompt into the prompt for the
+assistant LLM to generate the rejected conversations in the preference pairs:
+14
+
+MUSIC: MUlti-Step Instruction Contrast for Multi-Turn Reward Models
+Below is a dialogue between the user and the assistant. Pretend you are the assistant in this
+conversation.
+{{previous turns}}
+### Instructions:
+FIRST, generate a modified instruction that is highly relevant but not semantically identical to
+the instruction above from the user in the last turn.
+SECOND, on a new line, generate a high-quality answer which is a good response to the
+modified instruction but not a good response to the original user question.
+Your response should use the format:
+Modified Instruction:
+Answer:
+A.4. Evaluator Prompt
+We adapt the single-turn evaluation prompt from (Zheng et al., 2023) to evaluate multi-turn conver-
+sations:
+Please act as an impartial judge and evaluate the quality of the conversation between the
+user and two AI assistants displayed below. You should choose the assistant that follows the
+user’s instructions and answers the user’s questions better. Your evaluation should consider
+factors such as the helpfulness, relevance, accuracy, depth, creativity, and level of detail of
+their responses. Begin your evaluation by comparing the two conversations and provide a short
+explanation. Avoid any position biases and ensure that the order in which the conversations
+were presented does not influence your decision. Do not allow the length of the responses
+to influence your evaluation. Do not favor certain names of the assistants. Be as objective as
+possible. After providing your evaluation, output your final verdict by strictly following this
+format: "[[A]]" if assistant A is better, "[[B]]" if assistant B is better.
+[The Start of Assistant A’s Conversation]
+{{conversation A}}
+[The End of Assistant A’s Conversation]
+[The Start of Assistant B’s Conversation]
+{{conversation B}}
+[The End of Assistant B’s Conversation]
+15

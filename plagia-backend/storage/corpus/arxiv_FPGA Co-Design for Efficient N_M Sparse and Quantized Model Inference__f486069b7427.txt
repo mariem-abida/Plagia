@@ -1,0 +1,869 @@
+FPGA CO-DESIGN FOR EFFICIENT N:M SPARSE AND
+QUANTIZED MODEL INFERENCE
+Fen-Yu Hsieh∗
+Institute of Information Science
+Academia Sinica
+hsieh0013@as.edu.tw
+Yun-Chang Teng∗
+Institute of Information Science
+Academia Sinica
+yteng@iis.sinica.edu.tw
+Ding-Yong Hong
+Institute of Information Science
+Academia Sinica
+dyhong@iis.sinica.edu.tw
+Jan-Jan Wu
+Institute of Information Science
+Academia Sinica
+wuj@iis.sinica.edu.tw
+ABSTRACT
+Large language models (LLMs) have demonstrated remarkable performance across a wide range
+of language processing tasks. However, this success comes at the cost of substantial computation
+and memory requirements, which significantly impedes their deployment in resource-constrained
+environments. To address this challenge, this work introduces an automation framework that leverages
+weight pruning and low-bit quantization, and presents a hardware-software co-design method that
+generates accelerators on the Field-Programmable Gate Array (FPGA) platform. In particular, we
+implement a unified pipeline that applies N:M structured pruning and 4-bit integer quantization to
+reduce the memory footprint, followed by optimized dequantization and matrix multiplication to
+enhance LLM inference on several hardware platforms, including CPUs, NVIDIA GPUs with Dense
+and 2:4 Sparse Tensor Cores, and a custom systolic-array-based FPGA accelerator. Utilizing 2:4
+sparsity combined with quantization on 4096 × 4096 matrices, our approach achieves a reduction of
+up to 4× in weight storage and a 1.71× speedup in matrix multiplication, yielding a 1.29× end-to-end
+latency reduction compared to dense GPU baselines. Scaling analysis on the LLaMA-7B model
+further shows that structured sparsity enhances the throughput per token by 1.36×. These results
+demonstrate the synergy of fine-grained N:M sparsity and quantization for enabling efficient and
+deployable LLM inference, while the proposed FPGA accelerator offers a flexible architectural path
+for supporting a broader class of sparsity patterns beyond the fixed 2:4 hardware constraints.
+Keywords Accelerator · FPGA · High-level Synthesis · Weight Pruning · Quantization · Machine Learning
+1
+Introduction
+Large language models (LLMs) [1] have substantially advanced language processing tasks such as natural language
+understanding and generation [2]. However, their large scale and heavy computational requirements present significant
+challenges for both deployment and real-time inference [3]. This limitation impedes the realization of pervasive deep
+learning, which necessitates real-time inference and low energy consumption in resource-constrained environments [4].
+∗These authors contributed equally to this work and are listed in alphabetical order.
+F. Y. Hsieh: conceived the overall compression–acceleration framework, designed the N:M sparsity and quantization pipeline,
+implemented the CPU and dense/sparse GPU baselines and benchmarking scripts, designed the measurement methodology and
+LLaMA-7B scaling analysis, and led the writing and revision of the manuscript.
+Y. C. Teng: designed the systolic array-based accelerator, architecture of zero-skipping processing elements, bridged software and
+hardware design by creating a host for workload preprocessing and offloading, and built the HLS flow and FPGA implementation
+flow for deployment.
+arXiv:2512.24713v1 [cs.LG] 31 Dec 2025
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+Consequently, numerous model compression methods, such as sparsification and quantization, have been developed to
+reduce the size and complexity of LLMs [5].
+Pruning and quantization methods reduce computational and memory overhead by removing redundant weights or
+lowering numerical precision, enabling smaller and faster models with limited accuracy degradation [6, 7]. However,
+using either technique alone often provides an incomplete solution. Pruning reduces the number of operations but
+leaves activations and remaining weights at full precision, while quantization decreases precision but does not reduce
+the number of computation operations. Therefore, combining the two techniques offers a more comprehensive
+compression strategy, simultaneously lowering arithmetic cost, memory bandwidth, and model size. This joint approach
+is particularly important for LLMs, where both weight storage and data movement dominate inference latency and
+energy consumption [8, 9].
+Additionally, a central question to the pruning approaches is how sparsity should be structured. Unstructured pruning
+can achieve high sparsity, but without specialized hardware or library support, its practical acceleration benefits remain
+limited [10]. The N:M fine-grained structured sparsity has emerged as a promising solution, with NVIDIA Ampere and
+subsequent architectures providing dedicated hardware support for the fixed 2:4 pattern. However, current hardware
+support is often restricted to this fixed 2:4 configuration, despite algorithmic studies suggesting that alternative N:M
+patterns may yield better accuracy. This mismatch between flexible algorithmic designs and rigid hardware constraints
+motivates the need for new methods to obtain compact, fast, and deployable LLMs.
+To address the aforementioned issues, this work presents a hardware-software co-design methodology that generates
+FPGA-based accelerators to enable efficient inference of LLMs compressed using both pruning and quantization.
+Furthermore, we develop a unified framework that automatically performs model compression and supports multiple
+hardware platforms, including our FPGA-based accelerator, as well as modern processors such as CPUs, NVIDIA GPUs
+with Dense Tensor Cores, and NVIDIA GPUs with 2:4 Sparse Tensor Cores. Our framework is further distinguished by
+two key features: The software component is designed to support generalized N:M sparsity patterns (N < M) and
+low-bit precision (B < 8 bits) to be applied across LLM weights and activations. The hardware component introduces
+a systolic-array-based FPGA accelerator architecture specifically engineered for the efficient processing of generalized
+N:M sparse and B-bit quantized data. This efficiency is realized through a dynamic zero-skipping mechanism and
+a reconfigurable datapath that accommodates diverse N:M patterns and bit-widths. We further introduce a general
+analytical model to guide the design space exploration of the optimal N:M patterns and bit-widths, with the objective of
+maximizing hardware utilization and throughput while minimizing accuracy degradation.
+The remainder of this paper is organized as follows. Section 2 reviews background and related work. Section 3
+introduces our unified framework, and Section 4 describes the details of our FPGA-based accelerator. Section 5
+evaluates our method. Section 6 concludes the paper.
+2
+Backgrounds and Related Works
+Model compression. Neural networks has traditionally relied on weight pruning and quantization to reduce memory
+footprint and computation cost. Pruning compresses models by removing redundant or unimportant weights that
+contribute little to the predictive accuracy. Quantization reduces the precision of numerical values such as weights and
+activations from high-precision formats (e.g., 32-bit floating point) to lower-precision formats (e.g., 8-bit integers). Early
+work such as Deep Compression [11] demonstrated that magnitude pruning combined with low-bit quantization can
+substantially shrink model size while preserving accuracy. SpQR [12] proposes a sparse–quantized representation that
+stores outlier weights separately in higher precision while quantizing the remaining weights to 3-bit or 4-bit, achieving
+lower perplexity on LLaMA models. SqueezeLLM [13] similarly combines sensitivity-based pruning with non-uniform
+quantization, obtaining 3-bit LLaMA models with modest accuracy degradation. These approaches highlight the
+possibility of combining pruning and quantization to achieve smaller models with only limited accuracy loss.
+Building on this idea, later work focuses not only on the compressed formats themselves but also on how pruning and
+quantization interact. JSQ [14] introduces a saliency metric that accounts for both weight magnitude and activation
+range, enabling balanced selection of surviving weights before quantization. SLiM [2] further integrates quantization,
+structured sparsity, and low-rank adaptation (LoRA) in a unified one-shot pipeline, showing that 2:4 sparsity with 4-bit
+weights can still preserve downstream accuracy when combined with LoRA compensation.
+In contrast to prior work that optimizes a specific sparse–quantized format, our goal is to generalize model compression
+with N:M structured sparsity with low-bit quantization under realistic LLM workloads. We adopt magnitude-based
+N:M pruning, including but not limited to the 2:4 pattern used by NVIDIA sparse tensor cores, and pair it with uniform
+low-bit quantization.
+Systolic Array.
+2
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+3
+Unified Framework
+3.1
+Designed Pipeline
+To address the computation and memory bottlenecks of large language models on resource-constrained hardware,
+we design a unified pipeline that combines N:M structured pruning with low-bit quantization. While each technique
+individually reduces model size and arithmetic cost, their combination introduces practical challenges such as sparsity
+metadata management, dequantization overhead, and platform-dependent implementation details. Our goal is to provide
+a streamlined, platform-agnostic flow that compresses weights once offline in a consistent format and exposes a common
+execution interface for CPUs, dense GPUs, NVIDIA 2:4 sparse tensor cores, and FPGA accelerators. This enables
+fair benchmarking of compressed models and supports hardware/software co-design without modifying the high-level
+model description for each back-end.
+This section presents the component-level pipeline, including the offline weight compression via combining N:M
+structured pruning with quantization, and the online execution of dequantization and matrix multiplication. Figure 1
+illustrates the overall workflow. The pipeline consists of two stages. The offline preparation stage is shown in the green
+panel, and the online benchmark execution stage is shown in the red panel. During the offline stage, we transform
+dense FP16 weights into compressed N:M sparse INT4 value tensors and store them with compact metadata and
+scaling factors. During the online stage, we load these compressed tensors onto the target device, dequantize them
+back into FP16 values while preserving sparsity, and perform matrix multiplication with FP16 activations through a
+device-specific GEMM kernel.
+Benchmark Execution
+Float weights before
+pruning / quantization
+K
+M
+Weights after 2:4
+pruning
+K
+M
+Weights after
+quantization
+K
+M
+Float16
+INT4
+Zeros
+Metadata
+Scaling
+Factor
+Activations
+K
+B
+Offline Preparation
+Load
+Weights
+Loaded weights
+K
+M
+1
+Weights after dequantization
+K
+Dequantize
+2
+M
+Matrix after multiplication
+B
+M
+Matrix Multiplication
+3
+Metadata
+Scaling
+Factor
+Figure 1: Overview of the proposed pipeline. The green panel shows the offline preparation (N:M pruning, quantization,
+and packing). The red panel shows the benchmarking path (loading, dequantization, and matrix multiplication) across
+platforms. Purple cells indicate Half-Precision 16-bit Floating Point (FP16) values, white cells indicate zeros, and blue
+cells indicate 4-byte integer (INT4) nonzeros.
+3.2
+Offline Preparation
+The offline preparation stage converts dense FP16 weight matrices into a compact sparse–quantized format that can be
+used efficiently across all hardware back-ends. As illustrated in Figure 2, this stage applies two transformations. First,
+N:M structured pruning removes low-magnitude weights within fixed-size groups, producing a regular sparsity pattern
+that preserves the overall matrix shape. Second, the surviving nonzero values are quantized to low-bit integers, reducing
+storage cost and memory bandwidth. These two steps are performed once prior to deployment, and the resulting
+compressed weights, scaling factors, and sparsity pattern are stored for use during runtime. The following subsections
+describe the pruning method and quantization procedure in detail.
+3.2.1
+N:M Pruning Method
+As shown in the middle of Figure 2, each column W[:, j] is partitioned along the K dimension into non-overlapping
+windows of length Mgroup. In each window, we keep the Nkeep weights with the largest magnitudes and set the remaining
+Mgroup −Nkeep entries to zero. This simple magnitude-based rule covers common patterns such as 2:4 and generalizes
+to 2:8, 4:16, and other N:M configurations. The parameters must satisfy
+0 < Nkeep < Mgroup ≤K
+and
+Mgroup | K.
+3
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+-0.92 -0.42
+-0.12 -0.57
+-2.64 0.14
+-1.07
+0.31
+-0.36
+-0.18
+-0.62
+-1.67
+1.28
+-0.32
+2.26
+1.18
+-0.92
+0
+0
+-0.57
+-2.64
+0
+0
+0
+0
+0
+-0.62
+-1.67
+1.28
+0
+2.26
+1.18
+-2
+0
+0
+-2
+-7
+0
+0
+0
+0
+0
+-2
+-4
+3
+0
+6
+3
+Metadata
+2.65
+Dense FP16 weight
+2:4 sparse FP16 weight
+2:4 sparse INT4 weight
+Scaling factor
+Float16
+INT4
+Zeros
+Figure 2: Structured pruning and quantization of the weight matrix. Left: dense FP16 weights before pruning and
+quantization; purple cells indicate FP16 values. Middle: weights after 2:4 pruning (two nonzeros per group of four along
+K); white cells indicate zeros. Right: the same pruned pattern after quantization; blue cells indicate INT4 nonzeros.
+Pruning is performed once offline on pretrained weights, and the resulting sparse matrices preserve the original dense
+layout with zeros stored in place. This avoids any additional indexing structure when the weights are later dequantized
+and consumed by the hardware.
+3.2.2
+Quantization Method
+After pruning, we quantize only the surviving nonzero weights, as illustrated in the right panel of Figure 2, where the
+remaining FP16 values (purple) are mapped to low-bit integers (blue). We use symmetric abs-max calibration with a
+global scale and zero-point zw = 0. For a target bit-width b, we define Qmax = 2 b−1 −1 and compute the scaling
+factor s by using
+s =
+Qmax
+max(|W|),
+(1)
+where the maximum is taken over the pruned weight tensor.
+Each floating-point weight w is quantized by
+qw = round(s · w),
+(2)
+and the result is clamped to the signed integer range
+qw ←clip
+ qw, −(Qmax + 1), Qmax
+
+.
+(3)
+During runtime, the dequantized FP16 approximation is reconstructed by
+ˆw = qw
+s .
+(4)
+In all experiments we use b = 4 (INT4) for weights, consistent with the visual representation in Figure 2, while
+activations remain in FP16.
+3.3
+Benchmark Execution
+In the benchmark execution stage shown on the right side of Figure 1, the pre-compressed weights are consumed by
+the runtime on each hardware platform. Step 1⃝loads the weights and scaling factors into device memory. Step 2⃝
+performs dequantization, where the INT4 nonzeros are multiplied by their corresponding scaling factors to reconstruct
+FP16 values in their original locations, while pruned entries remain zeros. This produces an M × K sparse FP16 matrix
+that matches the 2:4 pattern. Finally, Step 3⃝executes matrix multiplication between the dequantized FP16 weights and
+the FP16 activation matrix. The resulting M × B output matrix is fully dense, as shown in the bottom right of Figure 1.
+To provide a fair and consistent baseline for our hardware design, we execute the same component-level operation on
+three software backends, including CPU, dense GPU, and the GPU 2:4 semi-structured kernel, and compare them with
+our FPGA accelerator. This setup allows us to quantify computational efficiency and memory reduction achieved by the
+joint pruning and quantization scheme while ensuring that all platforms follow the same execution flow.
+4
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+CPU Computation
+On the CPU path, we first reconstruct the dense weights by dequantizing the loaded integers
+using the stored scaling factor s according to formula 4. The dequantized tensor ˆW is cast to floating point and made
+contiguous in memory. We then compute C = ˆWA using PyTorch’s CPU Basic Linear Algebra Subprograms (BLAS)
+backend.
+GPU Dense
+On the GPU path, we mirror the CPU flow but perform dequantization on Compute Unified Device
+Architecture (CUDA). The resulting floating-point ˆW is passed directly to CUDA Basic Linear Algebra Subprograms
+(cuBLAS) for a standard General Matrix Multiplication (GEMM) with the current activations.
+GPU 2:4 Semi-Structured
+For the sparse path, we convert the floating-point matrix ˆW to NVIDIA’s semi-structured
+2:4 format via to_sparse_semi_structured. The resulting sparse handle is then multiplied with activations using
+CUDA Sparse Library extension for Tensor Cores (cuSPARSELt)’s specialized 2:4 kernel.
+3.4
+Measurement Methodology
+We benchmark the component end-to-end from input files to outputs, with explicit control over I/O and setup costs.
+The weight matrix W ∈RM×K is read in from the offline preparation mentioned in 3.2, and the activation matrix
+A ∈RK×B with batch size notated as B is generated randomly.
+Recorded timings
+For each benchmark, we record
+tio,
+tdeq,
+tmm,
+tcompute,
+where tio is the time to load the quantized weights and scale, tdeq is on-device dequantization to ˆW using Eq. 4, tmm
+is matrix multiplication, and tcompute is the compute-only pipeline time, which is from dequant to finished matrix
+multiplication.
+Throughput metric
+We convert times to GFLOP/s using the dense GEMM count
+FLOPsdense = 2 MKB,
+GFLOP/s = 2 MKB
+t
+× 10−9,
+(5)
+We report throughput for pure matrix multiplication time, and pipeline with/without setup.
+Batch size
+Table 1 compares matrix multiplication time and throughput at batch sizes 1 and 512. Larger batches
+amortize the kernel launch time and metadata overheads, so the GPU 2:4 sparse kernel shows the expected speedup
+at B = 512. At B = 1, however, the overhead of handling sparsity metadata dominates, making the sparse kernel
+slower than the dense GPU. To highlight the performance where pruning helps, we adopt batch size B = 512 for all
+subsequent experiments.
+Table 1: Matrix Multiplication time and throughput for different batch sizes across backends
+Backend
+Batch size
+tmm (ms)
+Throughtputmm (GFLOP/s)
+CPU
+1
+2.66
+18.85
+GPU
+1
+0.11
+295.95
+GPU (2:4)
+1
+0.18
+184.58
+FPGA (ours)
+1
+—
+CPU
+512
+24.66
+696.64
+GPU
+512
+0.36
+47862.12
+GPU (2:4)
+512
+0.21
+81968.13
+FPGA (ours)
+512
+—
+Setup time policy
+Setup time aggregates costs that are not representative of steady state per-layer execution in
+large models, including I/O (tio) and the one-time GPU conversion to the 2:4 semi-structured format (tconv, via
+to_sparse_semi_structured). Including these in per-iter totals would dominate the pipeline (Table 2) while
+not reflecting the target deployment. Therefore, unless otherwise noted, we exclude setup time from steady-state
+comparisons and report it separately.
+5
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+Table 2: I/O and compute times across backends
+Backend
+tio (ms)
+tcompute (ms)
+Throughput (GF/s)
+CPU
+910
+35.38
+18.17
+GPU
+925
+0.66
+18.56
+GPU (2:4)
+879
+0.51
+15.01
+FPGA (ours)
+1012
+—
+Note: Throughput shown for the whole pipeline.
+4
+Accelerator Design
+This section describes the architecture of our FPGA accelerator and how it is co-designed with the N:M sparse,
+low-bit quantized pipeline introduced in Section 3.1. The goal is to execute the same matrix multiplication CB×M =
+AB×KWK×M while exploiting weight sparsity to reduce arithmetic operations and matching the available memory
+bandwidth on the AMD Alveo U55C platform. The accelerator is controlled by a host program running on an Intel Core
+i9-12900K CPU and is integrated into the same benchmarking framework that we use for the CPU and GPU baselines.
+The hardware and software platform configuration is summarized in Table 3.
+Table 3: Host and FPGA Setup
+Accelerator
+Host
+Platform
+AMD Alevo U55C
+CPU
+Intel Core i9-12900K
+Memory
+16GB HBM
+RAM
+128GB DDR4
+XRT
+2.18.179
+GPU
+Nvidia RTX3090
+Vitis
+2024.2
+OpenCL
+2.2
+Vivado
+2024.2
+OS
+Ubuntu 20.04.6
+4.1
+Host-Side Processing Pipeline
+4.1.1
+Dequantization
+On the host, we convert the pruned and quantized weights produced by the offline pipeline into the floating-point format
+used by the accelerator. For each weight matrix, the host reads the INT4 values qw together with the corresponding
+scaling factor s (Section 3.2.2) and applies Equation 4. In practice, we avoid per-element division by rewriting the
+dequantization as a multiplication. Therefore, we precompute the reciprocal α−1 once on the host and use
+w = qw · α−1.
+This implementation is friendly to vectorized CPU instructions, which prefers multiplication over division.
+4.2
+Kernel Design and Optimization
+As shown in Figure 3, the systolic array [15] is organized as a 2D grid of processing elements (PEs) fed by on-chip
+buffers. Tiles of matrix A are first staged in the Matrix A Buffer and streamed row-wise through the Data FIFO, while
+tiles of matrix B are stored in the Matrix B Weight Buffer and streamed column-wise through the Weight FIFO. Each
+PE receives an activation from its left neighbor and a weight from its upper neighbor, updates its local partial sum, and
+then forwards the operands to the next PE in the row or column. The resulting outputs are collected in the Output Buffer.
+This streaming dataflow architecture maximizes data reuse within the PE grid, minimizes accesses to off-chip memory,
+and maintains a regular, high-throughput compute pattern.
+4.2.1
+Zero-Skipping Processing
+Figure 4 shows the microarchitecture of a single PE. Each PE receives a stream of activations and a stream of deqauntized
+weights. Internally, the PE contains, input registers for the current activation a and weight w, a comparator that checks
+whether w = 0, and an accumulator register that stores the running partial sum. On every cycle, the PR wither performs
+a multiply-accumulate operation or skips the multiply when the weight is detected zero:
+if w ̸= 0
+⇒
+acc ←acc + aw.
+6
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+Matrix A
+Buffer
+Data
+FIFO
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+Matrix B
+Weight Buffer
+Output Buffer
+Weight FIFO
+Figure 3: Top-level dataflow of the output-stationary systolic array, showing on-chip buffers and FIFOs that stream tiles
+of matrix A and matrix B into the PE grid and collect the resulting outputs.
+N:M structured sparsity is naturally exploited at the PE level. Because our software pipeline stores pruned weights
+in a dense layout, whcih means zeros preserved in place, the accelerator does not require explicit sparsity metadata
+for reconstruction. Instead, each PE inspects the incoming dequantized weight; if w = 0, the PE simply forwards the
+activation and weight to its neighbors without updating the accumulator. When w ̸= 0, the PE performs a standard
+floating-point MAC. In a 2:4 pattern, this zero-skipping reduces the number of effective MAC operations by roughly
+50% while keeping the PE datapath simple, which no integer arithmetic or scaling factors are needed in hardware.
+5
+Experimental Results and Evaluation
+We run all software and hardware experiments on the same host platform described in Table 3, using an Intel Core
+i9-12900K CPU and an NVIDIA RTX 3090 GPU together with an AMD Alveo U55C FPGA card.
+5.1
+Weight Size
+We quantify storage under M = N = 4096 with FP16 as the baseline and compare the weight sizes after 2:4 pruning
+and INT4 quantization (Table 4). Pruning to 2 nonzeros per 4 yields 50% density. In our prototype, we store pruned
+weights in a dense layout (zeros kept in place), so no explicit sparsity metadata is required for persistence or for
+reconstructing ˆW before compute. After quantization, if values are bit-packed to 4 bits, the effective footprint is 8.00
+MB plus a negligible global scale ≈2 bytes. For simplicity, our current implementation stores the quantized weights as
+an 8-bit integer tensor, which occupies 16.00 MB again with a ≈2 bytes global scale.
+In summary, 2:4 pruning halves the FP16 footprint, and adding INT4 quantization yields up to a 4× reduction versus
+dense FP16 when weights are bit-packed.
+5.2
+Inference Latency and Throughput
+Table 5 reports end-to-end component latency, which is from dequantization to completion of matrix–matrix multiplica-
+tion, and the corresponding throughput under M = N = 4096 and B = 512. As expected, the GPU paths outperform
+7
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+Data
+Weight
+1
+0
+Comparator
+== 0
+x
++
+Partial Sum
+Figure 4: Microarchitecture of a single PE with zero-skipping. Incoming activations (Data) and weights are first latched
+in input registers (triangular blocks), then passed to a comparator that checks whether the weight is zero. If the weight
+is nonzero, the PE performs a MAC operation and updates the partial-sum register; otherwise, the multiplier is bypassed
+and only the registered operands are forwarded to neighboring PEs.
+Table 4: Weight size under different schemes for 4096×4096 (2:4 pruning, INT4).
+Method / Storage
+Relative to dense
+Size (MB)
+Dense FP16 (no pruning)
+1.00×
+32.00
+Pruned FP16 (nonzeros only, 50% density)
+0.50×
+16.00
+Pruned + Quant INT4 (stored as int tensor)
+0.50×
+16.00
+Pruned + Quant INT4 (bit-packed)
+0.25×
+8.00
+the CPU on both dequantization and GEMM. The 2:4 sparse kernel further reduces GEMM time from 0.36 ms (dense)
+to 0.21 ms (sparse), a 1.71× speedup, and improves compute-only pipeline time from 0.66 ms to 0.51 ms, a 1.29×
+speedup. These results indicate that, with greater sparsity, the overall computation time can be reduced.
+Table 5: Inference latency and throughput across devices (M = N = 4096, B = 512)
+Backend
+tdequant (ms)
+tmm (ms)
+tcompute (ms)
+Throughputmm (GFLOP/s)
+Throughputcompute (GFLOP/s)
+CPU
+10.72
+24.66
+35.38
+696.64
+485.53
+GPU
+0.30
+0.36
+0.66
+47862.12
+25928.91
+GPU (2:4)
+0.32
+0.21
+0.51
+81968.13
+32690.74
+FPGA (ours)
+—
+5.3
+Effect of Matrix Size
+We evaluate how performance scales as the matrix size grows, and the results are given in Table 6. As M and N grow,
+arithmetic intensity and GPU occupancy improve, so GPU throughput rises while CPU remains an order of magnitude
+lower. The 2:4 sparse kernel consistently outperforms dense GPU on GEMM and the compute-only pipeline once
+metadata costs are amortized. GEMM time drops from 0.36 →0.21 ms at 4096×4096 (1.71×), 1.05 →0.64 ms at
+8192×8192 (1.64×), and 2.26 →1.16 ms at 12288×12288 (1.95×). End-to-end compute time (dequant+GEMM)
+also improves with sparsity, 0.66→0.51 ms (1.29×), 1.77→1.38 ms (1.28×), and 3.70→2.59 ms (1.43×), indicating
+that larger problems more effectively hide metadata handling and highlight the benefit of structured pruning.
+5.4
+Predicted Results for LLaMA-7B
+We estimate the per-token compute cost contributed by the linear layers of LLaMA-7B in order to measure the feasibility
+of our approach at model scale. LLaMA-7B has L = 32 decoder blocks. Each block contains four attention projections
+8
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+Table 6: Latency and throughput at different matrix sizes
+Time (ms)
+Throughput (GFLOP/s)
+Backend
+(M, N)
+Dequant
+GEMM
+Compute
+GEMM
+Compute
+CPU
+(4096, 4096)
+10.72
+24.66
+35.38
+696.64
+485.53
+GPU
+(4096, 4096)
+0.30
+0.36
+0.66
+47 862.12
+25 928.91
+GPU (2:4)
+(4096, 4096)
+0.32
+0.21
+0.51
+81 968.13
+32 690.74
+FPGA (ours)
+(4096, 4096)
+—
+CPU
+(8192, 8192)
+42.33
+88.90
+131.22
+773.01
+523.67
+GPU
+(8192, 8192)
+0.75
+1.05
+1.77
+65 267.91
+38 871.23
+GPU (2:4)
+(8192, 8192)
+0.74
+0.64
+1.38
+106 728.13
+48 470.63
+FPGA (ours)
+(8192, 8192)
+—
+CPU
+(12288, 12288)
+95.00
+203.40
+298.40
+760.18
+518.16
+GPU
+(12288, 12288)
+1.43
+2.26
+3.70
+68 379.14
+41 877.19
+GPU (2:4)
+(12288, 12288)
+1.42
+1.16
+2.59
+132 745.67
+59 766.85
+FPGA (ours)
+(12288, 12288)
+—
+Q, K, V, and O with weight shapes 4096×4096. The MLP uses two up paths of shape 4096×11008 and one down
+path of shape 11008×4096.
+Let Tlinear(M, N, B) denote the compute time, defined as dequantization plus GEMM, for a linear layer with weight
+M×N and batch B. The per-block compute time at batch B is
+Tblock(B) = 4×Tlinear(4096, 4096, B) + 2×Tlinear(4096, 11008, B) + 1×Tlinear(11008, 4096, B).
+(6)
+From Table 5 we obtain Tlinear(4096, 4096, 512), and from Table 7 we obtain Tlinear(4096, 11008, 512). We do not
+directly measure Tlinear(11008, 4096, 512); since FLOPs and memory traffic are comparable, we approximate it by
+Tlinear(4096, 11008, 512).
+GPU (2:4 sparse)
+t4096×4096
+comp
+= 0.51 ms,
+t4096×11008
+comp
+= 0.97 ms.
+T sparse
+block (512) ≈4×(0.51) + 2×(0.97) + 1×(0.97) = 4.95 ms.
+GPU
+t4096×4096
+comp
+= 0.66 ms,
+t4096×11008
+comp
+= 1.36 ms.
+T dense
+block (512) ≈4×(0.66) + 2×(1.36) + 1×(1.36) = 6.72 ms.
+CPU
+t4096×4096
+comp
+= 35.38 ms,
+t4096×11008
+comp
+= 94.45 ms.
+T cpu
+block(512) ≈4×(35.38) + 2×(94.45) + 1×(94.45) = 424.9 ms.
+The predicted model latency is Tmodel(B) = L · Tblock(B) with L = 32. The corresponding model-level throughput is
+Fmodel/Tmodel, where the per-block FLOPs for linear layers is
+Fblock = 4 · 2 · 40962 · B + 3 · 2 · 4096 · 11008 · B = 2.072 × 1011 FLOPs
+for B = 512,
+and Fmodel = L · Fblock = 6.631 × 1012 FLOPs. The results of the predicted latency and throughput for LLaMA-7B is
+shown in Table 8. Under this model prediction with B = 512, the 2:4 sparse GPU path predicts a 1.36× speedup over
+dense GPU and 85.67× speedup over CPU.
+These predictions include only dequantization and matrix multiplication for the linear layers. They exclude attention
+score computation, softmax, rotary embeddings, residual adds, normalizations, cache reads and writes, and embedding
+or head layers. They also assume steady execution with setup costs excluded. In practice, overall token latency will
+be higher once the omitted components are included, but the relative advantage of structured sparsity should remain
+similar. Finally, our hardware targets general N : M patterns, with higher sparsity such as 4 : 16 would further reduce
+FLOPs and memory traffic, potentially yielding larger gains than the 2:4 results shown here.
+9
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+Table 7: Inference latency and throughput across devices (M = 4096, N = 11008, B = 512)
+Backend
+tdequant (ms)
+tmm (ms)
+tcompute (ms)
+Throughputmm (GFLOP/s)
+Throughputcompute (GFLOP/s)
+CPU
+30.60
+63.84
+94.45
+723.21
+488.86
+GPU
+0.52
+0.84
+1.36
+54964.57
+33843.08
+GPU (2:4)
+0.52
+0.45
+0.97
+103132.10
+47595.38
+FPGA (ours)
+—
+Table 8: Predicted latency and throughput for LLaMA-7B linear layers only (L = 32 blocks, B = 512).
+Backend
+Tblock (ms)
+Tmodel (ms)
+Throughputmodel (GFLOP/s)
+CPU
+424.90
+13596.80
+488
+GPU
+6.72
+215.04
+30838
+GPU (2:4)
+4.95
+158.40
+41865
+FPGA (ours)
+—
+Note: FLOPs per block (linear layers only): Fblock = 4·2·40962·512 + 3·2·4096·
+11008 · 512 = 2.072 × 1011. Total per model: Fmodel = 32 · Fblock = 6.631 × 1012.
+Throughput is Fmodel/Tmodel.
+6
+Conclusion
+This work presented an FPGA-software co-design framework that combines N:M structured pruning with low-bit
+quantization to accelerate large language model inference. By unifying offline N:M pruning, INT4 weight quantization,
+host-side dequantization, and a zero-skipping systolic array, our pipeline jointly reduces weight storage, memory traffic,
+and arithmetic cost while keeping a single compressed representation that can be executed on CPU, GPU, and FPGA
+backends.
+On synthetic 4096×4096 workloads with 2:4 sparsity and INT4 weights, our scheme achieves up to a 4× reduction
+in effective weight footprint with bit-packing and delivers a 1.71× GEMM speedup and 1.29× end-to-end compute
+gain over dense GPU baselines. A scaling analysis on the linear layers of LLaMA-7B further suggests that structured
+sparsity can improve predicted per-token throughput by 1.36× compared with dense execution, indicating that the
+benefits of N:M pruning and quantization persist at model scale.
+Our FPGA accelerator is designed to support general N:M patterns beyond the fixed 2:4 configuration available on
+current GPUs, providing a path toward more flexible sparsity-aware hardware. As future work, we plan to complete a
+full empirical evaluation of the FPGA implementation, including power and energy efficiency, extend the framework
+from component-level kernels to end-to-end LLaMA inference, and explore richer sparsity and quantization schemes,
+such as higher-ratio N:M patterns and mixed-precision activations, to further reduce the cost of large-model deployment
+on edge and datacenter platforms.
+References
+[1] T. Brown, B. Mann, N. Ryder, M. Subbiah, J. D. Kaplan, P. Dhariwal, A. Neelakantan, P. Shyam,
+G. Sastry, A. Askell, S. Agarwal, A. Herbert-Voss, G. Krueger, T. Henighan, R. Child, A. Ramesh,
+D. Ziegler, J. Wu, C. Winter, C. Hesse, M. Chen, E. Sigler, M. Litwin, S. Gray, B. Chess, J. Clark,
+C. Berner, S. McCandlish, A. Radford, I. Sutskever, and D. Amodei, “Language models are few-shot
+learners,” in Advances in Neural Information Processing Systems, H. Larochelle, M. Ranzato, R. Hadsell,
+M. Balcan, and H. Lin, Eds., vol. 33.
+Curran Associates, Inc., 2020, pp. 1877–1901. [Online]. Available:
+https://proceedings.neurips.cc/paper_files/paper/2020/file/1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf
+[2] M. Mozaffari, A. Yazdanbakhsh, and M. M. Dehnavi, “SLim: One-shot quantization and sparsity with low-rank
+approximation for LLM weight compression,” in Forty-second International Conference on Machine Learning,
+2025. [Online]. Available: https://openreview.net/forum?id=4UfRP8MopP
+[3] E. Frantar and D. Alistarh, “Sparsegpt: massive language models can be accurately pruned in one-shot,” in
+Proceedings of the 40th International Conference on Machine Learning, ser. ICML’23.
+JMLR.org, 2023.
+[4] A. Gholami, S. Kim, Z. Dong, Z. Yao, M. W. Mahoney, and K. Keutzer, “A survey of quantization methods for
+efficient neural network inference,” 2021. [Online]. Available: https://arxiv.org/abs/2103.13630
+10
+
+FPGA Co-Design for Efficient N:M Sparse and Quantized Model Inference
+[5] J. Guo, J. Wu, Z. Wang, J. Liu, G. Yang, Y. Ding, R. Gong, H. Qin, and X. Liu, “Compressing large language
+models by joint sparsification and quantization,” in Forty-first International Conference on Machine Learning,
+2024. [Online]. Available: https://openreview.net/forum?id=sCGRhnuMUJ
+[6] M. Zhu and S. Gupta, “To prune, or not to prune: exploring the efficacy of pruning for model compression,” 2017.
+[Online]. Available: https://arxiv.org/abs/1710.01878
+[7] I. Hubara, M. Courbariaux, D. Soudry, R. El-Yaniv, and Y. Bengio, “Quantized neural networks: training neural
+networks with low precision weights and activations,” J. Mach. Learn. Res., vol. 18, no. 1, p. 6869–6898, Jan.
+2017.
+[8] Z. Zhou, X. Ning, K. Hong, T. Fu, J. Xu, S. Li, Y. Lou, L. Wang, Z. Yuan, X. Li, S. Yan, G. Dai, X.-P. Zhang,
+Y. Dong, and Y. Wang, “A survey on efficient inference for large language models,” ArXiv, vol. abs/2404.14294,
+2024. [Online]. Available: https://api.semanticscholar.org/CorpusID:269293007
+[9] T. Sharma, M. Ali, I. Chakraborty, and K. Roy, “Www: What, when, where to compute-in-memory,” 2025.
+[Online]. Available: https://arxiv.org/abs/2312.15896
+[10] Y. He and L. Xiao, “Structured pruning for deep convolutional neural networks: A survey,” IEEE Transactions
+on Pattern Analysis and Machine Intelligence, vol. 46, no. 5, p. 2900–2919, May 2024. [Online]. Available:
+http://dx.doi.org/10.1109/TPAMI.2023.3334614
+[11] S. Han, H. Mao, and W. J. Dally, “Deep compression: Compressing deep neural networks with pruning, trained
+quantization and huffman coding,” 2016. [Online]. Available: https://arxiv.org/abs/1510.00149
+[12] T. Dettmers, R. Svirschevski, V. Egiazarian, D. Kuznedelev, E. Frantar, S. Ashkboos, A. Borzunov, T. Hoefler, and
+D. Alistarh, “Spqr: A sparse-quantized representation for near-lossless llm weight compression,” 2023.
+[13] S. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer, “Squeezellm:
+dense-and-sparse quantization,” in Proceedings of the 41st International Conference on Machine Learning, ser.
+ICML’24.
+JMLR.org, 2024.
+[14] J. Guo, J. Wu, Z. Wang, J. Liu, G. Yang, Y. Ding, R. Gong, H. Qin, and X. Liu, “Compressing large language
+models by joint sparsification and quantization,” in Forty-first International Conference on Machine Learning,
+2024. [Online]. Available: https://openreview.net/forum?id=sCGRhnuMUJ
+[15] H. T. Kung and C. E. Leiserson, “Systolic Arrays for (VLSI),” Carnegie-Mellon University, Department of
+Computer Science, Pittsburgh, PA, Tech. Rep. 79/103, 1978.
+Author Biographies
+Fen-Yu Hsieh received the BS degree in computer science from National Tsing Hua University in 2025. She is currently
+a research assistant at the Institute of Information Science, Academia Sinica. Her research interests include computer
+architecture, model compression, N:M structured sparsity, low-bit quantization, hardware/software co-design, and
+accelerator support for efficient large language model inference on GPUs and FPGAs. In this paper, she conceived
+the overall compression–acceleration framework, designed the N:M sparsity and quantization pipeline, implemented
+the CPU and dense/sparse GPU baselines and benchmarking scripts, developed the measurement methodology and
+LLaMA-7B scaling analysis, and led the writing and revision of the manuscript.
+Yun-Chang Teng received his B.S. degree in Computer Engineering from the University of Massachusetts Lowell and
+M.S. degree from the University of Washington, Seattle in 2023. He is currently a Research Assistant at the Institute
+of Information Science, Academia Sinica. His research interests span computer architecture/parallel architectures,
+domain-specific accelerators, digital ASIC/VLSI design, and hardware/software co-design. He developed the systolic
+array-based accelerator for GEMM, bridged software and hardware by implementing the host to interface with the
+accelerator and offload workloads, and orchestrated the high-level synthesis and FPGA design flows, and performed
+power, performance, area analyses and evaluation.
+Ding-Yong Hong received the BS, MS, and PhD degrees in computer science from National Tsing Hua University
+in 2004, 2005, and 2013, respectively. He is currently an associate research fellow at the Institute of Information
+Science, Academia Sinica. His research interests include compiler optimization, dynamic binary translation, computer
+architecture, and parallel and distributed computing.
+Jan-Jan Wu received the BS and MS degrees in computer science from National Taiwan University in 1985 and 1987,
+respectively, and the MS and PhD degrees in computer science from Yale University in 1991 and 1995, respectively.
+She is currently a research fellow and the leader of the Computer Systems Laboratory at the Institute of Information
+Science, Academia Sinica. Her current research interests include parallel and distributed computing, cloud computing,
+cloud databases, virtualization, and dynamic binary translation on multicores.
+11

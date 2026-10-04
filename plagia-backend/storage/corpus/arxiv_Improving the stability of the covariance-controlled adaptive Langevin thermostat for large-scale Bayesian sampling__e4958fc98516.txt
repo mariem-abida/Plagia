@@ -1,0 +1,1697 @@
+Improving the stability of the covariance-controlled adaptive
+Langevin thermostat for large-scale Bayesian sampling
+Jiani Wei and Xiaocheng Shang∗
+School of Mathematics, University of Birmingham, Edgbaston, Birmingham, B15 2TT, United Kingdom
+January 1, 2026
+Abstract
+Stochastic gradient Langevin dynamics and its variants approximate the likelihood
+of an entire dataset, via random (and typically much smaller) subsets, in the setting of
+Bayesian sampling. Due to the (often substantial) improvement of the computational ef-
+ﬁciency, they have been widely used in large-scale machine learning applications. It has
+been demonstrated that the so-called covariance-controlled adaptive Langevin (CCAdL)
+thermostat, which incorporates an additional term involving the covariance matrix of
+the noisy force, outperforms popular alternative methods. A moving average is used in
+CCAdL to estimate the covariance matrix of the noisy force, in which case the covariance
+matrix will converge to a constant matrix in long-time limit. Moreover, it appears in
+our numerical experiments that the use of a moving average could reduce the stability of
+the numerical integrators, thereby limiting the largest usable stepsize. In this article, we
+propose a modiﬁed CCAdL (i.e., mCCAdL) thermostat that uses the scaling part of the
+scaling and squaring method together with a truncated Taylor series approximation to
+the exponential to numerically approximate the exact solution to the subsystem involving
+the additional term proposed in CCAdL. We also propose a symmetric splitting method
+for mCCAdL, instead of an Euler-type discretisation used in the original CCAdL thermo-
+stat. We demonstrate in our numerical experiments that the newly proposed mCCAdL
+thermostat achieves a substantial improvement in the numerical stability over the origi-
+nal CCAdL thermostat, while signiﬁcantly outperforming popular alternative stochastic
+gradient methods in terms of the numerical accuracy for large-scale machine learning
+applications.
+1
+Introduction
+In many large-scale machine learning applications, it is computationally infeasible to directly
+generate samples with an entire dataset, for example, in standard Markov chain Monte Carlo
+(MCMC) methods [28] and hybrid Monte Carlo (HMC) methods [4,8,16]. In order to improve
+the computational eﬃciency, a number of the so-called stochastic gradient MCMC methods [6,
+7,18,26,27,29,36–39] have been proposed in Bayesian sampling. These methods approximate
+the likelihood of the entire dataset, via random (and typically much smaller) subsets, thereby
+substantially reducing the computational cost in practice.
+∗Corresponding author. Email: x.shang.1@bham.ac.uk
+1
+arXiv:2512.24515v1 [stat.ML] 30 Dec 2025
+
+1.1
+Stochastic gradient
+In a typical setting of Bayesian sampling [4,32], we are interested in sampling from a posterior
+distribution deﬁned as
+π(θ|X) ∝π(X|θ)π(θ) ,
+(1)
+where θ ∈RNd denotes the parameter vector of interest, X is the entire dataset, and π(X|θ)
+and π(θ) respectively represent the likelihood and prior distributions. As in molecular dy-
+namics, a potential energy function U(θ) is introduced by setting π(θ|X) ∝exp(−βU(θ)),
+where β is a positive parameter that is proportional to the reciprocal temperature in an as-
+sociated physical system, i.e., β−1 = kBT, with kB being the Boltzmann constant and T the
+temperature. By taking the logarithm of (1), we can rewrite the potential energy function as
+U(θ) = −log π(X|θ) −log π(θ) .
+(2)
+Based on the assumption that the data points are independent and identically distributed
+(i.i.d.), the negative gradient of the potential energy can be written as
+−∇U(θ) =
+N
+X
+i=1
+∇log π(xi|θ) + ∇log π(θ) ,
+(3)
+where N denotes the size of the entire dataset. However, in many large-scale machine learning
+applications with a very large N, evaluations based on the entire dataset at each iteration,
+for example in MCMC and HMC methods, are computationally infeasible. In order to reduce
+the computational cost, random (and typically much smaller) subsets (also known as “sub-
+sampling”) are preferred in stochastic gradient methods, in which case the log likelihood of
+the dataset is approximated as
+log π(X|θ) ≈N
+n
+n
+X
+i=1
+log π(xri|θ) ,
+(4)
+where {xri}n
+i=1 is a subset of the entire dataset X, randomly selected at each iteration, and
+n ≪N denotes the size of the subset. In this case, (3) becomes a “noisy force” ˜F(θ) ∈RNd,
+which can be written as
+˜F(θ) = −∇˜U(θ) = N
+n
+n
+X
+i=1
+∇log π(xri|θ) + ∇log π(θ) .
+(5)
+As in [6, 7, 36], we assume the stochastic gradient noise to be Gaussian with mean zero and
+unknown covariance, in which case the noisy force (5) can be written as
+˜F(θ) = −∇U(θ) +
+p
+Σ(θ)M1/2R ,
+(6)
+where Σ(θ) ∈RNd×Nd represents the covariance matrix of the noisy force, M ∈RNd×Nd is
+typically a diagonal mass matrix, and R ∈RNd denotes a vector of i.i.d. standard normal
+random variables. As explained in [24], in a typical setting of numerical integration with an
+associated stepsize h, we have
+h˜F(θ) = h
+
+−∇U(θ) +
+p
+Σ(θ)M1/2R
+
+= −h∇U(θ) +
+√
+h
+p
+hΣ(θ)
+
+M1/2R .
+(7)
+2
+
+1.2
+Related work
+Proposed by Welling and Teh, the stochastic gradient Langevin dynamics (SGLD) [38] com-
+bines the ideas of stochastic optimisation [31] and traditional Brownian dynamics, with a
+sequence of stepsizes decreasing to zero. However, a ﬁxed stepsize is often preferred in prac-
+tice, which we also adopt in this article, as in Vollmer et al. [37], where a modiﬁed SGLD
+(mSGLD) method was proposed in order to reduce the sampling bias.
+Popular alternative methods include the stochastic gradient Hamiltonian Monte Carlo
+(SGHMC) method proposed by Chen et al. [6] and the stochastic gradient Nos´e–Hoover ther-
+mostat (SGNHT) proposed by Ding et al. [7], both of which will be included in numerical
+comparisons in this article. Based on a second order Langevin dynamics, SGHMC includes a
+parameter-dependent diﬀusion matrix in order to eﬀectively oﬀset the stochastic perturbation
+of the gradient. As a result, SGHMC is able to maintain a desired stationary distribution.
+In contrast, it has been demonstrated in [24] that ﬁrst order dynamics, such as SGLD (with
+a ﬁxed stepsize), is unable to dissipate excess noise in gradient approximations, in which
+case ﬁrst order dynamics is unlikely to be able to maintain a desired stationary distribu-
+tion. However, it turns out that, the additional diﬀusion matrix in SGHMC is diﬃcult to
+accommodate in practice, which may lead to a signiﬁcant adverse eﬀect on the sampling
+of the target distribution [7]. SGNHT adopts the “thermostat” idea that is widely used in
+molecular dynamics [10, 21]. It adjusts the kinetic energy during the simulation in order to
+maintain a constant (average) temperature, leading to the preservation of the canonical en-
+semble. SGNHT is also able to dissipate excess noise in gradient approximations and also
+maintains a desired stationary distribution [24]. However, it relies on the assumption that the
+covariance matrix of the noisy force is constant, which may not be the case in practice.
+1.3
+Covariance-controlled adaptive Langevin thermostat
+It is worth mentioning that, in SGNHT, the covariance matrix is assumed to be constant, i.e.,
+Σ = σ2I, where σ is a positive constant and I ∈RNd×Nd is the identity matrix. However,
+as explained in [36], it is essential to consider parameter-dependent noise as the covariance
+matrix Σ(θ) is expected to be naturally dependent on the parameter. To this end, proposed by
+Shang et al. [36], the CCAdL thermostat generalises the idea of SGNHT and, as in SGHMC,
+also incorporates an additional term involving the covariance matrix of the noisy force, which
+is intended to eﬀectively oﬀset the stochastic perturbation of the gradient. CCAdL can be
+written as a standard It¯o stochastic diﬀerential equation (SDE) system:
+dθ = M−1pdt ,
+(8a)
+dp = −∇U(θ)dt +
+p
+hΣ(θ)M1/2dW −(h/2)βΣ(θ)pdt −ξpdt +
+p
+2Aβ−1M1/2dWA ,
+(8b)
+dξ = µ−1 h
+pTM−1p −NdkBT
+i
+dt ,
+(8c)
+where p ∈RNd represents the associated momenta, ξ ∈R is an auxiliary variable governed
+by a Nos´e–Hoover device [15, 30] via a negative feedback mechanism (see more discussions
+in the original article [36]), µ is a coupling parameter that is referred to as the “thermal
+mass” in the molecular dynamics setting, and dW and dWA respectively represent vectors
+of independent Wiener increments (often informally denoted by N(0, dtI) [6]). Note that the
+3
+
+coeﬃcient
+p
+2Aβ−1M1/2 represents the strength of the artiﬁcial noise added into the system
+in order to improve the ergodicity, where the “eﬀective friction” A is a positive parameter that
+is proportional to the variance of the artiﬁcial noise. The incorporation of the additional term,
+−(h/2)βΣ(θ)pdt, involving the parameter-dependent covariance matrix, is intended to oﬀset
+the parameter-dependent noise also involving the covariance matrix (6). As a result, it can be
+shown that the CCAdL thermostat (8) preserves a modiﬁed Gibbs stationary distribution [36]:
+ˆρβ(θ, p, ξ) = Z−1 exp (−βH(θ, p)) exp
+ −βµ(ξ −A)2/2
+
+.
+(9)
+where Z is the normalising constant and H(θ, p) = pTM−1p/2 + U(θ) is the Hamiltonian.
+In practice, we do not know Σ(θ) a priori. Therefore, we have to estimate Σ(θ) during
+the simulation. In the original CCAdL article [36], we have Σ(θt) = N 2It/n and g(θ; x) =
+∇θ log π(x|θ). It was assumed that θt does not change dramatically over time and a moving
+average [1] was used to estimate It:
+ˆIt = (1 −κt)ˆIt−1 + κtV(θt) ,
+(10)
+where κt = 1/t and
+V(θt) =
+1
+n −1
+n
+X
+i=1
+(g(θt; xri) −¯g(θt)) (g(θt; xri) −¯g(θt))T
+(11)
+is the empirical covariance of the gradient, with ¯g(θt) being the mean gradient of the log
+likelihood computed from a subset
+¯g(θt) = 1
+n
+n
+X
+i=1
+g(θt; xri) .
+(12)
+One potential issue of the moving average (10) is that the covariance matrix will converge
+to a constant matrix in long-time limit (i.e., ˆIt →ˆIt−1 as t →∞in (10)). However, the co-
+variance matrix is naturally parameter-dependent. Moreover, it is computationally infeasible
+to estimate the full covariance matrix in high dimension, for which a diagonal approximation
+of the covariance matrix was employed in high dimension in the original CCAdL article [36].
+Although the diagonal approximation of the covariance matrix worked well in some of the nu-
+merical experiments in high dimension in [36], we could numerically integrate the subsystem
+involving the additional term without estimating the full covariance matrix in order to reduce
+the computational cost.
+1.4
+Contributions
+In this article, we propose a modiﬁed CCAdL (mCCAdL) thermostat that does not rely on the
+moving average. Moreover, mCCAdL does not need to explicitly estimate the full covariance
+matrix in integrating the subsystem involving the additional term; instead, it makes use of
+the fact that the exact solution to the subsystem involving the additional term is essentially
+a product of a matrix exponential and a vector, which can be solved more eﬃciently in
+practice. We also propose a symmetric splitting method for mCCAdL, instead of an Euler-
+type discretisation used in the original CCAdL thermostat. Our numerical experiments in
+4
+
+large-scale machine learning applications demonstrate that the newly proposed mCCAdL
+thermostat substantially outperforms popular alternative methods in terms of the numerical
+stability (measured by the largest usable stepsize) and accuracy (measured by the test error),
+leading to signiﬁcantly improved computational eﬃciency.
+The rest of the article is organised as follows. In Section 2, we propose the mCCAdL
+thermostat that uses a novel approach to integrate the subsystem involving the additional
+term; we also propose a symmetric splitting method for the mCCAdL thermostat. Various
+numerical experiments are reported in Section 3 to evaluate the performance of mCCAdL in
+large-scale machine learning applications. Finally, Section 4 summarises our ﬁndings.
+2
+Modiﬁed covariance-controlled adaptive Langevin thermo-
+stat
+In this section, we introduce the mCCAdL method, including the estimation of the parameter-
+dependent covariance matrix in Section 2.1, the integration of the subsystem involving the
+additional term in Section 2.2, and the design of splitting methods in Section 2.3.
+2.1
+Estimating the parameter-dependent covariance matrix
+In addition to the assumption that the stochastic gradient noise follows a normal distribu-
+tion (6), we further assume that the size of the random subset n is large enough for the central
+limit theorem to hold, in which case we have
+1
+n
+n
+X
+i=1
+g(θt; xri) ∼N
+
+Ex[g(θt; x)], 1
+nCov[g(θt; x)]
+
+,
+(13)
+where Ex[g(θt; x)] and Cov[g(θt; x)] are the expectation and covariance of the gradient g(θt; x) =
+∇θt log π(x|θt), respectively. We can easily see that the expectation of the noisy force (5) is
+equal to that of the clean (full) force (3), that is, Ex[−∇˜U(θt)] = Ex[−∇U(θt)], and therefore
+the noisy force can be written as
+−∇˜U(θt) = −∇U(θt) + N (0, Σ(θt)) ,
+(14)
+where the covariance matrix of the noisy force is calculated as
+Σ(θt) ≡N 2
+n Cov[g(θt; x)] = N 2
+n V(θt) .
+(15)
+Note that we no longer use the moving average (10) and instead estimate the covariance
+matrix “directly” as in (15).
+2.2
+Integrating the subsystem involving the additional term
+Let us now consider the subsystem involving the additional term in (8):
+dp = −(h/2)βΣ(θ)pdt .
+(16)
+It turns out that we do not need to estimate the full covariance matrix Σ(θ) before numerically
+integrating the subsystem (16) using for instance an Euler-type integrator as in the original
+5
+
+CCAdL article [36]. Instead, we can make use of the fact that there exists an exact solution
+to (16):
+p(t) = et ˜Σ(θ)p(0) ,
+(17)
+where ˜Σ(θ) = −(h/2)βΣ(θ) ∈RNd×Nd is a symmetric matrix. Subsequently, following [3],
+we can use the scaling part of the scaling and squaring method together with a truncated
+Taylor series approximation to the exponential to numerically approximate the exact solution
+in (17), which is essentially a product of a matrix exponential and a vector.
+In order to reduce the computational cost, we ﬁrst shift the matrix ˜Σ to obtain ˆΣ = ˜Σ−˜µI,
+where ˜µ = tr( ˜Σ)/Nd and I is again the identity matrix. The shifting allows us to rewrite the
+exact solution in (17) as
+et ˜Σp(0) = et( ˆΣ+˜µI)p(0) = et˜µet ˆΣp(0) .
+(18)
+We further introduce a scaling parameter s ≥1, which is an integer. This allows us to “scale”
+the exact solution in (17) as
+et ˜Σp(0) = et˜µ 
+e
+t
+s ˆΣs
+p(0) ,
+(19)
+where each scaled matrix exponential e
+t
+s ˆΣ is approximated by using a truncated Taylor series
+of degree m:
+e
+t
+s ˆΣ ≈
+m
+X
+j=0
+1
+j!
+ t
+s
+ˆΣ
+j
+.
+(20)
+Subsequently, starting from v0 = p(0), we iteratively compute
+vk+1 = e
+t
+s ˆΣvk ,
+k = 0, 1, . . . , s −1 .
+(21)
+In the end, we multiply vs by et˜µ to rewrite the exact solution in (17) as
+et ˜Σp(0) = et˜µ
+
+
+m
+X
+j=0
+1
+j!
+ t
+s
+ˆΣ
+j
+
+·
+
+
+m
+X
+j=0
+1
+j!
+ t
+s
+ˆΣ
+j
+
+· · ·
+
+
+m
+X
+j=0
+1
+j!
+ t
+s
+ˆΣ
+j
+
+
+|
+{z
+}
+s times
+p(0) .
+(22)
+Note that we can determine an optimal choice of s and m by exploiting the backward error
+analysis of Higham [13,14], as reﬁned by Al-Mohy and Higham [2]. Moreover, one particular
+advantage of the current approach (22) is that we do not need to explicitly forming the matrix
+exponential, exp(t ˜Σ), before computing its product with the vector, p(0). In what follows we
+refer the newly proposed approach as the mCCAdL thermostat.
+2.3
+Splitting methods
+The optimal design of splitting methods in ergodic SDEs has been an active area of research
+in the mathematics community [9, 21–25, 33–35, 40]. It has been demonstrated in [24] that
+one particular type of symmetric splitting methods for the SGNHT method (equivalent to
+the adaptive Langevin thermostat [17,24]) with a clean (full) gradient (i.e., without subsam-
+pling) inherits the superconvergence property (i.e., fourth order convergence to a modiﬁed
+6
+
+Gibbs stationary distribution for conﬁgurational quantities) recently proved in the setting of
+Langevin dynamics [20, 22]. However, a naive nonsymmetric splitting method was used for
+CCAdL in the original CCAdL article [36]. In what follows we propose a symmetric splitting
+method for mCCAdL. More speciﬁcally, the vector ﬁeld of the CCAdL/mCCAdL system (8)
+is decomposed into ﬁve parts, which we label as “A”, “B”, “C”, “O”, and “D”, respectively:
+d
+
+
+θ
+p
+ξ
+
+=
+
+
+M−1p
+0
+0
+
+dt
+|
+{z
+}
+A
++
+
+
+0
+˜F(θ)
+0
+
+dt
+|
+{z
+}
+B
++
+
+
+0
+−(h/2)βΣ(θ)p
+0
+
+dt
+|
+{z
+}
+C
++
+
+
+0
+−ξpdt +
+p
+2Aβ−1M1/2dWA
+0
+
+
+|
+{z
+}
+O
++
+
+
+0
+0
+µ−1 
+pTM−1p −NdkBT
+
+
+dt
+|
+{z
+}
+D
+.
+(23)
+As explained in detail in [24], parts “A”, “B”, “O”, and “D” can all be solved “exactly”, while
+part “C” can be approximated as described in the previous subsection. Note that part B is
+written slightly diﬀerently here as compared in (8); this is to emphasise that in practice we
+do not need to explicitly estimate the covariance matrix appearing in part B—the noisy force
+˜F(θ) is generated by the subsampling procedure (5). The generators associated with each
+part are deﬁned, respectively, as
+LA = M−1p · ∇θ ,
+(24a)
+LB = −∇U(θ) · ∇p + (h/2)tr
+ Σ(θ)M∇2
+p
+
+,
+(24b)
+LC = −(h/2)βΣ(θ)p · ∇p ,
+(24c)
+LO = −ξp · ∇p + Aβ−1tr
+ M∇2
+p
+
+,
+(24d)
+LD = µ−1 h
+pTM−1p −NdkBT
+i
+· ∇ξ .
+(24e)
+Overall, the generator of the CCAdL/mCCAdL system (8) can be written as
+L = LA + LB + LC + LO + LD .
+(25)
+The ﬂow map (or phase space propagator) of the system, Ft = exp (tL), is used to formally
+denote the solution operator. It turns out that a large number of approximations of Ft can be
+obtained as products (taken in diﬀerent arrangements) of exponentials of the splitting terms.
+It has been demonstrated that diﬀerent splittings and/or combinations give dramatically
+diﬀerent performance in practice [24]. It has also been well documented that symmetrical
+splitting methods often outperform their nonsymmetric counterparts (e.g., in the case of
+stochastic gradient methods [5, 24]).
+In this article, we propose the following symmetric
+splitting method, which we refer as the “BAODCDOAB” method:
+eh ˆLBAODCDOAB = e
+h
+2 LBe
+h
+2 LAe
+h
+2 LOe
+h
+2 LDeh ˆLCe
+h
+2 LDe
+h
+2 LOe
+h
+2 LAe
+h
+2 LB ,
+(26)
+where exp (hLf) denotes the phase space propagator related to the corresponding vector ﬁeld
+f. Note that the steplengths associated with various operations are uniform, spanning the in-
+terval h. Therefore, each of the B, A, O, and D steps in (26) is taken with a steplength of h/2,
+7
+
+Algorithm 1 The BAODCDOAB method for the mCCAdL thermostat.
+1: Input: M, h, β, A, µ, and Nd.
+2: Initialise θ0, p0, and ξ0 = A.
+3: for t = 1, 2, . . . , ˆT do
+4:
+pt ←pt−1 + (h/2)˜F(θt−1);
+5:
+θt ←θt−1 + (h/2)M−1pt;
+6:
+if ξt−1 ̸= 0 then
+7:
+pt ←e−ξt−1(h/2)pt +
+p
+Aβ−1(1 −e−ξt−1h)/ξt−1M1/2N(0, I);
+8:
+else
+9:
+pt ←pt +
+p
+hAβ−1M1/2N(0, I);
+10:
+end if
+11:
+ξt ←ξt−1 + (h/2)µ−1 
+pT
+t M−1pt −Ndβ−1
+;
+12:
+Approximate the new pt in (17) by using the expmv function in MATLAB;
+13:
+ξt ←ξt + (h/2)µ−1 
+pT
+t M−1pt −Ndβ−1
+;
+14:
+if ξt ̸= 0 then
+15:
+pt ←e−ξt(h/2)pt +
+p
+Aβ−1(1 −e−ξth)/ξtM1/2N(0, I);
+16:
+else
+17:
+pt ←pt +
+p
+hAβ−1M1/2N(0, I);
+18:
+end if
+19:
+θt ←θt + (h/2)M−1pt;
+20:
+pt ←pt + (h/2)˜F(θt);
+21: end for
+while a steplength of h is used in the C step. Note that the C step only appears once in the
+sequence, meaning that we only need to approximate the associated C part of the system once
+at each iteration. The procedure of the BAODCDOAB method is summarised in Algorithm 1.
+It is worth mentioning that the noisy force computed at the end of each iteration can be reused
+at the start of the next iteration; therefore only one (noisy) force calculation is needed in the
+BAODCDOAB method at each iteration. Based on the Baker–Campbell–Hausdorﬀexpan-
+sion (e.g., in [24, 33]), it can be demonstrated that the newly proposed symmetric splitting
+method associated with mCCAdL has a weak second order convergence to the modiﬁed Gibbs
+stationary distribution (9), if the approximation (22) in the C part is an at-least-second-order
+approximation to its exact solution (17). Note that it is nontrivial to achieve a weak second
+order convergence to a stationary distribution when the stochastic gradient noise is present
+(even for symmetric splitting methods). In contrast, the methods associated with SGHMC,
+SGNHT, and CCAdL are all expected to have a weak ﬁrst order convergence to their respec-
+tive stationary distributions.
+3
+Numerical experiments
+In this section, we compare the newly established mCCAdL method with SGHMC [6], SGNHT [7],
+and CCAdL [36] on various machine learning tasks to demonstrate the beneﬁts of mCCAdL
+in large-scale Bayesian sampling with a noisy force. In order to ensure a fair comparison,
+unless otherwise stated, we adopt the same experimental settings as in the original CCAdL
+article [36], including the same set of parameters: M = I, β = 1, and µ = Nd. The numerical
+8
+
+experiments in Section 3.1 follow the settings in [12] and were performed by using MATLAB
+R2024a on a macOS 14.5 system equipped with an Apple M1 processor (8 cores) and 8GB
+RAM. The numerical experiments in Section 3.2 were performed by using the same settings as
+in Section 3.1. The numerical experiments in Section 3.3 were performed by using MATLAB
+R2023b on a Linux server with Intel Xeon Platinum 8480CL CPUs (112 physical cores), where
+MATLAB was assigned 72 logical cores due to OS constraints. Note that GPU acceleration
+was not used throughout the article.
+3.1
+2-Wasserstein distance evaluation with Bayesian linear regression
+We begin with a Bayesian linear regression problem and evaluate the samplers by consid-
+ering the 2-Wasserstein distance between an empirical distribution and the true posterior
+distribution [12]. We generated N = 10,000 data points with Nd = 100 according to
+xi ∼N(0, I) ,
+yi = θTxi + δi ,
+(27)
+where δi ∼N(0, 1) are i.i.d. standard normal variables. We used a likelihood function of
+π (y|θ, X) ∝exp
+
+−
+
+y −θTX
+T 
+y −θTX
+
+/2
+
+,
+(28)
+where X = [x1, . . . , xN] ∈RNd×N and y = [y1, . . . , yN] ∈R1×N, and a prior distribution
+of π(θ) ∼N(0, λI), where we used λ = 10 in our numerical experiments. We then derived
+the posterior distribution as a Gaussian distribution π(θ|y, X) ∼N(m, Σ), where the mean
+vector is given by m = ΣXyT with the covariance matrix being
+Σ =
+h
+XXT + (λI)−1i−1
+.
+(29)
+At each iteration k, we randomly selected a subset of size n = 500 with replacement. We then
+formed an empirical Gaussian distribution N
+
+ˆmk, ˆΣk
+
+and computed the 2-Wasserstein dis-
+tance between the empirical distribution and the true posterior distribution, using an explicit
+formula that characterises the 2-Wasserstein distance between any two Gaussian distribu-
+tions [11]. Figure 1 reports the performance of various methods in terms of the 2-Wasserstein
+distance between the empirical distribution and the true posterior distribution, plotted against
+the number of passes through the entire dataset. We can observe that the newly established
+mCCAdL method achieves the smallest 2-Wasserstein distance with various values of the
+stepsize h, closely matching CCAdL when the stepsize h is small. In contrast, both SGHMC
+and SGNHT display larger values of the 2-Wasserstein distance, although their performance
+improves with larger values of the eﬀective friction A (as can be seen on the left and middle
+panels). Moreover, as the stepsize increases, mCCAdL remains stable, while the other three
+alternative methods all becomes worse and worse, with both SGHMC and CCAdL blowing
+up when the stepsize is h = 5 × 10−3 on the right panel.
+3.2
+Binary classiﬁcation with Bayesian logistic regression
+We consider a large-scale Bayesian logistic regression model trained on subsets of the bench-
+mark Modiﬁed National Institute of Standards and Technology (MNIST) dataset1 and Cana-
+1http://yann.lecun.com/exdb/mnist/
+9
+
+0
+50
+100
+150
+200
+250
+Number of Passes
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+2-Wasserstein Distance
+0
+50
+100
+150
+200
+250
+Number of Passes
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+2-Wasserstein Distance
+0
+50
+100
+150
+200
+250
+Number of Passes
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+2-Wasserstein Distance
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+CCAdL, A=1
+CCAdL, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+(a) h = 5 × 10−4
+(b) h = 1 × 10−3
+(c) h = 5 × 10−3
+Figure 1:
+Comparisons of the 2-Wasserstein distance of various methods against the number of
+passes over the entire dataset in the Bayesian linear regression with various values of the stepsize h
+and eﬀective friction A.
+dian Institute For Advanced Research (CIFAR-10) dataset2. We focus on the binary clas-
+siﬁcation of digits 7 and 9 for the MNIST dataset, while three binary classiﬁcation tasks,
+corresponding to the class pairs of airplane–automobile, deer–horse, and cat–dog, are consid-
+ered for the CIFAR-10 dataset.
+For the MNIST task, the training set consists of 12,214 samples, and the test set contains
+2,037 samples. As in the original CCAdL article [36], we applied a 100-dimensional random
+projection of the original features in order to reduce the dimensionality. For each CIFAR-10
+binary classiﬁcation task, the size of the training set is 10,000, and the size of the test set
+is 2,000. Unlike the MNIST task, the input features were projected onto a 400-dimensional
+space using a principal component analysis for dimensionality reduction as well as improving
+the convergence. We used a likelihood function of
+π (y, X|θ) = π
+ {yi, xi}N
+i=1|θ
+
+∝
+N
+Y
+i=1
+1
+1 + exp (−yiθTxi) ,
+(30)
+where the labels are assigned as either yi = 1 (e.g., for images of digit 7) or yi = −1 (e.g.,
+for images of digit 9), and a Gaussian prior distribution of π(θ) ∝exp
+ −θTθ/2
+
+. At each
+iteration, we randomly selected a subset of size n = 500 with replacement.
+Figure 2 and Figure 3 compare the convergence behavior of each method by evaluating
+the test log likelihood using the posterior mean, plotted against the number of passes over the
+entire dataset. It is worth mentioning that the largest stepsize used in the original CCAdL
+article [36] was h = 1 × 10−4. In contrast, we used much larger stepsizes in Figure 2 in order
+to demonstrate the improvement in the stability of the newly proposed mCCAdL method.
+When the stepsize is h = 1.2 × 10−4 on the left panel of Figure 2, we can see that CCAdL
+converges slightly faster mCCAdL, while clearly outperforming SGHMC and SGNHT: (1)
+both CCAdL and mCCAdL methods converge much faster than SGHMC and SGNHT, indi-
+cating their faster mixing speed and shorter burn-in period; (2) both CCAdL and mCCAdL
+methods show robustness with diﬀerent values of the eﬀective friction A, whereas SGHMC
+and SGNHT rely on a relative large value of the eﬀective friction A (especially for SGHMC)
+2https://www.cs.toronto.edu/~kriz/cifar.html
+10
+
+0
+50
+100
+150
+200
+Number of Passes
+-800
+-700
+-600
+-500
+-400
+-300
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+CCAdL, A=1
+CCAdL, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+0
+50
+100
+150
+200
+Number of Passes
+-800
+-700
+-600
+-500
+-400
+-300
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+0
+50
+100
+150
+200
+Number of Passes
+-800
+-700
+-600
+-500
+-400
+-300
+Test Log Likelihood
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+(a) h = 1.2 × 10−4
+(b) h = 5 × 10−4
+(c) h = 1.2 × 10−3
+Figure 2: Comparisons of the test log likelihood of various methods using the posterior mean against
+the number of passes over the entire dataset in the Bayesian logistic regression on the MNIST dataset
+of digits 7 and 9 with various values of the stepsize h and eﬀective friction A.
+that is intended to dominate the gradient noise. When the stepsize was increased, CCAdL
+quickly became unstable and was therefore not included in further comparisons in Figure 2.
+When the stepsize is h = 5 × 10−4 on the middle panel of the ﬁgure, while mCCAdL again
+signiﬁcantly outperforms SGHMC and SGNHT, the SGHMC method appears to be notably
+worse, even with a relative large value of the eﬀective friction A. When the stepsize was
+further increased, SGHMC also became unstable and was therefore not included in further
+comparisons in Figure 2. When the stepsize is h = 1.2× 10−3 on the right panel of the ﬁgure,
+the mCCAdL method is remarkably still stable and performs similarly as in the previous two
+cases. However, in stark contrast, even SGNHT appears to be substantially worse than in
+the previous two cases. This demonstrates that mCCAdL has substantially improved the
+stability than the other three alternative methods. Particularly, the largest usable stepsize in
+mCCAdL (i.e., h = 1.2 × 10−3) is over an order of magnitude larger than that in the original
+CCAdL thermostat (i.e., h = 1 × 10−4).
+The performance of various methods is largely similar in Figure 3 for the CIFAR-10
+dataset. On the left panel, CCAdL and mCCAdL behave similarly, while clearly outperform-
+ing SGHMC and SGNHT. On the middle panel with an increased stepsize, CCAdL became
+unstable and was therefore not included; mCCAdL again signiﬁcantly outperforms SGHMC
+and SGNHT, with the SGHMC method appearing to be notably worse, even with a relatively
+large value of the eﬀective friction A. With further increases in the stepsize on the right panel,
+SGHMC also became unstable and was therefore not included; mCCAdL remains remarkably
+stable, with SGNHT performing substantially worse than in the previous two cases.
+To complement the above ﬁndings based on the test log likelihood, we also evaluate the
+predictive performance of the algorithms using the log loss, a widely adopted metric for
+measuring classiﬁer accuracy on a test set T∗, for which |T∗| denotes the size of the test
+set. While mathematically related to the test log likelihood, the log loss evaluates predictive
+accuracy at the level of individual test points and is particularly sensitive to overconﬁdent
+misclassiﬁcations, thereby oﬀering a complementary perspective on the posterior predictive
+11
+
+Table 1: Comparisons of the posterior expected log losses of various methods on the MNIST
+and CIFAR-10 datasets with various values of the stepsize h and eﬀective friction A.
+h
+A = 1
+A = 10
+SGHMC
+SGNHT
+CCAdL
+mCCAdL
+SGHMC
+SGNHT
+CCAdL
+mCCAdL
+MNIST
+(digits 7 and 9)
+1.2 × 10−4
+0.4186
+0.2626
+0.1608
+0.1698
+0.2619
+0.2241
+0.1582
+0.1642
+5 × 10−4
+3.3546
+0.2410
+NaN
+0.1555
+0.4583
+0.2221
+NaN
+0.1551
+1.2 × 10−3
+Inf
+0.2945
+NaN
+0.1622
+1.1128
+0.2736
+NaN
+0.1614
+CIFAR-10
+(airplane–automobile)
+3.8 × 10−4
+2.3260
+0.5785
+0.4664
+0.4671
+0.5694
+0.5229
+0.4655
+0.4659
+1 × 10−3
+6.2227
+0.5836
+NaN
+0.4688
+0.8750
+0.5596
+NaN
+0.4677
+1.5 × 10−3
+9.8335
+0.6049
+NaN
+0.4725
+1.1894
+0.5840
+NaN
+0.4715
+CIFAR-10
+(deer–horse)
+3.9 × 10−4
+2.0485
+0.7538
+0.6165
+0.6181
+0.7567
+0.6908
+0.6162
+0.6173
+1 × 10−3
+9.5790
+0.7614
+NaN
+0.6206
+1.1854
+0.7363
+NaN
+0.6193
+1.5 × 10−3
+13.0544
+0.7847
+NaN
+0.6241
+1.6577
+0.7552
+NaN
+0.6237
+CIFAR-10
+(cat–dog)
+3.5 × 10−4
+2.1113
+0.8332
+0.6803
+0.6813
+0.8329
+0.7699
+0.6804
+0.6801
+1 × 10−3
+8.8982
+0.8475
+NaN
+0.6838
+1.3210
+0.8082
+NaN
+0.6825
+1.5 × 10−3
+15.9131
+0.8765
+NaN
+0.6880
+1.9174
+0.8615
+NaN
+0.6880
+distribution. In the binary settings considered here, the log loss is given by
+ℓ(θ, T∗) = −1
+|T∗|
+|T∗|
+X
+i∗=1
+log
+
+1
+1 + exp (−yi∗θTxi∗)
+
+=
+1
+|T∗|
+|T∗|
+X
+i∗=1
+log
+
+1 + exp
+
+−yi∗θTxi∗
+
+,
+(31)
+where again the labels are assigned as either yi = 1 or yi = −1. It is worth mentioning
+that (30) and (31) are equivalent to the corresponding functions in [29] where the labels are
+assigned as either yi = 1 or yi = 0.
+Table 1 reports the mean log losses with the same settings as in Figure 2 and Figure 3.
+Following [29], the mean log loss corresponds to the posterior expected log loss on each
+test dataset, obtained by ﬁrst computing the log loss for each posterior sample, and then
+averaging these values across all posterior samples. Since the predictive distribution is directly
+determined by the posterior sampling, this metric can also measure the quality of the sampling.
+These results are consistent with those obtained from the test log likelihood. For the smallest
+stepsize in each dataset, the mean log losses of CCAdL and mCCAdL are very similar to each
+other, while clearly outperforming SGHMC and SGNHT. However, as the stepsize increases,
+CCAdL rapidly becomes unstable, leading to unreliable predictive accuracy and indicating
+a deterioration in sampling quality, as reﬂected by an undeﬁned (shown as NaN) mean log
+loss. In contrast, mCCAdL remains stable with various values of the stepsize and consistently
+generates accurate posterior samples together with strong predictive performance, thereby
+demonstrating superior robustness over the other three alternative methods.
+3.3
+Multiclass classiﬁcation with discriminative restricted Boltzmann ma-
+chine
+We also conduct numerical experiments with the discriminative restricted Boltzmann ma-
+chine [19], which serves as a nonlinear classiﬁer with a tractable discriminative objective.
+The model was trained on two large-scale multiclass datasets from the LIBSVM collection3,
+3http://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass.html
+12
+
+Table 2: Detailed information of the datasets used in the discriminative restricted Boltzmann
+machine.
+Datasets
+training/test set
+classes
+features
+hidden units
+total number of parameters Nd
+letter
+10,500/5,000
+26
+16
+100
+4326
+acoustic
+78,823/19,705
+3
+50
+20
+1083
+Table 3: Comparisons of the posterior expected log losses of various methods on the letter
+and acoustic datasets with various values of the stepsize h and eﬀective friction A.
+h
+A = 1
+A = 10
+SGHMC
+SGNHT
+CCAdL
+mCCAdL
+SGHMC
+SGNHT
+CCAdL
+mCCAdL
+letter
+2 × 10−2
+1.5244
+0.4269
+NaN
+0.4320
+0.3299
+0.3029
+NaN
+0.2656
+2.5 × 10−2
+2.4337
+0.3908
+NaN
+0.4692
+0.3740
+0.3375
+NaN
+0.2764
+3 × 10−2
+2.5606
+0.4305
+NaN
+0.4572
+0.3735
+0.3467
+NaN
+0.2770
+acoustic
+1.5 × 10−3
+0.8727
+0.6568
+NaN
+0.5787
+0.6338
+0.6594
+NaN
+0.6137
+2.5 × 10−3
+0.9888
+0.6415
+NaN
+0.5656
+0.6338
+0.6445
+NaN
+0.5949
+3.5 × 10−3
+0.9757
+0.6279
+NaN
+0.5615
+0.6543
+0.6401
+NaN
+0.5933
+namely the letter and SensIT Vehicle (acoustic) datasets, whose detailed information is pre-
+sented in Table 2. Note that the number of hidden units was chosen via cross-validation in
+order to achieve their best results, leading to 100 hidden units for the letter dataset and 20
+for the acoustic dataset, respectively.
+In contrast to the original CCAdL article [36], which employed a diagonal approximation
+of the covariance matrix for improving the computational eﬃciency, we considered the full
+covariance matrix in this article in order to ensure a fair comparison of various methods. For
+both datasets, the size of the subset was chosen as n = 1000 with replacement. In addition,
+the initial 20% of the total number of passes over the dataset were discarded as burn-in, and
+the remaining samples were collected for prediction.
+Figure 4 compares various methods in terms of the test error rates, computed with the
+posterior mean and plotted against the number of passes over the entire dataset. We again
+used (much) larger stepsizes in Figure 4 than those used in the original CCAdL article [36].
+CCAdL became unstable for such large stepsizes and was therefore not included. We can
+clearly see that mCCAdL, particularly with a small value of the eﬀective friction A, substan-
+tially outperforms SGHMC and SGNHT. Particularly, as we increase the stepsize on the top
+row of Figure 4, the test error rates of the mCCAdL method remain largely similar, in stark
+contrast both SGHMC and SGNHT appear to be worse and worse. If the stepsize was large
+enough, both SGHMC and SGNHT became unstable, while mCCAdL was remarkably still
+stable with similar accuracy. We also note that SGHMC performs well only when the eﬀective
+friction A is chosen to be large. However, such a setting leads to a pronounced random-walk
+behaviour, thereby reducing the rate of convergence.
+In addition to the comparisons of the test error rates, we also computed the mean log
+losses to further assess the performance of various methods, as discussed in Section 3.2. Ta-
+ble 3 shows the mean log losses on the letter and acoustic datasets with the same settings as
+in Figure 4. CCAdL again became unstable for such large stepsizes as in Figure 4, resulting
+13
+
+in NaN in the table. For the letter dataset, when the eﬀective friction is relatively large as
+A = 10, mCCAdL achieves the smallest mean log loss and clearly outperforms both SGHMC
+and SGNHT. When the eﬀective friction is relatively small as A = 1, SGNHT appears to
+be slightly better than mCCAdL, whereas SGHMC performs substantially worse and only
+becomes competitive when A becomes relatively large. For the acoustic dataset, mCCAdL
+consistently has the smallest mean log loss with all stepsizes compared and for both A = 1
+and A = 10, while SGHMC and SGNHT produce noticeably larger mean log losses. There-
+fore, in both datasets, these results are largely consistent with the test error rates reported
+earlier and highlight that mCCAdL consistently provides more accurate and stable predictive
+performance with various values of the stepsize.
+4
+Conclusions
+In this article, we have proposed a modiﬁed version of the covariance-controlled adaptive
+Langevin (CCAdL) thermostat originally proposed in [36]. While CCAdL relies on a moving
+average to estimate the covariance matrix of the noisy force generated from subsampling,
+in the newly proposed mCCAdL method we have used the scaling part of the scaling and
+squaring method together with a truncated Taylor series approximation to the exponential to
+numerically approximate the exact solution to the subsystem involving the additional term
+(i.e., the C part). We have further proposed a symmetric splitting method for mCCAdL.
+We have demonstrated in large-scale machine learning applications that the newly proposed
+mCCAdL method achieves a substantial improvement in numerical stability (measured by the
+largest usable stepsize) over the original CCAdL method, while signiﬁcantly outperforming
+popular alternative stochastic gradient methods in terms of accuracy (measured by the test
+error). The methodologies presented in this article could be of use in more general settings of
+large-scale Bayesian sampling and optimisation, which we leave for future work.
+Acknowledgments
+The authors thank Gabriel Stoltz and Benedict Leimkuhler for their valuable suggestions and
+comments.
+References
+[1] S. Ahn, A. Korattikara, and M. Welling.
+Bayesian posterior sampling via stochastic
+gradient Fisher scoring. In Proceedings of the 29th International Conference on Machine
+Learning, pages 1591–1598, 2012. URL https://icml.cc/2012/papers/782.pdf.
+[2] A. H. Al-Mohy and N. J. Higham. A new scaling and squaring algorithm for the matrix
+exponential. SIAM J. Matrix Anal. Appl., 31(3):970–989, Jan. 2010. ISSN 1095-7162.
+[3] A. H. Al-Mohy and N. J. Higham. Computing the action of the matrix exponential, with
+an application to exponential integrators. SIAM J. Sci. Comput., 33(2):488–511, 2011.
+[4] S. Brooks, A. Gelman, G. Jones, and X.-L. Meng. Handbook of Markov Chain Monte
+Carlo. CRC Press, 2011.
+14
+
+[5] C.
+Chen,
+N.
+Ding,
+and
+L.
+Carin.
+On
+the
+convergence
+of
+stochas-
+tic
+gradient
+MCMC
+algorithms
+with
+high-order
+integrators.
+In
+Advances
+in
+Neural
+Information
+Processing
+Systems,
+volume
+28,
+pages
+2269–2277.
+Curran
+Associates,
+Inc,
+2015.
+URL
+https://papers.nips.cc/paper/
+5696-on-the-convergence-of-stochastic-gradient-mcmc-algorithms-with-high-order-integrat
+[6] T. Chen, E. B. Fox, and C. Guestrin. Stochastic gradient Hamiltonian Monte Carlo. In
+Proceedings of the 31st International Conference on Machine Learning, pages 1683–1691,
+2014. URL https://proceedings.mlr.press/v32/cheni14.html.
+[7] N.
+Ding,
+Y.
+Fang,
+R.
+Babbush,
+C.
+Chen,
+R.
+D.
+Skeel,
+and
+H.
+Neven.
+Bayesian
+sampling
+using
+stochastic
+gradient
+thermostats.
+In
+Advances
+in
+Neural
+Information
+Processing
+Systems,
+volume
+27,
+pages
+3203–3211.
+Curran
+Associates,
+Inc,
+2014.
+URL
+https://papers.nips.cc/paper/
+5592-bayesian-sampling-using-stochastic-gradient-thermostats.
+[8] S. Duane, A. D. Kennedy, B. J. Pendleton, and D. Roweth. Hybrid Monte Carlo. Physics
+Letters B, 195(2):216–222, 1987.
+ISSN 0370-2693.
+URL https://doi.org/10.1016/
+0370-2693(87)91197-X.
+[9] M. H. Duong and X. Shang. Accurate and robust splitting methods for the generalized
+Langevin equation with a positive Prony series memory kernel. J. Comput. Phys., 464:
+111332, 2022. URL https://doi.org/10.1016/j.jcp.2022.111332.
+[10] D. Frenkel and B. Smit. Understanding Molecular Simulation: From Algorithms to Ap-
+plications, 2nd ed. Academic Press, 2001.
+[11] C. R. Givens and R. M. Shortt. A class of Wasserstein metrics for probability distribu-
+tions. Mich. Math. J., 31(2):231–240, Jan. 1984. ISSN 0026-2285.
+[12] M. G¨urb¨uzbalaban, X. Gao, Y. Hu, and L. Zhu.
+Decentralized stochastic gradient
+Langevin dynamics and Hamiltonian Monte Carlo.
+J. Mach. Learn. Res., 22(239):1–
+69, 2021. URL http://jmlr.org/papers/v22/21-0307.html.
+[13] N. J. Higham. The scaling and squaring method for the matrix exponential revisited.
+SIAM J. Matrix Anal. Appl., 26(4):1179–1193, Jan. 2005. ISSN 1095-7162.
+[14] N. J. Higham. The scaling and squaring method for the matrix exponential revisited.
+SIAM Rev., 51(4):747–764, Nov. 2009. ISSN 1095-7200.
+[15] W. Hoover. Computational Statistical Mechanics, Studies in Modern Thermodynamics.
+Elsevier Science, 1991.
+[16] A. M. Horowitz. A generalized guided Monte Carlo algorithm. Physics Letters B, 268
+(2):247–252, 1991. ISSN 0370-2693. URL https://doi.org/10.1016/0370-2693(91)
+90812-5.
+[17] A. Jones and B. Leimkuhler. Adaptive stochastic methods for sampling driven molec-
+ular systems. J. Chem. Phys., 135:084125, 2011. URL https://doi.org/10.1063/1.
+3626941.
+15
+
+[18] H. Kim, G. Nam, C. Yun, H. Yang, and J. Lee. Parameter expanded stochastic gradient
+Markov chain Monte Carlo.
+In Proceedings of the 13th International Conference on
+Learning Representations, 2025. URL https://iclr.cc/virtual/2025/poster/28902.
+[19] H. Larochelle and Y. Bengio. Classiﬁcation using discriminative restricted Boltzmann
+machines. In Proceedings of the 25th International Conference on Machine Learning,
+pages 536–543, 2008. URL https://doi.org/10.1145/1390156.1390224.
+[20] B. Leimkuhler and C. Matthews. Rational construction of stochastic numerical methods
+for molecular sampling. Appl. Math. Res. Express, 2013(1):34–56, 2013. URL https:
+//doi.org/10.1093/amrx/abs010.
+[21] B. Leimkuhler and C. Matthews. Molecular Dynamics: With Deterministic and Stochas-
+tic Numerical Methods. Springer, Cham, Switzerland, 2015.
+[22] B. Leimkuhler, C. Matthews, and G. Stoltz. The computation of averages from equilib-
+rium and nonequilibrium Langevin molecular dynamics. IMA J. Numer. Anal., 36(1):
+13–79, 2015. ISSN 1464-3642. URL https://doi.org/10.1093/imanum/dru056.
+[23] B. Leimkuhler and X. Shang. On the numerical treatment of dissipative particle dynamics
+and related systems. J. Comput. Phys., 280:72–95, 2015. ISSN 0021-9991. URL https:
+//doi.org/10.1016/j.jcp.2014.09.008.
+[24] B. Leimkuhler and X. Shang. Adaptive thermostats for noisy gradient systems. SIAM
+J. Sci. Comput., 38(2):A712–A736, 2016. ISSN 1095-7197. URL https://doi.org/10.
+1137/15M102318X.
+[25] B. Leimkuhler and X. Shang. Pairwise adaptive thermostats for improved accuracy and
+stability in dissipative particle dynamics. J. Comput. Phys., 324:174–193, 2016. ISSN
+0021-9991. URL https://doi.org/10.1016/j.jcp.2016.07.034.
+[26] Y.-A. Ma, T. Chen, and E. B. Fox.
+A complete recipe for stochastic gradient
+MCMC.
+In Advances in Neural Information Processing Systems, volume 28, pages
+2899–2907. Curran Associates, Inc, 2015.
+URL https://papers.nips.cc/paper/
+5891-a-complete-recipe-for-stochastic-gradient-mcmc.
+[27] Y.-A. Ma, N. J. Foti, and E. B. Fox. Stochastic gradient MCMC methods for hidden
+Markov models. In Proceedings of the 34st International Conference on Machine Learn-
+ing, pages 2265–2274, 2017. URL https://proceedings.mlr.press/v70/ma17a.html.
+[28] N. Metropolis, A. W. Rosenbluth, M. N. Rosenbluth, A. H. Teller, and E. Teller. Equation
+of state calculations by fast computing machines. J. Chem. Phys., 21(6):1087–1092, 1953.
+ISSN 0021-9606. URL https://doi.org/10.1063/1.1699114.
+[29] C. Nemeth and P. Fearnhead. Stochastic gradient Markov chain Monte Carlo. J. Amer.
+Statist. Assoc., 116(533):433–450, Jan. 2021. ISSN 1537-274X.
+[30] S. Nos´e. A uniﬁed formulation of the constant temperature molecular dynamics methods.
+J. Chem. Phys., 81:511, 1984. URL https://doi.org/10.1063/1.447334.
+16
+
+[31] H. Robbins and S. Monro. A stochastic approximation method. Annals of Mathematical
+Statistics, 22(2):400–407, 1951. URL https://doi.org/10.1007/978-1-4612-5110-1_
+9.
+[32] C. P. Robert and G. Casella. Monte Carlo Statistical Methods, 2nd ed. Springer, 2004.
+[33] X. Shang. Accurate and eﬃcient splitting methods for dissipative particle dynamics.
+SIAM J. Sci. Comput., 43(3):A1929–A1949, 2021.
+URL https://doi.org/10.1137/
+20M1336230.
+[34] X. Shang and M. Kr¨oger. Time correlation functions of equilibrium and nonequilibrium
+Langevin dynamics: Derivations and numerics using random numbers. SIAM Rev., 62
+(4):901–935, 2020. URL https://doi.org/10.1137/19M1255471.
+[35] X. Shang, M. Kr¨oger, and B. Leimkuhler. Assessing numerical methods for molecular
+and particle simulation. Soft Matter, 13(45):8565–8578, 2017. URL https://doi.org/
+10.1039/C7SM01526G.
+[36] X. Shang,
+Z. Zhu,
+B. Leimkuhler,
+and A. J. Storkey.
+Covariance-controlled
+adaptive
+Langevin
+thermostat
+for
+large-scale
+Bayesian
+sampling.
+In
+Ad-
+vances
+in
+Neural
+Information
+Processing
+Systems,
+volume
+28,
+pages
+37–
+45.
+Curran
+Associates,
+Inc,
+2015.
+URL
+https://papers.nips.cc/paper/
+5978-covariance-controlled-adaptive-langevin-thermostat-for-large-scale-bayesian-samplin
+[37] S. J. Vollmer, K. C. Zygalakis, and Y. W. Teh. Exploration of the (non-)asymptotic bias
+and variance of stochastic gradient Langevin dynamics. J. Mach. Learn. Res., 17(159):
+1–48, 2016. URL http://www.jmlr.org/papers/v17/15-494.html.
+[38] M. Welling and Y. W. Teh. Bayesian learning via stochastic gradient Langevin dynamics.
+In Proceedings of the 28th International Conference on Machine Learning, pages 681–688,
+2011. URL https://doi.org/10.5555/3104482.3104568.
+[39] M. Wu, J. Xuan, and J. Lu. Bridging the gap between variational inference and stochastic
+gradient MCMC in function space. In Proceedings of the 13th International Conference on
+Learning Representations, 2025. URL https://iclr.cc/virtual/2025/poster/29112.
+[40] X. Wu and X. Shang. Stochastic Norton dynamics: An alternative approach for the
+computation of transport coeﬃcients in dissipative particle dynamics. J. Comput. Phys.,
+541:114316, Nov. 2025. ISSN 0021-9991. URL https://doi.org/10.1016/j.jcp.2025.
+114316.
+17
+
+0
+100
+200
+300
+400
+Number of Passes
+-1150
+-1100
+-1050
+-1000
+-950
+-900
+-850
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+CCAdL, A=1
+CCAdL, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+0
+100
+200
+300
+400
+Number of Passes
+-1150
+-1100
+-1050
+-1000
+-950
+-900
+-850
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+0
+100
+200
+300
+400
+Number of Passes
+-1150
+-1100
+-1050
+-1000
+-950
+-900
+-850
+Test Log Likelihood
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+(1a) h = 3.8 × 10−4
+(1b) h = 1 × 10−3
+(1c) h = 1.5 × 10−3
+0
+100
+200
+300
+400
+Number of Passes
+-1400
+-1350
+-1300
+-1250
+-1200
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+CCAdL, A=1
+CCAdL, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+0
+100
+200
+300
+400
+Number of Passes
+-1400
+-1350
+-1300
+-1250
+-1200
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+0
+100
+200
+300
+400
+Number of Passes
+-1400
+-1350
+-1300
+-1250
+-1200
+Test Log Likelihood
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+(2a) h = 3.9 × 10−4
+(2b) h = 1 × 10−3
+(2c) h = 1.5 × 10−3
+0
+100
+200
+300
+400
+Number of Passes
+-1500
+-1450
+-1400
+-1350
+-1300
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+CCAdL, A=1
+CCAdL, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+0
+100
+200
+300
+400
+Number of Passes
+-1500
+-1450
+-1400
+-1350
+-1300
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+0
+100
+200
+300
+400
+Number of Passes
+-1500
+-1450
+-1400
+-1350
+-1300
+Test Log Likelihood
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+(3a) h = 3.5 × 10−4
+(3b) h = 1 × 10−3
+(3c) h = 1.5 × 10−3
+Figure 3: Comparisons of the test log likelihood of various methods using the posterior mean against
+the number of passes over the entire dataset in the Bayesian logistic regression on the CIFAR-10 dataset
+of airplane and automobile (top row), deer and horse (middle row), and cat and dog (bottom row)
+with various values of the stepsize h and eﬀective friction A.
+18
+
+100
+150
+200
+250
+300
+350
+400
+Number of Passes 
+0.04
+0.06
+0.08
+0.1
+0.12
+0.14
+0.16
+0.18
+Test Error
+100
+150
+200
+250
+300
+350
+400
+Number of Passes 
+0.04
+0.06
+0.08
+0.1
+0.12
+0.14
+0.16
+0.18
+Test Error
+100
+150
+200
+250
+300
+350
+400
+Number of Passes 
+0.04
+0.06
+0.08
+0.1
+0.12
+0.14
+0.16
+0.18
+Test Error
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+(1a) letter, h = 2 × 10−2
+(1b) letter, h = 2.5 × 10−2
+(1c) letter, h = 3 × 10−2
+50
+100
+150
+200
+Number of Passes
+0.24
+0.26
+0.28
+0.3
+0.32
+Test Error
+50
+100
+150
+200
+Number of Passes
+0.24
+0.26
+0.28
+0.3
+0.32
+Test Error
+50
+100
+150
+200
+Number of Passes
+0.24
+0.26
+0.28
+0.3
+0.32
+Test Error
+SGHMC, A=1
+SGHMC, A=10
+SGNHT, A=1
+SGNHT, A=10
+mCCAdL, A=1
+mCCAdL, A=10
+(2a) acoustic, h = 1.5 × 10−3
+(2b) acoustic, h = 2.5 × 10−3
+(2c) acoustic, h = 3.5 × 10−3
+Figure 4: Comparisons of the test error rates of various methods using the posterior mean against
+the number of passes over the entire dataset on datasets letter (top row) and acoustic (bottom row)
+with various values of the stepsize h and eﬀective friction A indicated.
+19

@@ -1,0 +1,3058 @@
+Sequential Bayesian parameter–state estimation in dynamical systems with noisy
+and incomplete observations via a variational framework
+Liliang Wanga, Alex Gorodetskya
+aDepartment of Aerospace Engineering, University of Michigan, Ann Arbor, 48109, MI, USA
+Abstract
+Online joint estimation of a dynamical model’s unknown parameters and states with uncertainty quantification is
+crucial in many applications. For example, digital twins dynamically update their knowledge of model parameters
+and states to support prediction and decision-making. Reliability and computational speed are vital for DTs. Online
+parameter–state estimation ensures computational efficiency, while uncertainty quantification is essential for making
+reliable predictions and decisions. In parameter-state estimation, the joint distribution of the state and model param-
+eters conditioned on the data, termed the joint posterior, provides accurate uncertainty quantification. Because the
+joint posterior is generally intractable to compute, this paper presents an online variational inference framework to
+compute its approximation at each time step. The approximation is factorized into a marginal distribution over the
+model parameters and a state distribution conditioned on the parameters. This factorization enables recursive updates
+through a two-stage procedure: first, the parameter posterior is approximated via variational inference; second, the
+state distribution conditioned on the parameters is computed using Gaussian filtering based on the estimated parameter
+posterior. The algorithmic design is supported by a theorem establishing upper bounds on the joint posterior approxi-
+mation error. Numerical experiments demonstrate that the proposed method (i) matches the performance of the joint
+particle filter in low-dimensional problems, accurately inferring both unobserved states and unknown parameters of
+dynamical and observation models; (ii) remains robust under noisy, partial observations and model discrepancies in
+a chaotic Lorenz 96 system; and (iii) scales effectively to a high-dimensional convection–diffusion system, where it
+outperforms the joint ensemble Kalman filter.
+Keywords: Online data assimilation, Variational inference, Joint parameter-state estimation, Incomplete information
+1. Introduction
+In many data-driven techniques, there is a great need to continuously update knowledge of a system’s dynamics
+and states with proper uncertainty quantification in an online manner. A prominent example arises in the context of
+digital twins (DTs) of operating assets. A digital twin is a virtual representation of a physical system that is continu-
+ously updated using data from its physical counterpart [1]. One key consideration in DT applications is the limitation
+of computational resources [2]. In such settings, online inference methods are particularly well suited. Unlike offline
+approaches which process data in batches, online methods operate recursively: at each time step k, they update the
+inference results from the previous step k −1 by assimilating only the newly received data point yk. This recursive
+structure removes the need to store and reprocess historical data, offering substantially higher computational effi-
+ciency compared with offline approaches. In DTs, models and data work together to enable monitoring, prediction
+and decision-making [2]. However, real-world data are normally noisy and often incomplete. Therefore, DTs must
+not only update model parameters but also estimate the underlying system states to effectively achieve monitoring
+and prediction. Moreover, there is often a mismatch between the inference model and the true system, either due to
+limited knowledge or the complexity of the real dynamics. The noisy, incomplete data together with the model mis-
+specification introduce significant uncertainty. This makes uncertainty quantification essential for establishing trust in
+models and supporting risk-aware decision-making [3, 2]. In parameter-state estimation, the joint posterior, defined
+as the joint distribution of state and parameters conditioned on the data, provides accurate uncertainty quantification.
+It captures not only the individual uncertainties of the states and parameters but also their dependencies. However, the
+arXiv:2512.25056v1 [stat.ME] 31 Dec 2025
+
+𝑝0(𝑋0, 𝜃)
+…
+…
+𝑝𝑘(𝑋𝑘, 𝜃∣𝒴𝑘)
+≈
+𝑞𝑘(𝑋𝑘, 𝜃)
+𝑦𝑘
+𝑝𝑘−1(𝑋𝑘−1, 𝜃∣𝒴𝑘−1)
+≈
+𝑞𝑘−1(𝑋𝑘−1, 𝜃)
+𝑦𝑘−1
+𝑝2(𝑋2, 𝜃∣𝒴2)
+≈
+𝑞2(𝑋2, 𝜃)
+𝑦2
+𝑞1(𝑋1, 𝜃)
+𝑦1
+≈
+𝑝1(𝑋1, 𝜃∣𝒴1)
+step 2
+step 𝑘−1
+step 𝑘
+step 1
+…
+Figure 1: Visualization of the task considered in this paper. A prior distribution p0(X0, θ) that incorporates prior knowledge of the unknown initial
+state and model parameters is given. The objective is to sequentially approximate the joint posterior p(Xk, θ | Yk) by another distribution qk(Xk, θ),
+as new data arrive. At each time step k, the approximation qk(Xk, θ) is computed recursively using only the newly received data yk and the previous
+approximation qk−1(Xk−1, θ), without reprocessing past data.
+joint posterior is typically intractable to compute in practice. Therefore, we instead consider approximating it online.
+This task is formalized below.
+Task . Given sequentially arriving data points y1, y2, · · · , the goal is to compute a distribution of the current state Xk
+and unknown model parameters θ, denoted by qk(Xk, θ), that approximates the joint posterior p(Xk, θ | Yk), defined
+as the distribution of Xk and θ conditioned on all observations up to time k, Yk = (y1, y2, · · · , yk). At each time step k,
+we use only the approximation from the previous step, qk−1(Xk−1, θ), together with the newly received data point yk, to
+compute the current approximation qk(Xk, θ). This task is illustrated in Figure 1.
+In recent years, some methods have been developed to address this task, namely, to approximate the joint posterior
+in an online manner. Among these methods, the most commonly used approaches are based on state augmentation.
+They augment the state vector with the unknown parameters and apply standard filtering methods to the augmented
+system. Examples of such methods include joint Gaussian filters (e.g., joint unscented Kalman filter (UKF) [4, 5] and
+joint ensemble Kalman filter (EnKF) [6]) and joint particle filters (PFs) [7, 8]. Joint Gaussian filters approximate the
+joint posterior with a Gaussian distribution. Let Yk denote the observation at time step k, with the data yk as its realiza-
+tion. Joint Gaussian filters assume that the joint distribution p(Xk, θ, Yk | Yk−1) is Gaussian. Under this assumption, the
+joint posterior p(Xk, θ | Yk) remains Gaussian and can be updated recursively. This yields computationally efficient
+algorithms, but the Gaussian assumption is overly restrictive. It can introduce large approximation errors when the
+relation between θ and Xk is highly nonlinear, a situation that can arise in both linear and nonlinear systems. Joint PFs,
+by contrast, avoid Gaussian assumptions by representing the joint posterior with an empirical distribution constructed
+from weighted particles, achieving significantly higher approximation accuracy for low-dimensional systems. How-
+ever, the presence of static parameters in the augmented state amplifies particle weight degeneracy [9], a well-known
+issue of PFs. As a result, particle weights degenerate faster than in standard PFs, and the number of particles required
+to counteract this issue grows rapidly with the dimensions of the state and parameters [10]. Introducing artificial
+dynamics for the parameters [7] mitigates this issue to some extent, but at the cost of introducing estimation bias that
+is difficult to quantify [9]. Consequently, joint PFs may perform poorly even for moderately sized problems [11].
+To avoid the severe weight degeneracy resulting from state augmentation, another PF-based method for approxi-
+mating the joint posterior online, SMC2 [12], was developed. SMC2 employs a nested filtering structure to compute an
+approximation of the joint posterior. For each sample θ(i) drawn from the previous approximate parameter posterior,
+an inner-loop particle filter estimates the conditional state posterior p(Xk | Yk, θ(i)). The conditional state posterior
+estimates are then used by an outer-loop filter to update the approximate parameter posterior. While effective, SMC2
+has a major drawback: its per-step computational cost grows with time, making it unsuitable for online tasks.
+In contrast to PFs, variational inference (VI) [13], which approximates the posterior distribution by minimizing
+the Kullback-Leibler (KL) divergence of the approximate posterior from the true posterior, is widely regarded as
+scalable. Moreover, unlike Gaussian filters, VI is not restricted to a specific distribution family [14], making it a
+promising tool for accurate joint posterior approximation. Nevertheless, most of the existing VI methods for joint
+2
+
+posterior approximation are designed for offline settings (e.g., [15, 16, 17]). Only a limited number of VI-based
+approaches have been proposed for online joint posterior approximation [18, 19], and these methods apply only to
+linear dynamical and observation systems. Furthermore, these methods typically approximate the joint posterior as
+the product of marginal distributions over parameters and states. Such factorization neglects the intrinsic dependence
+between model parameters and states and often results in inaccurate joint posterior approximations.
+It is noteworthy that another class of online parameter–state estimation methods focuses on computing only the
+approximate marginal posteriors of the states and parameters by running two filters—a state filter and a parameter
+filter. Examples include the United Filter [20] and classical dual Gaussian filters such as the dual UKF [21] and dual
+EnKF [22]. However, since the outputs of these methods do not capture the dependency between parameter and state
+uncertainties, they often fail to provide accurate uncertainty quantification.
+Beyond the aforementioned limitations of existing posterior approximation-based methods for online parameter-
+state estimation, few of them provide theoretical guarantees on their approximation accuracy. However, theoretical
+foundations are essential for establishing trustworthiness, since numerical experiments cannot capture the full range
+of practical scenarios.
+In summary, there is a clear need for an online approach that (i) provides accurate joint posterior approximations
+across diverse problems and scales, and (ii) is supported by theoretical guarantees of effectiveness. In this paper, we
+introduce a flexible and scalable variational inference framework to address the task of computing an approximate
+joint posterior online using noisy and incomplete data. We refer to this framework as factorization-based online
+variational inference (FBOVI). FBOVI factorizes the approximate joint posterior qk(Xk, θ) into a parameter marginal
+νk(θ) and a conditional state distribution ρk(Xk | θ). Guided by a theorem establishing approximation error bounds, the
+framework proceeds in two stages: Stage 1 computes νk(θ) via VI, while Stage 2 computes ρk(Xk | θ) using a filtering
+method based on νk(θ). The family of νk(θ) can be chosen flexibly, while ρk(Xk | θ) is represented as a Gaussian with
+mean and covariance depending on θ, enabling the use of Gaussian filtering in Stage 2. Although this paper primarily
+focuses on Gaussian representations for ρk(Xk | θ) and using Gaussian filtering at Stage 2, our framework also supports
+non-Gaussian representations and filtering methods not in the family of Gaussian filters.
+This work is an extension and expansion of our previous study [11], which also factorizes qk(Xk, θ) and employs
+a two-stage procedure. The present work, however, introduces several key advances: (i) the framework supports a
+wide range of Gaussian filtering methods, including the EnKF, thus enhancing scalability; (ii) it provides a simplified
+procedure for linear systems by integrating the Kalman filter; (iii) it establishes theoretical results on approximation
+accuracy; and (iv) it validates the method with extensive numerical experiments, including cases with partially un-
+known observation models, model misspecification, and a high-dimensional system described by a partial derivative
+equation (PDE), whereas [11] focuses only on low-dimensional problems with correct model forms.
+The main contributions of this paper are summarized as follows:
+1. We propose a flexible variational inference framework for online joint posterior approximation. By avoiding
+restrictive assumptions on the structure of the joint posterior, the framework enables higher approximation accu-
+racy. A variety of Gaussian filtering methods (including EnKF) can be integrated into the proposed framework,
+which allows practitioners to balance inference accuracy and computational efficiency.
+2. We establish a theoretical result (Theorem 1) that provides an upper bound on the error between the true joint
+posterior and the approximate joint posterior. This result demonstrates the effectiveness of the factorization-
+based strategy and informs our algorithmic design. Building on this, we further derive Theorem 2, which gives
+estimable error bounds of our method for linear systems.
+3. Numerical experiments show that the proposed method (i) achieves estimation and prediction performance
+comparable to joint PF in low-dimensional systems, successfully inferring unobserved states and parameters in
+partially unknown dynamical and observation models, (ii) exhibits robustness when noisy and incomplete data,
+model misspecification, and chaotic dynamics occur simultaneously, and (iii) scales well to a high-dimensional
+convection–diffusion system.
+The contributions of this work can support the advancement of emerging data-driven techniques that rely on
+online parameter–state estimation. For example, the proposed framework can assist DTs in improving monitoring and
+predictive performance, and providing reliable uncertainty quantification and theoretical guarantees that contribute to
+achieving trustworthiness.
+3
+
+The remainder of this paper is organized as follows. Section 2 introduces the notation, formulates the online
+parameter-state estimation problem, and reviews the Kullback-Leibler divergence and general framework of Gaussian
+filtering. Section 3 presents the proposed factorization-based online variational inference framework. In Section 4,
+we evaluate the method through numerical experiments and compare its performance with several online Bayesian
+parameter-state methods. Finally, conclusions are given in Section 5.
+2. Background/Setting
+In this section, we formally present the notation and problem formulation, followed by an introduction to Kullback-
+Leibler divergence. Lastly, we introduce the fundamental concepts of Gaussian filtering.
+2.1. Notation
+Let R denote the set of real numbers and Z≥0 the set of non-negative integers. For a symmetric matrix M, let
+|M| denote its determinant. Let the triple (Ω, F , P) denote a probability space, where P is a probability measure with
+density p. The notation p(X = x | Y = y) denotes the value of the probability density function at x, conditioned on
+the event that the random variable Y takes the value y. For simplicity, we use p(x | y) to represent p(X = x | Y = y)
+throughout this paper. Let E[X], Var[X], and Cov[X, Y] denote the expectation and variance of the random variable
+X, and the covariance between the random variables X and Y, respectively. Similarly, let E[X | Z], Var[X | Z], and
+Cov[X, Y | Z] denote the conditional expectation and variance of X, and the conditional covariance between X and Y,
+given Z.
+We use N(µ, R) to denote a Gaussian distribution with mean µ and covariance R. The probability density function
+of this distribution evaluated at x is written as pN(x; µ, R), that is,
+pN(x; µ, R) :=
+1
+(2π)dx/2|R|1/2 exp
+
+−1
+2(x −µ)⊤R−1(x −µ)
+
+,
+where dx is the dimension of x.
+2.2. Problem formulation
+Consider the following discrete-time system with partially observable states:
+Xk+1 = Φ(Xk; θ) + Wk,
+Wk
+i.i.d.
+∼N(0, Σ(θ)),
+Yk = h(Xk; θ) + Vk,
+Vk
+i.i.d.
+∼N(0, Γ(θ)),
+(1)
+where k ∈Z≥0 denotes a time index; and Xk ∈Rn, Yk ∈Rr, Wk ∈Rn, Vk ∈Rr represent the state, observation,
+process noise, and measurement noise at time step k, respectively. Here θ represents the vector of unknown system
+parameters. The functions Φ(Xk; θ) and h(Xk; θ) are parameterized by the parameters θ. The process noise covariance
+Σ(θ) and the measurement noise covariance Γ(θ) are determined by θ. The quantities Xk, Yk, Wk, Vk, and θ are random
+variables and assumed to be continuous.
+Let yk denote the observed value of Yk. Coupled with system (1), we have a set Yk = (y1, . . . , yk) of all observations
+up to time k. The joint posterior at time step k is defined as the joint distribution of state Xk and parameters θ
+conditioned on Yk, represented by the probability density p(Xk, θ | Yk). The goal is to compute the joint posterior
+p(Xk, θ | Yk) at each time step k, using only the previous joint posterior p(Xk−1, θ | Yk−1) and the newly received data
+point yk, without reprocessing all historical data Yk−1.
+Theoretically, the expression of the current joint posterior p(Xk, θ | Yk) in terms of the previous joint posterior
+p(Xk−1, θ | Yk−1) and the newly received data yk can be derived through a prediction–update procedure. Specifically,
+at each time step k, the joint posterior satisfies
+p(Xk, θ | Yk) = p(Xk | θ, Yk) p(θ | Yk),
+where p(Xk | θ, Yk) denotes the filtering distribution conditioned on the parameter θ, and p(θ | Yk) represents the
+posterior of θ. During the prediction step, the predictive distribution p(Xk | θ, Yk−1) is obtained by propagating
+4
+
+the previous conditional filtering distribution p(Xk−1 | θ, Yk−1) through the system dynamics of (1). During the
+update step, the newly observed data yk is assimilated to update both the predictive distribution p(Xk | θ, Yk−1) and
+the previous parameter posterior p(θ | Yk−1), resulting in the conditional filtering distribution p(Xk | θ, Yk) and
+the updated parameter posterior p(θ | Yk) [11]. This prediction–update mechanism is illustrated in Figure 2. The
+subsequent subsections provide a detailed description of each step.
+𝑝(𝑋𝑘−1 ∣𝜃, 𝒴𝑘−1)
+𝑝(𝜃∣𝒴𝑘−1)
+𝑝(𝑋𝑘∣𝜃, 𝒴𝑘−1)
+𝑝(𝑋𝑘∣𝜃, 𝒴𝑘)
+𝑝(𝜃∣𝒴𝑘)
+𝑦𝑘
+Figure 2: Illustration of the prediction–update procedure for determining the conditional filtering distribution p(Xk | θ, Yk) and the parameter
+posterior p(θ | Yk). The predictive distribution p(Xk | θ, Yk−1) is obtained by propagating the previous filtering distribution p(Xk−1 | θ, Yk−1)
+through the dynamics. The data yk is then assimilated to update the predictive distribution, yielding p(Xk | θ, Yk). The distribution p(Xk | θ, Yk−1)
+is also used for determining the parameter posterior p(θ | Yk).
+2.2.1. Prediction step
+The predictive distribution p(Xk | θ, Yk−1) is obtained by propagating the conditional filtering distribution from
+the previous step:
+p(Xk | θ, Yk−1) =
+Z
+p(Xk, Xk−1 | θ, Yk−1) dXk−1
+=
+Z
+pN(Xk; Φ(Xk−1; θ), Σ(θ)) p(Xk−1 | θ, Yk−1) dXk−1.
+(2)
+Let T denote the operator that maps p(Xk−1 | θ, Yk−1) to the predictive distribution p(Xk | θ, Yk−1). We refer to T
+as the prediction operator. For example, the distribution p(Xk | θ, Yk−1) can be represented as p(Xk | θ, Yk−1) =
+T p(Xk−1 | θ, Yk−1).
+2.2.2. Update step
+Given the predictive distribution p(Xk | θ, Yk−1), we now derive the posterior distributions p(Xk | θ, Yk) and
+p(θ | Yk). By Bayes’ rule, the conditional filtering distribution is
+p(Xk | θ, Yk) =
+1
+ZX,k(θ) pN(yk; h(Xk; θ), Γ(θ)) p(Xk | θ, Yk−1),
+(3)
+where
+ZX,k(θ) =
+Z
+pN(yk; h(Xk; θ), Γ(θ)) p(Xk | θ, Yk−1) dXk
+is a normalization constant for a given θ. Let F X
+k denote the operator mapping p(Xk−1 | θ, Yk−1) to p(Xk | θ, Yk).
+Similarly, by Bayes’ rule, the parameter posterior can be written as
+p(θ | Yk) = 1
+Zk
+p(θ | Yk−1) p(yk | θ, Yk−1) = 1
+Zk
+p(θ | Yk−1)
+Z
+pN(yk; h(Xk; θ), Γ(θ)) p(Xk | θ, Yk−1) dXk,
+(4)
+where
+Zk =
+Z
+p(θ | Yk−1)
+ Z
+pN(yk; h(Xk; θ), Γ(θ)) p(Xk | θ, Yk−1) dXk
+!
+dθ
+is a normalizing constant. Let Fk denote the operator that maps the pair  p(Xk−1 | θ, Yk−1), p(θ | Yk−1) to the updated
+parameter posterior p(θ | Yk).
+5
+
+2.3. Kullback-Leibler divergence
+This section introduces the Kullback–Leibler (KL) divergence, which is employed in our framework described in
+detail in Section 3. Let µ1 and µ2 be two probability measures with corresponding probability density functions f1(x)
+and f2(x). The KL divergence of µ1 relative to µ2 is defined as:
+KL(µ1∥µ2) :=
+Z
+f1(x) log f1(x)
+f2(x)dx.
+(5)
+2.4. Gaussian filtering
+Gaussian filtering will be employed in the proposed framework. In this section, we present the fundamental
+concept of Gaussian filtering. Gaussian filtering assumes that the joint distribution of the current state Xk and the
+current observation Yk, conditioned on past observations Yk−1, namely p (Xk, Yk | Yk−1), is Gaussian. Under this
+assumption, the posterior p(Xk | Yk) is also Gaussian and can be written as
+p(Xk | Yk) = pN(Xk; mk,Ck),
+with mean mk and covariance Ck given by
+mk = m−
+k + UkS −1
+k (yk −µk),
+Ck = C−
+k −UkS −1
+k U⊤
+k ,
+(6)
+where m−
+k , C−
+k , µ−
+k , Uk, and S k are defined as
+m−
+k := E[Xk | Yk−1],
+C−
+k := Var[Xk | Yk−1],
+µk := E[Yk | Yk−1],
+Uk := Cov[Xk, Yk | Yk−1],
+S k := Var[Yk | Yk−1].
+(7)
+Various Gaussian filtering methods differ in how they approximate the quantities m−
+k , C−
+k , µk, Uk, and S k [23].
+3. Methodology
+In this section, we introduce our proposed framework, FBOVI, which aims to obtain the joint posterior p(Xk, θ |
+Yk) in an online fashion.
+As noted in Section 1, computing the joint posterior p(Xk, θ | Yk) is typically intractable. We therefore approxi-
+mate p(Xk, θ | Yk) at each time step k by another distribution qk(Xk, θ), referred to as the approximate joint posterior.
+The approximation is computed recursively: qk(Xk, θ) is obtained using only the newly received data yk and the pre-
+vious approximation qk−1(Xk−1, θ). We factorize qk as the product of a conditional distribution of Xk given θ and a
+marginal distribution over θ:
+qk(Xk, θ) := ρk(Xk | θ) νk(θ).
+In principle, one might try to directly approximate the exact factorization p(Xk, θ | Yk) = p(Xk | θ, Yk) p(θ | Yk) by
+setting ρk(Xk | θ) ≈p(Xk | θ, Yk) and νk(θ) ≈p(θ | Yk). However, as described in Section 2.2, the expressions of
+p(Xk | θ, Yk) and p(θ | Yk) depend on the previous conditional filtering distribution p(Xk−1 | θ, Yk−1) and the previous
+parameter posterior p(θ | Yk−1), both of which are unavailable in closed forms. This makes a direct approximation
+infeasible.
+Our solution to this issue is to introduce “online targets". We let the distribution ρk(Xk | θ) approximate the online
+conditional filtering distribution ρ∗
+k(Xk | θ) and let νk(θ) approximate the online parameter posterior ν∗
+k(θ). The online
+conditional filtering distribution ρ∗
+k(Xk | θ) is the resulting p(Xk | θ, Yk) obtained by replacing the previous conditional
+filtering distribution p(Xk−1 | θ, Yk−1) with its approximation ρk−1(Xk−1 | θ). The online parameter posterior ν∗
+k(θ)
+represents the resulting p(θ | Yk) when the distributions p(Xk−1 | θ, Yk−1) and p(θ | Yk−1) are replaced by their
+approximations ρk−1(Xk−1 | θ) and νk−1(θ), respectively. Formally, ρ∗
+k and ν∗
+k are defined as
+ρ∗
+k := F X
+k ρk−1,
+ν∗
+k := Fk(ρk−1, νk−1),
+where F X
+k and Fk are the operators introduced in Section 2.2. Generally, the distributions ρ∗
+k(Xk | θ) and ν∗
+k(θ) cannot
+be computed analytically. The core idea of our framework is therefore to use ρk(Xk | θ) to approximate ρ∗
+k(Xk | θ), and
+νk(θ) to approximate ν∗
+k(θ). This procedure is illustrated in Figure 3.
+6
+
+𝜌𝑘−1(𝑋𝑘−1 ∣𝜃)
+𝜈𝑘−1(𝜃)
+𝜌𝑘
+∗(𝑋𝑘∣𝜃)
+𝜈𝑘
+∗(𝜃)
+𝑦𝑘
+ℱ𝑘
+𝑋
+ℱ𝑘
+ℱ𝑘
+𝑋
+ℱ𝑘
+≈
+≈
+𝜌𝑘(𝑋𝑘∣𝜃)
+𝜈𝑘(𝜃)
+𝑝(𝑋𝑘−1 ∣𝜃, 𝒴𝑘−1)
+𝑝(𝜃∣𝒴𝑘−1)
+𝑝(𝑋𝑘∣𝜃, 𝒴𝑘)
+𝑝(𝜃∣𝒴𝑘)
+𝑦𝑘
+ℱ𝑘
+𝑋
+ℱ𝑘
+ℱ𝑘
+𝑋
+ℱ𝑘
+ℱ𝑘
+ℱ𝑘
+Figure 3: Core idea of the proposed framework: the online conditional filtering distribution ρ∗
+k(Xk | θ) is approximated by ρk(Xk | θ), and the online
+parameter posterior ν∗
+k(θ) is approximated by νk(θ). Their product, ρk(Xk | θ)νk(θ), forms the approximate joint posterior qk(Xk, θ). The blue arrows
+represent the maps F X
+k and Fk. For comparison, the transformations of the exact solutions are shown on the right. The distributions shown in gray
+are those that are intractable to compute.
+As ρ∗
+k(Xk | θ) and ν∗
+k(θ) normally differ from p(Xk | θ, Yk) and p(θ | Yk), respectively, one may ask whether
+approximating these online targets is sufficient to effectively approximate the true joint posterior p(Xk, θ | Yk). The
+following theorem, which establishes an upper bound on the error between the true and approximate joint posteriors,
+demonstrate the effectiveness of our strategy and offers principled guide for algorithmic design:
+Theorem 1. Assume infθ
+Γ(θ)
+ = ˜C > 0. The total variation and Hellinger distances between p(Xk, θ | Yk) and
+qk(Xk, θ) satisfy:
+d(p(Xk, θ | Yk), qk(Xk, θ)) ≤
+k−1
+X
+j=1
+C(Yk, ˜C, j, k)
+q
+Eθ∼ν j(·)
+h
+KL
+
+ρj(· | θ)∥ρ∗
+j(· | θ)
+i
++ KL
+
+ν j∥ν∗
+j
+
++ 1√
+2
+q
+Eθ∼νk(·)
+h
+KL
+
+ρk(· | θ)∥ρ∗
+k(· | θ)
+i
++ KL
+
+νk∥ν∗
+k
+
+,
+(8)
+where C(Yk, ˜C, j, k) = (2π)−r(k−j)
+2
+˜C−k−j
+2
+√
+2p(Y j+1:k|Y j) when d is the total variation distance, and C(Yk, ˜C, j, k) = 2(k−j)(2π)−r(k−j)
+4
+˜C−k−j
+4
+√
+2p(Y j+1:k|Y j)
+when
+d is the Hellinger distance. The notation Y j+1:k denotes the data received from time step j + 1 through k.
+The total variation (TV) and Hellinger distances are two commonly used metrics for measuring the difference between
+two probability distributions. Their definitions are provided in Appendix A.
+Proof See Appendix B.
+The terms C(Yk, ˜C, j, k) depend only on the observational data and model quantities and are thus constant with
+respect to the choices for ρ j and νj for j ∈[1, k]. The controllable terms in the bounds are the divergences
+Eθ∼νj(·)
+h
+KL
+
+ρ j(· | θ)
+
+ ρ∗
+j(· | θ)
+i
+and
+KL
+
+ν j
+
+ ν∗
+j
+
+,
+j = 1, . . . , k,
+which measure how well the approximate conditional filtering distribution and the approximate parameter posterior
+track their online targets. Hence, to reduce the error between the true and approximate joint posteriors, we adopt the
+following two-stage strategy at each time step k:
+1. Minimize KL(νk∥ν∗
+k) to obtain νk(θ).
+2. Minimize Eθ∼νk(·)[KL(ρk(· | θ)∥ρ∗
+k(· | θ))] to obtain ρk(Xk | θ), using the updated νk(θ).
+We allow νk(θ) to be chosen from an arbitrary variational family, while ρk(Xk | θ) is modeled as a conditional Gaussian:
+ρk(Xk | θ) = pN(Xk; mk(θ),Ck(θ)).
+We now describe how each of these two stages is performed in detail.
+7
+
+3.1. Stage 1: computation of νk(θ)
+To compute νk(θ) by minimizing KL(νk∥ν∗
+k), we first derive the expression of ν∗
+k(θ). Let ρ∗−
+k (Xk | θ) denote the
+corresponding predictive distribution p(Xk | θ, Yk−1) when the previous conditional filtering distribution p(Xk−1 |
+θ, Yk−1) is replaced with ρk−1(Xk−1 | θ), i.e., ρ∗−
+k := T (ρk−1). We can express ρ∗−
+k (Xk | θ) as
+ρ∗−
+k (Xk | θ) :=
+Z
+pN(Xk; Φ(Xk−1; θ), Σ(θ))ρk−1(Xk−1 | θ)dXk−1.
+We refer to ρ∗−
+k (Xk | θ) as the online conditional predictive distribution. Throughout this paper, the superscript ‘−’
+indicates quantities associated with predictive distributions.
+By Bayes’ rule, the online parameter posterior ν∗
+k(θ) is given by:
+ν∗
+k(θ) = 1
+ˆZk
+νk−1(θ)
+Z
+pN(yk; h(Xk; θ), Γ(θ)) ρ∗−
+k (Xk | θ) dXk,
+(9)
+where ˆZk is a normalizing constant. Given Equation (9), the KL divergence KL(νk∥ν∗
+k) can be written as
+KL(νk∥ν∗
+k) = log ˆZk −
+ 
+Eθ∼νk(·)
+"Z
+pN(yk; h(Xk; θ), Γ(θ)) ρ∗−
+k (Xk | θ) dXk
+#
+−KL(νk∥νk−1)
+!
+.
+(10)
+Since the first term on the right-hand side of Equation (10), log ˆZk, is constant, VI minimizes the KL divergence
+KL(νk∥ν∗
+k) by maximizing the negative of the remaining terms on the right-hand side of Equation (10), which is
+defined as the evidence lower bound (ELBO) Lk(νk):
+Lk(νk) := Eθ∼νk(·)[I(θ)] −KL(νk ∥νk−1) ,
+(11)
+where
+I(θ) :=
+Z
+pN(yk; h(Xk; θ), Γ(θ)) ρ∗−
+k (Xk | θ) dXk.
+In the following subsections, we describe how the integral I(θ) in Equation (11) can be computed for both linear and
+nonlinear systems.
+3.1.1. Linear case
+If the dynamical and observation models in system (1) are linear in the state Xk and have the following forms
+Xk+1 = A(θ)Xk + Wk,
+Wk
+i.i.d.
+∼N(0, Σ(θ)),
+Yk = H(θ)Xk + Vk,
+Vk
+i.i.d.
+∼N(0, Γ(θ)),
+(12)
+where A(θ) ∈Rn×n and H(θ) ∈Rr×n are matrices determined by the parameters θ, the online conditional predictive
+distribution ρ∗−
+k is Gaussian and given by
+ρ∗−
+k (Xk | θ) = pN
+
+Xk; m∗−
+k (θ),C∗−
+k (θ)
+
+,
+where
+m∗−
+k (θ) = A(θ)mk−1(θ),
+C∗−
+k (θ) = A(θ)Ck−1(θ)A(θ)T + Σ(θ).
+(13)
+Thus the integral I(θ) has a closed-form expression:
+I(θ) = pN
+
+yk; H(θ)m∗−
+k (θ), H(θ)C∗−
+k (θ)H(θ)T + Γ(θ)
+
+.
+(14)
+The procedure of computing the distribution νk(θ) for the linear case is illustrated in Figure 4.
+8
+
+𝒩(𝑋𝑘−1; 𝑚𝑘−1 𝜃, 𝐶𝑘−1(𝜃))
+𝜈𝑘−1(𝜃)
+𝑦𝑘
+𝒯
+𝜈𝑘(𝜃)
+𝒩(𝑋𝑘; 𝑚𝑘
+∗−𝜃, 𝐶𝑘
+∗−(𝜃))
+Figure 4: Computation of the distribution νk(θ) for linear systems. The predictive distribution ρ∗−
+k (Xk | θ) can be computed in the linear case. The
+prediction operator T is introduced in Section 2.2.1. It represents the operator that maps the previous conditional filtering distribution p(Xk−1 |
+θ, Yk−1) to the predictive distribution p(Xk | θ, Yk−1).
+𝜈𝑘−1(𝜃)
+𝜌𝑘
+∗−(𝑋𝑘∣𝜃)
+𝑦𝑘
+𝒯
+𝜈𝑘(𝜃)
+𝒩(𝑋𝑘; 𝑚𝑘
+−𝜃, 𝐶𝑘
+−𝜃)
+≈
+𝒩(𝑋𝑘−1; 𝑚𝑘−1 𝜃, 𝐶𝑘−1(𝜃))
+Figure 5: Computation of the distribution νk(θ) for nonlinear systems. The predictive distribution ρ∗−
+k (Xk | θ) is intractable to compute and thus
+approximated by a Gaussian distribution N(Xk; m−
+k (θ),C−
+k (θ)) first.
+3.1.2. Nonlinear case
+When the dynamical model is nonlinear in the state variable Xk, closed-form expressions of the online condi-
+tional predictive distribution ρ∗−
+k (Xk | θ) are generally unavailable, rendering the computation of the ELBO Lk(νk)
+intractable. In such cases, we approximate ρ∗−
+k (Xk | θ) with a Gaussian distribution:
+ρ∗−
+k (Xk | θ) ≈pN(Xk; m−
+k (θ),C−
+k (θ)),
+(15)
+where the mean m−
+k (θ) and the covariance m−
+k (θ) are defined as
+m−
+k (θ) :=
+Z
+Φ(Xk−1; θ)pN(Xk−1; mk−1(θ),Ck−1(θ))dXk−1,
+(16)
+C−
+k (θ) :=
+Z 
+Φ(Xk−1; θ) −m−
+k (θ)
+ 
+Φ(Xk−1; θ) −m−
+k (θ)
+T pN(Xk−1; mk−1(θ),Ck−1(θ))dXk−1 + Σ(θ).
+(17)
+The integrals in Equations (16) and (17) can be evaluated using the unscented transform or Gaussian quadrature [24].
+With the Gaussian approximation pN
+
+Xk; m−
+k (θ),C−
+k (θ)
+
+for ρ∗−
+k (Xk | θ), we approximate the integral I(θ) by
+I(θ) ≈
+Z
+pN(yk; h(Xk; θ), Γ(θ))pN
+
+Xk; m−
+k (θ),C−
+k (θ)
+
+dXk.
+(18)
+The right hand side of Equation (18) can be evaluated by unscented transform or Gaussian quadrature. In addition,
+when the observation model is linear in the state Xk:
+Yk = H(θ)Xk + Vk,
+Vk
+i.i.d.
+∼N(0, Γ(θ)),
+(19)
+the right hand side of Equation (18) has a closed-form expression:
+Z
+pN(yk; h(Xk; θ), Γ(θ))pN
+
+Xk; m−
+k (θ),C−
+k (θ)
+
+dXk = pN
+
+yk; H(θ)m−
+k (θ), H(θ)C−
+k (θ)H(θ)T + Γ(θ)
+
+.
+(20)
+The procedure of computing the distribution νk(θ) for the nonlinear case is illustrated in Figure 5. The choice of
+approximating the distribution ρ∗−
+k (Xk | θ) with a Gaussian distribution is to convert the integral I(θ) into an integral
+of the likelihood pN(yk; h(Xk; θ) with respect to a Gaussian measure. This conversion enables the use of existing
+computationally efficient numerical methods for evaluating integrals under Gaussian measures and thereby ensures
+9
+
+the overall computational efficiency of the proposed method. If we don’t choose to approximate the distribution
+ρ∗−
+k (Xk | θ) with a Gaussian, we can still estimate the integral I(θ) using the Monte Carlo method:
+I(θ) ≈1
+N
+N
+X
+i=1
+pN
+
+yk; h(X(i)
+k ; θ), Γ(θ)
+
+,
+(21)
+where X(i)
+k , i = 1, 2, · · · , N are samples following the distribution ρ∗−
+k (Xk | θ) constructed by
+X(i)
+k = Φ(X(i)
+k−1; θ) + η(i),
+X(i)
+k−1 ∼ρk−1(Xk−1 | θ),
+η(i) ∼Σ(θ).
+When the integral I(θ) can be evaluated, we can compute the distribution νk(θ) by maximizing the ELBO Lk(νk).
+Stage 1 ends with νk(θ) obtained and we proceed to Stage 2.
+3.2. Stage 2: computation of ρk(Xk | θ)
+With νk(θ) computed, we focus on computing the conditional distribution ρk(Xk | θ) that minimizes
+Eθ∼νk(·)
+h
+KL
+
+ρk(· | θ) ∥ρ∗
+k(· | θ)
+i
+.
+In the following two subsections, we describe how ρk(Xk | θ) is computed for both linear and nonlinear systems, given
+the marginal distribution νk(θ).
+3.2.1. Linear case
+When the dynamical and observation models are linear and described by Equation (12), the online conditional
+filtering distribution ρ∗
+k(Xk | θ) is Gaussian:
+ρ∗
+k(Xk | θ) = N
+
+Xk; m∗
+k(θ),C∗
+k(θ)
+
+,
+with the mean m∗
+k(θ) and covariance C∗
+k(θ) given by the Kalman filter:
+m∗
+k(θ) =m∗−
+k (θ) + C∗−
+k (θ)H(θ)T 
+H(θ)C∗−
+k (θ)H(θ)T + Γ(θ)
+−1 
+yk −H(θ)m∗−
+k (θ)
+
+,
+(22)
+C∗
+k(θ) =C∗−
+k (θ) −C∗−
+k (θ)H(θ)T 
+H(θ)C∗−
+k (θ)H(θ)T + Γ(θ)
+−1 H(θ)C∗−
+k (θ),
+(23)
+where m∗−
+k (θ) and C∗−
+k (θ) are defined in Equation (13).
+While using mk(θ) = m∗
+k(θ) and Ck(θ) = C∗
+k(θ) would minimize the KL divergence exactly, this is computationally
+infeasible in practice. As shown in Equations (22) and (23), the complexity of m∗
+k(θ) and C∗
+k(θ) increases over time
+due to recursive dependence on past distributions. To maintain constant computational and storage costs over time,
+we represent mk(θ) and Ck(θ) using neural networks with fixed architectures. This design ensures that the inference
+cost does not grow with time, while leveraging the universal approximation capability of neural networks to reduce
+error. The procedure of computing the distribution ρk(Xk | θ) for the linear case is illustrated in Figure 6.
+The following theorem demonstrates the joint posterior approximation accuracy of our method, establishing an
+upper bound on the error between the true joint posterior p(Xk, θ | Yk) and the approximate joint posterior qk(Xk, θ)
+obtained by our method, for linear system (12).
+Theorem 2. Assume infθ
+Γ(θ)
+ = ˜C > 0. Suppose the ELBO Li(νi) satisfies Li(νi) ≥ϵi for all i ∈[1, k]. The total
+variation and Hellinger distances between p(Xk, θ | Yk) and qk(Xk, θ) satisfy:
+d(p(Xk, θ | Yk), qk(Xk, θ))
+≤
+k−1
+X
+j=1
+C′(Yk, ˜C, j, k, mj:k,C j:k, νj:k)
+r
+Eθ∼ν j(·)
+h
+Ψj(C j(θ), mj(θ),C j−1(θ), mj−1(θ), θ)
+i
+−r
+2 log(2π) −1
+2 log ˜C −ϵ j
++ 1√
+2
+r
+Eθ∼νk(·) [Ψk(Ck(θ), mk(θ),Ck−1(θ), mk−1(θ), θ)] −r
+2 log(2π) −1
+2 log ˜C −ϵk,
+(24)
+10
+
+𝑦𝑘
+ℱ𝑘
+𝑋
+ℱ𝑘
+𝑋
+𝜈𝑘(𝜃)
+𝒩(𝑋𝑘−1; 𝑚𝑘−1 𝜃, 𝐶𝑘−1(𝜃))
+𝒩(𝑋𝑘; 𝑚𝑘
+∗𝜃, 𝐶𝑘
+∗𝜃)
+𝜌𝑘(𝑋𝑘∣𝜃)
+Figure 6: Procedure of computing the distribution ρk(Xk | θ) for linear systems. The online conditional filtering distribution ρ∗
+k(Xk | θ) is a Gaussian
+distribution N(Xk; m∗
+k(θ),C∗
+k(θ)) given by the Kalman filter. We compute the distribution ρk(Xk | θ) using the mean function m∗
+k(θ), the covariance
+function C∗
+k(θ), and the distribution νk(θ) which is inferred at Stage 1.
+where m j:k, C j:k, and ν j:k denote the sequences {mi}k
+i= j, {Ci}k
+i= j, and {νi}k
+i= j, respectively. For any integer j ∈[1, k], Ψ j
+is defined as:
+Ψj(C j(θ), mj(θ),C j−1(θ), mj−1(θ), θ)
+:= log
+Fc(C j−1(θ), mj−1(θ), θ)
+ −log
+C j(θ)
+ −n + Tr
+
+Fc(C j−1(θ), mj−1(θ), θ)
+−1 C j(θ)
+
++
+
+mj(θ) −Fm(m j−1(θ),C j−1(θ), θ)
+T 
+Fc(C j−1(θ), mj−1(θ), θ)
+−1 
+mj(θ) −Fm(m j−1(θ),C j−1(θ), θ)
+
+,
+with Fm and Fc defined as
+Fm(C j−1(θ), mj−1(θ), θ) :=m∗−
+j (θ) + C∗−
+j (θ)H(θ)T 
+H(θ)C∗−
+j (θ)H(θ)T + Γ(θ)
+−1 
+y j −H(θ)m∗−
+j (θ)
+
+,
+Fc(C j−1(θ), mj−1(θ), θ) :=C∗−
+j (θ) −C∗−
+j (θ)H(θ)T 
+H(θ)C∗−
+j (θ)H(θ)T + Γ(θ)
+−1 H(θ)C∗−
+j (θ),
+where
+m∗−
+j (θ) := A(θ)mj−1(θ),
+C∗−
+j (θ) := A(θ)C j−1(θ)A(θ)T + Σ(θ).
+The term C′(Yk, ˜C, j, k, mj:k,C j:k, νj:k) in Equation (24) is defined as C′(Yk, ˜C, j, k, m j:k,C j:k, νj:k) =
+(2π)−r(k−j)
+2
+˜C−k−j
+2
+√
+2 Qk
+i=j+1 Zi(mi−1,Ci−1,νi−1)
+when d is the total variation distance, and C′(Yk, ˜C, j, k, m j:k,C j:k, νj:k) =
+2(k−j)(2π)−r(k−j)
+4
+˜C−k−j
+4
+q
+2 Qk
+i=j+1 Zi(mi−1,Ci−1,νi−1) when d is the Hellinger
+distance. Here Zi(mi−1,Ci−1, νi−1) is defined as Zi(mi−1,Ci−1, νi−1) := Eθ∼νi−1(·)[pN(yi; H(θ)m∗−
+i (θ), H(θ)C∗−
+i (θ)H(θ)T +
+Γ(θ))].
+Proof See Appendix C.
+Remark 1. The upper bound provided by Theorem 2 on the approximation error d(p(Xk, θ) | Yk), qk(Xk, θ)) is de-
+termined by the outputs of FBOVI: mi(θ),Ci(θ) and νi(θ) for i = 1, 2, · · · , k. In practice, this upper bound can be
+estimated using the outputs of FBOVI by Monte Carlo method:
+Eθ∼ν j(·)
+h
+Ψ j(C j(θ), mj(θ),C j−1(θ), mj−1(θ), θ)
+i
+≈1
+N
+N
+X
+i=1
+Ψj(C j(θ(i)), mj(θ(i)),C j−1(θ(i)), mj−1(θ(i)), θ(i)),
+θ(i) i.i.d.
+∼νj(·),
+Z j(m j−1,C j−1, νj−1) ≈1
+N′
+N′
+X
+i=1
+pN(yj; H(θ(i))m∗−
+j (θ(i)), H(θ(i))C∗−
+j (θ(i))H(θ(i))T + Γ(θ(i))),
+θ(i) i.i.d.
+∼νj−1(·).
+11
+
+𝑦𝑘
+ℱ𝑘
+𝑋
+ℱ𝑘
+𝑋
+𝜈𝑘(𝜃)
+𝒩(𝑋𝑘−1; 𝑚𝑘−1 𝜃, 𝐶𝑘−1(𝜃))
+𝒩(𝑋𝑘; 𝑚𝑘
+∗𝜃, 𝐶𝑘
+∗(𝜃))
+𝜌𝑘
+∗(𝑋𝑘∣𝜃)
+𝒩(𝑋𝑘; 𝑚𝑘𝜃, 𝐶𝑘(𝜃))
+≈
+Figure 7: Procedure of computing the distribution ρk(Xk | θ) for nonlinear systems. The online conditional filtering distribution ρ∗
+k(Xk | θ) is
+infeasible to compute and approximated by a Gaussian distribution N(Xk; m∗
+k(θ),C∗
+k(θ)). We compute the distribution ρk(Xk | θ) using the mean
+function m∗
+k(θ), the covariance function C∗
+k(θ), and the distribution νk(θ) which is computed at Stage 1.
+Compute 𝜈𝑘(𝜃) using variational inference:
+minimize 𝐾𝐿(𝜈𝑘||𝜈𝑘
+∗)
+Supervised learning for computing 
+ 𝑚𝑘(𝜃) and 𝐶𝑘𝜃
+target values for supervised learning: 
+𝑚𝑘
+∗
+𝜃𝑖
+= 𝐹𝑚(𝑚𝑘−1 𝜃𝑖
+, 𝐶𝑘−1 𝜃(𝑖) , 𝑦𝑘, 𝜃(𝑖))
+𝐶𝑘
+∗𝜃𝑖
+= 𝐹𝐶(𝑚𝑘−1 𝜃𝑖
+, 𝐶𝑘−1 𝜃(𝑖) , 𝑦𝑘, 𝜃(𝑖))
+𝜈𝑘𝜃
+𝑚𝑘(𝜃), 𝐶𝑘(𝜃)
+𝜈𝑘−1 
+𝑚𝑘−1(𝜃), 𝐶𝑘−1(𝜃)
+step 𝑘
+𝑦𝑘−1 
+step 𝑘−1
+𝑦𝑘 
+step 𝑘+ 1
+…
+…
+𝜃(𝑖) ∼𝜈𝑘(⋅)
+Figure 8: Scheme of FBOVI. Functions Fm and FC are given by Kalman filter or Gaussian filtering.
+3.2.2. Nonlinear case
+When the dynamical model or the observation model is nonlinear, we use Gaussian filtering to approximate ρ∗
+k(Xk |
+θ) by a Gaussian:
+ρ∗
+k(Xk | θ) ≈N
+
+Xk; m∗
+k(θ),C∗
+k(θ)
+
+,
+where m∗
+k(θ) and C∗
+k(θ) are obtained via Gaussian filtering. Again, to avoid the complexity growth of time-dependent
+filtering operations, we represent mk(θ) and Ck(θ) using neural networks with time-invariant architectures and train
+them to approximate m∗
+k(θ) and C∗
+k(θ). The procedure of computing the distribution ρk(Xk | θ) for the nonlinear case is
+illustrated in Figure 7. A schematic overview of the complete procedure is presented in Figure 8.
+Training Strategy for mk and Ck
+In principle, the neural networks mk and Ck should be trained by directly minimizing the expected KL divergence:
+Eθ∼νk(·)
+h
+KL
+
+ρk(· | θ) ∥ρ∗
+k(· | θ)
+i
+≈1
+N
+N
+X
+i=1
+KL
+
+ρk(· | θ(i)) ∥ρ∗
+k(· | θ(i))
+
+,
+= 1
+2N
+N
+X
+i=1
+log
+C∗
+k(θ(i))
+ −log
+Ck(θ(i))
+ −n + Tr
+
+C∗
+k(θ(i))
+−1 Ck(θ(i))
+
++ δ(θ(i))T 
+C∗
+k(θ(i))
+−1 δ(θ(i)),
+(25)
+with θ(i) ∼νk(·) and δ(θ(i)) = mk(θ(i)) −m∗
+k(θ(i)).
+From Equation (25), we can see that evaluating the expected KL divergence Eθ∼νk(·)
+h
+KL
+
+ρk(· | θ) ∥ρ∗
+k(· | θ)
+i
+re-
+quires evaluating the determinants of the covariances C∗
+k(θ(i)) and Ck(θ(i)), as well as the inverse of the covariance
+C∗
+k(θ(i)), for each samples of θ, θ(i). This can be computationally expensive, especially for high state dimension. When
+12
+
+the requirement for computational efficiency is high, the following two surrogate losses can be employed for the
+training of neural networks used to represent mk(θ) and Ck(θ):
+1
+N
+N
+X
+i=1
+
+mk(θ(i)) −m∗
+k(θ(i))
+
+2
+2,
+1
+N
+N
+X
+i=1
+
+Ck(θ(i)) −C∗
+k(θ(i))
+
+2
+F,
+θ(i) ∼νk(·).
+(26)
+3.2.3. Incorporation of ensemble Kalman filter
+In high-dimensional nonlinear systems, many Gaussian filtering methods, including the Unscented Kalman Filter
+(UKF) and the Gauss–Hermite Kalman Filter (GHKF), encounter significant scalability challenges. For instance,
+in an n-dimensional state space, evaluating the integrals in Equation (7) using the UKF requires 2n + 1 function
+evaluations, and, more critically, the UKF’s covariance estimates become increasingly unstable as the dimensionality
+grows. Similarly, the GHKF requires ln function evaluations when employing an l-th-order Hermite polynomial,
+causing the computational cost to rise drastically with n. Consequently, directly incorporating these Gaussian filtering
+methods into Stage 2 of our framework would also constrain the overall scalability of the proposed approach. To
+overcome this, the proposed framework supports the use of the EnKF, which is known for its scalability, at Stage 2.
+A distinctive aspect of our framework is that only the approximate parameter posterior νk(θ), and the function-
+based representations mk(θ) and Ck(θ), are propagated to the next time step. State particles are not passed forward. As
+a result, the standard EnKF is not directly applicable. Instead, we propose an every-step resampling procedure. For a
+given sample θ(i), we first draw M state particles from the previous approximate conditional posterior ρk−1(Xk−1 | θ(i)):
+X(j)
+k−1 ∼N
+
+mk−1(θ(i)),Ck−1(θ(i))
+
+,
+j = 1, . . . , M.
+These samples {X(j)
+k−1}M
+j=1 are then propagated using the standard EnKF update to generate an ensemble {X( j)
+k }M
+j=1, which
+approximates the online conditional filtering distribution q∗
+k(Xk | θ(i)). Finally, the sample mean and covariance of
+{X(j)
+k }M
+j=1 are computed and assigned to m∗
+k(θ(i)) and C∗
+k(θ(i)), respectively. The full procedure is outlined in Algorithm 1.
+Once the pairs {θ(i), m∗
+k(θ(i)),C∗
+k(θ(i))} are computed for all i = 1, . . . , N, they are used as training data to fit the
+neural networks representing mk(θ) and Ck(θ). These learned functions are then passed to the next time step k + 1. It
+can be seen that, unlike standard EnKF approaches, which propagate state particles forward in time, the incorporated
+EnKF in our framework is only used as a training data generating procedure to generate the target mean m∗
+k(θ(i)) and
+target covariance C∗
+k(θ(i)), for each sample θ(i).
+It is noteworthy that our framework can also operate when a non-Gaussian distribution is used to represent the
+conditional distribution ρk(Xk | θ). The details of computing νk(θ) and ρk(Xk | θ) in this setting are provided in Ap-
+pendix D.
+4. Numerical Experiments
+In this section, we implement the proposed FBOVI algorithm across three numerical experiments and compare
+its performance against three online joint posterior approximation methods: the joint PF, joint UKF and joint EnKF.
+All these methods assign artificial dynamics to the unknown model parameters and augment the system state with
+them. Standard PF, UKF, and EnKF are then applied to the augmented system, respectively. The joint PF tested
+in this section employs the bootstrap PF. Details of the hyperparameters used for the joint PF, joint UKF, and joint
+EnKF in the experiments are provided in Appendix E. Each of these methods has its own strengths: the joint PF can
+provide accurate joint posterior approximations in low-dimensional systems; the joint EnKF is effective for large-scale
+problems; and the joint UKF is widely adopted for its balance between scalability and computational efficiency. The
+experimental setups are designed to capture several of the most common and significant challenges encountered in
+recent application scenarios of parameter–state estimation methods, such as DTs:
+1. Observation-related challenges: First, as previously discussed, observational data are typically noisy and often
+incomplete. Second, the observation model may be partially unknown, adding additional challenges to the
+inference process.
+13
+
+Algorithm 1: Single-step EnKF-based computation for m∗
+k(θ) and C∗
+k(θ)
+Input:
+νk(θ): parameter posterior at time k
+mk−1(θ), Ck−1(θ): mean and covariance functions of the previous conditional posterior ρk−1(Xk−1 | θ)
+yk: current observation
+Φ(· ; θ): state transition function
+h(·; θ): observation model
+Σ(θ), Γ(θ): process noise covariance and measurement noise covariance
+M: number of ensemble members
+N: number of samples θ(i) ∼νk(θ)
+Output: Training data {θ(i), m∗
+k(θ(i)),C∗
+k(θ(i))}N
+i=1
+1 for i = 1 to N do
+2
+Sample θ(i) ∼νk(θ)
+3
+for j = 1 to M do
+4
+Sample X(j)
+k−1 ∼N(mk−1(θ(i)),Ck−1(θ(i))) ←Re-sampling happens here
+5
+Sample ξ(j)
+k
+∼N(0, Σ(θ(i)))
+6
+Compute X(j)−
+k
+←Φ(X(j)
+k−1; θ(i)) + ξ(j)
+k
+7
+Compute m−
+k (θ(i)) ←1
+M
+PM
+j=1 X(j)−
+k
+8
+Compute C−
+k (θ(i)) ←
+1
+M−1
+PM
+j=1(X(j)−
+k
+−m−
+k (θ(i)))(X( j)−
+k
+−m−
+k (θ(i)))T
+9
+for j = 1 to M do
+10
+Sample η(j)
+k ∼N(0, Γ(θ(i)))
+11
+Define perturbed observation y(j)
+k ←yk −η( j)
+k
+12
+Compute µy(θ(i)) ←1
+M
+PM
+j=1(h(X(j)−
+k
+; θ(i)) + η( j)
+k )
+13
+Compute S (θ(i)) ←
+1
+M−1
+PM
+j=1(h(X(j)−
+k
+; θ(i)) + η( j)
+k −µy(θ(i)))(h(X( j)−
+k
+; θ(i)) + η( j)
+k −µy(θ(i)))T
+14
+Compute U(θ(i)) ←
+1
+M−1
+PM
+j=1(X(j)−
+k
+−m−
+k (θ(i)))(h(X( j)−
+k
+; θ(i)) + η( j)
+k −µy(θ(i)))T
+15
+for j = 1 to M do
+16
+Compute X(j)
+k
+←X(j)−
+k
++ U(θ(i))S (θ(i))−1(y( j)
+k −h(X( j)−
+k
+; θ(i)))
+17
+Compute m∗
+k(θ(i)) ←1
+M
+PM
+j=1 X(j)
+k
+18
+Compute C∗
+k(θ(i)) ←
+1
+M−1
+PM
+j=1(X(j)
+k −m∗
+k(θ(i)))(X( j)
+k −m∗
+k(θ(i)))T
+19 return {θ(i), m∗
+k(θ(i)),C∗
+k(θ(i))}N
+i=1
+2. Model misspecification: The dynamical models used by parameter-state estimation methods are often inaccurate
+due to limited knowledge or the inherent complexity of real-world physical systems. Furthermore, online
+parameter-state estimation methods frequently rely on simplified, low-fidelity models that differ from the true
+physical systems in order to reduce computational burden and allow rapid updates. This is quite often the case
+in e.g., digital twins.
+3. Chaotic dynamics: Many physical systems encountered in parameter–state estimation problems exhibit inher-
+ently chaotic behavior, wherein small perturbations in initial conditions or inputs can cause significant changes
+in system trajectories. This sensitivity poses a major challenge for data-driven estimation and prediction.
+4. High dimensionality: parameter-state estimation methods must remain scalable in order to provide reliable
+guidance for high-dimensional systems, a requirement that is particularly demanding for online inference algo-
+rithms.
+To evaluate the estimation and prediction capabilities of FBOVI under these conditions and illustrate how different
+Gaussian filtering methods can be integrated into FBOVI depending on the problem settings, we present the following
+three experiments:
+1. In Section 4.1, we consider a two-dimensional linear pendulum system with partially unknown dynamical and
+14
+
+observation models. As the underlying system is linear, we use the Kalman filter within FBOVI to compute the
+filtering distribution conditioned on the parameters.
+2. In Section 4.2, we study a ten-dimensional Lorenz-96 system in a chaotic regime. FBOVI is implemented in two
+cases: one with model error and one without. The UKF is employed within FBOVI to balance computational
+efficiency and estimation accuracy.
+3. In Section 4.3, FBOVI is applied to a nonlinear convection–diffusion transport model. After spatial discretiza-
+tion, the system becomes 51-dimensional. To ensure scalability in this high-dimensional setting, we integrate
+EnKF into FBOVI.
+All systems considered in these experiments are partially observable. Different evaluation metrics and validation
+strategies are employed to assess the estimation and prediction performance of FBOVI. The detailed experimental
+configurations, criteria, and results are provided in the subsequent subsections.
+4.1. Single linear pendulum system
+In this experiment, we consider a two-dimensional linear pendulum system governed by
+"˙x1
+˙x2
+#
+=
+" x2
+−g
+l x1
+#
++ w,
+(27)
+where g = 9.8 m/s2 is the gravitational constant, l = 1.2 m denotes the pendulum length, and w represents the random
+perturbations in real world. The initial state is chosen as x0 =
+h
+0.5
+0.5
+iT. Reference trajectories are generated
+with the forward Euler scheme using a step size of ∆t = 0.1 s. Specifically, the reference trajectories are generated
+according to
+Xk+1 =
+" 0.9594
+0.0986
+−0.8056
+0.9594
+#
+Xk + ηk,
+ηk ∼N(0, 0.01I2×2).
+(28)
+Noisy measurements of the states are collected according to the model Yk = HXk +Vk,
+Vk
+i.i.d.
+∼N(0, 0.01). Through-
+out this section, the learning model does not have access to the true initial state. Instead, the prior distribution for X0
+is taken to be N([3, 4.5]T, 4I2×2).
+4.1.1. System with partially unknown dynamical model
+In this section, we focus on learning the parameters in a partially unknown dynamical model and learning partially
+observable states. We show that approximate posteriors obtained by FBOVI are close to the true posteriors at most
+time steps.
+The dynamical model used for learning is parameterized as:
+Xk+1 =
+"θ1
+0.0986
+θ2
+θ1
+#
+Xk + Wk,
+Wk
+i.i.d.
+∼N(0, 0.01I2×2),
+(29)
+where θ = (θ1, θ2) represent the unknown parameters with a prior N(0, I2×2). The observation matrix H = [1
+0], the
+process noise covariance and the measurement noise covariance are known. The simulation is conducted over a span
+of 50 time steps. Three online parameter-state estimation algorithms, FBOVI, joint PF, and joint UKF, are employed
+to approximate the joint posterior distribution P(Xk, θ | Yk) at each time step k. FBOVI utilizes a Gaussian distribution
+to represent the distribution νk(θ), while the joint PF utilizes 1 × 104 particles to represent the joint posterior. The rest
+of the experiment settings can be found in Appendix F.
+Figure 9 depicts the marginal distributions of the parameters and state components produced by different algo-
+rithms at each time step for a single data realization. The results show that FBOVI yields marginal distributions that
+closely track the ground truth across most time steps. Although the joint PF employs a large number of particles, the
+mean estimated by FBOVI remains closer to the true posterior mean most of the time.
+As time progresses, the means of the marginal distributions of parameters and states obtained by FBOVI gradually
+converge to their true values. However, during the time from around step 11 to 25, FBOVI tends to overestimate the
+uncertainty of θ2, as shown in Figure 9b. This can be attributed to the fact that although the prior of θ is Gaussian, the
+15
+
+truth
+joint UKF mean
+true posterior mean
+95% interval (joint UKF)
+95% interval (true posterior)
+joint PF mean
+FBOVI mean
+95% interval (joint PF)
+95% interval (FBOVI)
+data
+0
+10
+20
+30
+40
+50
+time step k
+−2
+0
+2
+θ1
+(a) Distribution of θ1
+0
+10
+20
+30
+40
+50
+time step k
+−3
+0
+3
+θ2
+(b) Distribution of θ2
+1
+10
+20
+30
+40
+50
+time step k
+−1
+0
+1
+x1
+(c) Distribution of x1(k)
+1
+10
+20
+30
+40
+50
+time step k
+−5
+0
+5
+x2
+(d) Distribution of x2(k)
+Figure 9: Single pendulum: Approximate marginal distributions parameters at each time step k. FBOVI closely follows the true posteriors for
+most time steps, although it overestimates the uncertainty of θ2 between steps 10 and 25.
+posterior of θ is typically highly non-Gaussian in the early stages due to the limited amount of data points incorporated.
+Consequently, a Gaussian distribution may not adequately capture the posterior of θ. Moreover, as online inference
+progresses, approximation errors accumulate over time. As more data are assimilated, the posterior is expected to
+become increasingly Gaussian, and FBOVI regains its ability to provide accurate uncertainty estimation. This high-
+lights FBOVI’s capability to yield an accurate posterior approximation online, starting from an initially inaccurate
+approximation, provided that the variational distribution family used for the parameters can adequately represent the
+parameter posterior. In contrast, the joint UKF fails to demonstrate this capability, as evidenced by the divergence
+of its approximated posterior when more data points are assimilated, and the true parameter posterior approaches
+Gaussian distribution. This suggests that the joint UKF may struggle to provide a good approximation of the posterior
+when given an inaccurate prior, or that the approximation error of the joint UKF in the early stages is too substantial,
+and more data points especially noisy data points cannot provide sufficient information to mitigate the accumulated
+error within the framework of the joint UKF.
+Next, we evaluate the three online inference methods using 50 independent data realizations. The estimation
+performance is assessed using the root mean square error (RMSE), which measures the average discrepancy between
+the true values of the states or parameters and the means of their corresponding marginal approximate posterior
+distributions over different realizations. Specifically, the RMSE for estimating the i-th component of the parameter θ
+and the i-th component of the state Xk at time step k are defined as
+RMS Eθi(k) :=
+v
+u
+t
+1
+N
+N
+X
+j=1
+ˆθ(j)
+i (k) −¯θi
+2,
+RMS Exi(k) :=
+v
+u
+t
+1
+N
+N
+X
+j=1
+
+ˆx( j)
+i (k) −¯x( j)
+i (k)
+2,
+(30)
+where N = 50 is the total number of data realizations. Here, ˆθ( j)
+i (k) and ˆx( j)
+i (k) denote the means of the marginal
+approximate posterior distributions for the i-th elements of θ and Xk, respectively, obtained from the j-th data real-
+ization at time step k. The true parameter value is denoted by ¯θi, and ¯x( j)
+i (k) represents the true value of the i-th state
+component at time step k for the j-th realization.
+The resulting RMS Eθi(k) and RMS Exi(k) for i = 1, 2 and k = 1, 2, . . . , 50 are shown in Figure 10. Overall, FBOVI
+achieves the lowest RMSE for both parameter and state estimation across most time steps, outperforming the joint PF
+and joint UKF.
+Next, we assess the predictive ability of the three online parameter–state estimation methods by computing the
+prediction RMSE over the same 50 data realizations. The prediction RMSE at time step k is defined as
+RMS Epred(k) :=
+v
+u
+t
+1
+N
+N
+X
+j=1
+E(Xk−1,θ)∼q(j)
+k−1(Xk−1,θ),Wk−1∼N(0,Σ(θ))
+h
+∥(Φ(Xk−1; θ) + Wk−1(θ)) −¯x( j)(k)∥2
+2
+i
+,
+(31)
+where q(j)
+k−1(Xk−1, θ) and ¯x(j)(k) denote the approximate joint posterior distribution at time step k −1 and the true state
+16
+
+FBOVI
+joint UKF
+joint PF
+0
+10
+20
+30
+40
+50
+time step k
+0.1
+0.5
+1
+RMSEθ1
+(a) RMS Eθ1 vs. time
+0
+10
+20
+30
+40
+50
+time step k
+0.3
+1.3
+2.3
+RMSEθ2
+(b) RMS Eθ2 vs. time
+0
+10
+20
+30
+40
+50
+time step k
+0.08
+0.15
+0.22
+RMSEx1
+(c) RMS Ex1 vs. time
+0
+10
+20
+30
+40
+50
+time step k
+0.2
+1.2
+2.2
+RMSEx2
+(d) RMS Ex2 vs. time
+Figure 10: Single pendulum: Average estimation error of states and parameters over time. The figure compares the performance of FBOVI, joint
+PF, and joint UKF across 50 independent data realizations. FBOVI achieves the lowest estimation error at most time steps.
+FBOVI
+joint UKF
+joint PF
+2
+10
+20
+30
+40
+50
+time step k
+1
+2
+3
+RMSEpred
+Figure 11: Single pendulum: time-step prediction error for the system with a partially unknown dynamical model. The figure shows prediction
+errors calculated using results from FBOVI, joint PF and joint UKF. FBOVI begins to achieve the most accurate predictions among the three
+methods after step 18.
+at time step k, respectively, corresponding to the j-th data realization.
+Figure 11 presents the prediction errors of different algorithms at each time step. FBOVI achieves the best pre-
+dictive accuracy after time step 18, although it underperforms the other two methods between steps 10 and 14. This
+temporary degradation can be partly attributed to its overestimation of uncertainty during that short period, as illus-
+trated in Figure 9. Since the prediction error is computed based on the joint posterior, FBOVI’s strong predictive
+performance demonstrates its ability to obtain accurate approximations of the joint posterior.
+4.1.2. System with partially unknown dynamical and observation models
+In this section, we aim at learning the unknown parameters of the dynamical and observation model simultane-
+ously. We show that the proposed method is able to yield good estimates of the dynamical and observation models as
+well as the states with both dynamical and observation models partially unknown.
+The dynamical and observation models used by the learning agent are as follows:
+Xk+1 =
+" 0.9594
+θ1
+−0.8056
+0.9594
+#
+Xk + Wk,
+Wk ∼N(0, 0.01I2×2),
+Yk =
+"θ2
+0
+0
+1
+#
+Xk + Vk,
+Vk ∼N(0, 0.01I2×2).
+We assume that the parameters θ = (θ1, θ2) are unknown to the learning model. The prior of θ is set to N([1
+0]T, I2×2).
+The covariances of the process and measurement noises are assumed to be known.
+To evaluate the efficacy of the proposed algorithm, data is generated with H = I2×2 for 100 steps. Next, three
+online inference algorithms are implemented: FBOVI, joint PF and joint UKF. This problem is more challenging than
+17
+
+true value
+95% interval (FBOVI)
+FBOVI mean
+95% interval (joint UKF)
+joint UKF mean
+95% interval (joint PF)
+joint PF mean
+data
+0
+20
+40
+60
+80
+100
+time step k
+−2
+0
+2
+θ1
+20
+40
+60
+80
+100
+0
+0.1
+0.2
+(a) Distribution of θ1
+0
+20
+40
+60
+80
+100
+time step k
+−2
+0
+2
+θ2
+20
+40
+60
+80
+100
+0.8
+1
+1.2
+25 40
+60
+80
+100
+0.2
+0.4
+0.6
+(b) Distribution of θ2
+1
+20
+40
+60
+80
+100
+time step k
+−5
+0
+5
+10
+15
+x1
+1
+20 40 60 80 100
+−2
+0
+2
+(c) Distribution of x1(k)
+1
+20
+40
+60
+80
+100
+time step k
+−5
+0
+5
+x2
+(d) Distribution of x2(k)
+Figure 12: Single pendulum: approximate marginal distributions parameters and states for the single pendulum system with partially unknown
+dynamics and partially unknown observation model. For detailed analysis, the zoom-in views from time step 20 to 100 are provided in 12a and
+12c. The estimates produced by FBOVI and the joint UKF converge to the truth rapidly.
+the one discussed in Section 4.1.1. The joint PF with 104 particles collapses and we increase the number of particles
+to 1 × 106.
+The marginal distributions of θ and states obtained by different algorithms at each time step are shown in Figure
+12. Remarkably, the means of FBOVI and joint PF for all parameters converge to the truth rapidly despite the inherent
+difficulty in learning θ2 as it constitutes an entry in the observation matrix H. In contrast, the entire distribution of θ2
+obtained by the joint UKF deviates significantly from the truth for most of the duration. It can be seen that FBOVI
+and joint PF are both able to track the true states closely while the joint UKF tends to overestimate the amplitude of
+the trajectory of x1, corresponding to an underestimation of θ2.
+4.2. Chaotic system: Lorenz 96 model
+In this example, we evaluate the performance of the proposed method for parameter-state estimation in chaotic,
+partially observable dynamical systems, where learning is performed using both accurate models and models subject
+to structural errors.
+We consider a generalized Lorenz 96 model [25]1 with the state vector x = [x1, x2, · · · , xM]T. The governing
+equations are given by
+˙xi = αxi−1 (xi+1 −xi−2) −βxi + F,
+∀i ∈[1, M],
+(32)
+where x−1 := xM−1, x0 := xM, and xM+1 := x1. The parameters α = 1.1 and β = 0.9 are unknown. The external forcing
+F = 8 is known to the learning agent and the system dimension is M = 10. Following [26], the initial condition is set
+as xi = cos(2πi/M),
+∀i ∈[1, M], which is assumed to be unknown to the learning agent. The system is simulated
+using a time step ∆t = 0.01. Noisy measurements of the odd-numbered states x1, x3, x5, x7, and x9 are collected
+every 5 simulation steps. The measurement noise follows a Gaussian distribution with zero mean and covariance I5×5.
+This measurement model is known to the learning agent. To ensure that the learning process is performed when the
+system is operating in the chaotic regime, the learning process begins after the 3000th simulation step. The 4th-order
+runge-kutta (RK4) method is used to generate reference solution trajectories and data.
+Let θ = (α, β) denote the vector of unknown parameters. We assign θ a Gaussian prior N(02, I2×2). The discrete-
+time dynamical model used by the learning agent is as follows:
+Xk+1 = Φ(Xk; θ) + Vk,
+Vk ∼N(0, σ2IM×M),
+(33)
+where the integer k ≥0 represents the time instance, and each time step corresponds to a duration of 5∆t. The function
+Φ is a low-fidelity, discrete-time approximation of the continuous dynamics in Equation (32), obtained by applying the
+1The common version of Lorentz 96 model is a low-fidelity approximation of this generalized formulation.
+18
+
+truth
+FBOVI mean
+95% interval (FBOVI)
+joint UKF mean
+95% interval (joint UKF)
+3000
+3500
+4000
+time step k
+−2
+−1
+0
+1
+2
+α
+(a) Approximate marginal distribution of
+α
+3000
+3500
+4000
+time step k
+−2
+−1
+0
+1
+2
+3
+β
+(b) Approximate marginal distribution of
+β
+Figure 13: Lorentz 96 system with correct model: approximate marginal posterior distributions of the parameters α and β when the deterministic
+part of the model used by the learning agent matches the true model. FBOVI rapidly converges to the true parameter values.
+truth
+data
+FBOVI mean
+95% interval (FBOVI)
+joint UKF mean
+95% interval (joint UKF)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x1
+(a) Distribution of x1(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x2
+(b) Distribution of x2(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x3
+(c) Distribution of x3(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x4
+(d) Distribution of x4(k)
+3000
+3500
+4000
+time step k
+−5
+5
+15
+x5
+(e) Distribution of x5(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x6
+(f) Distribution of x6(k)
+3000
+3500
+4000
+time step k
+−5
+2
+10
+x7
+(g) Distribution of x7(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x8
+(h) Distribution of x8(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x9
+(i) Distribution of x9(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x10
+(j) Distribution of x10(k)
+Figure 14: Lorentz 96 system with correct model: approximate marginal posterior distributions of the state variables when the deterministic part
+of the model used by the learning agent matches the true model. Shaded regions represent the 95% credible intervals. FBOVI accurately tracks
+both observed and unobserved states.
+forward Euler method or RK4 over a time interval of length 5∆t, with simulation time step ∆t. We present the results
+of our method applying both the forward Euler method and RK4 method to computing the function Φ, as detailed
+in Section 4.2.1 and Section 4.2.2. The joint PF with 106 particles collapses in this example due to the increasing
+dimensionality, and we therefore compare the performance of FBOVI with the joint UKF.
+4.2.1. Correct model
+In this case, the RK4 method is used to obtain the function Φ(Xk; θ). Therefore, the deterministic part of the model
+used for learning, Φ, matches the dynamical system which is used to generate the reference solutions. The variance
+of the process noise is chosen to be σ2 = 0.5.
+Figure 13 presents the approximate marginal distributions of the parameters obtained by FBOVI and joint UKF.
+The FBOVI estimates converges rapidly to the truth parameter values, while joint UKF struggles to learn the parame-
+ters. Moreover, the ability to accurately estimate unobserved states is particularly noteworthy, given that only half of
+the state variables are observed and the model is partially unknown—further complicated by the system’s operation
+in a chaotic regime.
+Figure 15 shows the distribution of the predicted state Xk, generated using the approximate joint posterior obtained
+19
+
+truth
+FBOVI mean
+95% interval (FBOVI)
+joint UKF mean
+95% interval (joint UKF)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x1
+(a) Distribution of the pre-
+dicted x1(k)
+3010
+3500
+4000
+time step k
+−8
+3
+15
+x2
+(b) Distribution of the pre-
+dicted x2(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x3
+(c) Distribution of the pre-
+dicted x3(k)
+3010
+3500
+4000
+time step k
+−5
+5
+15
+x4
+(d) Distribution of the pre-
+dicted x4(k)
+3010
+3500
+4000
+time step k
+−5
+5
+15
+x5
+(e) Distribution of the pre-
+dicted x5(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x6
+(f) Distribution of the pre-
+dicted x6(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x7
+(g) Distribution of the pre-
+dicted x7(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x8
+(h) Distribution of the pre-
+dicted x8(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x9
+(i) Distribution of the pre-
+dicted x9(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x10
+(j) Distribution of the pre-
+dicted x10(k)
+Figure 15: Lorentz 96 system with correct model (prediction): the distributions of the predicted state variables. The prediction is based on the
+approximate joint posterior of the state and parameters obtained at the previous learning step. The deterministic part of the model used by the
+learning agent matches the true system. Shaded regions indicate the 95% credible intervals. FBOVI accurately forecasts all state components.
+at the previous learning step. Specifically, we draw a set of N samples {(X(i)
+k−1, θ(i))}N
+i=1 from the approximate joint
+posterior qk−1(Xk−1, θ). For each sample (X(i)
+k−1, θ(i)), we compute a predicted state ˆX(i)
+k using the model in Equation (33):
+ˆX(i)
+k = Φ(X(i)
+k−1; θ(i)) + Vk−1,
+Vk−1 ∼N(0, σ2IM×M).
+The resulting set { ˆX(i)
+k }N
+i=1 represents the predicted distribution of Xk. As illustrated in the figure, FBOVI achieves
+accurate predictions for most time steps.
+In the early stages, the joint distribution in nonlinear systems is often non-Gaussian. To demonstrate that FBOVI
+is able to capture such non-Gaussian features, we present the approximate joint posteriors obtained by FBOVI and
+the joint UKF. Figure 16 shows representative examples of these approximate joint posterior distributions. The results
+show that FBOVI is capable of capturing significant non-Gaussian features in both parameter-state and state-state joint
+distributions. Importantly, although FBOVI employs Gaussian filtering to approximate the conditional distribution of
+the state given the parameters, the absence of a mean-field assumption allows the resulting joint distributions to
+preserve their inherent non-Gaussian structure. As a result, the marginal posterior distributions of the states, after
+integrating out the parameters, can still exhibit rich, non-Gaussian behavior.
+4.2.2. Incorrect model
+Next, we assess whether the proposed method can still accurately estimate the states when the model used for
+learning deviates from the true system dynamics. Specifically, we use the forward Euler method to compute the
+deterministic component of the learning model, Φ. Consequently, Φ differs from the true model. To compensate for
+the model-form error, the process noise variance is increased to σ2 = 2. In this setting, the notion of “true values” for
+the parameters no longer applies, as the model form used for learning does not match the true dynamics. We evaluate
+the performance of the proposed method based on its ability to estimate the current states, with particular focus on the
+unobserved ones, and its predictive accuracy for the subsequent time step.
+Figure 17 shows the approximate marginal posterior distributions of the state variables. Despite the use of an
+inaccurate model form, FBOVI is able to track all states reasonably well. However, in comparison to the results
+obtained under the correct model form, the estimation quality around the peaks and troughs of the trajectories slightly
+degrades. This degradation is likely attributable to the limited expressiveness of the incorrect model used for learning.
+20
+
+FBOVI distribution
+FBOVI mean
+joint UKF distribution
+joint UKF mean
+−2
+0
+2
+α
+3
+5
+7
+x1
+(a) joint distribution of x1 and α
+−2
+0
+2
+α
+−5
+5
+15
+x2
+(b) joint distribution of x2 and α
+−1
+2
+5
+β
+−3
+3
+9
+x10
+(c) joint distribution of x10 and β
+−2
+5
+12
+x4
+−5
+5
+15
+x2
+(d) joint distribution of x2 and x4
+Figure 16: Lorentz 96 system with correct model: representative examples of approximate joint posterior distributions at simulation step 25 for
+the Lorenz 96 system under the correct model. Contour lines indicate density levels of the joint distributions. FBOVI successfully captures the non-
+Gaussian characteristics in both parameter-state and state-state joint distributions. Notably, although Gaussian filtering is used to approximate the
+conditional distributions of the state given parameters, the overall joint distributions remain expressive due to the absence of mean-field assumptions.
+Figure 18 presents the distributions of the predicted states. As described in Section 4.2.1, the prediction at each
+learning step is based on the approximate joint posterior obtained at the previous learning step. Despite the presence
+of model-form errors, FBOVI achieves reasonably accurate predictions. Compared to the results under the correct
+model form (shown in Figure 15), the predictive accuracy around the peaks and troughs is noticeably lower. This
+lower predictive accuracy is expected, as structural model inaccuracies inherently limit the predictive capability of the
+learned model and subsequently affect the accuracy of state prediction.
+4.3. Nonlinear convection–diffusion transport model
+In this section, we consider a one-dimensional nonlinear convection–diffusion transport model given by
+∂u
+∂t + αu∂u
+∂x = ν∂2u
+∂x2 ,
+(34)
+for u = u(x, t) with x ∈[0, 1]. Here, α denotes the nonlinear convection coefficient and ν the diffusion coefficient.
+Throughout this study, we set α = 12 and ν = 0.01. The initial condition is prescribed as
+u(x, 0) = sin(2πx) + 0.5 cos(4πx) + 10,
+together with periodic boundary conditions u(0, t) = u(1, t).
+The reference solution is computed using the forward Euler method with time interval ∆t = 0.001 on a uniform
+grid with mesh size h = 0.02. This discretization yields 51 equally spaced grid points, with the first at x = 0 and the
+2Equation (34) reduces to Burgers’ equation when α = 1.
+21
+
+truth
+data
+FBOVI mean
+95% interval (FBOVI)
+joint UKF mean
+95% interval (joint UKF)
+3000
+3500
+4000
+time step k
+−5
+2
+10
+x1
+(a) Distribution of x1(k)
+3000
+3500
+4000
+time step k
+−8
+3
+15
+x2
+(b) Distribution of x2(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x3
+(c) Distribution of x3(k)
+3000
+3500
+4000
+time step k
+−5
+5
+15
+x4
+(d) Distribution of x4(k)
+3000
+3500
+4000
+time step k
+−5
+5
+15
+x5
+(e) Distribution of x5(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x6
+(f) Distribution of x6(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x7
+(g) Distribution of x7(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x8
+(h) Distribution of x8(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x9
+(i) Distribution of x9(k)
+3000
+3500
+4000
+time step k
+−8
+0
+10
+x10
+(j) Distribution of x10(k)
+Figure 17: Lorentz 96 system with model form error: approximate marginal posterior distributions of the states when the deterministic part of the
+model used for learning differs from the true system. The shaded regions represent the 95% credible intervals. Despite model-form inaccuracies,
+FBOVI provides robust state estimates across all components.
+last at x = 1. Based on this reference solution, measurements are taken at the (3n + 1)-th and (3n + 2)-th grid points
+for n = 0, 1, . . . , 16. At each time step tk = k∆t, the measurements are corrupted by Gaussian noise Wk ∼N(0, I34×34),
+so that noisy observations are available at 2/3 of the spatial grid points.
+For online inference, we employ the following 51-dimensional dynamical model:
+Xk+1 = Φ(Xk; θ) + Vk,
+Vk ∼N(0, 0.01I51×51),
+(35)
+where the state Xk ∈R51 represents the solution values at the 51 grid points at time tk. The mapping Φ denotes
+the numerical propagation of Xk to Xk+1, obtained using the same temporal and spatial discretization scheme as in
+the reference solution for (34). It is important to note that the numerical method used to generate the reference
+solution differs from that used in Φ. For the reference solution, the upwind scheme is employed to compute the spatial
+derivative ∂u
+∂x, which is stable when the viscosity ν is small—this is the case here. In contrast, the model Φ uses
+the simple central difference scheme for computing the derivative ∂u
+∂x, which is less stable under this condition. The
+parameter vector θ = (α, ν) is treated as unknown, with prior distribution N([0, 1]T, 4I2×2). Because of the model-form
+error, there are no “true” parameter values. The initial state X0 is assigned a prior N(µ0, 4I51×51), where the prior mean
+µ0 is randomly drawn according to µ0 ∼N(1051, 9I51×51), with 1051 denoting the 51-dimensional all-10 vector.
+As the dynamical system (35) used for learning is high-dimensional, we employ the EnKF, which is effective for
+large-scale problems, within the framework of FBOVI in Stage 2. To demonstrate the effectiveness of FBOVI, we
+compare its performance with that of joint EnKF, a parameter-state estimation method commonly applied to large-
+scale state–parameter estimation problems.
+The means of the marginal distributions of the solution u(x, t) obtained by FBOVI and joint EnKF, along with
+the reference solution, are shown in Figure 19. We can see that the mean computed by FBOVI closely follows the
+reference solution. This demonstrates that, although the prior for the initial solution value is far from the reference,
+FBOVI quickly adapts and begins to track the reference within a short time. In contrast, the discrepancy between the
+reference and the joint EnKF mean is considerably larger during the early stage (t < 0.02).
+Figure 20 presents the means of the predictions produced by FBOVI and joint EnKF, where the predicted values
+are computed in the same way as described in Section 4.2. The prediction generated by FBOVI is relatively accurate,
+reflecting the high quality of its joint posterior approximation. On the contrary, the Gaussian assumption for the
+joint distribution used by the joint EnKF limits its predictive capability. This deficiency is most obvious in the early
+stage, when only a small number of observations have been incorporated and the true joint posterior tend to be highly
+non-Gaussian.
+22
+
+truth
+FBOVI mean
+95% interval (FBOVI)
+joint UKF mean
+95% interval (joint UKF)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x1
+(a) Distribution of the pre-
+dicted x1(k)
+3010
+3500
+4000
+time step k
+−8
+3
+15
+x2
+(b) Distribution of the pre-
+dicted x2(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x3
+(c) Distribution of the pre-
+dicted x3(k)
+3010
+3500
+4000
+time step k
+−5
+5
+15
+x4
+(d) Distribution of the pre-
+dicted x4(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x5
+(e) Distribution of the pre-
+dicted x5(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x6
+(f) Distribution of the pre-
+dicted x6(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x7
+(g) Distribution of the pre-
+dicted x7(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x8
+(h) Distribution of the pre-
+dicted x8(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x9
+(i) Distribution of the pre-
+dicted x9(k)
+3010
+3500
+4000
+time step k
+−8
+0
+10
+x10
+(j) Distribution of the pre-
+dicted x10(k)
+Figure 18: Lorentz 96 system with model form error (prediction): distributions of the predicted state variables when the deterministic part of
+the model used by the learning agent differs from the true system. The prediction for the state at each time step is based on the approximate joint
+posterior obtained at the previous learning step. Shaded regions denote the 95% credible intervals. FBOVI achieves relatively high prediction
+accuracy despite the presence of model-form errors.
+5. Conclusions
+In this paper, we have presented an online variational inference (VI) framework for joint parameter-state estimation
+of dynamical systems, particularly under conditions of noisy and incomplete data. The core idea of our approach is to
+approximate the joint posterior distribution of model parameters and system states through a structured factorization:
+a flexible variational distribution over parameters and a conditional distribution over states given those parameters.
+Unlike approaches that rely on restrictive assumptions about the joint posterior structure, our method preserves the
+structure between states and parameters, leading to improved estimation and predictive accuracy. The modular nature
+of the framework allows for integration with different filtering techniques, broadening its applicability across domains.
+A theoretical error bound for the approximation has been established, which not only quantifies inference accuracy
+but also informs algorithmic design.
+Through a series of numerical experiments, we demonstrated that the proposed method maintains strong perfor-
+mance in both low- and high-dimensional settings and remains robust under noisy, partial observations and model
+discrepancies. Together, these results highlight the reliability, scalability, and adaptability of the approach, underscor-
+ing its potential as a powerful tool in challenging application scenarios, including DT systems.
+Acknowledgements
+This work was supported by an NSF CAREER Award, grant number CMMI-2238913.
+References
+[1] D. Xiu, D. Tartakovsky, Computational framework for real-time digital twins, Thermopedia (2025).
+doi:10.1615/thermopedia.010452.
+[2] National Academy of Engineering and National Academies of Sciences, Engineering, and Medicine, Founda-
+tional Research Gaps and Future Directions for Digital Twins, The National Academies Press, Washington, DC,
+2024. doi:https://doi.org/10.17226/26894.
+23
+
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+Time t
+0
+0.2
+0.4
+0.6
+0.8
+1
+x
+(a) Reference solution u(x, t)
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+Time t
+0
+0.2
+0.4
+0.6
+0.8
+1
+x
+(b) FBOVI mean for u(x, t)
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+Time t
+0
+0.2
+0.4
+0.6
+0.8
+1
+x
+(c) Joint EnKF mean for u(x, t)
+5
+10
+15
+18
+Figure 19: Nonlinear convection–diffusion transport model: reference solution u(x, t) at different spatial locations x and times t, together with
+the means of the distributions of u(x, t) obtained by FBOVI and joint EnKF. FBOVI rapidly approaches the reference solution (from t ≈0.003
+onward), while the joint EnKF mean are significantly biased during the initial phase.
+[3] G. Pash, U. Villa, D. A. Hormuth II, T. E. Yankeelov, K. Willcox, Predictive digital twins with quantified
+uncertainty for patient-specific decision making in oncology, arXiv (2025). doi:10.48550/arXiv.2505.08927.
+[4] H. Mahdianfar, A. Pavlov, O. Aamo, Joint unscented Kalman filter for state and parameter estima-
+tion in Managed Pressure Drilling, in:
+European Control Conference (ECC), 2013, pp. 1645–1650.
+doi:10.23919/ECC.2013.6669753.
+[5] M. Wielitzka, M. Dagen, T. Ortmaier, Joint unscented Kalman filter for state and parameter estimation in vehi-
+cle dynamics, in: IEEE Conference on Control Applications (CCA), Sdyney, Australia, 2015, pp. 1945–1950.
+doi:10.1109/CCA.2015.7320894.
+[6] H. J. Hendricks Franssen, W. Kinzelbach, Real-time groundwater flow modeling with the Ensemble Kalman
+Filter: Joint estimation of states and parameters and the filter inbreeding problem, Water Resources Research
+44 (9) (2008) W09408. doi:10.1029/2007WR006505.
+[7] G. Kitagawa, A self-organizing state-space model, J. Amer. Statist. Assoc. 93 (443) (1998) 1203–1215.
+doi:10.2307/2669862.
+[8] B. Uzunoglu, M. AkifÜlker, D. Bayazit, Particle filter joint state and parameter estimation of dynamic power sys-
+tems, in: International Scientific Conference on Power and Electrical Engineering of Riga Technical University
+(RTUCON), Riga, Latvia, 2016, pp. 1–7. doi:10.1109/RTUCON.2016.7763152.
+[9] N. Kantas, A. Doucet, S. S. Singh, J. Maciejowski, N. Chopin, On particle methods for parameter estimation in
+state-space models, Statist. Sci. 30 (3) (2015) 328–351. doi:10.1214/14-STS511.
+[10] C. Snyder, T. Bengtsson, P. Bickel, J. Anderson, Obstacles to high-dimensional particle filtering, Monthly
+Weather Review 136 (2008) 4629–4640. doi:10.1175/2008MWR2529.1.
+[11] L. Wang, A. Gorodetsky, Factorization-based online variational inference for state-parameter estimation of par-
+tially observable nonlinear dynamical systems, in: AIAA Scitech 2025 Forum, 2025. doi:10.2514/6.2025-1960.
+[12] N. Chopin, P. E. Jacob, O. Papaspiliopoulos, SMC2: An efficient algorithm for sequential analysis of state
+space models, Journal of the Royal Statistical Society Series B: Statistical Methodology 75 (3) (2013) 397–426.
+doi:10.1111/j.1467-9868.2012.01046.x.
+24
+
+0.002 0.02
+0.04
+0.06
+0.08
+0.1
+Time t
+0
+0.2
+0.4
+0.6
+0.8
+1
+x
+(a) Reference solution u(x, t)
+0.002 0.02
+0.04
+0.06
+0.08
+0.1
+Time t
+0
+0.2
+0.4
+0.6
+0.8
+1
+x
+(b) Mean of FBOVI prediction for u(x, t)
+0.002 0.02
+0.04
+0.06
+0.08
+0.1
+Time t
+0
+0.2
+0.4
+0.6
+0.8
+1
+x
+(c) Mean of joint EnKF prediction for u(x, t)
+5
+10
+15
+Figure 20: Nonlinear convection–diffusion transport model (prediction): reference solution u(x, t) at different spatial locations x and times t,
+along with prediction means from FBOVI and joint EnKF. FBOVI provides accurate predictions, while joint EnKF predictions deviate substantially
+from the reference, particularly when t < 0.02.
+[13] D. M. Blei, A. Kucukelbir, J. D. McAnliffe, Variational inference: A review for statisticians, Journal of the
+American Statistical Association (2017).
+[14] A. Campbell, Y. Shi, T. Rainforth, A. Doucet, Online variational filtering and parameter learning, Advances in
+Neural Information Processing Systems (2021).
+[15] K. Hao, I. Bilionis, An information field theory approach to bayesian state and parameter estimation in dynamical
+systems, Journal of Computational Physics 605 (2024) 113139. doi:10.1016/j.jcp.2024.113139.
+[16] T. Ryder, A. Golightly, A. S. McGough, D. Prangle, Black-box variational inference for stochastic differential
+equations, in: Proceedings of the 35th International Conference on Machine Learning (ICML), Vol. 80, PMLR,
+2018, pp. 4423–4432. doi:10.5555/3294771.3295129.
+[17] J. Courts, J. Hendriks, A. Wills, T. B. Schön, B. Ninness, Variational state and parameter estimation,
+IFAC-PapersOnLine 54 (7) (2021) 732–737, 19th IFAC Symposium on System Identification SYSID 2021.
+doi:https://doi.org/10.1016/j.ifacol.2021.08.448.
+[18] J. Yoshimoto, S. Ishii, M. Sato, System identification based on online variational bayes method and its applica-
+tions to reinforcement learning, ICANN (2003) 123–131.
+[19] J. Neri, R. Badeau, P. Depalle, Probabilistic filter and smoother for variational inference of bayesian linear
+dynamical system, 2020 IEEE International Conference on Acoustics, Speech and Signal Processing (2020).
+[20] P. T. Huynh, T.-T.-P. Hoang, G. Zhang, F. Bao, Joint state-parameter estimation for the reduced fracture model
+via the united filter, Journal of Computational Physics 538 (2025) 114159. doi:10.1016/j.jcp.2025.114159.
+[21] A. Yu, Y. Liu, J. Zhu, Z. Dong, An improved dual unscented kalman filter for state and parameter estimation,
+Asian Journal of Control 18 (4) (2015) 343–367. doi:10.1002/asjc.1229.
+[22] V. A. Bavdekar, J. Prakash, S. L. Shah, R. B. Gopaluni, Constrained dual ensemble kalman filter for state and
+parameter estimation, in: Proceedings of the American Control Conference (ACC), Washington, DC, 2013.
+[23] K. Ito, K. Xiong, Gaussian filters for nonlinear filtering problems, IEEE Transactions on Automatic Control
+45 (5) (2020) 910–927.
+[24] S. Säkkä, Bayesian filtering and smoothing (2013).
+25
+
+[25] J. Kerin, H. Engler, On the Lorenz ’96 model and some generalizations, Discrete and Continuous Dynamical
+Systems - B 27 (2) (2022) 769–797. doi:10.3934/dcdsb.2021064.
+[26] A. Albarakati, M. Budiši´c, E. S. Van Vleck, Projected data assimilation using sliding window proper orthogonal
+decomposition, Journal of Computational Physics 514 (2024) 113235. doi:10.1016/j.jcp.2024.113235.
+[27] L. Wang, A. A. Gorodetsky, A global lipschitz stability perspective for understanding approximate approaches
+in bayesian sequential learning, arXiv preprint (2025). arXiv:2507.20379, doi:10.48550/arXiv.2507.20379.
+[28] S. J. Julier, The scaled unscented transformation, in: Proceedings of the 2002 American Control Conference
+(IEEE Cat. No. CH37301), Vol. 6, IEEE, 2002, pp. 4555–4559.
+26
+
+Appendix A. Metrics of difference between probability measures
+In this section, we introduce two widely used metrics for quantifying differences between probability distributions:
+the total variation (TV) distance and the Hellinger distance.
+Let µ1 and µ2 be two probability measures with corresponding probability density functions f1(x) and f2(x). The
+total variation distance between µ1 and µ2 is defined as:
+dTV(µ1, µ2) := 1
+2
+Z  f1(x) −f2(x)
+dx.
+(A.1)
+The Hellinger distance between µ1 and µ2 is defined by:
+dH(µ1, µ2) :=
+s
+1
+2
+Z  p
+f1(x) −
+p
+f2(x)
+2 dx.
+(A.2)
+Appendix B. Proof of Theorem 1
+The following theorem is used for proving Theorem 1.
+Theorem 3 (Theorem 16 in [27]). For any step k ≥2, given a sequence of data Yk = (y1, y2, · · · , yk), suppose that
+for any step i ∈[2, k], we have
+¯C(yi; i) := sup
+Xi−1,θ
+Z
+p(yi | Xi, θ)p(Xi | Xi−1, θ)dXi < ∞.
+(B.1)
+The total variation distance between p(Xk, θ | Yk) and q(Xk, θ), namely dTV (p(Xk, θ | Yk), qk(Xk, θ)), satisfies:
+dTV (p(Xk, θ | Yk), qk(Xk, θ)) ≤
+k−1
+X
+j=1
+Qk
+i= j+1 ¯C(yi; i)
+p(Y j+1:k | Y1: j)dTV
+
+q j, q∗
+j
+
++ dTV
+
+qk, q∗
+k
+
+.
+(B.2)
+The Hellinger distance between p(Xk, θ | Yk) and q(Xk, θ), namely dH(p(Xk, θ | Yk), q(Xk, θ)), satisfies:
+dH(p(Xk, θ | Yk), qk(Xk, θ)) ≤
+k−1
+X
+j=1
+2(k−j) Qk
+i= j+1
+p ¯C(yi; i)
+p
+p(Y j+1:k | Y1: j)
+dH
+
+qj, q∗
+j
+
++ dH
+
+qk, q∗
+k
+
+.
+(B.3)
+Proof We begin by confirming that the assumption in Theorem 3 holds.
+For any i ∈[2, k], if infθ |Γ(θ)| = ˜C > 0, then
+p(yi | Xi, θ) = pN(yi; h(Xi; θ), Γ(θ)) = (2π)−r
+2 Γ(θ)
+−1
+2 exp
+ 
+−1
+2 (yi −h(Xi; θ))T Γ(θ)−1 (yi −h(Xi; θ))
+!
+≤(2π)−r
+2 Γ(θ)
+−1
+2 ≤(2π)−r
+2 ˜C−1
+2 .
+Thus,
+¯C(yi; i) = sup
+Xi−1,θ
+Z
+p(yi | Xi, θ)p(Xi | Xi−1, θ)dXi
+≤(2π)−r
+2 ˜C−1
+2 sup
+Xi−1,θ
+Z
+p(Xi | Xi−1, θ)dXi
+= (2π)−r
+2 ˜C−1
+2 < ∞,
+(B.4)
+and hence the assumption is satisfied.
+27
+
+We now derive an upper bound on the total variation distance between qi(Xi, θ) and q∗
+i (Xi, θ). The KL divergence
+of the distribution qi with respect to the distribution q∗
+i can be written as
+KL(qi∥q∗
+i ) = E(Xi,θ)∼qi(·)
+"
+log
+ qi(Xi, θ)
+q∗
+i (Xi, θ)
+!#
+= E(Xi,θ)∼qi(·)
+"
+log
+ ρi(Xi | θ)νi(θ)
+ρ∗
+i (Xi | θ)ν∗
+i (θ)
+!#
+= E(Xi,θ)∼qi(·)
+"
+log
+ ρi(Xi | θ)
+ρ∗
+i (Xi | θ)
+!#
++ E(Xi,θ)∼qi(·)
+"
+log
+ νi(θ)
+ν∗
+i (θ)
+!#
+.
+(B.5)
+The first term on the right hand side in Equation (B.5) can be expressed as
+E(Xi,θ)∼qi(·)
+"
+log
+ ρi(Xi | θ)
+ρ∗
+i (Xi | θ)
+!#
+= Eθ∼νi(·)
+"
+EXi∼ρi(·|θ)
+"
+log
+ ρi(Xi | θ)
+ρ∗
+i (Xi | θ)
+!##
+= Eθ∼νi(·)
+KL  ρi(· | θ)∥ρ∗
+i (· | θ) .
+(B.6)
+Since the term log
+
+νi(θ)
+ν∗
+i (θ)
+
+does not depend on Xi, the second term on the right hand side in Equation (B.5) becomes
+E(Xi,θ)∼qi(·)
+"
+log
+ νi(θ)
+ν∗
+i (θ)
+!#
+= Eθ∼νi(·)
+"
+log
+ νi(θ)
+ν∗
+i (θ)
+!#
+= KL  νi∥ν∗
+i
+ .
+(B.7)
+Plugging Equations (B.6) and (B.7) into Equation (B.5) yields
+KL  qi∥q∗
+i
+ = Eθ∼νi(·)
+KL  ρi(· | θ)∥ρ∗
+i (· | θ) + KL  νi∥ν∗
+i
+ .
+(B.8)
+Consequently, we get
+dTV(qi, q∗
+i ) ≤
+1√
+2
+q
+KL
+
+qi∥q∗
+i
+
+=
+1√
+2
+q
+Eθ∼νi(·)
+h
+KL
+
+ρi(· | θ)∥ρ∗
+i (· | θ)
+i
++ KL
+
+νi∥ν∗
+i
+
+.
+(B.9)
+An analogous inequality holds for the Hellinger distance:
+dH(qi, q∗
+i ) ≤
+1√
+2
+q
+KL
+
+qi∥q∗
+i
+
+=
+1√
+2
+q
+Eθ∼νi(·)
+h
+KL
+
+ρi(· | θ)∥ρ∗
+i (· | θ)
+i
++ KL
+
+νi∥ν∗
+i
+
+.
+(B.10)
+Lastly, combining Theorem 3 with Equations (B.4), (B.9), and (B.10) completes the proof of Theorem 1.
+Appendix C. Proof of Theorem 2
+The following theorem is used for the proof of Theorem 2.
+Theorem 4 (Theorem 16 in [27]). For any step k ≥2, given a sequence of data Yk = (y1, y2, · · · , yk), suppose that
+for any step i ∈[2, k], we have
+¯C(yi; i) := sup
+Xi−1,θ
+Z
+p(yi | Xi, θ)p(Xi | Xi−1, θ)dXi < ∞.
+(C.1)
+28
+
+The total variation distance between p(Xk, θ | Yk) and q(Xk, θ) satisfies:
+dTV (p(Xk, θ | Yk), qk(Xk, θ)) ≤
+k−1
+X
+j=1
+Qk
+i= j+1 ¯C(yi; i)
+Qk
+i= j+1 Zi(qi−1)
+dTV
+
+qj, q∗
+j
+
++ dTV
+
+qk, q∗
+k
+
+.
+(C.2)
+The Hellinger distance between p(Xk, θ | Yk) and q(Xk, θ), dH(p(Xk, θ | Yk), q(Xk, θ)) satisfies:
+dH(p(Xk, θ | Yk), qk(Xk, θ)) ≤
+k−1
+X
+j=1
+2(k−j) Qk
+i= j+1
+p ¯C(yi; i)
+Qk
+i= j+1
+p
+Zi(qi−1)
+dH
+
+qj, q∗
+j
+
++ dH
+
+qk, q∗
+k
+
+.
+(C.3)
+Here Zi(qi−1) is defined as Zi(qi−1) :=
+R
+p(yi | Xi, θ)p(Xi | Xi−1, θ)qi−1(Xi−1, θ)dXi−1dXidθ.
+Proof Similar to the proof of Theorem 1, we can show that the assumption in Theorem 4 holds under the condition
+infθ|Γ(θ)| = ˜C > 0 and ¯C(yi; i) satisfies
+¯C(yi; i) ≤(2π)−r
+2 ˜C−1
+2 .
+(C.4)
+Next, we prove that Zi(qi−1) = Eθ∼νi−1(·)[pN(yi; H(θ)m∗−
+i (θ), H(θ)C∗−
+i (θ)H(θ)T + Γ(θ))]. According to the definition of
+Zi(qi−1), it can be written as
+Zi(qi−1) =
+Z
+pN(yi; H(θ)Xi, Γ(θ))pN(Xi; A(θ)Xi−1, Σ(θ))pN(Xi−1; mi−1(θ),Ci−1(θ))νi−1(θ)dXi−1dXidθ
+= Eθ∼νi−1(·)
+"Z
+pN(yi; H(θ)Xi, Γ(θ))pN(Xi; A(θ)Xi−1, Σ(θ))pN(Xi−1; mi−1(θ),Ci−1(θ))dXi−1dXi
+#
+= Eθ∼νi−1(·)[pN(yi; H(θ)m∗−
+i (θ), H(θ)C∗−
+i (θ)H(θ)T + Γ(θ))].
+(C.5)
+By Equations (B.9) and (B.10), the terms dTV(q j, q∗
+j) and dH(q j, q∗
+j) satisfy
+dTV(q j, q∗
+j) ≤
+1√
+2
+q
+KL
+
+qj∥q∗
+j
+
+=
+1√
+2
+q
+Eθ∼ν j(·)
+h
+KL
+
+ρ j(· | θ)∥ρ∗
+j(· | θ)
+i
++ KL
+
+νj∥ν∗
+j
+
+,
+(C.6)
+and
+dH(q j, q∗
+j) ≤
+1√
+2
+q
+KL
+
+q j∥q∗
+j
+
+=
+1√
+2
+q
+Eθ∼ν j(·)
+h
+KL
+
+ρj(· | θ)∥ρ∗
+j(· | θ)
+i
++ KL
+
+ν j∥ν∗
+j
+
+.
+(C.7)
+The KL divergence KL
+
+ν j∥ν∗
+j
+
+satisfies
+KL(νj∥ν∗
+j) = log
+ Z
+pN(yj; h(Xj; θ), Γ(θ)) ρ∗−
+j (X j | θ) ν j−1(θ)dX jdθ
+!
+−L j(νj)
+≤log
+ 
+(2π)−r
+2 ˜C−1
+2
+Z
+ρ∗−
+j (X j | θ)νj−1(θ) dXjdθ
+!
+−L j(νj)
+= log
+
+(2π)−r
+2 ˜C−1
+2 
+−L j(νj)
+≤−r
+2 log(2π) −1
+2 log ˜C −ϵ j.
+(C.8)
+We next derive the expression of the KL divergence KL
+
+ρj(· | θ)∥ρ∗
+j(· | θ)
+
+. The analytical expression of ρ∗
+j(X j | θ) is
+given by Kalman filter:
+ρ∗
+j(Xj | θ) = pN(X j; m∗
+j(θ),C∗
+j(θ)).
+(C.9)
+Recall that ρj(X j | θ) = pN(X j; mj(θ),C j(θ)). By employing the formula for the KL divergence between two Gaussian
+distributions, we obtain
+KL
+
+ρj(· | θ)∥ρ∗
+j(· | θ)
+
+= Ψj(C j(θ), mj(θ),C j−1(θ), mj−1(θ), θ).
+(C.10)
+Finally, combining Equations (C.4), (C.5), (C.6), (C.7), (C.8), and (C.10), together with Theorem 4, completes the
+proof.
+29
+
+Appendix D. Non-Gaussian approximation for ρk(Xk | θ)
+In this section, we introduce how the marginal distribution νk(θ) and the conditional distribution ρk(Xk | θ) can be
+computed in the setting where ρk(Xk | θ) is represented by a non-Gaussian distribution and the corresponding filtering
+method which is integrated into our framework does not belong to the family of Gaussian filtering.
+Appendix D.1. Stage 1: Computation of νk(θ)
+When a non-Gaussian distribution is used to represent ρk(Xk | θ), the following procedure can be applied to
+compute the integral I(θ) in Equation (11), for evaluating the ELBO Lk(νk).
+For a given θ, draw M samples from the previous conditional distribution ρk−1(Xk−1 | θ) and M samples of the
+process noise:
+X(i)
+k−1
+i.i.d.
+∼ρk−1(Xk−1 | θ),
+ξ(i) i.i.d.
+∼N(0, Σ(θ)).
+The samples of the predictive distribution ρ∗
+k(Xk | θ) can then be constructed by
+X(i)−
+k
+= Φ(X(i)
+k−1; θ) + ξ(i).
+As a result, the integral I(θ) can be approximated by
+I(θ) ≈1
+M
+M
+X
+i=1
+pN(yk; h(X(i)−
+k
+; θ), Γ(θ)).
+(D.1)
+Appendix D.2. Stage 2: Computation of ρk(Xk | θ)
+Following Stage 1, a variational filtering method is employed to approximate the conditional posterior ρ∗
+k(Xk | θ)
+with a distribution ˆρk(Xk | θ). The parametric family used to represent ρk(Xk | θ) is chosen to be the same with that of
+ˆρk(Xk | θ), and the same filtering method is applied at every time step. Let ϕk(θ) and ϕ∗
+k(θ) denote the corresponding
+hyperparameters used to represent the distributions ρk(Xk | θ) and ˆρk(Xk | θ), respectively. If we directly set ρk(Xk |
+θ) = ˆρk(Xk | θ), i.e., ϕk(θ) = ϕ∗
+k(θ), then the complexity of the functional representation of ϕk(θ) will grow with time
+step k. To maintain constant computational and storage costs over time, we therefore re-approximate ˆρ(Xk | θ) with
+ρ(Xk | θ) by minimizing the expected KL divergence Eθ∼νk(·)[KL (ρk(· | θ)∥ˆρk(· | θ))]. For a given θ, the KL divergence
+KL (ρk(· | θ)∥ˆρk(· | θ)) can be approximated using the Monte Carlo method with samples generated from ρk(Xk | θ):
+KL (ρk(· | θ)∥ˆρk(· | θ)) ≈1
+Nx
+Nx
+X
+i=1
+
+log ρk(X(i)
+k | θ) −log ˆρk(X(i)
+k | θ)
+
+,
+X(i)
+k
+i.i.d.
+∼ρk(· | θ).
+When computational resources are highly constrained, the training loss can be simplified to
+1
+N
+N
+X
+i=1
+
+ϕk(θ(i)) −ϕ∗
+k(θ(i))
+
+2
+2,
+θ(i) i.i.d.
+∼νk(·).
+Finally, the distribution νk(θ) together with the function ϕk(θ) are passed forward to the next time step k + 1.
+Appendix E. Detailed settings for hyperparameters of the methods FBOVI is compared with in Section 4
+The hyperparameters of the unscented transform used by the joint UKF in Section 4.1 and Section 4.2 are set
+to α = 0.5, β = 2, and κ = 0, following the settings in [4]. Specifically, α is typically chosen within the range
+[10−4, 1] [4]. For Gaussian distributions, β = 2 is generally regarded as an optimal choice [28]. It is also common
+practice to set κ = 0.
+The joint PF, joint UKF, and joint EnKF assign random-walk dynamics with zero-mean Gaussian noise to the
+model parameters. For the joint PF, the noise covariance is set to 10−4Idθ×dθ to balance estimation accuracy and the
+mitigation of weight degeneracy. The joint UKF and joint EnKF use a smaller noise covariance of 10−8Idθ×dθ. Here dθ
+represents the dimension of the parameters.
+30
+
+Appendix F. Detailed settings for the experiment of the single pendulum system
+The ground truth of the posterior p(Xk, θ | Yk) is obtained by the delayed rejection adaptive Metropolis (DRAM),
+recognized as a state-of-the-art Markov Chain Monte Carlo (MCMC) method. Notably, MCMC operates in an offline
+manner, incorporating the entire history of observations Yk = y1, y2, · · · , yk at once for each time step k. The hyper-
+parameters of DRAM used are as follows. The adaption threshold for the adaptive Metropolis algorithm is set to
+100. The 2-tier delayed rejection method is used and the scaling factor for the proposal covariance of the second tier
+is γ = 0.5. DRAM generates 3 × 106 samples from the joint distribution p(Xk, θ | Yk) at each time step k. After
+discarding the first 50% of samples as burn-in, half of the remaining samples, i.e., 7.5 × 105, are used to represent the
+posterior.
+31

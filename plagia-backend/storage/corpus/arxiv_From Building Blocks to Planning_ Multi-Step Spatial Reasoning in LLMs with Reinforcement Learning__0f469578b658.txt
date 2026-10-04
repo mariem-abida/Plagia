@@ -1,0 +1,1084 @@
+Preprint.
+From Building Blocks to Planning: Multi-Step Spatial
+Reasoning in LLMs with Reinforcement Learning
+Amir Tahmasbi, Sadegh Majidi, Kazem Taram & Aniket Bera
+Department of Computer Science
+Purdue University
+{atahmasb,mmajidiy,kazem,aniketbera}@purdue.edu
+Abstract
+Spatial reasoning in large language models (LLMs) has gained increasing
+attention due to applications in navigation and planning. Despite strong
+general language capabilities, LLMs still struggle with spatial transforma-
+tions and multi-step planning in structured environments. We propose a
+two-stage approach that decomposes spatial reasoning into atomic build-
+ing blocks and their composition. First, we apply supervised fine-tuning
+on elementary spatial transformations, such as rotation, translation, and
+scaling, to equip the model with basic spatial physics. We then freeze
+this physics-aware model and train lightweight LoRA adapters within the
+GRPO framework to learn policies that compose these building blocks
+for multi-step planning in puzzle-based environments, in a closed-loop
+manner. To support this pipeline, we synthesize an ASCII-art dataset
+and construct a corresponding ASCII-based reinforcement learning envi-
+ronment. Our method consistently outperforms baselines, including the
+generic backbone, physics-aware model, and end-to-end RL models, under
+both Dynamic environments with explicit state updates and Static envi-
+ronments where the model must rely on its internal state across steps. In
+addition, the proposed approach converges faster and exhibits more stable
+training compared to end-to-end reinforcement learning from scratch. Fi-
+nally, we analyze attention patterns to assess whether fine-tuning induces
+meaningful improvements in spatial understanding.
+1
+Introduction
+Spatial reasoning and understanding represent the capability to reason about spatial rela-
+tionships of objects and transformations in an environment. This includes understanding
+relative positions, orientations, distances, and the effects of actions that modify spatial
+configurations. With the recent advancements of LLMs (Minaee et al., 2025) and VLMs
+(Li et al., 2025) in a wide variety of tasks, such as math reasoning (Ahn et al., 2024) and
+vision–language understanding (Wu et al., 2024a), their spatial reasoning capabilities have
+gained more attention, with applications such as robotics (Kong et al., 2025) and language
+navigation tasks (Zhang et al., 2024). However, their abilities in spatial reasoning have not
+yet been widely explored (Wu et al., 2024b). Spatial reasoning tasks can often be mapped
+into several domains, some of which focus on linguistic and natural language scenarios
+(Li et al., 2024), as well as puzzle-based settings (Noever & Burdick, 2021) such as mazes
+(Einarsson, 2025), Rubik’s Cube (Ding et al., 2023), and Sokoban (Todd et al., 2023), where
+the model needs to understand the spatial relationships among objects to solve the task.
+In puzzle-based settings, language models are empowered by several techniques. One
+category involves using an external module as a solver, with the LLM acting as an action
+recommender or reasoning candidate generator. The external module can be heuristic-
+based, such as BFS or DFS in Tree of Thoughts (ToT) (Yao et al., 2023), or learning-based
+approaches, such as XoT, which leverages pretrained reinforcement learning and Monte
+Carlo Tree Search (MCTS) (Ding et al., 2023), or Q-learning (Deng et al., 2025). Another
+category of approaches focuses on the model itself. One direction aims to change the model’s
+behavior through prompting, such as Visualization-of-Thought (VoT) (Wu et al., 2024b),
+1
+arXiv:2512.24532v1 [cs.AI] 31 Dec 2025
+
+Preprint.
+SFT
+Rotation
+Scaling
+Translation
+Qwen-Instruct
+Building Block Dataset
+B
+A
+{Right, Up, Quart Rot, Double}
+{Down, Down, Slight Rot}
+Training Environment
+Qwen-Physics
+CLOSED LOOP GRPO
+Action: Up
+Update Shape B
+Qwen-PhysRL
+Wphys
+H
+H
+H
+r
+A
+B
+LoRA
+Adapters
+B
+B
+B
+B
+B
+A
+A
+A
+A
+A
+Half 
+Up
+Up
+Slight Rot
+Left
+Evaluation Environment
+Figure 1: Overview of the proposed training framework. The pipeline follows a two-stage
+learning approach. In the SFT Phase, the base model (QWEN-INSTRUCT) is fine-tuned on
+the Building Block Dataset to acquire atomic spatial priors (translation, scaling, rotation),
+resulting in the intermediate QWEN-PHYSICS model. In the RL Phase, we employ GRPO in
+a closed-loop setting with LoRA adapters. The model is trained to master multi-step spatial
+reasoning and planning, yielding the final QWEN-PHYSRL model.
+which elicits spatial reasoning in LLMs by visualizing their reasoning traces and guiding
+subsequent reasoning steps. Another approach, presented in Dao & Vu (2025), is inspired by
+DeepSeek-R1 (DeepSeek-AI et al., 2025) and is based on supervised fine-tuning the model
+on solution traces, and then applying GRPO to further refine reasoning steps on the same
+task and structure.
+In this work, we focus on spatial reasoning in a puzzle-based setting, where an agent must
+transform an initial spatial configuration into a target configuration through a sequence of
+discrete actions. We propose a novel approach that decomposes spatial understanding into a
+set of building blocks, consisting of atomic transformations such as rotating a shape by 90◦or
+translating it one grid cell upward. We first apply supervised fine-tuning to enable the model
+to learn these basic physical transformations. After this stage, the physics-aware model is
+kept frozen, and reinforcement learning is applied on top of it by introducing lightweight
+adapter layers that learn a policy for composing these building blocks as primitives to reach
+a target spatial configuration from a given starting point. An overview of our approach is
+shown in Figure 1.
+For the supervised fine-tuning stage, we synthesize a dataset of 12k tasks spanning three
+transformation categories, translation, rotation, and scaling, which is used to fine-tune the
+Qwen2.5-1.5B-Instruct model (Qwen Team, 2024). In the subsequent reinforcement learning
+stage, the physics-aware model is embedded directly in the reinforcement learning loop
+within a multi-step, compositional environment. Reinforcement learning is applied via
+GRPO to optimize lightweight LoRA adapter layers (Hu et al., 2021) on top of the frozen
+backbone, enabling the model to learn policies over sequences of atomic spatial operations
+through repeated interaction with the environment. We evaluate our approach against
+several baselines, including the generic Qwen2.5-1.5B-Instruct model, the physics-aware
+model trained only with supervised fine-tuning, and a Qwen model trained directly with
+GRPO reinforcement learning. All models are tested on unseen spatial reasoning tasks under
+two settings: one where the environment map is updated after each action, and one where
+the map remains fixed. Our results show that the proposed method achieves higher rewards
+than all baselines across both settings and converges faster during reinforcement learning.
+Although the physics-aware model trained only with supervised fine-tuning underperforms
+the generic backbone on the final task, it provides a stronger prior for reinforcement learning,
+leading to substantially better performance after GRPO optimization. Finally, we conduct
+ablation studies on attention layers to analyze whether the learned improvements reflect
+genuine spatial understanding.
+2
+
+Preprint.
+2
+Related Work and Background
+2.1
+Spatial Reasoning in LLMs
+Spatial reasoning in large language models has been studied across a range of domains.
+One line of research focuses on textual inputs, where spatial semantics are embedded in
+text and models are required to reason about relative spatial relations, such as left of or right
+of, expressed through language (Mirzaee & Kordjamshidi, 2022). A further step is explored
+in natural language navigation tasks, where, given a sequence of textual instructions, the
+model must maintain an implicit spatial state and track its position over multiple steps. In
+these settings, spatial understanding is inferred from sequential language instructions rather
+than from explicit spatial representations such as symbolic layouts (Wu et al., 2024b). Recent
+efforts explore symbolic environments, particularly ASCII-art representations, which bridge
+the gap between text and image modalities in applications such as level generation (Todd
+et al., 2023). Results show that large language models are capable of recognizing concepts
+depicted in ASCII art given textual inputs. However, they still exhibit notable limitations
+and remain far behind human performance in transformation tasks such as translation,
+rotation, and robustness to noise (Bayani, 2024), as well as in shape recognition (Wang et al.,
+2024; Jia et al., 2025). Prior work also indicates that supervised fine-tuning can improve
+model accuracy in these settings (Jia et al., 2025).
+2.2
+Attention Mechanisms in Transformer-Based LLMs
+Since the introduction of the Transformer architecture (Vaswani et al., 2017), it has been
+widely adopted across a broad range of applications. Most notably, it serves as the dominant
+foundation for large language models (LLMs), enabling efficient natural language processing
+(NLP) tasks such as understanding and generating long sequences of text (Devlin et al.,
+2019; Brown et al., 2020). The key innovation underlying these advances is the self-attention
+mechanism (Akbari et al., 2021), which models long-range dependencies among elements
+in sequential data and enables effective extraction, processing, and generation of structured
+outputs. Most contemporary LLMs adopt a decoder-only Transformer architecture, which
+is more suitable for autoregressive text generation. These models process a sequence of
+tokens through multiple architecturally similar decoder layers, followed by a final linear
+projection that maps hidden states to the vocabulary space. Each decoder layer consists of
+several core components, including self-attention, a feed-forward multilayer perceptron
+(MLP), and residual connections with normalization. With the exception of a small number
+of element-wise operations (e.g., softmax and dropout), matrix multiplication dominates
+the computational workload of these components.
+During inference, the token sequence is represented as a matrix of hidden state vectors
+with dimensionality H, corresponding to the model’s hidden size. These hidden states are
+multiplied by a set of learned linear projections in the self-attention module, namely WQ
+(query), WK (key), WV (value), and WO (output), as well as by projection matrices in the MLP
+component, such as Wup, Wdown, and Wgate. Among these operations, the multiplication
+QKT, which produces the attention score matrix, plays a key role in our analysis. Here, Q
+and K are obtained by projecting the input hidden states using WQ and WK, respectively.
+The resulting attention score matrix captures semantic and syntactic dependencies between
+tokens in the sequence by quantifying the relative influence of each token on every other
+token. In later sections, we examine how this attention distribution changes under our
+proposed method and analyze its effect on how tokens are weighted during spatial reasoning
+tasks.
+3
+Methodology
+3.1
+Problem Formulation
+We frame the spatial configuration space using three properties: the rotational state of the
+shape, its translational position on a discrete grid, and its scale. Based on this formulation,
+a shape state is represented as a tuple S = (r, p, s), where r denotes the orientation, p the
+spatial position, and s the size of the shape. Correspondingly, the action space is defined
+3
+
+Preprint.
+as a finite symbolic set A = Arot ∪Atrans ∪Ascale, aligned with these three properties. The
+rotation action set is given by Arot = {90◦CCW, 45◦CCW, 180◦CCW, 0◦}, the scaling set
+by Ascale = {2×, 1
+2×, 1}, and the translation set by Atrans = {right, left, up, down}. This
+discrete action formulation mitigates known limitations of language models when operating
+in continuous spaces (Szot et al., 2024), while still providing sufficient flexibility to modify
+each component of the state. The task begins from an initial state S0 = (r0, p0, s0), and
+the agent applies a sequence of actions a1:T = {a1, . . . , aT} with the objective of reaching
+a target configuration Starget = (rg, pg, sg). The environment dynamics are deterministic,
+with state transitions defined as S(t+1)
+B
+= T (S(t)
+B , at), resulting in a closed-loop rollout
+where the observation at step t is given by Ot = (Starget, St, Ht), with the action history
+Ht = (a1, . . . , at−1).
+The objective is to reach the target spatial configuration in the fewest possible steps. An
+episode is considered successful once the intersection-over-union (IoU) between the current
+shape and the target shape exceeds a predefined threshold τ. Accordingly, the task objective
+can be expressed in terms of the minimal timestep t⋆at which the following condition is
+satisfied:
+t⋆= min
+n
+t ≥0
+ IoU
+ S(t)
+B , SA
+ ≥τ
+o
+.
+(1)
+All actions are admissible at each timestep under a bounded map domain P ⊂Z2. For any
+action a ∈A with induced displacement ∆(a), the next position is given by ˜p = p + ∆(a)
+when ˜p ∈P, and equals p otherwise.
+3.2
+Proposed Method
+In the first stage, we perform supervised fine-tuning on atomic building-block transfor-
+mations. We define a building block as a single-step transformation for which the dis-
+tance between the start configuration Sstart and the target configuration Starget satisfies
+dist(Sstart, Starget) = 1, where the distance is defined as the sum of differences in position,
+scale, and orientation, i.e., ∆p + ∆s + ∆r. Under this formulation, each training example
+corresponds to exactly one atomic action from the predefined action set A. This process
+yields a physics-aware policy πphys, defined as
+πphys := πθ∗(a | Sstart, Starget, k),
+(2)
+where k ∈{rot, trans, scale} denotes the transformation type label. This policy captures the
+local physics of the environment by learning to correctly execute the corresponding atomic
+transformation.
+In the second stage, we learn a compositional policy on top of the frozen physics-aware
+model. The policy πϕ is parameterized by the frozen base weights θ∗obtained from SFT
+and a set of learnable Low-Rank Adaptation (LoRA) parameters ϕ. We apply LoRA to a
+predefined set of transformer modules M = {WQ, WK, WV, WO, Wgate, Wup, Wdown}. For
+each layer l ∈{1, . . . , L} and each module W ∈M, the forward pass is modified as
+h(l) = (Wphys + ∆Wl) h(l−1) = (Wphys + BlAl) h(l−1),
+(3)
+where Wphys denotes the frozen base weights and Al, Bl are the learnable low-rank matrices
+comprising ϕ. The adapter parameters ϕ are optimized using GRPO in a closed-loop
+reinforcement learning setting, while the base parameters θ∗remain fixed.
+As a result, the learned policy πϕ operates in a closed-loop manner, where at each timestep
+t the model generates a textual output yt conditioned on the current observation ot.
+yt ∼πϕ(· | ot),
+at = g(yt) ∈A,
+(4)
+where g(·) is a deterministic parser that maps the generated text to a discrete atomic action
+label.
+4
+Experiments
+4.1
+Experimental Setup
+For the spatial reasoning task, all models are built on top of the Qwen2.5-1.5B-Instruct
+backbone. In our experiments, we evaluate the performance of several variants to isolate
+4
+
+Preprint.
+the contribution of each training stage. These include: (i) QWEN-INSTRUCT, the generic
+pretrained model without task-specific training; (ii) QWEN-PHYSICS, a supervised fine-
+tuned model trained only on atomic building-block transformations; (iii) QWEN-DIRECTRL,
+a model trained end-to-end using GRPO directly on the base model; (iv) QWEN-PHYSRL,
+our proposed two-stage method combining frozen atomic execution with reinforcement
+learning–based composition; and (v) RANDOM POLICY (πrnd), a random action policy
+serving as an unbiased lower-bound baseline. All model variants share the same tokenizer,
+namely the standard tokenizer provided with the Qwen2.5-1.5B-Instruct model.
+4.2
+Dataset Construction
+For supervised fine-tuning, we construct a synthetic dataset consisting of 12k unique sam-
+ples, approximately uniformly distributed across the action set A. Each sample is generated
+by randomly initializing two of the three shape properties and modifying the remaining
+property according to a single atomic action. All samples are generated programmatically by
+applying deterministic atomic transformations to randomly sampled initial configurations,
+ensuring full reproducibility and eliminating the need for manual annotation. All spatial
+configurations are represented using an ASCII-art domain, where both the current shape
+and the target shape are encoded as text-based grids. In this representation, the relative
+spatial relationship between the current and target shapes is conveyed implicitly through
+their layouts (Appendix §A). Shape boundaries are denoted using the character #, while
+rows are separated using * and newline (\n) characters to preserve the two-dimensional
+structure. This textual spatial encoding follows conventions inspired by prior work on
+symbolic spatial reasoning with language models (Todd et al., 2023).
+4.3
+Evaluation Metrics
+A deterministic parser g(·) is used to identify the <answer> tags in the model output and
+extract the corresponding discrete action. Our primary evaluation metric is the cumulative
+episode reward. For an episode of length T, we define
+Rtotal = Rcorrectness −0.1 T −
+T
+∑
+t=1
+R(t)
+rep + Rsuccess,
+(5)
+where Rcorrectness reflects agreement between the agent’s predicted action and a predefined
+ground-truth sequence GT = {a1, . . . , aT} of heuristic greedy atomic actions that locally
+reduce the distance to the target configuration. A per-step penalty of 0.1 encourages shorter
+solutions, Rt
+rep penalizes repetitive behaviors, and Rsuccess is granted upon task completion.
+We additionally log step-wise rewards {rt}T
+t=1 to support fine-grained analysis of policy
+failures and divergence points.
+5
+Results and Analysis
+For GRPO training of the physics-aware fine-tuned model, all experiments were conducted
+on a single NVIDIA A100 GPU with 80 GB of memory. We use the Adam optimizer with
+a learning rate of 1 × 10−5 and apply LoRA adaptation with rank r = 64 to the specified
+transformer modules, while keeping the base model frozen. Training is performed with a
+batch size of 64 trajectories, with puzzles randomly generated at each environment reset.
+Action sampling during training follows a temperature scheduling strategy to stabilize
+learning, where the temperature is linearly annealed from an initial value of 1.4 to a lower
+bound of 0.7 over training iterations. During evaluation, sampling is disabled, and actions
+are selected greedily to obtain the best deterministic solution from the model. In both
+training and evaluation, the maximum distance between the start and target configurations
+is limited to 5, and the episode horizon is set to Tmax = 5. A success bonus of +2 is assigned
+upon task completion, while a per-step penalty of −0.1 encourages shorter solutions. To
+discourage repetitive behavior, an additional repetition penalty of −0.2 is applied when the
+same atomic action is selected more than twice within an episode. Finally, the correctness
+reward is normalized to 1 across all operation types, regardless of the number of ground-
+truth atomic actions available for a given operation, in order to prevent bias toward specific
+5
+
+Preprint.
+0
+20
+40
+60
+80
+100
+120
+140
+160
+180
+Step Number
+1
+0
+1
+2
+3
+4
+5
+Reward
+Model
+Qwen-PhysRL
+Qwen-directRL
+Figure 2: GRPO training reward trajectories for QWEN-PHYSRL and QWEN-DIRECTRL,
+illustrating improved stability and faster convergence when using a frozen physics-aware
+prior.
+Model
+Avg Rtotal −Rsuccess (max = 2.7)
+Dynamic
+Static
+Qwen-Instruct
+0.070
+0.004
+Qwen-Physics
+−0.068
+−0.120
+Qwen-DirectRL (r = 64)
+1.626
+−0.216
+Qwen-PhysRL (r = 64, Ours)
+2.457
+1.717
+Table 1: Performance comparison across models on 100 unseen random scenarios under
+Dynamic state updates and Static settings.
+transformation categories. For instance, in a scenario involving three transformations, one
+rotation and one scaling, the maximum episode reward is computed as 3 × 1
+3 + 1 + 1 −3 ×
+0.1 = 2.7. Adding the success bonus Rsuccess = 2 yields a total reward of 4.7.
+Performance Analysis.
+The average total reward achieved by different model variants is
+reported in Table 1. We evaluate all models under two settings. In the Dynamic setting, after
+each action, the environment updates the shape’s spatial configuration map SB, mirroring
+the training procedure and generating the next prompt accordingly. This setup allows the
+model to focus on predicting the correct next action without requiring explicit memorization
+of prior state changes. In contrast, in the Static setting, the initial maps remain fixed, and the
+prompt includes only the sequence of previously selected actions. Successful performance
+in this scenario, therefore, requires the model to internally track and reason about the
+cumulative effects of past actions. The results demonstrate that our proposed QWEN-
+PHYSRL achieves near-maximum performance in the Dynamic setting, with an average
+reward of 2.457, indicating that the learned RL policy reliably identifies the correct sequence
+of transformations when external state updates are provided. Importantly, QWEN-PHYSRL
+also achieves an average reward of 1.717 in the Static setting, substantially outperforming
+all baseline models. In contrast, QWEN-DIRECTRL exhibits moderate performance in
+the Dynamic setting but fails in the Static setting, suggesting that reinforcement learning
+alone is insufficient to equip the model with robust internal spatial understanding and
+reasoning. Finally, non-RL models perform poorly in both settings, reflecting limited
+planning capability. Reinforcement learning bridges this gap by teaching the model how to
+utilize its building-block knowledge, enabling the composition of atomic operations into
+coherent multi-step policies.
+6
+
+Preprint.
+Step
+Cumulative Reward until Step i
+Qwen-PhysRL
+πrnd
+Dynamic
+Static
+1
+0.900
+0.759
+0.250
+2
+1.374
+1.143
+0.463
+3
+1.914
+1.469
+0.641
+4
+2.340
+1.689
+0.790
+5
+2.457
+1.717
+0.912
+0
+0.9
+1.2
+1.8
+1.5
+2.1
+2.1
+1.8
+2.4
+2.4
+2.4
+2.7
+2.7
+2.7
+2.7
+scale
+tr
+rot
+tr
+tr
+rot
+tr
+tr
+tr
+tr
+tr
+rot
+rot
+tr
+Figure 3: Left: Step-by-step cumulative reward comparison between QWEN-PHYSRL (Dy-
+namic and Static settings) and random policy (πrnd) on tasks requiring 3 translations, 1
+rotation, and 1 scaling. Right: Action-reward trajectory illustrating the optimal path (blue:
+scale →tr →rot →tr →tr), which achieves the maximum reward of 2.7, contrasted
+with alternative action sequences (gray). The trajectory obtained under the Static setting is
+shown in red, where the model initially follows the optimal prefix (scale →tr →tr →tr)
+but then diverges and loses track of the remaining steps, failing to complete the full plan.
+Per-Step Reward Analysis.
+To analyze step-by-step reward accumulation during eval-
+uation, we focus on a smaller subset of test samples in which the distance between the
+start and target configurations is exactly five. Specifically, we select instances that require
+three translations, one rotation, and one scaling operation to reach the goal. This restriction
+allows us to study reward trajectories under a fixed action budget and comparable difficulty.
+Figure 3 reports the average cumulative reward per step for three cases: QWEN-PHYSRL
+evaluated in the Dynamic environment, QWEN-PHYSRL evaluated in the Static setting,
+and a random policy πrnd. Figure 3 also includes a tree representation of the maximum
+achievable cumulative reward at each step for all valid sequences of ground-truth actions
+(GT). To keep the tree visualization compact and interpretable, we fix the first action in
+the tree to scale, which is the most frequently selected initial operation by the learned
+policy. The optimal action sequence identified by the QWEN-PHYSRL policy in the Dynamic
+setting (scale →translation →rotation →translation →translation) is highlighted
+as the blue path in the tree and is taken in approximately 33 % of the evaluated trajectories.
+The corresponding average cumulative reward closely tracks the maximum achievable
+reward along this path, indicating that the model consistently follows near-optimal action
+sequences when the environment explicitly updates the state after each step. Two additional
+high-probability paths, (scale →rotation →translation →translation →translation)
+and (scale →translation →translation →rotation →translation), are taken in 27 %
+and 19 % of cases, respectively. In contrast, under the Static setting, the average cumulative
+reward initially follows the red path in the tree, corresponding to the sequence (scale
+→translation →translation →translation). This behavior aligns with our empirical
+observations that, without explicit state updates, the model gradually loses track of earlier
+actions, diverges from the optimal plan, and ultimately fails to produce a decisive fifth
+action. As a result, reward accumulation stagnates at later steps. Compared to the random
+policy πrnd (see Appendix §B for its expected reward analysis), QWEN-PHYSRL selects
+substantially more effective actions at each step in both the Dynamic and Static settings. The
+only exception occurs at the final step in the Static case, where the learned policy yields a
+smaller average reward increase than the random policy, as it has already diverged from the
+optimal trajectory, whereas the random policy occasionally converges to a higher-reward
+7
+
+Preprint.
+Qwen-Phys
+Qwen-Instruct
+0.00
+0.02
+0.04
+0.06
+0.08
+0.10
+Total Attention (Sum)
+Layer 0
+Qwen-Phys
+Qwen-Instruct
+Layer 16
+Qwen-Phys
+Qwen-Instruct
+Layer 20
+Qwen-Phys
+Qwen-Instruct
+Layer 27
+# (Hash)
+* (Star)
+Whitespace
+Figure 4: Token-level attention distribution across layers for QWEN-PHYSICS and QWEN-
+INSTRUCT.
+Gen0
+Gen1
+Gen2
+Gen3
+Gen4
+Generated Token
+0
+15
+18
+17
+16
+19
+20
+21
+27
+Layer
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+1.4
+KL
+(a) Attention divergence heatmap
+L0
+L1
+L2
+L3
+L14 L15 L16 L18 L20 L21 L24 L25 L26 L27
+Model Layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Relative Attention Share
+System Prompt
+Maps
+(b) Relative attention share across layers
+Figure 5: Layer-wise attention score analysis showing (a) attention divergence of QWEN-
+PHYSICS from the backbone QWEN-INSTRUCT model across layers, and (b) relative attention
+allocation between system prompt and map tokens.
+branch by chance. We note that, because the action space is not relatively large and the
+reward distribution is partly biased toward positive values, the random policy attains rela-
+tively high rewards in this setting. Even under these favorable conditions, QWEN-PHYSRL
+consistently outperforms the random baseline by a wide margin.
+GRPO Convergence and Stability.
+As shown in Figure 2, QWEN-PHYSRL exhibits substan-
+tially faster convergence and higher final rewards than QWEN-DIRECTRL under identical
+GRPO training configurations, highlighting the importance of a physics-aware initialization
+for RL. Table 1 provides additional insight: the generic QWEN-INSTRUCT backbone used
+in QWEN-DIRECTRL achieves higher rewards than the QWEN-PHYSICS backbone used
+in QWEN-PHYSRL during evaluation, indicating that general pretrained knowledge can
+partially compensate. However, despite this advantage, QWEN-INSTRUCT fails to scale
+effectively under GRPO, exhibiting slower adaptation and early convergence to subopti-
+mal policies. In contrast, the proposed two-stage approach consistently achieves superior
+performance across both Dynamic and Static settings.
+5.1
+Ablation Study
+To examine the effect of our initial building-block fine-tuning on the spatial understanding of
+the target LLM F, we analyze how attention is distributed across prompt tokens at different
+layers of the model by studying the attention score matrices produced during evaluation.
+We prompt the model with a fixed system prompt P, concatenated with a start–target map
+sequence M, to generate an answer sequence A, i.e., F(P·M) = A, where · denotes string
+8
+
+Preprint.
+concatenation. To obtain attention scores between prompt tokens and the newly generated
+output tokens, we concatenate the generated answer to the original prompt and perform a
+single forward pass over the full sequence, F(P·M·A). This pass yields the complete set of
+attention score matrices, including those corresponding to output tokens. For each decoder
+layer l ∈{1, . . . , L} and attention head h ∈{1, . . . , H}, the model computes a raw attention
+score matrix as Qh,lKT
+h,l. We aggregate these matrices across heads by averaging to obtain a
+per-layer attention score matrix,
+AttScorel = 1
+H
+H
+∑
+h=1
+Qh,lKT
+h,l.
+We then focus on the rows corresponding to the answer tokens, AttScorel[|P·M| :, :], where
+each row represents the attention assigned to all prompt tokens during the generation of
+a specific output token. In the following, we summarize key observations derived from
+analyzing these attention patterns across layers.
+Observation 1.
+Fine-tuning induces the most pronounced changes in attention distribu-
+tions within the middle layers of the model, as confirmed by Figure 5a. Among the 28
+layers, layers 16 and 20 exhibit the highest KL divergence between QWEN-PHYSICS and
+the generic QWEN-INSTRUCT backbone, while the early (layer 0) and final (layer 27) layers
+show substantially smaller deviations. This indicates that the adaptation introduced by
+fine-tuning is concentrated in intermediate layers rather than being uniformly distributed
+across the network.
+Observation 2.
+QWEN-PHYSICS assigns closer attention to spatially informative ASCII
+tokens, such as # and *, compared to QWEN-INSTRUCT. As shown in Figure 4, the increased
+attention to these tokens is most prominent in the same middle layers identified in Observa-
+tion 1. This suggests that the layers undergoing the largest adaptation are also those most
+responsible for encoding spatial structure, enabling the model to better focus on salient
+regions of the map M during spatial reasoning.
+Observation 3.
+Across most layers, QWEN-PHYSICS consistently allocates more attention
+to the system prompt P than to the map region, except in the earliest layers. Notably,
+the system prompt contains approximately 1.8× more tokens than the map region M, yet
+Figure 5b shows an attention gap that is substantially larger than what token count alone
+would suggest. This gap narrows in the middle layers, which, as shown in Observations 1
+and 2, are more actively involved in spatial reasoning. This behavior is consistent with
+prior findings that textual context can dominate attention allocation in spatial reasoning and
+vision–language models (Chen et al., 2025; Wang et al., 2025). The earliest layers, such as
+layer 0, allocate attention more evenly across different parts of the input, reflecting a coarse,
+global skimming behavior, as illustrated in both Figure 5b and Figure 4.
+6
+Conclusion
+This paper presents a two-stage training pipeline that enables spatial understanding, rea-
+soning, and planning capabilities in large language models. Our approach first builds a
+foundation of atomic spatial relations through supervised fine-tuning and then augments it
+with multi-step planning ability using a closed-loop GRPO-based reinforcement learning
+stage. This combination equips the model with both task-relevant physical knowledge and
+a learned policy that effectively composes these primitives to solve more complex spatial
+planning problems, without relying solely on reinforcement learning to discover representa-
+tions and planning strategies simultaneously. Experimental results demonstrate that models
+trained under this framework exhibit a newfound understanding of spatial properties
+and planning, substantially outperforming generic LLM baselines on challenging spatial
+planning tasks. Moreover, compared to end-to-end reinforcement learning applied to an
+unadapted backbone model, our pipeline converges faster and exhibits more stable training
+under identical settings. Through ablation studies and attention analysis, we further identify
+the decoder layers most affected by training and show that our approach systematically
+shifts attention toward task-critical tokens, providing evidence of more structured internal
+9
+
+Preprint.
+reasoning. While our evaluation focuses on a specific class of spatial planning problems, we
+believe that the underlying principle of learning reusable building blocks and composing
+them through reinforcement learning is broadly applicable. We view this work as a step
+toward more modular and interpretable approaches for teaching complex reasoning skills
+to language models, and we leave the exploration of additional tasks and modalities to
+future work.
+References
+Janice Ahn, Rishu Verma, Renze Lou, Di Liu, Rui Zhang, and Wenpeng Yin. Large language
+models for mathematical reasoning: Progresses and challenges, 2024. URL https://
+arxiv.org/abs/2402.00157.
+Hassan Akbari, Liangzhe Yuan, Rui Qian, Wei-Hong Chuang, Shih-Fu Chang, Yin Cui, and
+Boqing Gong. Vatt: transformers for multimodal self-supervised learning from raw video,
+audio and text. In Proceedings of the 35th International Conference on Neural Information
+Processing Systems, NIPS ’21, Red Hook, NY, USA, 2021. Curran Associates Inc. ISBN
+9781713845393.
+David Bayani. Testing the depth of chatgpt’s comprehension via cross-modal tasks based
+on ascii-art: Gpt3.5’s abilities in regard to recognizing and generating ascii-art are not
+totally lacking, 2024. URL https://arxiv.org/abs/2307.16806.
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla
+Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini
+Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya
+Ramesh, Daniel Ziegler, Jeffrey Wu, Clemens Winter, Chris Hesse, Mark Chen, Eric
+Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam
+McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are
+few-shot learners. In H. Larochelle, M. Ranzato, R. Hadsell, M.F. Balcan, and H. Lin
+(eds.), Advances in Neural Information Processing Systems, volume 33, pp. 1877–1901. Curran
+Associates, Inc., 2020. URL https://proceedings.neurips.cc/paper files/paper/2020/
+file/1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf.
+Shiqi Chen, Tongyao Zhu, Ruochen Zhou, Jinghan Zhang, Siyang Gao, Juan Carlos Niebles,
+Mor Geva, Junxian He, Jiajun Wu, and Manling Li. Why is spatial reasoning hard for
+vlms? an attention mechanism perspective on focus areas, 2025. URL https://arxiv.
+org/abs/2503.01773.
+Alan Dao and Dinh Bach Vu. Alphamaze: Enhancing large language models’ spatial
+intelligence via grpo, 2025. URL https://arxiv.org/abs/2502.14669.
+DeepSeek-AI, Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin
+Xu, Qihao Zhu, Shirong Ma, Peiyi Wang, Xiao Bi, Xiaokang Zhang, Xingkai Yu, Yu Wu,
+Z. F. Wu, Zhibin Gou, Zhihong Shao, Zhuoshu Li, Ziyi Gao, Aixin Liu, Bing Xue, Bingxuan
+Wang, Bochao Wu, Bei Feng, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu
+Zhang, Chong Ruan, Damai Dai, Deli Chen, Dongjie Ji, Erhang Li, Fangyun Lin, Fucong
+Dai, Fuli Luo, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Han Bao, Hanwei Xu,
+Haocheng Wang, Honghui Ding, Huajian Xin, Huazuo Gao, Hui Qu, Hui Li, Jianzhong
+Guo, Jiashi Li, Jiawei Wang, Jingchang Chen, Jingyang Yuan, Junjie Qiu, Junlong Li, J. L.
+Cai, Jiaqi Ni, Jian Liang, Jin Chen, Kai Dong, Kai Hu, Kaige Gao, Kang Guan, Kexin
+Huang, Kuai Yu, Lean Wang, Lecong Zhang, Liang Zhao, Litong Wang, Liyue Zhang,
+Lei Xu, Leyi Xia, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Meng Li, Miaojun
+Wang, Mingming Li, Ning Tian, Panpan Huang, Peng Zhang, Qiancheng Wang, Qinyu
+Chen, Qiushi Du, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, R. J. Chen, R. L.
+Jin, Ruyi Chen, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shengfeng Ye, Shiyu
+Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, S. S. Li, Shuang Zhou, Shaoqing Wu,
+Shengfeng Ye, Tao Yun, Tian Pei, Tianyu Sun, T. Wang, Wangding Zeng, Wanjia Zhao,
+Wen Liu, Wenfeng Liang, Wenjun Gao, Wenqin Yu, Wentao Zhang, W. L. Xiao, Wei An,
+Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie,
+Xingchao Liu, Xinyu Yang, Xinyuan Li, Xuecheng Su, Xuheng Lin, X. Q. Li, Xiangyue Jin,
+10
+
+Preprint.
+Xiaojin Shen, Xiaosha Chen, Xiaowen Sun, Xiaoxiang Wang, Xinnan Song, Xinyi Zhou,
+Xianzu Wang, Xinxia Shan, Y. K. Li, Y. Q. Wang, Y. X. Wei, Yang Zhang, Yanhong Xu, Yao
+Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Yu, Yichao Zhang, Yifan Shi, Yiliang Xiong,
+Ying He, Yishi Piao, Yisong Wang, Yixuan Tan, Yiyang Ma, Yiyuan Liu, Yongqiang Guo,
+Yuan Ou, Yuduan Wang, Yue Gong, Yuheng Zou, Yujia He, Yunfan Xiong, Yuxiang Luo,
+Yuxiang You, Yuxuan Liu, Yuyang Zhou, Y. X. Zhu, Yanhong Xu, Yanping Huang, Yaohui
+Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Ying Tang, Yukun Zha, Yuting Yan, Z. Z. Ren,
+Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao,
+Zhicheng Ma, Zhigang Yan, Zhiyu Wu, Zihui Gu, Zijia Zhu, Zijun Liu, Zilin Li, Ziwei Xie,
+Ziyang Song, Zizheng Pan, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, and Zhen Zhang.
+Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning, 2025.
+URL https://arxiv.org/abs/2501.12948.
+Hourui Deng, Hongjie Zhang, Jie Ou, and Chaosheng Feng. Can llm be a good path
+planner based on prompt engineering? mitigating the hallucination for path planning. In
+Proceedings of the International Conference on Intelligent Computing (ICIC), 2025.
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of
+deep bidirectional transformers for language understanding. In North American Chapter
+of the Association for Computational Linguistics, 2019. URL https://api.semanticscholar.
+org/CorpusID:52967399.
+Ruomeng Ding, Chaoyun Zhang, Lu Wang, Yong Xu, Ming-Jie Ma, Wei Zhang, Si Qin,
+S. Rajmohan, Qingwei Lin, and Dongmei Zhang. Everything of thoughts: Defying the
+law of penrose triangle for thought generation. ArXiv, abs/2311.04254, 2023.
+Hafsteinn Einarsson. Mazeeval: A benchmark for testing sequential decision-making in
+language models, 2025. URL https://arxiv.org/abs/2507.20395.
+Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang,
+Lu Wang, and Weizhu Chen. Lora: Low-rank adaptation of large language models, 2021.
+URL https://arxiv.org/abs/2106.09685.
+Qi Jia, Xiang Yue, Shanshan Huang, Ziheng Qin, Yizhu Liu, Bill Yuchen Lin, and Yang
+You. Visual perception in text strings, 2025. URL https://openreview.net/forum?id=
+etToTig9Fp.
+Yangzhe Kong, Daeun Song, Jing Liang, Dinesh Manocha, Ziyu Yao, and Xuesu Xiao.
+Autospatial: Visual-language reasoning for social robot navigation through efficient
+spatial reasoning learning, 2025. URL https://arxiv.org/abs/2503.07557.
+Fangjun Li, David C. Hogg, and Anthony G. Cohn. Advancing spatial reasoning in large
+language models: an in-depth evaluation and enhancement using the stepgame bench-
+mark. In Proceedings of the Thirty-Eighth AAAI Conference on Artificial Intelligence and
+Thirty-Sixth Conference on Innovative Applications of Artificial Intelligence and Fourteenth
+Symposium on Educational Advances in Artificial Intelligence, AAAI’24/IAAI’24/EAAI’24.
+AAAI Press, 2024.
+ISBN 978-1-57735-887-9.
+doi: 10.1609/aaai.v38i17.29811.
+URL
+https://doi.org/10.1609/aaai.v38i17.29811.
+Zongxia Li, Xiyang Wu, Hongyang Du, Fuxiao Liu, Huy Nghiem, and Guangyao Shi. A sur-
+vey of state of the art large vision language models: Alignment, benchmark, evaluations
+and challenges, 2025. URL https://arxiv.org/abs/2501.02189.
+Shervin Minaee, Tomas Mikolov, Narjes Nikzad, Meysam Chenaghlu, Richard Socher,
+Xavier Amatriain, and Jianfeng Gao. Large language models: A survey, 2025. URL
+https://arxiv.org/abs/2402.06196.
+Roshanak Mirzaee and Parisa Kordjamshidi. Transfer learning with synthetic corpora for
+spatial role labeling and reasoning. 10 2022. doi: 10.48550/arXiv.2210.16952.
+David Noever and Ryerson Burdick. Puzzle solving without search or human knowledge:
+An unnatural language approach. CoRR, abs/2109.02797, 2021. URL https://arxiv.org/
+abs/2109.02797.
+11
+
+Preprint.
+Qwen
+Team.
+Qwen2.5-1.5b-instruct.
+https://huggingface.co/Qwen/Qwen2.5-1.
+5B-Instruct, 2024. Hugging Face model card, accessed 2025-08-10.
+Andrew Szot, Bogdan Mazoure, Harsh Agrawal, Devon Hjelm, Zsolt Kira, and Alexander
+Toshev. Grounding multimodal large language models in actions, 2024. URL https:
+//arxiv.org/abs/2406.07904.
+Graham Todd, Sam Earle, Muhammad Umair Nasir, Michael Cerny Green, and Julian
+Togelius. Level generation through large language models. In Proceedings of the 18th
+International Conference on the Foundations of Digital Games, FDG 2023, pp. 1–8. ACM, April
+2023. doi: 10.1145/3582437.3587211. URL http://dx.doi.org/10.1145/3582437.3587211.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez,
+Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Proceedings of the 31st
+International Conference on Neural Information Processing Systems, NIPS’17, pp. 6000–6010,
+Red Hook, NY, USA, 2017. Curran Associates Inc. ISBN 9781510860964.
+Hong Wang, Xuan Luo, Weizhi Wang, and Xifeng Yan. Bot or human? detecting chatgpt
+imposters with a single question, 2024. URL https://arxiv.org/abs/2305.06424.
+Zhaochen Wang, Bryan Hooi, Yiwei Wang, Ming-Hsuan Yang, Zi Huang, and Yujun Cai.
+Text speaks louder than vision: Ascii art reveals textual biases in vision-language models,
+2025. URL https://arxiv.org/abs/2504.01589.
+Jiannan Wu, Muyan Zhong, Sen Xing, Zeqiang Lai, Zhaoyang Liu, Zhe Chen, Wenhai Wang,
+Xizhou Zhu, Lewei Lu, Tong Lu, Ping Luo, Yu Qiao, and Jifeng Dai. Visionllm v2: an end-
+to-end generalist multimodal large language model for hundreds of vision-language tasks.
+In Proceedings of the 38th International Conference on Neural Information Processing Systems,
+NIPS ’24, Red Hook, NY, USA, 2024a. Curran Associates Inc. ISBN 9798331314385.
+Wenshan Wu, Shaoguang Mao, Yadong Zhang, Yan Xia, Li Dong, Lei Cui, and Furu Wei.
+Mind’s eye of llms: Visualization-of-thought elicits spatial reasoning in large language
+models, 2024b. URL https://arxiv.org/abs/2404.03622.
+Shunyu Yao et al. Tree of thoughts: Deliberate problem solving with large language models.
+arXiv preprint arXiv:2305.10601, 2023.
+Yue Zhang, Ziqiao Ma, Jialu Li, Yanyuan Qiao, Zun Wang, Joyce Chai, Qi Wu, Mohit Bansal,
+and Parisa Kordjamshidi. Vision-and-language navigation today and tomorrow: A survey
+in the era of foundation models, 2024. URL https://arxiv.org/abs/2407.07035.
+12
+
+Preprint.
+A
+Environment Setup Example
+System prompt for Dynamic Setting
+You are an expert at analyzing ASCII art shapes. Two shapes are provided:
+Shape A (the target) and Shape B (the current state), separated by '%$%$%$%'.
+Each line of the shapes starts and ends with a star (*) character.
+Your goal is to transform Shape B into Shape A
+by analyzing one type of transformation at a time.
+You may analyze rotation, translation, or scaling --- but try to analyze
+DIFFERENT types rather than repeating.
+You have already analyzed: {analyzed}
+IMPORTANT: Choose a transformation type you haven't analyzed yet if possible.
+TASK 1 - ROTATION:
+If analyzing rotation: Determine what rotation is needed to transform Shape B
+into Shape A.
+Classify using exactly one of these labels:
+- 'no_rotation': The shapes have the same orientation (0 rotation needed)
+- 'quarter_rotation': Shape B needs a 90 degrees rotation to match Shape A
+- 'slight_rotation': Shape B needs a small rotation (<90 degrees)
+to match Shape A
+TASK 2 - TRANSLATION:
+If analyzing translation: Determine how Shape B must be moved to match Shape
+A's position.
+Classify using exactly one of these labels:
+- 'no_translation': Shapes are already in the same position
+- 'up': Shape B must be moved up to match Shape A
+- 'down': Shape B must be moved down to match Shape A
+- 'left': Shape B must be moved left to match Shape A
+- 'right': Shape B must be moved right to match Shape A
+TASK 3 - SCALING:
+If analyzing scaling: Determine the size adjustment needed to transform Shape B
+to match Shape A.
+Classify using exactly one of these labels:
+- 'no_scaling': Both shapes have the same size
+- 'double_size': Shape B is half size and must be enlarged to match Shape A
+- 'half_size': Shape B is twice as large and must be shrunk to match Shape A
+INSTRUCTIONS:
+1. Identify which transformation type would be most useful to analyze now
+2. Carefully compare both ASCII art shapes
+3. Determine the transformation needed to convert Shape B into Shape A
+4. Respond with the appropriate label inside <answer></answer> tags
+13
+
+Preprint.
+System prompt for Static Setting
+You are an expert at analyzing ASCII art shapes. Two shapes are provided:
+Shape A (the target) and Shape B (the current state), separated by '%$%$%$%'.
+Each line of the shapes starts and ends with a star (*) character.
+Your goal is to transform Shape B into Shape A
+by analyzing one type of transformation at a time.
+You may analyze rotation, translation, or scaling --- but try to analyze
+DIFFERENT types rather than repeating.
+CRITICAL INSTRUCTION: THE MAP IS NOT UPDATING
+The Shape B shown below is the **STATIC INITIAL STATE**
+It does **NOT** reflect the moves you have already made.
+You must RELY ON YOUR MEMORY of the following actions you have already performed:
+HISTORY OF ACTIONS: [{analyzed}]
+To solve this:
+1. Look at the Initial Shape B.
+2. Mentally apply the 'HISTORY OF ACTIONS' to it to imagine the *current* state.
+3. Determine the NEXT step needed from that imagined state.
+4. Choose a transformation type you haven't analyzed yet if possible.
+TASK 1 - ROTATION:
+If analyzing rotation: Determine what rotation is needed to transform Shape B
+into Shape A.
+Classify using exactly one of these labels:
+- 'no_rotation': The shapes have the same orientation (0 rotation needed)
+- 'quarter_rotation': Shape B needs a 90 degrees rotation to match Shape A
+- 'slight_rotation': Shape B needs a small rotation (<90 degrees)
+to match Shape A
+TASK 2 - TRANSLATION:
+If analyzing translation: Determine how Shape B must be moved to match Shape
+A's position.
+Classify using exactly one of these labels:
+- 'no_translation': Shapes are already in the same position
+- 'up': Shape B must be moved up to match Shape A
+- 'down': Shape B must be moved down to match Shape A
+- 'left': Shape B must be moved left to match Shape A
+- 'right': Shape B must be moved right to match Shape A
+TASK 3 - SCALING:
+If analyzing scaling: Determine the size adjustment needed to transform Shape B
+to match Shape A.
+Classify using exactly one of these labels:
+- 'no_scaling': Both shapes have the same size
+- 'double_size': Shape B is half size and must be enlarged to match Shape A
+- 'half_size': Shape B is twice as large and must be shrunk to match Shape A
+INSTRUCTIONS:
+1. Identify which transformation type would be most useful to analyze now
+2. Carefully compare both ASCII art shapes
+3. Determine the transformation needed to convert Shape B into Shape A
+4. Respond with the appropriate label inside <answer></answer> tags
+14
+
+Preprint.
+Sample Environment
+TARGET (Shape A):
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+## *
+*
+##
+#*
+*
+##
+*
+*
+##
+##*
+*
+##
+##
+*
+*
+##
+##
+*
+*
+##
+*
+*
+*
+%$%$%$%
+CURRENT (Shape B):
+*
+*
+*
+*
+*
+#
+*
+*
+## ##
+*
+*
+#
+#
+*
+*
+## ##
+*
+*
+#
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+------------------------------
+15
+
+Preprint.
+Model Responses (Dynamic setting with State Updates)
+⋆Ground-Truth: double size, quarter rotation, right, down, down.
+× Qwen-Instruct: slight rotation, slight rotation, slight rotation, slight rotation, slight rotation.
+× Qwen-Physics: slight rotation, quarter rotation, slight rotation, slight rotation, slight
+rotation.
+× Qwen-DirectRL: double size, quarter rotation, down, down, up.
+✓Qwen-PhysRL (ours): double size, quarter rotation, right, down, down.
+B
+Random Policy Reward Calculation
+To establish a baseline for the random policy πrnd, we analytically derive the expected
+reward E[Rk] at step k. An action a yields a positive reward only if its usage count Na over
+the preceding k−1 steps does not exceed its ground-truth quota Ca. We model Na as a
+binomial random variable, Na ∼Binomial(k −1, 1/|A|), reflecting uniform random action
+selection. The expected reward at step k is therefore given by
+E[Rk] = ∑
+a∈GT
+r(a) P(Na < Ca) −λ
+ 
+1 −∑
+a∈GT
+P(Na < Ca)
+!
+,
+(6)
+where GT denotes the set of ground-truth required actions, r(a) is the reward associated
+with a valid action, and λ is the penalty incurred for an invalid action. The probability term
+expands as the cumulative binomial sum
+P(Na < Ca) =
+Ca−1
+∑
+i=0
+k −1
+i
+  1
+|A|
+i 
+1 −
+1
+|A|
+k−1−i
+.
+(7)
+For the subset of samples considered in our evaluation, the ground-truth action quotas
+consist of two occurrences of one translation direction (C = 2), one occurrence of another
+translation direction (C = 1), and a single occurrence each for rotation and scaling (C = 1).
+The expected cumulative reward up to step K then follows directly as ∑K
+j=1 E[Rj].
+16

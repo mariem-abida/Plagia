@@ -1,0 +1,955 @@
+Spectral and Spatial Graph Learning for
+Multispectral Solar Image Compression
+Prasiddha Siwakoti†, Atefeh Khoshkhahtinat† Piyush M. Mehta‡,
+Barbara J. Thompson§, Michael S. F. Kirk§, Daniel da Silva§
+†Department of Computer Science and Electrical Engineering, West Virginia University, WV, USA
+‡Department of Mechanical & Aerospace Engineering, West Virginia University, WV, USA
+§NASA Goddard Space Flight Center, MD, USA
+{ps00068, ak00043}@mix.wvu.edu, {piyush.mehta}@mail.wvu.edu
+{barbara.j.thompson, michael.s.kirk, daniel.e.dasilva}@nasa.gov
+Abstract—High-fidelity compression of multispectral solar im-
+agery remains challenging for space missions, where limited
+bandwidth must be balanced against preserving fine spectral
+and spatial details. We present a learned image compression
+framework tailored to solar observations, leveraging two com-
+plementary modules: (1) the Inter-Spectral Windowed Graph
+Embedding (iSWGE), which explicitly models inter-band rela-
+tionships by representing spectral channels as graph nodes with
+learned edge features; and (2) the Windowed Spatial Graph
+Attention and Convolutional Block Attention (WSGA-C), which
+combines sparse graph attention with convolutional attention to
+reduce spatial redundancy and emphasize fine-scale structures.
+Evaluations on the SDOML dataset across six extreme ultraviolet
+(EUV) channels show that our approach achieves a 20.15%
+reduction in Mean Spectral Information Divergence (MSID), up
+to 1.09% PSNR improvement, and a 1.62% log-transformed MS-
+SSIM gain over strong learned baselines, delivering sharper and
+spectrally faithful reconstructions at comparable bits-per-pixel
+rates. The code is publicly available at https://github.com/agyat4/
+sgraph.
+Index Terms—multispectral learned image compression, graph
+neural network, feature embedding, solar imagery
+I. INTRODUCTION
+Multispectral images capture diverse range of physical
+phenomena across various spectral bands, providing essential
+information for fields such as remote sensing, atmospheric
+science, and astrophysics. However, their scientific utility
+hinges on preserving their high-fidelity representation, which
+imposes severe demands on storage and transmission systems.
+For example, NASA’s Solar Dynamics Observatory (SDO)
+generates approximately 1.4 terabytes of full-disk solar im-
+agery per day, capturing thirteen spectral bands every 12
+seconds [1]. The high volume of data overwhelms the limited
+telemetry and onboard storage capacities of space missions.
+While lossless compression preserves data quality, it typically
+reduces size by only 2–4 times. Lossy methods offer higher
+compression ratios but often compromise the fidelity required
+for scientific analysis. This balance between image fidelity
+and compression efficiency, known as the rate–distortion trade-
+off, forms the central motivation for the learned compression
+approach proposed in this paper
+Fig. 1: Multispectral solar images are partitioned into spatial windows. Graphs
+are constructed both within each window and across spectral channels to
+jointly capture spatial and spectral dependencies.
+Traditional image compression methods, such as JPEG [2]
+and JPEG2000 [3], remain widely used but are not well-suited
+for multispectral or hyperspectral imagery, as they process
+each band independently and fail to exploit the cross-band
+correlations critical for preserving scientific fidelity. Learned
+image compression (LIC) methods overcome some of these
+limitations by jointly learning compact latent representations
+and entropy models for more efficient coding [4]. Using con-
+volutional networks [5], [6] and attention-based architectures
+[7], [8], LIC has achieved strong results across many imaging
+domains and has even outperformed specialized codecs such
+as 3D-SPECK [9] and 3D-SPIHT [10] on scientific datasets
+[11]. However, most LIC approaches primarily target spatial
+redundancy, and even with advanced mechanisms such as
+windowed attention or recent graph-based models [12], [13],
+the improvements in standard metrics such as PSNR and MS-
+SSIM have become increasingly marginal [14]. To achieve
+further progress, particularly for bandwidth-constrained solar
+missions where fidelity across wavelengths is crucial, com-
+pression frameworks must explicitly capture the rich, non-
+uniform spectral correlations in multispectral data, building
+on while extending beyond 3D convolution and transformer-
+based approaches.
+Multispectral images exhibit redundancy not only in spatial
+structure but also across spectral channels. While jointly
+arXiv:2512.24463v1 [cs.CV] 30 Dec 2025
+
+modeling these dependencies is essential for effective com-
+pression, most learned methods address them only implicitly,
+which often fails to capture the structured correlations between
+specific bands. To address this, we introduce a graph-based
+multispectral compression framework that explicitly models
+inter-spectral relationships alongside spatial redundancies.
+Our contributions are as follows:
+• We propose Inter-Spectral Windowed Graph Embed-
+ding (iSWGE), a spectral module that represents bands
+as graph nodes and learns their relationships via edge
+embeddings. This targeted modeling preserves per-band
+semantics and leverages cross-band redundancy, resulting
+in enhanced spectral fidelity in solar imagery.
+• We introduce a Windowed Spatial Graph Attention
+(WSGA) module that sparsifies local interactions to
+reduce redundancy and computational costs, paired with
+a Convolutional Block Attention Module (CBAM) that
+emphasizes informative spatial and channel-wise features.
+Working in concert with the spectral graph module
+iSWGE, WSGA-C enhances spatial representation effi-
+ciency and jointly contributes to superior spectral fidelity
+and overall compression performance.
+• We validate our framework on the SDOML dataset, show-
+ing that the combined iSWGE and WSGA-C architecture
+consistently surpasses strong attention-based baselines,
+achieving superior spectral fidelity (20.15% MSID re-
+duction) and spatial quality gains (up to 1.09% PSNR
+and 1.62% MS-SSIM ) at identical bitrates, demonstrating
+bandwidth-efficient and scientifically reliable solar image
+compression.
+II. RELATED WORK
+A. Learning Image Compression
+Traditional
+image
+compression
+pipelines
+rely
+on
+transformation, quantization, and entropy coding. Modern
+learned image compression (LIC) frameworks adopt this
+structure but implement the components using deep neural
+networks, typically within a variational autoencoder (VAE)
+framework
+optimized
+for
+the
+rate–distortion
+trade-off.
+Reference
+[4]
+introduced
+an
+end-to-end
+approach
+with
+nonlinear analysis and synthesis transforms and differentiable
+quantization , later extending it with a scale hyperprior
+to capture spatial variance patterns in the latent space,
+improving entropy modeling [5]. This framework was further
+advanced with autoregressive and hierarchical priors, enabling
+more accurate probability estimation and state-of-the-art
+compression rates [6].
+1) Transform
+Coding:
+Convolutional neural networks
+(CNNs) remain the primary backbone for feature extraction
+in
+learned
+image
+compression
+(LIC),
+mapping
+images
+into compact latent representations. However, their limited
+receptive fields make capturing long-range dependencies
+challenging [15]. Vision transformers, adapted from sequence
+modeling [16], address this limitation but introduce substantial
+computational
+and
+memory
+costs.
+Swin
+Transformer
+architectures [13] and [17] mitigate these costs by restricting
+self-attention to local windows, enabling non-local structure
+modeling with improved rate–distortion efficiency. Hybrid
+CNN–attention approaches [7], [18], and [19] further balance
+local and global modeling, enhancing feature stability while
+maintaining efficiency. Beyond pure attention mechanisms,
+Graph Neural Networks (GNNs) offer a flexible paradigm
+for modeling irregular structures in visual data [20] and
+[21]. Recent attention-based graph designs [22] integrate into
+hybrid LIC architectures [8], replacing non-local attention
+with window-level graph operations. These treat patches
+as nodes and connect them via k-nearest neighbor (k-NN)
+graphs, selectively aggregating features to reduce redundancy
+while retaining essential relationships.
+2) Entropy Model:
+Entropy modeling is a central com-
+ponent of learned image compression, as it estimates the
+probability distribution of quantized latents and directly de-
+termines coding efficiency. Early work employed a factorized
+Gaussian prior [4], enabling the end-to-end optimization of
+the rate–distortion trade-off. This was extended by introducing
+a scale hyperprior to capture spatial dependencies through
+hierarchical latent structures [5]. Autoregressive priors [6]
+further improved compression by modeling sequential cor-
+relations, though they introduced substantial latency during
+encoding and decoding. To alleviate this, slice-based entropy
+models [7] process latents channel-wise and reuse decoded
+slices as context, shortening causal contexts and improving
+parallelism, while relying less on explicit spatial context
+modeling. ELIC [23] builds on these advances by using
+uneven channel slicing combined with checkerboard spatial
+context, better capturing spatial and cross-channel correlations
+at the cost of greater computational complexity. More recent
+transformer-based designs, such as MLIC++ [24], incorporate
+attention-driven mechanisms, including checkerboard attention
+and global feature aggregation, to efficiently model spatial
+and channel-wise priors. To further address long-range depen-
+dencies, Entroformer [25] employs top-k self-attention with
+relative positional encoding to optimize probability estimation
+across the latent space.
+B. Multispectral Image Compression
+Effective compression of multispectral imagery requires
+capturing both spatial and spectral correlations. Classical 3D
+wavelet-based codecs, such as 3D-SPECK and 3D-SPIHT
+[9], [10], addressed this by jointly processing the spatial
+and spectral domains; however, recent learned approaches
+have surpassed them in rate–distortion performance. Recent
+Learned methods utilize multidirectional CNNs to fuse spec-
+tral and spatial features implicitly [26] or employ attention
+mechanisms to adaptively weight spectral bands [27]. How-
+ever, most of these approaches treat the spectral dimension
+as either a simple extension of the spatial domain or as a
+
+Encoder (ga)
+Decoder(gs)
+Conv Nx5x5  /2
+Conv Nx5x5  /2
+Conv Nx5x5  /2
+Conv Nx5x5  /2
+Conv Nx5x5  x2
+WSGA-C
+WSGA-C
+WSGA-C
+WSGA-C
+GDN
+IGDN
+IGDN
+IGDN
+GDN
+GDN
+Channel-wise Autoregressive  Entropy Model
+Q
+EE
+ED
+ , 
+Input Multispectral Image
+Reconstructed Multispectral Image
+iSWGE
+iSWGE
+C
+S
+Conv Nx5x5  x2
+Conv Nx5x5  x2
+Conv Nx5x5  x2
+S
+C
+ED
+Q
+EE
+Entropy Decoder
+Entropy Encoder
+Quantization
+Concatenate
+Split
+Fig. 2: Overview of the proposed multispectral compression framework. The encoder ga fuses spectral features from iSWGE with spatial features via
+concatenation (C), followed by WSGA-C blocks to form compact latent representations. The latent y is quantized (Q) and entropy-coded using a channel-wise
+autoregressive model. The decoder gs reconstructs spectral and spatial features through parallel paths: convolutional layers recover spatial layout, while iSWGE
+refines spectral embeddings. The two streams are averaged to produce the final output ˆx, ensuring fidelity in both spectral and spatial domains.
+set of independent channels, overlooking their structured, non-
+uniform relationships. This limitation motivates the need for
+architectures that explicitly model inter-band dependencies to
+achieve more efficient and faithful compression.
+C. SDO Imagery: Learned Compression Advances
+Launched in 2010, NASA’s Solar Dynamics Observatory
+(SDO) monitors solar activity, including flares and coronal
+mass ejections (CMEs), with high temporal and spatial res-
+olution [28]. Its Atmospheric Imaging Assembly (AIA) cap-
+tures 4096×4096 full-disk solar images across 10 ultraviolet
+wavelengths every 12 seconds, while the Helioseismic and
+Magnetic Imager (HMI) produces magnetograms and doppler-
+grams of the Sun’s magnetic field and interior [1]. Together,
+these instruments generate terabytes of high-cadence solar data
+daily. To support machine learning research on these data, the
+SDOML dataset [29] curates AIA and HMI observations from
+2010–2020, providing standardized data for tasks such as solar
+activity forecasting [30], image restoration [31], and synthetic
+data generation [32].
+Conventional compression approaches for SDO data remain
+limited. The Rice algorithm, being lossless, achieves only a
+2-3 times compression factor [28], offering minimal band-
+width savings. JPEG2000 was tested for solar images [33],
+demonstrating limited storage and transfer gains, but requiring
+careful tuning of compression ratios to preserve the features of
+scientific interest, such as delicate coronal structures. Recent
+work has shifted toward learned image compression for solar
+imagery. Reference [34] introduced an adversarially trained
+network combining local and non-local attention with win-
+dowed convolutional attention blocks (CBAM), demonstrating
+significant rate–distortion improvements. A subsequent study
+[35] proposed a transformer-based framework with token
+aggregation for multispectral compression, jointly encoding
+all wavelengths to leverage inter-band redundancies. However,
+this approach relies on the inherent feature aggregation of
+self-attention, without an explicit mechanism to model the
+structured, non-uniform relationships between spectral bands,
+which may limit its ability to fully exploit cross-band redun-
+dancies.
+III. METHOD
+A. Compression Framework Overview
+We propose a learned image compression framework for
+multispectral solar images that jointly captures spatial and
+spectral redundancies through structured representation learn-
+ing. Our model follows a transform coding paradigm com-
+prising an analysis transform (encoder), a synthesis transform
+(decoder), and an entropy model for rate estimation.
+In the encoder’s early stage, a spectral graph module cap-
+tures inter-spectral relationships by representing each band as
+a node and modeling edge embeddings between them. These
+spectral features mix with spatial features extracted in parallel
+via convolutional layers. To enhance spatial modeling, we
+incorporate two attention based approaches: a sparse win-
+dowed graph attention and a windowed CBAM. The windowed
+graph attention block sparsifies feature interactions by limiting
+aggregation to locally relevant nodes, mitigating redundancy
+introduced by fully connected attention. Complementing this,
+the windowed CBAM adaptively emphasizes spatially and
+spectrally informative regions, jointly promoting more efficient
+and informative representations for multispectral compression.
+
+The latent representation is quantized and then modeled
+by a channel-wise autoregressive entropy model. The encoder
+transforms the input image x ∈RH×W ×C to a latent repre-
+sentation y and a hyper-latent z. The quantized hyper-latent ˆz
+is then decoded into side information ψ by the hyper-synthesis
+transform hs. Finally, the corrected latent tensor ¯y is used to
+reconstruct the output image ˆx.
+y = ga(x; ϕ)
+z = ha(y)
+ψ = hs(ˆz)
+ˆx = gs(¯y; θ)
+(1)
+The side information ψ contains base mean and scale tensors
+that provide the initial context for the entropy model. To
+facilitate this, the latent representation y divides into s disjoint
+channel-wise slices. For each slice yi, a model predicts its
+Gaussian parameters (µi, σi) based on ψ and previously de-
+coded slices ˆy<i. We then use a mean-subtracted approach to
+quantize the residual between the latent slice and its predicted
+mean. To improve reconstruction, an offset ri is predicted and
+subtracted. The final probability model is a product of these
+Gaussian distributions, convolved with a uniform distribution
+to account for quantization noise.
+(µi, σi) = ϕi(ψ, ˆy<i)
+ˆyi = ⌊yi −µi⌉+ µi
+¯yi = ˆyi −ri,
+where ri = ρi(ˆyi, µi)
+p(ˆy | ψ) =
+Y
+i
+N(ˆyi; µi, σ2
+i ) ∗U(−0.5, 0.5)
+(2)
+The proposed framework jointly optimizes bitrate and recon-
+struction quality under a rate-distortion objective. The full
+training objective minimizes the expected bitrate R of both the
+latent and hyper-latent codes along with a distortion penalty
+d(·, ·), where the trade-off is controlled by λ.
+L = Ex∼p(x) [−log2 p(ˆy | ψ) −log2 p(ˆz) + λ · d(x, ˆx)] (3)
+B. Inter-Spectral Windowed Graph Embedding (iSWGE)
+The
+Inter-Spectral
+Windowed
+Graph
+Embedding
+(iSWGE) module is designed to explicitly model the rela-
+tional dependencies across spectral channels using a structured
+graph representation, leveraging correlations often missed by
+standard convolutional approaches. The process begins by
+applying a grouped convolution to the input image x with
+g number of groups of each f channels, which extracts a
+feature map x′ ∈RH′×W ′×(g·f) while preserving per-band
+semantics. These feature maps are then partitioned into non-
+overlapping spatial windows. For each window, across the
+group, we construct a spectral graph. First, features in a
+window are summarized via average pooling into a descriptor
+matrix X(i) ∈Rg×f. A lightweight MLP projects these into
+node embeddings H(i)
+v , where each of the g spectral groups
+becomes a node in the graph. We connect adjacent bands to
+form a cyclic graph, a static topology that is significantly more
+computationally efficient than constructing a dynamic k-NN
+Spatial Expansion
+Grouped 
+ Convolution 
+(N-group)
+Window Splitting
+Graph Update
+Edge Feature
+Embeddings
+Node Feature
+Embeddings
+Average Pooling
+(a)
+WGA
+WCBAM
+RB
+RB
+RB
+RB
+RB
+Sigmoid
+Conv 1x1
+Conv 1x1
+RB
+(b)
+Fig. 3: Detail diagram of (a) the iSWGE module and (b) the WSGA-C module
+graph and sparser than a fully-connected graph. To capture
+the local spectral contrast, a highly informative cue in solar
+imaging, edge features are formed by subtracting adjacent
+node descriptors and are projected into an embedding space
+by a shared MLP, creating edge embeddings H(i)
+e .
+H(i)
+v
+= MLP
+ X(i)
+(4)
+H(i)
+e
+= MLP
+ |X(i,j) −X(i,k)|
+
+(5)
+The graph structure is defined by a binary incidence matrix
+T (i) ∈{0, 1}g×|E(i)|, which maps each edge to its two endpoint
+nodes, and by Laplacian-normalized adjacency matrices for the
+nodes ( ˜A(i)
+v ) and edges ( ˜A(i)
+e ) that describe their respective
+connectivity. To allow the spectral content (nodes) and their
+relationships (edges) to influence each other mutually, we
+refine these embeddings using a co-embedding mechanism
+adapted from CensNet [36]. This iterative process creates
+richer, more context-aware representations. The update rule
+for a single layer ℓis defined as:
+H(ℓ+1,i)
+v
+= ζ
+
+T (i)Φ(H(ℓ,i)
+e
+Pe)T (i)⊤
+⊙˜A(i)
+v H(ℓ,i)
+v
+Wv
+
+H(ℓ+1,i)
+e
+= ζ
+
+T (i)⊤Φ(H(ℓ+1,i)
+v
+Pv)T (i)
+⊙˜A(i)
+e H(ℓ,i)
+e
+We
+
+(6)
+where Φ(·) is a diagonalization operator, Wv, We are learn-
+able weights, Pv, Pe are learnable projection vectors, ⊙is the
+Hadamard product, and ζ is the ReLU function. Stacking three
+such layers yields deeply co-refined embeddings. Finally, the
+refined embeddings from each window are unshuffled back to
+their original spatial positions to reconstruct the full feature
+map. This spectrally aware feature map then concatenates
+
+Fig. 4: Spectral graph construction in iSWGE: grouped convolutions extract
+per-band features, pooled nodes form graph vertices, and edges encode
+differences for spectral graph processing.
+with features from a parallel CNN branch, which captures
+complementary spatial patterns, thereby enriching the overall
+feature representation.
+C. Windowed Spatial Graph Attention and CBAM (WSGA-C)
+We introduce the Windowed Spatial Graph Attention
+and CBAM (WSGA-C) module to jointly address two sig-
+nificant challenges in LIC: (1) spatial redundant interactions
+in standard dense self-attention within local windows, and
+(2) ineffective selection of informative spatial and spectral
+features. WSGA-C addresses these issues by combining win-
+dowed sparse graph-based attention and windowed convolu-
+tional block attention in a parallel architecture, promoting effi-
+cient spatial representation learning and discriminative feature
+boosting.
+To mitigate redundancy in local spatial attention, WSGA-
+C incorporates a spatial graph attention branch based on the
+formulation from GABIC [22]. Let the input feature tensor be
+˜x ∈RH′′×W ′′×M. We divide this tensor into non-overlapping
+windows of size P × P. Within each window, we treat each
+patch as a node in a local graph, G(V, E). The edge set E
+is constructed dynamically in each iteration by computing the
+k-nearest neighbors (N(i)) for each node based on feature
+similarity. Each node is updated using a graph-based attention
+mechanism. Given a node ˜x(i) ∈RM, is updated as:
+˜x(i)
+upd = ˜x(i) + Wz
+X
+j∈N(i)
+αi,jWg˜x(j),
+(7)
+where Wz and Wg are learnable weight matrices. The attention
+coefficient αi,j from node i to its neighbor j is computed via
+a softmax over the neighborhood, analogous to scaled dot-
+product attention:
+αi,j =
+exp
+ (Wθ˜x(i))⊤Wϕ˜x(j)
+P
+n∈N(i) exp
+ (Wθ˜x(i))⊤Wϕ˜x(n),
+(8)
+where Wθ and Wϕ are learnable projection matrices. When k
+equals the total number of patches N, this formulation recovers
+standard local self-attention.
+To complement the spatial graph branch, WSGA-C applies a
+windowed CBAM that enhances features through channel and
+spatial attention. For a feature block ˜xw ∈RP ×P ×M, channel
+attention is first computed to obtain Ach, which reweights
+the feature channels to produce a channel-refined map ˜xch.
+Spatial attention Asp is then derived from ˜xch to emphasize
+informative regions, yielding the final output ˜xwcbam.The
+sequence of operations is:
+Ach = sigmoid
+ MLP(Avg(˜xw)) + MLP(Max(˜xw))
+
+˜xch = Ach ⊙˜xw
+Asp = sigmoid
+ Conv([Avg(˜xch), Max(˜xch)])
+
+˜xwcbam = Asp ⊙˜xch
+(9)
+Finally, instead of enforcing strict agreement between the
+two branches, we perform channel-wise concatenation of their
+outputs, followed by a learnable 1×1 convolution. This allows
+the network to adaptively integrate the relational interactions
+captured by the learned spatial graph with features emphasized
+by the CBAM.
+IV. EXPERIMENTS
+A. Experimental Setup
+1) Dataset:
+For our experiments, we use a curated subset of
+the SDOML dataset [28], focusing on six AIA EUV channels
+(94 ˚A, 131 ˚A, 171 ˚A, 193 ˚A, 211 ˚A, and 304 ˚A). These wave-
+lengths capture emission features across a broad temperature
+range, from the transition region to active coronal structures.
+Preliminary tests also showed that including additional wave-
+length bands reduced cross-channel correlations and degraded
+compression performance. Following the protocol of [35],
+we resample all images to a uniform spatial resolution of
+512 × 512 pixels. To reduce temporal correlation between
+samples and ensure diverse, independent training data, we
+reduce the temporal resolution by sampling one frame per
+hour from the native 6-minute cadence, which also improves
+computational efficiency during training. The dataset spans
+2015–2018, and we partition it following [37], we use the first
+eight months of each year for training and the remaining four
+months for testing. This temporal split prevents overfitting to
+specific phases of the solar cycle and evaluates the model’s
+generalization to unseen conditions. After filtering incomplete
+or corrupted entries, we compile a final dataset of 17,474
+training and 2,592 test examples, each a six-channel stack
+of spatially aligned solar images.
+2) Training Setup:
+We preprocess each input image by
+applying a logarithmic transformation to compress the dy-
+namic range, followed by normalization and random crop-
+ping into 256 × 256 patches. We train all models on an
+NVIDIA A30 GPU (24 GB) using the Adam optimizer with
+a mini-batch size of 16 and an initial learning rate of
+10−4, adjusted dynamically via a Reduce-on-Plateau sched-
+uler. Each model is trained for 250 epochs. To explore the
+rate–distortion trade-off, we train separate networks for each
+λ
+∈
+{0.0018, 0.0048, 0.0085, 0.0150, 0.1000, 0.5000}. For
+
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+Bits per pixel (bpp)
+32
+34
+36
+38
+PSNR(dB)
+iSWGE + WSGA-C
+BL2
+WSGA-C
+BL1
+iSWGE
+3D-SPIHT
+(a)
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+Bits per pixel (bpp)
+12
+14
+16
+18
+20
+22
+MS-SSIM(dB)
+iSWGE + WSGA-C
+BL2
+WSGA-C
+BL1
+iSWGE
+3D-SPIHT
+(b)
+Fig. 5: Rate-distortion comparison of the proposed model against baselines: (a) PSNR vs. BPP and (b) log-transformed MS-SSIM vs. BPP. The (iSWGE +
+WSGA-C) model consistently outperforms BL1 and BL2 across bitrates, delivering higher spatial and perceptual quality.
+WSGA-C, we set the K-NN value to 9 for graph construction,
+and for iSWGE, we limit the number of spatial windows to 16
+to balance computational efficiency and feature aggregation.
+V. EVALUATION
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+Bits per pixel (bpp)
+0.02
+0.03
+0.04
+0.05
+0.06
+0.07
+0.08
+MSID
+iSWGE + WSGA-C
+BL2
+WSGA-C
+iSWGE
+3D-SPIHT
+Fig. 6: MSID vs. BPP, showing that (iSWGE + WSGA-C) achieves the lowest
+spectral divergence across bitrates.
+We evaluate compression performance using three metrics:
+Peak Signal-to-Noise Ratio (PSNR) for pixel-level fidelity,
+Multi-Scale Structural Similarity (MS-SSIM) [38] for per-
+ceptual structure, and Mean Spectral Information Divergence
+(MSID) [39] for spectral accuracy, where lower MSID indi-
+cates better preservation of inter-band relationships.
+Baselines are adapted from the CNN-attention hybrid model
+in [34], evaluated without its GAN component, as adversarial
+training favors visual sharpness at the cost of PSNR and MS-
+SSIM. BL1 compresses each channel independently, providing
+a single-band reference, while BL2 jointly encodes all six
+channels by stacking them as a multi-channel input for the
+same encoder-decoder, where convolutional and attention lay-
+ers implicitly capture cross-channel correlations. Even though
+the evaluation primarily focuses on learned baselines to assess
+architectural performance, the multispectral framework in [35]
+is excluded, as it targets nine AIA channels and employs
+a distinct entropy coding scheme. All primary comparisons
+use compatible entropy models to isolate the impact of the
+transformation architecture. Additionally, we include the 3D-
+SPIHT codec to provide a representative traditional baseline
+for comparison.
+1) Rate-Distortion Performance:
+Fig. 5 presents the rate-
+distortion performance of the proposed method compared to
+baselines BL1 and BL2 across a range of bitrates. Our spectral-
+spatial model consistently achieves higher PSNR values, with
+up to 0.4 dB improvement over BL2 and nearly 1 dB over
+BL1 at higher bitrates, highlighting its ability to preserve
+fine spatial details under compression better. In terms of
+perceptual quality, as shown in Fig. 5b, the model delivers
+consistently higher MS-SSIM, with gains of up to 0.33 dB in
+log-transformed MS-SSIM over BL2 and 1.06 dB over BL1,
+reflecting improved multi-scale structural coherence and visu-
+ally superior reconstructions. For spectral fidelity, evaluated
+via MSID in Fig. 6, our approach achieves a reduction of up
+to 20.15% relative to BL2 at higher bitrates, demonstrating
+improved preservation of spectral signatures. MSID is only
+reported for jointly encoded models, as it measures divergence
+across normalized spectral distributions per pixel. For single-
+band methods like BL1, where channels are compressed and
+quantized independently with no shared bit allocation, MSID
+may not be meaningful.
+2) Ablation Study:
+We conducted ablation studies to isolate
+the effects of the spectral graph module (iSWGE) and the spa-
+tial attention module (WSGA-C). As shown in Fig. 5a, iSWGE
+alone improves the PSNR across all bitrates, validating its
+effectiveness in capturing structured inter-spectral correlations
+that are often overlooked by baseline convolutional encoders.
+TABLE I: Performance comparison of different model variants for encoding
+and decoding time, FLOPs and memory requirement.
+Model Variant
+Encode Time(ms)
+Decode Time(ms)
+FLOPs (×109)
+Memory(MB)
+BL1
+77.48
+98.86
+349.28
+296.17
+BL2
+85.98
+110.30
+355.56
+303.32
+WSGA-C
+98.20
+119.88
+354.69
+303.07
+iSWGE + WSGA-C
+104.60
+131.52
+354.72
+304.11
+
+In contrast, WSGA-C performs comparably to the baseline in
+terms of PSNR but does not exceed it. This is likely due to its
+sparsified graph-based attention, which prioritizes discrimina-
+tive modeling over exhaustive spatial modeling. However, their
+combination (iSWGE + WSGA-C) yields the highest PSNR,
+confirming the effective synergy between spectral feature
+learning and localized spatial attention. Perceptual quality, as
+measured by MS-SSIM (Fig. 5b), consistently improves with
+each module. This aligns with WSGA-C’s design objective
+of enhancing the salience of local features and inter-channel
+contrast through dual attention, resulting in smoother and more
+perceptually coherent reconstructions.
+An analysis of MSID (Fig. 6) shows that iSWGE, when
+isolated, is most effective at reducing spectral divergence,
+underscoring its role in preserving bandwise semantic consis-
+tency. When combined with WSGA-C, the full model achieves
+the lowest MSID, indicating optimal spectral fidelity.
+As summarized in Table I, these improvements come with
+only a modest increase in computational demands and memory
+usage compared to BL2, as the sparse design of WSGA-C
+offsets some of the added complexity from iSWGE. This helps
+keep the full model practical while delivering superior spectral
+and spatial fidelity.
+VI. CONCLUSION
+We developed a graph-based learned compression frame-
+work for multispectral solar imagery that overcomes the limi-
+tations of spatially focused approaches by explicitly capturing
+spectral dependencies and leveraging efficient spatial attention.
+The framework achieves lower spectral divergence and con-
+sistently improves spatial quality compared to strong learned
+baselines, enhancing overall rate-distortion performance while
+incurring only modest computational overhead. These findings
+demonstrate that the approach is a promising candidate for
+further evaluation by the solar physics and broader scientific
+imaging communities.
+ACKNOWLEDGMENT
+This research is based upon work supported by the National
+Aeronautics and Space Administration (NASA), via award
+number 80NSSC21M0322 under the title of Adaptive and
+Scalable Data Compression for Deep Space Data Transfer
+Applications using Deep Learning
+and the computational
+resources were provided by the WVU Research Computing
+Dolly Sods HPC cluster, which is funded in part by NSF OAC-
+2117575.
+REFERENCES
+[1] J. R. Lemen, A. M. Title, and et al. D. J. Akin, “The at-
+mospheric imaging assembly (aia) on the solar dynamics
+observatory (sdo),” Solar Physics, vol. 275, no. 1-2, pp.
+17–40, jan 2012.
+[2] G. K. Wallace,
+“The JPEG still picture compression
+standard,” IEEE Transactions on Consumer Electronics,
+vol. 38, no. 1, pp. xviii–xxxiv, 1992.
+[3] D. S. Taubman and M. W. Marcellin,
+JPEG2000:
+Image Compression Fundamentals, Standards and Prac-
+tice, The Kluwer International Series in Engineering and
+Computer Science. Kluwer, 2002.
+[4] J. Ball´e, V. Laparra, and E. P. Simoncelli, “End-to-end
+optimization of nonlinear transform codes for perceptual
+quality,”
+in 2016 Picture Coding Symposium (PCS).
+IEEE, 2016, pp. 1–5.
+[5] J. Ball´e, D. Minnen, S. Singh, S. J. Hwang, and N. John-
+ston,
+“Variational image compression with a scale
+hyperprior,” arXiv preprint arXiv:1802.01436, 2018.
+[6] D. Minnen, J. Ball´e, and G. D. Toderici, “Joint autore-
+gressive and hierarchical priors for learned image com-
+pression,” Advances in Neural Information Processing
+Systems, vol. 31, 2018.
+[7] Z. Cheng, H. Sun, M. Takeuchi, and J. Katto, “Learned
+image compression with discretized gaussian mixture
+likelihoods and attention modules,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2020, pp. 7939–7948.
+[8] R. Zou, C. Song, and Z. Zhang, “The devil is in the de-
+tails: Window-based attention for image compression,” in
+Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 2022, pp. 17492–17501.
+[9] X. Tang and W. A. Pearlman,
+Three-Dimensional
+Wavelet-Based Compression of Hyperspectral Images,
+pp. 273–308, Springer US, Boston, MA, 2006.
+[10] P. L. Dragotti, G. Poggi, and A. R. P. Ragozini, “Com-
+pression of multispectral images by three-dimensional
+SPIHT algorithm,”
+IEEE Transactions on Geoscience
+and Remote Sensing, vol. 38, no. 1, pp. 416–428, 2000.
+[11] C. Deng, Y. Cen, and L. Zhang, “Learning-based hyper-
+spectral imagery compression through generative neural
+networks,” Remote Sensing, vol. 12, no. 21, pp. 3657,
+2020.
+[12] J. Liu, H. Sun, and J. Katto, “Learned image compression
+with mixed transformer-CNN architectures,” in Proceed-
+ings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, 2023, pp. 14388–14397.
+[13] Z. Liu, Y. Lin, Y. Cao, H. Hu, Y. Wei, Z. Zhang, S. Lin,
+and B. Guo,
+“Swin transformer: Hierarchical vision
+transformer using shifted windows,” in 2021 IEEE/CVF
+International Conference on Computer Vision (ICCV),
+2021, pp. 9992–10002.
+[14] Y. Yang, S. Mandt, L. Theis, and et al., “An introduction
+to neural data compression,” Foundations and Trends in
+Computer Graphics and Vision, vol. 15, no. 2, pp. 113–
+200, 2023.
+[15] D. Li, J. Hu, C. Wang, X. Li, Q. She, L. Zhu, T. Zhang,
+and Q. Chen,
+“Involution: Inverting the inherence of
+convolution for visual recognition,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2021, pp. 12321–12330.
+[16] A. Dosovitskiy,
+“An image is worth 16x16 words:
+Transformers for image recognition at scale,”
+arXiv
+preprint arXiv:2010.11929, 2020.
+
+[17] Y. Zhu, Y. Yang, and T. Cohen,
+“Transformer-based
+transform coding,” in International Conference on Learn-
+ing Representations, 2022.
+[18] Y. Bai, X. Yang, X. Liu, J. Jiang, Y. Wang, X. Ji, and
+W. Gao, “Towards end-to-end image compression and
+analysis with transformers,” in Proceedings of the AAAI
+Conference on Artificial Intelligence, 2022, vol. 36, pp.
+104–112.
+[19] J. Liu, H. Sun, and J. Katto, “Learned image compression
+with mixed transformer-cnn architectures,” in Proceed-
+ings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), 2023, pp. 14388–
+14397.
+[20] J. Zhou, G. Cui, S. Hu, Z. Zhang, C. Yang, Z. Liu,
+L. Wang, C. Li, and M. Sun, “Graph neural networks:
+A review of methods and applications,” AI Open, vol. 1,
+pp. 57–81, 2020.
+[21] K. Han, Y. Wang, J. Guo, Y. Tang, and E. Wu, “Vision
+gnn: An image is worth graph of nodes,” 2022.
+[22] G. Spadaro, A. Presta, E. Tartaglione, J. H. Giraldo,
+M. Grangetto, and A. Fiandrotti, “GABIC: Graph-based
+attention block for image compression,” in 2024 IEEE
+International Conference on Image Processing (ICIP).
+IEEE, 2024, pp. 1802–1808.
+[23] D. He, Z. Yang, W. Peng, R. Ma, H. Qin, and Y. Wang,
+“Elic: Efficient learned image compression with unevenly
+grouped space-channel contextual adaptive coding,” in
+Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 2022, pp. 5718–5727.
+[24] W. Jiang, J. Yang, Y. Zhai, P. Ning, F. Gao, and R. Wang,
+“Mlic: Multi-reference entropy model for learned image
+compression,” in Proceedings of the 31st ACM Interna-
+tional Conference on Multimedia, 2023, pp. 7618–7627.
+[25] Y. Qian, M. Lin, X. Sun, Z. Tan, and R. Jin, “Entro-
+former: A transformer-based entropy model for learned
+image compression,” arXiv preprint arXiv:2202.05492,
+2022.
+[26] F. Kong, K. Hu, Y. Li, D. Li, X. Liu, and T. Durrani, “A
+spectral-spatial feature extraction method with polydirec-
+tional cnn for multispectral image compression,” IEEE
+J. Sel. Top. Appl. Earth Observ. Remote Sens., vol. 15,
+pp. 1–1, 2022.
+[27] F. Kong, T. Cao, Y. Li, D. Li, and K. Hu, “Multi-scale
+spatial-spectral attention network for multispectral image
+compression based on variational autoencoder,” Signal
+Process., vol. 198, 2022.
+[28] W. D. Pesnell, B. J. Thompson, and P. C. Chamberlin,
+“The solar dynamics observatory (SDO),” Solar Physics,
+vol. 275, no. 1-2, pp. 3–15, 2012.
+[29] R. Galvez, D. F. Fouhey, M. Jin, A. Szenicer, A. Mu˜noz-
+Jaramillo, M. C. M. Cheung, P. J. Wright, M. G. Bobra,
+Y. Liu, J. Mason, et al., “A machine-learning data set
+prepared from the NASA solar dynamics observatory
+mission,” The Astrophysical Journal Supplement Series,
+vol. 242, no. 1, pp. 7, 2019.
+[30] E. J. E. Brown, F. Svoboda, N. P. Meredith, N. Lane, and
+R. B. Horne, “Attention-based machine vision models
+and techniques for solar wind speed forecasting using
+solar euv images,” Space Weather, vol. 20, no. 3, pp.
+e2021SW002976, 2022.
+[31] X. Zhang, L. Xu, Z. Ren, X. Yu, and J. Li, “Attention-
+based deep learning model for image desaturation of
+sdo/aia,” Research in Astronomy and Astrophysics, vol.
+23, 2023.
+[32] M. Dannehl, V. Delouille, and V. Barra, “An experimental
+study on euv-to-magnetogram image translation using
+conditional generative adversarial networks,” Earth and
+Space Science, vol. 11, no. 4, pp. e2023EA002974, 2024.
+[33] C. E. Fischer, D. M¨uller, and I. De Moortel, “JPEG2000
+image compression on solar EUV images,”
+Solar
+Physics, vol. 292, no. 1, pp. 16, 2017.
+[34] A. Zafari, A. Khoshkhahtinat, J. A. Grajeda, P. M. Mehta,
+N. M. Nasrabadi, L. E. Boucheron, B. J. Thompson,
+M. S. F. Kirk, and D. E. da Silva,
+“Neural-based
+compression scheme for solar image data,” IEEE Trans-
+actions on Aerospace and Electronic Systems, vol. 60,
+no. 1, pp. 918–933, 2024.
+[35] A. Zafari, A. Khoshkhahtinat, P. M. Mehta, N. M.
+Nasrabadi, B. J. Thompson, M. S. F. Kirk, and D. Da
+Silva, “Multi-spectral entropy constrained neural com-
+pression of solar imagery,” in 2023 International Con-
+ference on Machine Learning and Applications (ICMLA).
+IEEE, 2023, pp. 1181–1188.
+[36] X. Jiang, R. Zhu, S. Li, and P. Ji, “Co-embedding of
+nodes and edges with graph neural networks,”
+IEEE
+Transactions on Pattern Analysis and Machine Intelli-
+gence, 2020.
+[37] V. Salvatelli, S. Bose, B. Neuberg, L. F. G. dos Santos,
+M. Cheung, M. Janvier, A. G. Baydin, Y. Gal, and M. Jin,
+“Using u-nets to create high-fidelity virtual observations
+of the solar corona,” arXiv preprint arXiv:1911.04006,
+2019.
+[38] Z. Wang, E.P. Simoncelli, and A.C. Bovik, “Multiscale
+structural similarity for image quality assessment,” in The
+Thrity-Seventh Asilomar Conference on Signals, Systems
+& Computers, 2003, 2003, vol. 2, pp. 1398–1402 Vol.2.
+[39] C.-I. Chang,
+“An information-theoretic approach to
+spectral variability, similarity, and discrimination for
+hyperspectral image analysis,”
+IEEE Transactions on
+Information Theory, vol. 46, no. 5, pp. 1927–1932, 2000.

@@ -1,0 +1,953 @@
+ArtiSG: Functional 3D Scene Graph Construction via
+Human-demonstrated Articulated Objects Manipulation
+Qiuyi Gu∗, Yuze Sheng∗, Jincheng Yu, Jiahao Tang, Xiaolong Shan, Zhaoyang Shen, Tinghao Yi,
+Xiaodan Liang, Xinlei Chen, Yu Wang
+Abstract— 3D scene graphs have empowered robots with
+semantic understanding for navigation and planning, yet they
+often lack the functional information required for physical
+manipulation, particularly regarding articulated objects. Ex-
+isting approaches for inferring articulation mechanisms from
+static observations are prone to visual ambiguity, while methods
+that estimate parameters from state changes typically rely on
+constrained settings such as fixed cameras and unobstructed
+views. Furthermore, fine-grained functional elements like small
+handles are frequently missed by general object detectors. To
+bridge this gap, we present ArtiSG, a framework that constructs
+functional 3D scene graphs by encoding human demonstrations
+into structured robotic memory. Our approach leverages a robust
+articulation data collection pipeline utilizing a portable setup to
+accurately estimate 6-DoF articulation trajectories and axes even
+under camera ego-motion. We integrate these kinematic priors
+into a hierarchical and open-vocabulary graph while utilizing
+interaction data to discover inconspicuous functional elements
+missed by visual perception. Extensive real-world experiments
+demonstrate that ArtiSG significantly outperforms baselines in
+functional element recall and articulation estimation precision.
+Moreover, we show that the constructed graph serves as a
+reliable functional memory that effectively guides robots to
+perform language-directed manipulation tasks in real-world
+environments containing diverse articulated objects.
+I. INTRODUCTION
+Scene understanding is fundamental for robots operating in
+complex and unstructured environments. Recent research on
+3D scene graphs has made significant progress in semantic
+understanding, enabling applications such as language-guided
+object retrieval [1], [2], navigation [3], [4], and planning
+[5], [6]. However, real-world manipulation requires robots
+to go beyond mere semantic categorization and master the
+physical properties of their surroundings, particularly those of
+functionally intricate articulated objects [7]. This functional
+awareness is essential to bridge perception with action,
+facilitating physically grounded and task-aware interactions
+in human-centric environments. Motivated by this necessity,
+our work aims to augment 3D scene graphs with functional
+information derived from articulated objects.
+Understanding object articulation remains a longstanding
+challenge, primarily due to the vast diversity in visual
+appearance and internal kinematic mechanisms. Recent data-
+driven approaches [8]–[10] have attempted to infer articulation
+trajectories directly from static visual observations. However,
+Qiuyi Gu, Yuze Sheng, Jincheng Yu, Jiahao Tang, Xiaolong Shan,
+Zhaoyang Shen, Xinlei Chen, and Yu Wang are with the Tsinghua University,
+China. Tinghao Yi is with the University of Science and Technology of
+China and Openmind, China. Xiaodan Liang and Qiuyi Gu are with the
+Pengcheng Laboratory, China.
+∗Contributed equally to this work.
+Fig. 1.
+Constructing Functional Scene Graphs via Human Demon-
+stration. The bottom film strips show our manipulation sequences using
+a custom UMI gripper. From these sequences, we extract articulation
+trajectories and estimate axes, registering them to the corresponding element
+nodes in the graph. This structured representation enables open-vocabulary
+queries to locate functional elements and provides actionable priors for robot
+manipulation.
+these methods often struggle with visual ambiguities [11],
+where objects with distinct mechanisms share highly similar
+appearances. Another line of research [12]–[14] estimates
+axes of articulated objects by observing state changes before
+and after manipulation. Yet, these approaches typically rely
+on constrained settings, such as unobstructed views and
+fixed camera perspectives, which are difficult to guarantee in
+unconstrained real-world scenarios.
+A further challenge lies in guiding robots to perform
+effective interactions with articulated objects in complex
+scenes, which necessitates accurate contact with functional
+elements like handles or buttons. These functional elements
+are often too fine-grained to be reliably detected by general
+object detectors. To address this, prior works [7], [15] rely on
+collecting and annotating custom datasets to train specialized
+detectors, which often suffer from poor generalization to
+novel objects and environments. More recent approaches
+[16], [17] turn to vision foundation models for functional
+element segmentation and deal with multi-view semantic
+inconsistency when lifting 2D segmentations into 3D.
+To tackle the challenges above, we draw inspiration
+from the fact that humans often learn by observing others’
+arXiv:2512.24845v1 [cs.RO] 31 Dec 2025
+
+manipulations—a capability yet to be fully leveraged for
+robotic functional scene understanding. To bridge this gap,
+we present ArtiSG, a framework designed to encode observed
+human manipulations into a structured scene graph, serving
+as robotic memory to guide subsequent interactions with
+articulated objects. As illustrated in Fig. 1, ArtiSG possesses
+four key characteristics: 1) a hierarchical graph represen-
+tation, which captures the parent-child relationships between
+objects and their functional elements while allowing various
+attributes, such as articulation axes and trajectories, to be
+attached to nodes, 2) viewpoint-robust articulation tracking
+that supports dynamic observation perspectives by utilizing
+a portable setup and gripper pose tracking algorithms to
+estimate articulation mechanisms from human demonstrations,
+3) interaction-augmented functional element detection
+through integrating visual foundational models with realistic
+manipulation trajectories to better identify inconspicuous
+elements, and 4) open-vocabulary scene construction where
+semantic features are aggregated from multiple optimal views
+for each node via a top-k frame selection mechanism, thereby
+enhancing generalization and applicability.
+In summary, our contributions are as follows:
+• We present a novel functional 3D scene graph construc-
+tion framework that captures functional elements and
+articulation mechanisms of articulated objects by leverag-
+ing vision foundation models and human-demonstrated
+trajectories.
+• We design a viewpoint-robust data collection pipeline
+utilizing a portable setup to extract articulated object
+trajectories during human manipulation and accurately
+estimate articulation axes.
+• We deploy ArtiSG in real-world environments, demon-
+strating its capability to construct functional 3D scene
+graphs and its utility in guiding language-based robot
+manipulation tasks.
+II. RELATED WORK
+A. 3D Scene Graphs
+Pioneered by Armeni et al. [18], 3D scene graphs abstract
+environments into nodes and edges, a structure well-suited for
+encoding attributes and facilitating task planning. While many
+recent works [1]–[6] construct object-level scene graphs that
+support navigation and basic grasping, they often overlook
+the fine-grained functional details required for articulated
+object manipulation. To address this, approaches such as
+FunGraph [15] and OpenFunGraph [16] introduce element-
+level detection via 2D detectors or vision foundation models.
+However, these methods remain limited to static detection.
+They identify where the functional elements are but fail to
+model how they move.
+Integrating human interaction into scene construction
+is an emerging direction. Most relevant work to ours is
+Lost&Found [19], which updates the scene graph by tracking
+human-object interactions. It focuses primarily on object
+tracking, identifying when objects are grasped by humans
+rather than understanding object kinematics. In contrast,
+our framework treats human interaction as a functional
+demonstration, leveraging manipulation trajectories to infer
+and explicitly encode articulation mechanisms into the scene
+graph.
+B. Articulated Object Understanding
+Unlike rigid objects, articulated objects require inferring
+both actionable parts and kinematic constraints. Existing
+works generally fall into two categories. One line of research
+[8]–[10], [20] infers contact poses and articulation trajec-
+tories directly from static visual observations. For instance,
+GFlow [10] and RAM [20] predict motion flows or retrieve
+trajectories based on large-scale datasets. However, relying on
+static inputs makes these methods prone to visual ambiguity,
+failing when objects with similar appearances possess distinct
+internal mechanisms. Another stream of research [7], [14],
+[17] focuses on estimating precise articulation parameters
+by observing state changes. While accurate, these methods
+typically assume constrained settings, such as fixed cam-
+era viewpoints or unobstructed pre- and post-manipulation
+observations, which are impractical for humans operating
+in the wild. Most relevant to our work is ArtiPoint [21], a
+concurrent approach that relaxes some constraints by visually
+tracking object keypoints [22] during manipulation. However,
+tracking textureless or occluded object parts remains fragile
+during dynamic interactions.
+C. Human-demonstrated Manipulation
+Human demonstrations for robots typically stem from in-
+the-wild videos, teleoperation, or portable interfaces. While
+learning from videos [10], [20], [23] offers scalability, it
+suffers from the embodiment gap and lacks high precision.
+Conversely, teleoperation [24] ensures high-quality trajecto-
+ries but relies on specialized hardware, limiting its in-the-wild
+applicability.
+Portable interfaces, such as UMI [25] and FastUMI [26],
+strike a balance by enabling hardware-agnostic data collection
+in diverse environments. While these systems primarily utilize
+wrist-mounted cameras to capture visual data for policy
+learning, our approach adopts a decoupled setup optimized
+for functional scene understanding. We employ a head-
+mounted camera with built-in SLAM that serves a dual
+purpose by collecting posed RGB-D frames to construct
+the static scene graph while tracking the UMI gripper’s
+manipulation trajectories. This design ensures that both the
+environmental geometry and the dynamic articulation data
+are precisely registered within a unified coordinate system,
+maintaining robustness despite the operator’s continuous
+viewpoint changes.
+III. PROBLEM FORMULATION
+We aim to construct a functional 3D scene graph for indoor
+environments populated with articulated objects. Formally,
+we define the scene graph as a tuple G = {N obj, N ele, E}.
+The set of object nodes N obj represents static object bodies.
+Each object node N obj
+i
+∈N obj encapsulates its semantic
+
+Fig. 2.
+System Overview. Our approach to building the functional scene graph for an indoor room unfolds in three stages. Firstly, the construction begins
+with the initialization of an element-aware scene representation, where we aggregate multi-view semantics to detect and generate object and functional
+element nodes that are explicitly visible. Secondly, we leverage a portable setup to track human manipulation, enabling the extraction of precise motion
+trajectories and the estimation of articulation axes for articulated objects. Finally, we perform interaction-augmented graph refinement, utilizing these human
+demonstrations to recover inconspicuous functional elements missed in the initial phase and enrich element nodes with articulation kinematic attributes.
+and geometric attributes, including a category label, an open-
+vocabulary semantic feature, and the associated point cloud.
+The functional element nodes N ele represent actionable
+components. Each node N ele
+j
+∈N ele is characterized by
+a functional label, an articulation type, an articulation axis
+Aj = {pc, pd} that defines its kinematic mechanism, and a
+demonstrated manipulation trajectory Tj = {p1, p2, ..., pn}.
+Here, pc ∈R3 is the center position of the articulation axis
+and pd ∈R3 shows the axis’s direction. Each pk ∈R7
+denotes a 6-DoF pose in the sequence. The set of edges
+E encodes the hierarchical structural relationships, linking
+a functional element node N ele
+j
+to its corresponding parent
+object node N obj
+i
+. This structure supports a one-to-many
+mapping. While each functional element belongs to a unique
+parent object, a single articulated object may possess multiple
+functional elements.
+IV. APPROACH
+We propose ArtiSG, a unified framework that constructs
+functional scene graphs by bridging static visual perception
+with dynamic human interaction. Our approach consists of
+three stages. Functional Scene Graph Initialization establishes
+a semantic foundation by aggregating multi-view observa-
+tions to identify objects and visible functional elements.
+Viewpoint-Robust Articulation Estimation leverages a portable
+interface to capture high-fidelity manipulation trajectories
+and estimate kinematic parameters. Interaction-Augmented
+Graph Refinement fuses these kinematic priors into the graph,
+explicitly registering articulation attributes and discovering
+inconspicuous elements missed during the initial visual scan.
+Fig. 2 provides an overview of our approach.
+A. Functional Scene Graph Initialization
+Object Node Construction: We initiate the process by
+scanning the environment to acquire posed RGB-D mapping
+sequences and then generating the RGB point cloud of the
+scene. To extract object-level instances, we employ an off-
+the-shelf 3D instance segmentation model [27] and then
+utilize DBSCAN clustering [28] to remove outliers from
+each instance. The resulting denoised point cloud constitutes
+the geometric body of an object, which is instantiated as an
+object node N obj
+i
+in the graph, serving as the parent entity
+for subsequent functional element association.
+Top-k Frame Selection: Detecting fine-grained functional
+elements and extracting semantic features often rely on
+2D detection [29], [30] and segmentation models [31], as
+well as vision–language encoders [32], [33]. However, the
+performance of these models suffers inevitable degradation
+when target objects are only partially visible or heavily
+occluded, which is very common when observing elements on
+articulated objects. Therefore, selecting optimal viewpoints
+that provide sufficient visibility is pivotal. For each object
+node N obj
+i
+, we compute a contribution score st,i for every
+frame t in the RGB-D sequence [34]. Specifically, we project
+each object’s 3D points onto the camera imaging plane using
+the camera’s extrinsic and intrinsic parameters. Points falling
+outside the image boundary or exhibiting significant depth
+inconsistency which implies occlusion, are filtered out. The
+contribution st,i is defined as the percentage of valid points
+retained on the imaging plane relative to the object’s total
+points. Based on these scores, we select the top-k frames that
+offer the most comprehensive observations for each object.
+Element Node and Edge Construction: Leveraging the
+selected top-k RGB frames, we proceed to identify functional
+elements. For each frame in top-k, we crop the image based
+on the bounding box of the valid projected points. We then
+employ Grounding DINO [29] with predefined prompts (i.e.,
+“handle”, “knob”) to detect functional regions, followed by
+SAM [31] to obtain fine-grained pixel-level masks. These 2D
+
+part masks are back-projected into 3D space and observations
+from multiple views are aggregated into a unified point cloud.
+This multi-view lifting strategy enables us to capture small
+functional elements that are typically indistinguishable in
+3D segmentation. To ensure geometric quality, we apply
+DBSCAN clustering again to the merged point cloud to
+filter out noise, resulting in a clean representation for each
+functional element node N ele
+j . Notably, this object-centric
+processing strategy eliminates the need for a separate edge
+identification step. Since functional elements are detected
+within the visual context of a specific object N obj
+i
+, the
+belonging edges Eij are naturally established.
+Open-vocabulary Feature Extraction: Similar to geometric
+construction, we utilize the cropped top-k frames to compute
+open-vocabulary features for both object and element nodes.
+For functional elements, we slightly expand the crop bound-
+ing box to include surrounding context, preventing feature
+degradation caused by insufficient pixel coverage. We extract
+features using SigLIP 2 [33] and aggregate them into a single
+node feature by performing a weighted average based on the
+frame contribution scores st,i. This weighting strategy ensures
+that views with higher visibility contribute more to the final
+semantic representation, enhancing robustness against visual
+ambiguity.
+B. Viewpoint-robust Articulation Estimation
+Hardware setup: Our hardware setup is designed to cap-
+ture high-fidelity manipulation data despite ego-motion. We
+employ a head-mounted RGB-D camera to visually track a
+handheld UMI gripper [25] fitted with a custom polyhedral
+sphere. As shown in Fig. 3, this sphere provides a dense
+set of ArUco markers that allows the camera to estimate the
+gripper’s 6-DoF pose, while the UMI gripper is a 3D-printed
+parallel jaw device. We utilize this rigid gripper interface
+instead of direct hand tracking for a critical reason. Human
+hand-object interactions involve complex and varying contact
+points, making it difficult to define a consistent reference
+frame for the object’s motion. In contrast, the UMI gripper
+acts as a rigid body that stays tightly coupled with the
+functional element during manipulation. Therefore, tracking
+the gripper tip provides a precise proxy for the articulated
+element’s trajectory. To ensure robustness during mobile
+operation, the camera utilizes built-in SLAM to establish a
+globally consistent world frame. This combination guarantees
+accurate trajectory recording even when the operator moves
+freely in the environment.
+Trajectory Tracking: Our goal is to recover the 6-DoF
+trajectory of the gripper tip in the world frame, which serves
+as the demonstrated trajectory Tj for the functional element
+node. Given RGB-D manipulation sequences from the head-
+mounted camera, we detect visible ArUco markers on the
+sphere. We establish 2D-3D correspondences by mapping the
+detected marker IDs {u2D
+i } to their pre-calibrated 3D corner
+positions {P 3D
+i
+} on the polyhedral model. An initial pose
+estimate Tcam←sphere ∈SE(3) is obtained via a Perspective-
+n-Point (PnP) solver [35]:
+Tcam←sphere = solvePnP({P 3D
+i
+}, {u2D
+i }, K)
+(1)
+26-sided ArUco
+tracking sphere
+UMI gripper tip
+OptiTrack retro-
+reflective markers
+Fig. 3.
+Hardware setup for articulation data collection. The handheld
+UMI gripper is equipped with a custom 26-sided ArUco tracking sphere,
+enabling robust 6-DoF pose estimation via a head-mounted camera. OptiTrack
+retro-reflective markers are attached to the cabinet door to provide ground
+truth poses for the quantitative evaluation in Section V-B.
+where K is the camera intrinsic matrix. This local pose is
+then transformed into the global frame using the real-time
+camera pose Tworld←cam:
+Tworld←sphere = Tworld←cam · Tcam←sphere
+(2)
+To suppress jitter caused by hand tremors or detection noise,
+we process the raw world-frame poses using an adaptive
+Kalman filter [36]. Crucially, our filter addresses the cyclic
+nature of rotation by performing rotation unwrapping, which
+prevents sudden numerical jumps and ensures smooth angular
+transitions. Furthermore, we adaptively adjust the filter’s
+confidence based on the PnP reprojection error. This enables
+the system to rely heavily on high-quality detections, while
+automatically prioritizing smooth prediction when markers
+are partially occluded. Since the sphere center has a static
+physical offset with the gripper’s tip, we apply a pre-calibrated
+rigid-body transformation Tsphere←tip to obtain the final end-
+effector pose:
+Tworld←tip = Tworld←sphere · Tsphere←tip
+(3)
+The resulting sequence forms the final smoothed manipulation
+trajectory Tj.
+Articulation Axis Estimation: Given the articulation trajec-
+tory Tj, we infer the kinematic mechanism of the manipulated
+object. We consider two primary articulation types, prismatic
+and revolute, and employ an analytical fitting approach based
+on Principal Component Analysis (PCA) and non-linear
+optimization. For the prismatic joint where motion follows a
+3D line, we apply Singular Value Decomposition (SVD) to
+the centered points of Tj. The axis direction pd is identified
+as the eigenvector associated with the largest singular value,
+while the axis center pc is defined as the centroid of the
+trajectory. For the revolute joint where motion follows a
+circular arc, we adopt a two-stage process. We first determine
+the rotation axis direction pd (i.e., the plane normal) using the
+eigenvector associated with the smallest singular value from
+SVD. We then project the points onto the plane orthogonal
+to pd and solve for the rotation center pc via non-linear
+least squares optimization to minimize radial deviation. The
+final joint type is selected by comparing the reconstruction
+residuals of both models while applying a penalty for model
+complexity. As a result, we obtain the articulation type and
+axis parameters Aj = {pc, pd}.
+
+C. Interaction-augmented Graph Refinement
+Trajectory-to-Node Association Having estimated the ar-
+ticulation parameters and trajectory, the final step grounds
+this kinematic information to the static scene graph via
+geometric matching. We extract the trajectory’s starting pose
+p1 representing the initial physical contact and compute its
+Euclidean distance to the centroids of all spatially adjacent
+functional element nodes. The nearest neighbor is identified,
+and its distance is evaluated against a spatial threshold
+to determine whether the demonstration corresponds to an
+existing visual detection or reveals a previously missed
+functional element.
+Graph Update Based on the association result, we perform
+either attribute attachment or node instantiation. If the nearest
+node lies within the threshold, we confirm a successful match
+and register the inferred articulation axis Aj, joint type,
+and the full trajectory Tj as dynamic functional attributes
+of that node. Conversely, if no node is found within the
+threshold, it indicates that the functional element is missed in
+the initialization step due to occlusion or its implicit nature.
+In this scenario, we instantiate a new functional element
+node centered at p1 and explicitly attach the kinematic
+parameters while linking it to the nearest parent object node.
+This mechanism ensures the scene graph captures a complete
+set of functional affordances by effectively compensating for
+visual perception failures through physical interaction.
+V. EXPERIMENTS
+In this section, we evaluate ArtiSG in three aspects: 1)
+scene graph construction quality, assessing the accuracy of
+functional element detection and open-vocabulary semantic
+representation; 2) articulation tracking precision, verifying the
+robustness of our hardware-assisted pipeline against several
+baselines; 3) real-world manipulation utility, demonstrating
+the effectiveness of the constructed graph in guiding manipu-
+lation tasks.
+A. Functional Scene Graph Construction Evaluation
+Dataset: Behavior-1k [37] is an Isaac Sim-based simulation
+platform widely used in studies related to 3D scene under-
+standing and robot manipulation. It offers a variety of indoor
+environments, from which we select three typical scenes.
+We also conduct experiments in real-world environments,
+including a kitchen, an office pantry, and a tabletop scene. In
+total, our evaluation includes 79 articulated objects and 139
+functional elements.
+Baselines: We compare the functional element detection
+ability in our scene graph construction approach with Open-
+FunGraph [16] and Lost&Found [19]. All the following
+experiments in Section V are conducted on a desktop PC
+equipped with an Intel I7-13790F CPU and an Nvidia RTX
+4090 GPU.
+Metrics: We evaluate the accuracy of functional 3D scene
+graphs using the precision rate, recall rate, and F1 value of
+functional element nodes. We also utilize the query success
+rate R@k as defined in OpenFunGraph [16]. This metric
+evaluates object retrieval capability by considering the top-k
+TABLE I
+FUNCTIONAL 3D SCENE GRAPHS EVALUATION
+Scene
+Method
+Fun. Ele. Node
+Overall Node
+R
+P
+F1
+R@1
+R@5
+Simulation
+Lost&Found [19]
+25.5
+86.1
+39.4
+27.3
+29.2
+OpenFunGraph [16]
+39.7
+66.1
+49.6
+34.0
+41.8
+ArtiSG w.o human
+78.6
+70.4
+74.2
+59.0
+73.2
+ArtiSG(ours)
+82.6
+71.4
+76.6
+61.7
+75.9
+Real-world
+Lost&Found [19]
+16.3
+27.8
+20.6
+31.0
+34.5
+OpenFunGraph [16]
+45.7
+18.4
+26.3
+50.0
+63.1
+ArtiSG w.o human
+55.8
+41.0
+47.2
+60.7
+70.2
+ArtiSG(ours)
+88.5
+51.6
+65.2
+79.8
+89.3
+Query 1: “Fun. ele. of the bottom cabinet.”
+Query 2: “All handles of the drawer.”
+Query 3: “Fun. ele. of the water cooler.”
+Query 4: “Handle of the oven.”
+Ground-truth
+ArtiSG
+Lost&Found
+OpenFunGraph
+Fig. 4.
+Qualitative comparison of open-vocabulary querying per-
+formance. We compare the retrieval results of ArtiSG against baselines
+Lost&Found and OpenFunGraph in both real-world (left) and simulated
+(right) scenes. Green dots indicate the ground truth functional elements.
+As shown, our method accurately localizes target elements with high
+recall, whereas baselines often suffer from missed detections or imprecise
+localization.
+most likely objects in 3D scene graphs, with the retrieval
+counted as successful if the correct object is among them.
+Results: As presented in Tab. I, ArtiSG demonstrates superior
+performance in functional scene graph construction across
+both simulated and real-world environments. In terms of
+functional element node, Lost&Found achieves high precision
+in simulation but suffers from significantly low recall. This is
+primarily because it relies on a lightweight model specialized
+for detecting drawers with handles, failing to generalize to
+functional parts on other object categories. OpenFunGraph,
+by leveraging powerful vision foundation models such as
+RAM++ [38] and Grounding DINO, improves recall com-
+pared to Lost&Found. However, it still struggles to detect
+inconspicuous or implicit functional elements, resulting in
+a recall of only 45.7% in real-world scenarios. In contrast,
+
+TABLE II
+QUANTITATIVE COMPARISON OF ARTICULATION ESTIMATION
+PERFORMANCE.
+Setting
+Method
+Prismatic joints
+Revolute joints
+Terr
+(cm) ↓
+θerr
+(deg) ↓
+Terr
+(cm) ↓
+θerr
+(deg) ↓
+derr
+(cm) ↓
+Static
+GFlow [10]
+-
+16.610
+-
+38.084 13.122
+CoTracker [22] 14.342
+4.145
+7.310
+4.976
+1.883
+Mediapipe [39] 1.788
+3.703
+3.826
+4.066
+2.219
+ArtiSG(ours)
+0.976
+1.026
+1.092
+1.627
+0.811
+Dynamic
+CoTracker [22]
+7.967
+1.541
+11.039
+5.016
+3.619
+Mediapipe [39] 1.083
+2.291
+2.953
+6.644
+3.757
+ArtiSG(ours)
+0.820
+1.314
+0.899
+2.322
+1.225
+ArtiSG achieves the highest F1-scores and substantially higher
+recall. Even without human demonstrations, our method
+outperforms baselines, and introducing human interaction
+cues further boosts real-world recall from 55.8% to 88.5%,
+validating that observing human manipulation effectively
+uncovers hard-to-detect functional elements. Regarding open-
+vocabulary node retrieval, ArtiSG consistently outperforms
+baselines in both R@1 and R@5 metrics. This superiority
+stems from two factors. Firstly, our method successfully
+constructs a larger set of functional element nodes, providing
+a more complete candidate pool. Secondly, our top-k frame
+selection mechanism aggregates semantic features from
+optimal viewpoints, effectively mitigating visual noise and
+resulting in more accurate open-vocabulary representations
+compared to single-view predictions. Visualization results
+of the open-vocabulary query comparisons are illustrated in
+Fig. 4.
+B. Viewpoint-robust Articulation Tracking Evaluation
+Setup: We validate the precision of our articulation estimation
+method using a hardware setup comprising an iPhone 12 Pro
+for camera pose estimation and a UMI gripper equipped
+with an ArUco sphere for end-effector tracking. To quantify
+performance, we utilize an OptiTrack motion capture system
+to acquire ground truth trajectories. The evaluation is con-
+ducted under two settings: a static view, where the operator
+remains stationary to minimize ego-motion, and a dynamic
+view, where the operator moves naturally during manipulation
+to introduce realistic camera jitter and viewpoint changes.
+Baselines: We compare our hardware-assisted tracking ap-
+proach against three representative baselines covering hand-
+tracking [39], point-tracking [22], and static inference [10]
+paradigms. First, we evaluate Mediapipe [39], a widely-
+used vision-based hand-tracking method, where the detected
+fingertip keypoints are treated as the interaction points.
+Second, we include CoTracker [22], a state-of-the-art vision
+foundation model for dense point tracking. For this baseline,
+we initialize keypoints on the moving part of the articulated
+objects in the first frame, track their 2D motion throughout
+the sequence, and lift them to 3D using depth maps and
+camera extrinsics to fit the articulation axis. To ensure a fair
+Trajectory 
+World
+Camera
+Sphere
+(a)
+(b)
+(c)
+(d)
+Fig. 5.
+Visualization of the viewpoint-robust articulation tracking
+process. Subfigures (a) and (b) depict the start and end phases of manipulating
+a prismatic joint, while (c) and (d) show the manipulation of a revolute
+joint. The distinct coordinate frames for the World, Camera, and Sphere
+are highlighted to illustrate our decoupled tracking setup. The recovered
+gripper trajectory is visualized as an orange curve, demonstrating smooth
+and precise tracking performance.
+comparison, we substitute both trajectories from Mediapipe
+and CoTracker for the marker-based gripper pose within our
+pipeline while keeping the downstream axis estimation steps
+unchanged. Finally, we compare against GFlow [10], a data-
+driven method that infers articulation attributes directly from
+static images. Note that since GFlow performs inference on
+single frames without temporal tracking, it is excluded from
+the dynamic trajectory evaluation.
+Metrics: To comprehensively evaluate the performance of our
+articulation tracking, we report three key metrics. We calculate
+the trajectory RMSE Terr by measuring the Euclidean distance
+error between the estimated and ground truth trajectories. The
+accuracy of the articulation axis estimation is also assessed
+by the axis angular error θerr, which measures the deviation
+in the direction of the estimated axis, and the axis position
+error derr, which quantifies the distance deviation of the axis
+origin for revolute joints.
+Results: To visually demonstrate the effectiveness of our
+pipeline, Fig. 5 illustrates the coordinate frame transforma-
+tions and the recovered trajectories for both prismatic and
+revolute joints during manipulation. Quantitative comparisons
+are presented in Tab. II. Overall, ArtiSG demonstrates superior
+accuracy and robustness compared to the above baselines. 1)
+Comparison with Static Inference: As shown in the static
+setting, GFlow struggles to accurately estimate articulation
+parameters, yielding high angular errors. This highlights
+the inherent ambiguity of inferring kinematics from static
+visual observations alone, validating our choice of using
+interaction trajectories. 2) Tracking Accuracy: Compared
+to hand-tracking and point-tracking baselines, our method
+significantly reduces tracking errors. For instance, in the
+static setting for revolute joints, we reduce the trajectory
+RMSE from 7.31 cm (CoTracker) and 3.83 cm (Mediapipe)
+to 1.09 cm, and the axis position error from 1.88 cm
+
+User: “Open the [object].”
+No explicit
+func. element
+Visually 
+ambiguous 
+Obj1
+Obj2
+Obj3
+Unusual 
+kinematics 
+ArtiSG-assisted 
+Manipulation
+Fig. 6.
+Demonstration of ArtiSG-assisted robot manipulation. We
+evaluate the system on objects with inconspicuous elements (Obj1), unusual
+kinematics (Obj2), and visual ambiguity (Obj3). While VLMs struggle to
+correctly infer the articulation mechanisms from appearance alone (e.g.,
+mistaking the flip-down door of Obj2 for a drawer), ArtiSG-assisted method
+leverages the stored “memory” of human demonstrations to retrieve precise
+6-DoF end-effector trajectories, successfully executing the opening tasks
+(Right).
+and 2.22 cm to 0.81 cm. This improvement stems from
+our rigid-body tracking approach, which bypasses the jitter
+and surface contact variations common in hand tracking
+as well as the performance degradation due to textureless
+surfaces and occlusion in point tracking, enabling reliable
+kinematic inference. 3) Robustness to Dynamics: Our
+pipeline maintains high accuracy even in a dynamic setting.
+This robustness is attributed to our decoupled setup: the head-
+mounted camera tracks the markers on the UMI gripper,
+which ensures high-quality pose estimation regardless of
+the operator’s body movement. 4) Performance Across
+Joint Types: While all methods perform reasonably well
+on simpler prismatic joints, the advantage of ArtiSG is
+most pronounced on geometrically complex revolute joints.
+Accurately estimating the rotation axis requires precise arc
+fitting, which is sensitive to noise. Our method effectively
+handles this complexity, reducing the trajectory RMSE by
+approximately 70% compared to the best-performing baseline
+Mediapipe in dynamic scenarios.
+C. Application: ArtiSG-assisted Robot Manipulation
+To demonstrate the downstream utility of ArtiSG, we
+conduct real-world experiments using a Franka Research
+3 robot arm. The robot is tasked with responding to natural
+language commands “Open the [object]” on a set of chal-
+lenging articulated objects shown in Fig. 6. These objects
+are specifically selected to highlight perception difficulties,
+including inconspicuous functional elements (Obj1, a
+microwave without explicit functional elements), unusual
+kinematics (Obj2, a flip-down box resembling a drawer),
+and visual ambiguity (Obj3, a cabinet with unclear opening
+mechanisms).
+We compare our approach against a state-of-the-art VLM
+[40]. While powerful, VLM relies on static visual inference
+and frequently fails in these scenarios. For instance, it
+struggles to pinpoint interaction regions that lacked explicit
+visual features on Obj1 or hallucinates incorrect pulling
+directions for the flip-down mechanism of Obj2, leading
+to task failures.
+In contrast, ArtiSG leverages the stored memory of human
+interactions to bypass these perceptual ambiguities. Upon
+receiving a command, we query the graph to retrieve the target
+functional element node and its demonstrated articulation
+trajectory. As visualized in Fig. 6, by guiding the robot
+to follow this trajectory, ArtiSG successfully executes the
+manipulation tasks.
+VI. CONCLUSION AND FUTURE WORK
+In this work, we introduced ArtiSG, a novel framework that
+bridges the gap between semantic scene understanding and
+physical interaction by encoding human demonstrations into
+functional 3D scene graphs. By leveraging a viewpoint-robust
+tracking pipeline and an interaction-augmented refinement
+method, our system effectively resolves the visual ambiguities
+inherent in static perception and captures inconspicuous
+functional elements often missed by general detectors. Exten-
+sive real-world experiments demonstrate that ArtiSG serves
+as a reliable functional memory, empowering robots to
+execute precise language-guided manipulation tasks on diverse
+articulated objects. In the future, we plan to evolve the
+hardware setup by investigating markerless visual tracking
+solutions to create a more portable data collection interface.
+Furthermore, we aim to integrate ArtiSG with general robot
+manipulation policies, utilizing the structured kinematic priors
+stored in our graph as explicit guidance to facilitate robust
+and efficient task execution.
+REFERENCES
+[1] L. Ge, X. Zhu, Z. Yang, and X. Li, “DynamicGSG: Dynamic 3d
+gaussian scene graphs for environment adaptation,” in 2025 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS),
+2025, pp. 2232–2239.
+[2] Q. Gu, Z. Ye, J. Yu, J. Tang, T. Yi, Y. Dong, J. Wang, J. Cui, X. Chen,
+and Y. Wang, “MR-COGraphs: Communication-efficient multi-robot
+open-vocabulary mapping system via 3d scene graphs,” IEEE Robotics
+and Automation Letters, 2025.
+[3] A. Werby, C. Huang, M. B¨uchner, A. Valada, and W. Burgard,
+“Hierarchical open-vocabulary 3d scene graphs for language-grounded
+robot navigation,” Robotics: Science and Systems, 2024.
+[4] J. Chen, G. Li, S. Kumar, B. Ghanem, and F. Yu, “How to not train your
+dragon: Training-free embodied object goal navigation with semantic
+frontiers,” Proceedings of Robotics: Science and System XIX, p. 075,
+2023.
+[5] Q. Gu, A. Kuwajerwala, S. Morin, K. M. Jatavallabhula, B. Sen,
+A. Agarwal, C. Rivera, W. Paul, K. Ellis, R. Chellappa et al.,
+“Conceptgraphs: Open-vocabulary 3d scene graphs for perception and
+planning,” in 2024 IEEE International Conference on Robotics and
+Automation (ICRA).
+IEEE, 2024, pp. 5021–5028.
+[6] K. Rana, J. Haviland, S. Garg, J. Abou-Chakra, I. Reid, and N. Suen-
+derhauf, “Sayplan: Grounding large language models using 3d scene
+graphs for scalable robot task planning,” in 7th Annual Conference on
+Robot Learning, 2023.
+[7] C.-C. Hsu, Z. Jiang, and Y. Zhu, “Ditto in the house: Building
+articulation models of indoor scenes through interactive perception,” in
+IEEE International Conference on Robotics and Automation (ICRA),
+2023.
+
+[8] R. Wu, Y. Zhao, K. Mo, Z. Guo, Y. Wang, T. Wu, Q. Fan, X. Chen,
+L. Guibas, and H. Dong, “VAT-mart: Learning visual action trajectory
+proposals for manipulating 3d ARTiculated objects,” in International
+Conference on Learning Representations, 2022. [Online]. Available:
+https://openreview.net/forum?id=iEx3PiooLy
+[9] X. Zhang, Y. Wang, R. Wu, K. Xu, Y. Li, L. Xiang, H. Dong, and Z. He,
+“Adaptive articulated object manipulation on the fly with foundation
+model reasoning and part grounding,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision, 2025, pp. 13 032–13 042.
+[10] C. Yuan, C. Wen, T. Zhang, and Y. Gao, “General flow as foundation
+affordance for scalable robot learning,” in Conference on Robot
+Learning.
+PMLR, 2025, pp. 1541–1566.
+[11] Y. Li, W. H. Leng, Y. Fang, B. Eisner, and D. Held, “Flowbothd: History-
+aware diffuser handling ambiguities in articulated objects manipulation,”
+in Conference on Robot Learning.
+PMLR, 2025, pp. 5271–5293.
+[12] Z. Jiang, C.-C. Hsu, and Y. Zhu, “Ditto: Building digital twins of
+articulated objects from interaction,” in Conference on Computer Vision
+and Pattern Recognition (CVPR), 2022.
+[13] J. Liu, A. Mahdavi-Amiri, and M. Savva, “PARIS: Part-level recon-
+struction and motion analysis for articulated objects,” in Proceedings
+of the IEEE International Conference on Computer Vision (ICCV),
+2023.
+[14] Y. Liu, B. Jia, R. Lu, J. Ni, S.-C. Zhu, and S. Huang, “Building
+interactable replicas of complex articulated objects via gaussian
+splatting,” in The Thirteenth International Conference on Learning
+Representations, 2025.
+[15] D. Rotondi, F. Scaparro, H. Blum, and K. O. Arras, “Fungraph:
+Functionality aware 3d scene graphs for language-prompted scene
+interaction,” IEEE/RSJ International Conference on Intelligent Robots
+and Systems (IROS), 2025.
+[16] C. Zhang, A. Delitzas, F. Wang, R. Zhang, X. Ji, M. Pollefeys, and
+F. Engelmann, “Open-Vocabulary Functional 3D Scene Graphs for
+Real-World Indoor Spaces,” in IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), 2025.
+[17] C. Zhang and G. H. Lee, “Iaao: Interactive affordance learning for
+articulated objects in 3d environments,” in Proceedings of the Computer
+Vision and Pattern Recognition Conference, 2025, pp. 12 132–12 142.
+[18] I. Armeni, Z.-Y. He, J. Gwak, A. R. Zamir, M. Fischer, J. Malik, and
+S. Savarese, “3d scene graph: A structure for unified semantics, 3d
+space, and camera,” in Proceedings of the IEEE/CVF international
+conference on computer vision, 2019, pp. 5664–5673.
+[19] T. Behrens, R. Zurbr¨ugg, M. Pollefeys, Z. Bauer, and H. Blum, “Lost &
+found: Tracking changes from egocentric observations in 3d dynamic
+scene graphs,” IEEE Robotics and Automation Letters, 2025.
+[20] Y. Kuang, J. Ye, H. Geng, J. Mao, C. Deng, L. Guibas, H. Wang, and
+Y. Wang, “RAM: Retrieval-based affordance transfer for generalizable
+zero-shot robotic manipulation,” in Conference on Robot Learning.
+PMLR, 2025, pp. 547–565.
+[21] A. Werby, M. Buechner, A. Roefer, C. Huang, W. Burgard, and
+A. Valada, “Articulated object estimation in the wild,” Conference
+on Robot Learning (CoRL), 2025.
+[22] N. Karaev, I. Makarov, J. Wang, N. Neverova, A. Vedaldi, and
+C. Rupprecht, “CoTracker3: Simpler and better point tracking by
+pseudo-labelling real videos,” in Proc. arXiv:2410.11831, 2024.
+[23] Y. Ju, K. Hu, G. Zhang, G. Zhang, M. Jiang, and H. Xu, “Robo-abc:
+Affordance generalization beyond categories via semantic correspon-
+dence for robot manipulation,” in European Conference on Computer
+Vision.
+Springer, 2025, pp. 222–239.
+[24] S. Wu, Y. Zhu, Y. Huang, K. Zhu, J. Gu, J. Yu, Y. Shi, and J. Wang,
+“Afforddp: Generalizable diffusion policy with transferable affordance,”
+in Proceedings of the Computer Vision and Pattern Recognition
+Conference, 2025, pp. 6971–6980.
+[25] C. Chi, Z. Xu, C. Pan, E. Cousineau, B. Burchfiel, S. Feng, R. Tedrake,
+and S. Song, “Universal manipulation interface: In-the-wild robot
+teaching without in-the-wild robots,” in Proceedings of Robotics:
+Science and Systems (RSS), 2024.
+[26] Zhaxizhuoma, K. Liu, C. Guan, Z. Jia, Z. Wu, X. Liu, T. Wang,
+S. Liang, P. CHEN, P. Zhang, H. Song, D. Qu, D. Wang, Z. Wang,
+N. Cao, Y. Ding, B. Zhao, and X. Li, “FastUMI: A scalable and
+hardware-independent universal manipulation interface with dataset,”
+in 9th Annual Conference on Robot Learning, 2025. [Online].
+Available: https://openreview.net/forum?id=RUSscFSEfD
+[27] J. Schult, F. Engelmann, A. Hermans, O. Litany, S. Tang, and B. Leibe,
+“Mask3D: Mask Transformer for 3D Semantic Instance Segmentation,”
+2023.
+[28] M. Ester, H.-P. Kriegel, J. Sander, X. Xu et al., “A density-based
+algorithm for discovering clusters in large spatial databases with noise,”
+in kdd, vol. 96, no. 34, 1996, pp. 226–231.
+[29] S. Liu, Z. Zeng, T. Ren, F. Li, H. Zhang, J. Yang, Q. Jiang, C. Li,
+J. Yang, H. Su, J. Zhu, and L. Zhang, “Grounding DINO: Marrying
+DINO with Grounded Pre-training for Open-Set Object Detection,”
+in Computer Vision – ECCV 2024, A. Leonardis, E. Ricci, S. Roth,
+O. Russakovsky, T. Sattler, and G. Varol, Eds.
+Cham: Springer Nature
+Switzerland, 2025, pp. 38–55.
+[30] X. Zhou, R. Girdhar, A. Joulin, P. Kr¨ahenb¨uhl, and I. Misra, “Detecting
+twenty-thousand classes using image-level supervision,” in European
+Conference on Computer Vision.
+Springer, 2022, pp. 350–368.
+[31] A. Kirillov, E. Mintun, N. Ravi, H. Mao, C. Rolland, L. Gustafson,
+T. Xiao, S. Whitehead, A. C. Berg, W.-Y. Lo et al., “Segment anything,”
+in Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2023, pp. 4015–4026.
+[32] A. Radford, J. W. Kim, C. Hallacy, A. Ramesh, G. Goh, S. Agarwal,
+G. Sastry, A. Askell, P. Mishkin, J. Clark et al., “Learning transferable
+visual models from natural language supervision,” in International
+conference on machine learning.
+PMLR, 2021, pp. 8748–8763.
+[33] M. Tschannen, A. Gritsenko, X. Wang, M. F. Naeem, I. Alabdulmohsin,
+N. Parthasarathy, T. Evans, L. Beyer, Y. Xia, B. Mustafa, O. H´enaff,
+J. Harmsen, A. Steiner, and X. Zhai, “Siglip 2: Multilingual vision-
+language encoders with improved semantic understanding, localization,
+and dense features,” arXiv preprint, 2025, arXiv:2502.14786 [cs.CV].
+[34] S. Koch, N. Vaskevicius, M. Colosi, P. Hermosilla, and T. Ropinski,
+“Open3DSG: Open-vocabulary 3d scene graphs from point clouds with
+queryable objects and open-set relationships,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), June 2024.
+[35] G. Bradski, “The OpenCV library,” Dr. Dobb’s Journal of Software
+Tools, vol. 25, no. 11, pp. 120–125, 2000.
+[36] R. E. Kalman, “A new approach to linear filtering and prediction
+problems,” 1960.
+[37] C. Li, R. Zhang, J. Wong, C. Gokmen, S. Srivastava, R. Mart´ın-Mart´ın,
+C. Wang, G. Levine, W. Ai, B. Martinez, H. Yin, M. Lingelbach,
+M. Hwang, A. Hiranaka, S. Garlanka, A. Aydin, S. Lee, J. Sun,
+M. Anvari, M. Sharma, D. Bansal, S. Hunter, K.-Y. Kim, A. Lou,
+C. R. Matthews, I. Villa-Renteria, J. H. Tang, C. Tang, F. Xia, Y. Li,
+S. Savarese, H. Gweon, C. K. Liu, J. Wu, and L. Fei-Fei, “Behavior-
+1k: A human-centered, embodied ai benchmark with 1,000 everyday
+activities and realistic simulation,” arXiv preprint arXiv:2403.09227,
+2024.
+[38] Y. Zhang, X. Huang, J. Ma, Z. Li, Z. Luo, Y. Xie, Y. Qin, T. Luo, Y. Li,
+S. Liu, Y. Guo, and L. Zhang, “Recognize anything: A strong image
+tagging model,” in 2024 IEEE/CVF Conference on Computer Vision
+and Pattern Recognition Workshops (CVPRW), 2024, pp. 1724–1732.
+[39] C. Lugaresi, J. Tang, H. Nash, C. McClanahan, E. Uboweja, M. Hays,
+F. Zhang, C.-L. Chang, M. G. Yong, J. Lee et al., “Mediapipe:
+A framework for building perception pipelines,” arXiv preprint
+arXiv:1906.08172, 2019.
+[40] OpenAI,
+“Gpt-5
+technical
+report,”
+https://cdn.openai.com/
+gpt-5-system-card.pdf, 2025, large language model.

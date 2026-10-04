@@ -1,0 +1,1574 @@
+Spatial-aware Vision Language Model for Autonomous Driving
+Weijie Wei1,2,∗
+Zhipeng Luo1,†
+Ling Feng1
+Venice Erin Liong1,‡
+1Motional
+2University of Amsterdam
+Abstract
+While Vision-Language Models (VLMs) show significant
+promise for end-to-end autonomous driving by leveraging
+the common sense embedded in language models, their re-
+liance on 2D image cues for complex scene understanding
+and decision-making presents a critical bottleneck for safety
+and reliability. Current image-based methods struggle with
+accurate metric spatial reasoning and geometric inference,
+leading to unreliable driving policies. To bridge this gap,
+we propose LVLDrive (LiDAR-Vision-Language), a novel
+framework specifically designed to upgrade existing VLMs
+with robust 3D metric spatial understanding for autonomous
+driving by incoperating LiDAR point cloud as an extra in-
+put modality. A key challenge lies in mitigating the catas-
+trophic disturbance introduced by disparate 3D data to the
+pre-trained VLMs. To this end, we introduce a Gradual Fu-
+sion Q-Former that incrementally injects LiDAR features,
+ensuring the stability and preservation of the VLM’s existing
+knowledge base. Furthermore, we develop a spatial-aware
+question–answering (SA-QA) dataset to explicitly teach the
+model advanced 3D perception and reasoning capabilities.
+Extensive experiments on driving benchmarks demonstrate
+that LVLDrive achieves superior performance compared to
+vision-only counterparts across scene understanding, met-
+ric spatial perception, and reliable driving decision-making.
+Our work highlights the necessity of explicit 3D metric data
+for building trustworthy VLM-based autonomous systems.
+1. Introduction
+Large vision–language models (VLMs) have recently
+emerged as a promising foundation for end-to-end au-
+tonomous driving systems. By coupling visual perception
+with language-native reasoning and explanation, VLM-based
+agents can describe scenes, justify decisions, and expose in-
+termediate rationales that were opaque in earlier pipelines
+[24, 38, 42, 43]. However, despite rapid progress, a criti-
+cal limitation persists: contemporary VLMs predominantly
+consume 2D imagery and thus struggle with metric spatial
+∗Work done as an intern at Motional. †Project lead. ‡Corresponding
+author.
+VLM
+It is a car at (-0.5, -6.2) and 
+is going to (-3.3, -12.6).
+What is the object in 
+<CAM_BACK_RIGHT, 
+200.8, 22.4, 289.3, 
+251.5>, and where is it 
+going?
+𝓛
+(a) Image-based VLM for autonomous driving.
+LVLDrive
+It is a car at (-0.5, -6.2) and 
+is going to (-3.3, -12.6).
+What is the masked object, and where is it going?
+𝓛
+(b) LVLDrive (Ours).
+Figure 1. (a) Typical image-based VLMs take only images as input
+and train the LLM through image-conditioned question answering.
+In contrast, our LVLDrive leverages both image and LiDAR inputs
+and incorporates carefully designed spatial-aware QAs to encourage
+effective LiDAR integration and enhance spatial understanding.
+understanding—precise distances, extents, occlusions, and
+interactions in 3D. These capabilities are not optional; they
+are prerequisites for safe planning in dense, multi-agent
+urban scenes, especially in autonomous driving. Recent
+benchmarks that isolate spatial queries corroborate this gap,
+showing that strong general-purpose VLMs underperform
+on driving-critical spatial reasoning tasks [46, 57].
+Why is this challenging? Inferring geometry from monoc-
+ular or multi-view images is ill-posed under occlusions, ad-
+verse weather, and viewpoint changes. Even when bird’s-
+eye-view (BEV) features or video context are introduced,
+image-only models tend to confuse appearance with metric
+structure, leading to brittle estimates of range, free space,
+and collision risk. As a result, VLM-based driving agents
+1
+arXiv:2512.24331v1 [cs.CV] 30 Dec 2025
+
+may produce fluent rationales yet fail at the quantitative spa-
+tial inferences that underwrite reliable control. LiDAR offers
+a complementary pathway. Its calibrated 3D point measure-
+ments provide direct, long-range, and lighting-invariant geo-
+metric cues for scene layout, drivable area, and inter-agent
+relations. Prior works have demonstrated that integrating
+LiDAR with images can significantly enhance the perception
+performance in autonomous driving scenes [28, 51]. While
+integrating LiDAR with VLMs seems like a natural next step,
+it remains challenging. Pre-trained VLMs are optimized on
+massive image–text corpora but not on LiDAR–image–text
+multimodal data. Consequently, naively injecting a disparate
+3D representation can severely disrupt their learned align-
+ments, resulting in suboptimal linguistic competence and
+visual grounding.
+To
+this
+end,
+we
+introduce
+LVLDrive
+(Li-
+DAR–Vision–Language),
+a
+framework
+designed
+to
+equip VLMs with robust 3D metric spatial understanding
+capabilities while preserving their learned knowledge, as
+shown in Fig. 1. The key component is a Gradual Fusion
+Q-Former structure that incrementally injects LiDAR
+embeddings into the VLM via a gated attention mechanism.
+Rather than exposing the model to unaligned 3D signals
+from LiDAR at once, LVLDrive schedules the introduction
+of LiDAR embeddings over training, allowing the model
+to adapt its cross-modal attention without drifting from its
+original visual–linguistic manifold. The trainable gate learns
+when—and how strongly—to rely on LiDAR, enabling
+graceful fallback to image cues when 3D observations are
+sparse or noisy.
+To explicitly enforce spatial reasoning
+and encourage the integration of LiDAR features, we
+further construct SA-QA dataset, a spatial-aware visual
+question–answering dataset derived from ground-truth 3D
+annotations in standard driving scenes. To explicitly enforce
+spatial reasoning and promote the integration of LiDAR
+features, we construct SA-QA, a spatial-aware visual
+question–answering dataset derived from ground-truth 3D
+annotations in standard driving scenes. The dataset focuses
+on metric and relational question–answer pairs that are
+central to autonomous driving, pairing linguistically natural
+questions with unambiguous, 3D-grounded answers and
+complementing prior instruction-tuned driving corpora
+[10, 43, 50]. In addition, a subset of question–answer pairs
+incorporates a modality-masking mechanism that forces the
+VLM to rely on LiDAR information, thereby promoting the
+alignment between LiDAR and image representations.
+We evaluate LVLDrive on recent language–based driving
+benchmarks emphasizing spatial reasoning and decision reli-
+ability. Across scene understanding, metric spatial percep-
+tion, and planning-relevant intent prediction, LVLDrive con-
+sistently outperforms vision-only VLM baselines, narrowing
+the gap between the commonsense strengths of VLMs and
+the metric precision demanded by safety-critical driving. By
+integrating LiDAR in a stability-preserving manner and su-
+pervising with spatial-aware language tasks, our approach
+improves the reliability of LLM-based autonomous systems
+and underscores the necessity of explicit 3D metric cues for
+trustworthy end-to-end driving. The contributions of this
+work are threefold: (1) we introduce LVLDrive, augment-
+ing a pre-trained VLM with a Gradual Fusion Q-Former
+to incrementally inject LiDAR embeddings while preserv-
+ing visual–linguistic priors; (2) we construct a spatial-aware
+QA dataset (SA-QA) on top of the nuScenes dataset and its
+ground-truth annotations, to boost the spatial understanding
+and reasoning of LVLDrive; (3) we conduct extensive ex-
+periments and ablation studies to quantify the performance
+gains and to clarify how LiDAR injection and fine-tuning on
+our proposed spatial-aware dataset contribute to faithful 3D
+spatial reasoning.
+2. Related Work
+Language–Driving Datasets.
+Early efforts grounded
+natural-language commands and explanations in real driving
+scenes—e.g., Talk2Car [9] for referred-object commands,
+the BDD-X [23] explanation corpus, and BDD-OIA [55] for
+object-induced action with textual rationales. More recently,
+driving QA resources have scaled markedly: nuScenes-QA
+[40] standardized multi-view urban driving VQA, while Lin-
+goQA [36] scaled short video scenarios with human truthful-
+ness judging. Graph-structured chain-of-thoughts reasoning
+for driving was introduced by DriveLM [43], which released
+DriveLM-Data on nuScenes and CARLA, and a GVQA pro-
+tocol spanning perception, prediction, and planning. BEV-
+centric language benchmarks emerged to stress global scene
+and interaction reasoning (Talk2BEV-Bench [8], BEV-TSR
+[45] text-to-scene retrieval, ChatBEV-QA [54] with 137k
+questions). End-to-end language supervision also appears
+inside instruction datasets like NuInstruct [10] paired with
+BEV-Injected MLLMs. OmniDrive [50] proposed a holis-
+tic language-driving dataset with counterfactual reasoning.
+Most of the above datasets focus on generic driving scene
+understanding and decision-making. Recently, nuScenes-
+SpatialQA [46] benchmarked the spatial understanding ca-
+pacity of various VLMs. While our SA-QA dataset is related
+in spirit, it focuses more on planning-oriented spatial rea-
+soning and the modeling of interactions across LiDAR and
+vision modalities.
+VLMs for Autonomous Driving. Vision-Language Mod-
+els have been widely adopted in autonomous driving, pre-
+dominantly using image inputs for tasks such as human-
+interpretable scene understanding and trajectory planning.
+For example, DriveLM [43] introduced a VLM-based
+“agent” performing joint graph VQA and end-to-end control;
+LMDrive [42] integrated LLM reasoning with closed-loop
+control; VLP [38] bridged perception, text, and planning
+2
+
+Image Encoder
+Point Encoder
+Large Language Model
+Text Tokenizer
+Please provide the planning trajectory 
+for the ego car without any reason.
+What is the future position of the car in 
+<FRONT_LEFT> after 1 second?
+For the position (3.5, -1.0), is it 
+drivable?
+Gradual Fusion Q-former
+Gated Fusion
+Figure 2. Overview of LVLDrive. LVLDrive takes text, images, and point clouds as multimodal inputs and employs three pretrained
+encoders, an LLM, and a Gradual Fusion Q-Former module that bridges visual and linguistic representations to generate task-specific
+responses. The fire symbol denotes trainable components.
+with language supervision; and LLaDA [24] adapted poli-
+cies to new domains using LLM priors. GPT-style planners
+such as GPT-Driver [35] and DriveGPT4 [56] explored au-
+toregressive action generation with rationales; DriveVLM
+[47] tailored MLLMs for driving QA and intent understand-
+ing; and DriVLMe [19] built a video-language agent for
+interactive navigation. BEV-aware multimodal models like
+BEV-InMLLM [10] improved global spatial context, while
+V2X-VLM [59] leveraged infrastructure views. More re-
+cently, VLA families such as OpenDriveVLA [65] and Au-
+toVLA [66] unified perception, reasoning, and action in a
+single autoregressive policy incorporating feasibility and
+physics constraints; InternDrive [63] focused on scenario
+understanding with MLLMs. Different from these image-
+based approaches, LiDAR-LLM [58] pioneers the use of
+LLMs for driving-scene understanding directly from LiDAR
+inputs, aiming to extend VLMs’ comprehension to more
+challenging real-world 3D scenes. In contrast, our work
+explores the complementary strengths of both image and
+LiDAR within a unified framework, leveraging the strong
+reasoning capabilities of pretrained VLMs together with the
+3D metric information from LiDAR point clouds.
+Spatial Understanding in VLMs. In recent years, generic
+VLMs [1, 20, 30, 52] have achieved remarkable progress,
+exhibiting strong reasoning and problem-solving abilities in
+open-ended tasks. However, several studies [21, 32, 34] have
+evaluated the spatial understanding and reasoning capabili-
+ties of VLMs and found they are far from satisfactory—even
+with enhancements such as chain-of-thought prompting [57].
+To address these gaps, several recent studies on the under-
+standing of indoor scenes-including SpatialVLM [4] and
+SpatialRGPT [7]—have explored fine-tuning strategies with
+spatially enriched task-specific datasets. In autonomous driv-
+ing contexts, where accurate spatial reasoning is essential
+for planning and safety, benchmarking results on NuScenes-
+SpatialQA [46] similarly reveals that current VLMs still
+fall short. These findings highlight the need to explore more
+capable approaches to effectively enhance spatial understand-
+ing and reasoning in autonomous driving scenarios.
+3. Methodology
+3.1. Preliminaries
+Vision-Language Model (VLM). A VLM typically com-
+prises three main components: a language model pretrained
+on large-scale text corpora using next-token prediction ob-
+jectives [37, 48]; a vision encoder pretrained on visual tasks
+through self-supervised learning [3, 6, 17], contrastive learn-
+ing [25, 41] or supervised learning [11, 16, 53]; and a pro-
+jector that injects visual featrues into the language model.
+The projector can be a simple MLP, as in LLaVA [30, 31], or
+a more structured Q-Former [26] built with cross-attention
+layers. In the Q-Former, learnable queries attend to exter-
+nal visual features, enabling the model to retrieve and com-
+press relevant information into a fixed-length of latent tokens.
+Since point cloud encoders yield variable-length outputs due
+to sparsity, we adopt a Q-Former-style projector to produce
+fixed-length token outputs, enabling robust interfacing with
+the language model.
+Q-Former 3D Block.
+Q-Former 3D block is an up-
+graded version of the Q-Former and was proposed in Om-
+niDrive [50]. While it shares the core idea and architecture of
+a standard Q-Former—i.e. two multi-head attention (MHA)
+layers per block stacked in depth—OmniDrive modifies the
+input formulation so that the architecture can decode object-
+centric features from images. As illustrated in Fig. 3, the
+first MHA layer in each block uses a shared set of learnable
+instance tokens as queries, keys, and values. Each query
+corresponds to a reference point in 3D space; thus, 3D posi-
+tional embeddings derived from these reference points are
+3
+
+added to both the queries and keys. When a memory bank
+is available (carrying information from previous frames),
+memory tokens are concatenated to the keys and values to
+incorporate temporal context. The second MHA layer takes
+the output of the first layer as queries and the patch-wise
+image embeddings as keys and values, enabling retrieval
+and compression of visual features. Positional embeddings
+from the reference points are again added to the queries and
+keys to maintain spatial correspondence. Building on this
+design, OmniDrive further concatenates carrier tokens with
+the instance tokens and processes them through multiple
+Q-Former 3D blocks. The carrier tokens are then passed to
+the LLM, while the instance tokens are supervised with 3D
+perception objectives. Our fusion module is constructed on
+top of this Q-Former 3D block introduced by OmniDrive.
+3.2. Framework Overview
+As illustrated in Fig. 2, LVLDrive takes text, images, and
+point clouds as multimodal inputs to generate task-specific
+responses via an LLM. The overall architecture comprises
+three pretrained encoders (for text, image, and point cloud),
+an LLM, and a Gradual Fusion Q-Former that serves as a
+projector between visual and linguistic representations. The
+text tokenizer, image encoder, LLM, and Gradual Fusion
+Q-Former —implemented with stacked multi-head attention
+blocks—have been jointly pretrained without point cloud
+input, enabling well-aligned feature representations across
+text-image modalities. This strong alignment, however, does
+not extend to the point cloud encoder. Unlike the image
+modality, large-scale LiDAR-text data for joint pretraining is
+scarce. This lack of alignment means that naively injecting
+point cloud features into the VLM could disrupt the well-
+learned text-image representations and lead to suboptimal
+performance. Our core challenge, therefore, is to effectively
+integrate these “out-of-domain” features under limited data
+conditions. To address this, we introduce a unified Gradual
+Fusion Q-Former that progressively integrates the newly
+acquired point cloud features into the carrier tokens and
+jointly retrieves multimodal representations for downstream
+reasoning.
+3.3. Gradual Fusion Q-Former
+As discussed in Sec. 3.2, a key challenge lies in how to inject
+point cloud features into an existing VLM where text and
+image representations are already well aligned. To address
+this, we investigate the Q-Former 3D block and identify its
+three inputs: 1) a set of learnable query tokens, 2) tokens
+from the memory bank, which encode object-centric features
+from historical frames, and 3) image feature tokens, through
+which information from the current frame is incorporated.
+Each token is associated with either a specific reference
+point in 3D space or a probability distribution over a set of
+reference points. These reference points are encoded as 3D
+Multi-Head Attention
+𝒱
+𝒬
+𝒦
+Instance Queries
++
+3D PE
+Carrier Queries
+…
+…
+…
+Memory Tokens
+…
+Image Features
+…
+Point Features
+LLM
+3D Perception
++
+Multi-Head Attention
+𝒱
+𝒬
+𝒦
+𝐒
+Zero-initialized Gate
+3D PE
++
++
++
++
+Figure 3. Gradual Fusion Q-Former. Each block contains two
+multi-head attention layers. The first layer uses learnable carrier
+and instance tokens as queries, keys, and values; the keys and values
+are extended with memory tokens when the memory bank is non-
+empty, and both queries and keys are augmented with 3D positional
+embeddings (3D PE) derived from reference points. The second
+layer introduces image and point features as keys and values, with
+queries and keys again augmented using their corresponding 3D
+positional embeddings. Note that the zero-initialized gate is applied
+only to point features. At the end of the module, the output queries
+are supervised by 3D perception objectives and LLM gradients
+separately.
+positional embeddings, which are added to the tokens and
+actively participate in the attention computation.
+To integrate point cloud features, a natural choice is to
+introduce them at the same stage as image features, while
+using the corresponding 3D locations as reference points for
+positional encoding. This leads to the architecture illustrated
+in Fig. 3. Through this design, we introduce an additional
+modality while preserving the sparse representation attribute
+of the Q-Former 3D block as well as its ability to leverage
+temporal information. However, we observe that naively
+introducing point cloud features in this manner destabilizes
+training and causes the model to converge to suboptimal
+optima. Inspired by LLaMA-Adapter [62], we therefore
+incorporate point cloud features through a zero-initialized
+gating mechanism.
+4
+
+Given a scene’s point cloud, image, and text prompt,
+we feed them into their respective encoders to obtain
+modality-specific representations, which are denoted as
+FP ∈RNP ×C, FI ∈RNI×C and T ∈RNT ×C, where
+NP , NI and NT denotes the lengths of three modalities and
+C equals the feature dimension of the LLM. For Gradual
+Fusion Q-Former, the inputs to the first layer consist of learn-
+able tokens L ∈RNL×C and memory tokens M ∈RNM×C,
+where M is either inherited from the previous frame or zero-
+initialized when no preceding frame exists. The learnable
+tokens are then updated by the first layer as follows:
+L ←MHA ( L, [L; M], [L; M] )
+(1)
+where MHA(Q, K, V) indicates a standard multi-head at-
+tention. When the pretraining starts with only the image
+modality available, the second layer of the Q-Former 3D
+block functions as a standard cross-attention layer and gen-
+erates output as follows:
+OI = MHA ( L, I, I )
+(2)
+In the joint training stage, we further introduce point
+features as additional keys and values to the second layer, as
+illustrated in Fig. 3. First, a set of linear layers is applied to
+transform the inputs into queries, keys and values:
+Q = Linearq( L ),
+(3)
+KI = Lineark( FI ), KP = Lineark( FP ),
+(4)
+VI = Linearv( FI ), VP = Linearv( FP ).
+(5)
+Then, the attention scores are calculated as:
+SI = softmax( QKT
+I /
+√
+C ),
+(6)
+SP = softmax( QKT
+P /
+√
+C )
+(7)
+where SI, SP ∈RNL×NC. Note that we add 3D positional
+embeddings derived from reference points to the queries,
+probability-accumulation–based 3D positional embeddings
+for each pixel to KI and 3D positional embeddings derived
+from each point feature’s spatial location to KP . By aligning
+the coordinate systems, all reference points reside in the
+same 3D physical space, enabling spatially aligned fusion.
+For clarity, these details are omitted from the formula in this
+section. The resulting scores are applied to the values to
+obtain the output:
+O = Linearo(SIVI + SP VP ) ∈RNL×C.
+(8)
+Since the point cloud features are newly introduced and
+have not yet been jointly trained with the image features
+or learnable tokens, they probably cause instability during
+the softmax operation. To this end, we introduce a zero-
+initialized learnable gate, denoted as g, to adaptively control
+the contribution of point cloud features during training:
+O = Linearo (SIVI + tanh (g) SP VP ) ∈RNL×C.
+(9)
+Since g is zero-initialized, tanh(g) starts near zero, sup-
+pressing initially unaligned point features and allowing them
+to be gradually integrated into the Q-Former. This design
+preserves the training stability of the pre-existing compo-
+nents. To encourage diverse and complementary feature
+learning, we employ independent gates for each attention
+head, referred to as the multi-head gate in Tab. 3.
+3.4. SA-QA Dataset
+To enhance the spatial understanding capability of LVLDrive
+and encourage its adaptation to LiDAR point cloud data, we
+construct the Spatial-Aware Question-Answering dataset,
+abbreviated as SA-QA. Built upon the nuScenes dataset [2],
+our SA-QA dataset encompasses both fundamental spatial
+perception questions and complex spatial reasoning tasks, as
+illustrated in Fig. 4.
+Spatial Perception.
+The spatial perception ques-
+tion–answering tasks in SA-QA can be categorized into two
+types. The first type asks whether a specific BEV point
+lies within a drivable area, allowing the language model to
+develop an awareness of road conditions. The second type
+requires the language model to identify an object in various
+ways and answer questions about its 3D attributes, including
+coordinates, size (length, width, and height), orientation, and
+velocity. In addition, we carefully design question–answer
+pairs to explicitly encourage the fusion of LiDAR and im-
+age features. For example, arrows in 2D images are used
+to indicate objects, prompting the model to perform cross-
+modal reasoning between images and point clouds. Similarly,
+masking the corresponding region in the 2D image forces
+the model to extract relevant information directly from the
+point cloud. Examples of spatial perception QAs are shown
+in Fig. 4(a).
+Spatial Reasoning. Building upon the fundamental spatial
+perception tasks, we further design complex spatial reason-
+ing question-answering to enhance the LLM’s reasoning abil-
+ity that is crucial for autonomous driving decision-making.
+For instance, given a set of points along a road centerline,
+the model is asked to identify which objects lie on that lane.
+In another type of question, the LLM must determine the
+nearest object in a specified direction. We also introduce
+tasks involving two indicated objects (denoted by two ar-
+rows) and require the LLM to compute their 3D distance.
+These objects may appear within the same image but are
+more often captured across different camera views, com-
+pelling the model to perform true 3D spatial reasoning rather
+than relying on 2D pixel distances. Finally, we incorporate
+temporal reasoning tasks in which the LLM must not only
+identify an object but also predict its future position after a
+given time interval. Examples of spatial reasoning QAs are
+shown in Fig. 4(b).
+All questions are generated from templates, and the answers
+5
+
+Q: For a potential future 
+position at (3.0, 0.5), is it in a 
+drivable area?
+Q: Identify the object in the 
+<CAM_BACK_RIGHT, 
+200.8, 22.4, 289.3, 251.5> 
+and describe its 3D 
+information.
+Q: Identify the object in the 
+masked region and describe 
+its 3D information.
+Q: Identify the object cued 
+by the arrow and describe 
+its 3D information.
+A: The object is a car in the back right, location: (-0.5, -6.2), length: 4.6, width: 3.4, height: 2.8, 
+angles in degrees: -130.8, velocity: (-2.3, -0.3).
+A: Yes.
+(a) Spatial-Perception Question-Answering
+Q: What objects are on the 
+lane (0.0, 3.5), (0.9, 5.4), 
+(1.8, 7.3)?
+A: The object is a car, 
+location (1.0, 5.8), length ...
+Q: What is the nearest object 
+in back left direction?
+A: The object is a car, 
+location (-3.0, -0.5), ....
+Q: Please determine the metric distance (in meters) 
+separating the two indicated objects.
+A: 4.5.
+Q: What is the future 
+position of the object at (-0.5, 
+-6.2) after 1.0 second?
+A: (-3.3, -12.6).
+(b) Spatial-Reasoning Question-Answering
+Figure 4. Examples to illustrate different question-answering pairs in SA-QA. The green dots, box, and line are highlighted only for
+visualization. The masked region and the red arrows are visible to the vision encoder.
+are derived from the human-annotated ground-truth labels
+in the nuScenes dataset [2] and its extension OpenLane
+dataset [5]. This design fully leverages the high-precision
+annotations of nuScenes, guiding the model toward spatially
+aware understanding. More details on SA-QA dataset are
+provided in the supplementary material.
+4. Experiments
+4.1. Implementation Details
+Following the configuration of our base model OmniDrive-
+Agent [50], we utilize EVA-02-L [13] as the vision encoder
+and LLaVA v1.5 [31] as the LLM, initializing the latter
+with its pretrained weights on the LLaVA-665K dataset [31].
+For the point cloud encoder, we employ FSDv2 [12] pre-
+trained on nuScenes [2]. We jointly finetune the entire
+LVLDriver—applying LoRA only to the LLM compo-
+nents—on the OmniDrive dataset [50] and our proposed
+SA-QA dataset. The learning rate for the Gradual Fusion
+Q-Former is set to 4 × 10−4, while the learning rate for
+image encoder, point encoder and LLM is 2 × 10−5. We
+use AdamW optimizer with a batch size of 16 and train for
+12 epochs, using a 500-iteration warmup followed by co-
+sine annealing policy. Training requires approximately 30
+hours on 8×A100 GPUs (40 GB each). Additionally, we
+finetune LVLDriver on the DriveLM dataset to evaluate its
+performance on DriveLM.
+4.2. Dataset & Metircs
+nuScenes. The nuScenes dataset [2] is a comprehensive real-
+world dataset for autonomous driving research, capturing
+across 1,000 diverse driving scenes from Boston and Singa-
+pore. Each scene is fully annotated with 3D bounding boxes,
+object attributes, tracking IDs, and rich metadata, making
+nuScenes one of the most comprehensive datasets for 3D
+perception and prediction. OpenLane [5] supplements the
+dataset with high-quality labels for lane boundaries, center-
+lines, and traffic lights, which enables the generation of lane
+related question-answering pairs. In this work, we primarily
+utilize the camera images and LiDAR scans from nuScenes
+as model inputs, and adopt the future ego-vehicle trajectories
+as ground truth for evaluating open-loop planning perfor-
+mance.
+OmniDrive. The OmniDrive dataset [50] extends nuScenes
+by selecting planning-oriented key-frames and utilizing
+GPT4 and human-in-the-loop to enrich each key scene with
+scene description, key objects descripton, and reasoning over
+real and counterfactual trajectories. Its annotations on tra-
+jectory plausibility—covering rule violations, collision risks,
+6
+
+Table 1. Comparison on nuScenes open-loop planning. ∗and ∗∗indicate not use ego status in BEV module or planner, respectively. Best
+results are highlighted as first , second , and third .
+Method
+L2 (m) ↓
+Collision Rate (%) ↓
+Intersection Rate (%) ↓
+1s
+2s
+3s
+Avg.
+1s
+2s
+3s
+Avg.
+1s
+2s
+3s
+Avg.
+End-to-end Models
+UniAD [18]
+0.20
+0.42
+0.75
+0.46
+0.02
+0.25
+0.84
+0.37
+0.20
+1.33
+3.24
+1.59
+VAD-Base [22]
+0.17
+0.34
+0.60
+0.37
+0.04
+0.27
+0.67
+0.33
+0.21
+2.13
+5.06
+2.47
+Ego-MLP∗[60]
+0.15
+0.32
+0.59
+0.35
+0.00
+0.27
+0.85
+0.37
+0.27
+2.52
+6.60
+2.93
+BEV-Planner [27]
+0.16
+0.32
+0.57
+0.35
+0.00
+0.29
+0.73
+0.34
+0.35
+2.62
+6.51
+3.16
+Language Models
+DriveVLM [47]
+0.18
+0.34
+0.68
+0.40
+0.10
+0.22
+0.45
+0.27
+-
+-
+-
+-
+OmniReason [33]
+0.15
+0.31
+0.57
+0.34
+0.04
+0.18
+0.98
+0.40
+0.61
+2.75
+6.19
+3.18
+Orion∗∗[14]
+0.17
+0.31
+0.55
+0.32
+0.05
+0.25
+0.80
+0.37
+-
+-
+-
+-
+OmniDrive-Agent [50]
+0.14
+0.29
+0.55
+0.33
+0.00
+0.13
+0.78
+0.30
+0.56
+2.48
+5.96
+3.00
+LVLDrive (Ours)
+0.13
+0.26
+0.49
+0.29
+0.02
+0.16
+0.57
+0.25
+0.53
+2.03
+5.22
+2.59
+Table 2. Comparison on DriveLM dataset [43]. ∗denotes results
+reproduced by us. All other metrics are quoted directly from their
+original publications.
+Method
+BLEU-4 ↑
+ROUGE-L ↑
+CIDEr ↑
+EM-VLM4AD [15]
+45.36
+71.98
+3.20
+MiniDrive [61]
+50.20
+73.50
+3.32
+MPDrive [64]
+52.71
+76.98
+3.56
+LMAD [44]
+54.49
+75.72
+3.84
+OmniDrive-Agent∗[50]
+55.52
+72.08
+15.44
+LVLDrive (Ours)
+59.01
+73.67
+21.65
+and behavioral rationality—provide richer planning-oriented
+supervision for training LLM-based driving models.
+DriveLM. The DriveLM dataset [43] formulates au-
+tonomous driving as a graph VQA task, where scene un-
+derstanding and decision-making are expressed as a directed
+graph of QA pairs spanning perception, prediction, planning,
+and motion. Built on nuScenes [2], DriveLM provides 4871
+keyframes annotated with multi-stage QA graphs grounded
+in 3D bounding boxes and multi-view images, enabling struc-
+tured evaluation of reasoning across the full driving pipeline.
+We follow the dataset split used in EM-VLM4AD [15], em-
+ploying 90% of the data for fine-tuning and evaluating on
+the 5% test set. For other previous works, we directly cite
+the results reported in their papers after confirming that they
+were obtained under the same setting.
+Metrics. For open-loop planning on nuScenes, our model
+outputs six future waypoints in a question–answer format,
+corresponding to the next 3 seconds at 0.5-second intervals.
+We compute the BEV L2 distance between each predicted
+waypoint and the ground-truth (GT) trajectory—also known
+as the Displacement Error—along with the collision rate over
+the entire 3-second horizon. Following BEV-Planner [27],
+we adopt an improved collision rate—where any collision at
+a given step marks all subsequent steps as collisions—and
+additionally evaluate the intersection rate (IR) with road
+boundaries, which measures whether the predicted trajec-
+tory remains within the drivable area. In addition, to assess
+spatial perception, we parse bounding boxes from the VLM-
+generated answers responding to 3D grounding questions
+and compute the BEV mean Intersection over Union (mIoU),
+a standard metric for evaluating object detection and local-
+ization quality. More details on this grounding evaluation
+are provided in the supplementary material. On the Driv-
+eLM dataset, we evaluate how closely the generated answers
+match human annotations using standard language metrics,
+including BLEU-4 [39], ROUGE-L [29], and CIDEr [49].
+4.3. Open-loop Planning
+We compare LVLDrive with state-of-the-art end-to-end
+planning models and LLM-based planning approaches on
+the nuScenes open-loop planning benchmark in Tab. 1.
+LVLDrive delivers competitive results and outperforms ex-
+isting LLM-based approaches. Although our model lags
+behind end-to-end models in Intersection Rate, LLM-based
+approaches offer more comprehensive functionality; for
+instance, our model can perform scene-level question an-
+swering. Relative to our base model OmniDrive-Agent,
+LVLDrive achieves consistent gains across all average met-
+rics, validating the effectiveness of the proposed fusion mech-
+anism and spatial-aware fine-tuning strategy. These findings
+underscore the crucial role of accurate spatial understanding
+and reasoning in enabling safe and robust planning.
+4.4. Results on DriveLM Dataset
+Table 2 shows that LVLDrive achieves competitive per-
+formance on BLEU-4 and ROUGE-L, indicating that its
+generated answers are comparable in surface-level phras-
+ing to prior vision–language driving models. Meanwhile,
+LVLDrive attains a CIDEr score of 21.65, substantially
+outperforming all baselines.
+Since CIDEr emphasizes
+content relevance, informativeness, and alignment with
+human-consensus keywords, this large margin suggests that
+7
+
+Table 3. Ablation on Q-Former configuration, input modalities
+and gate variants. CR and IR denote collision rate and inter-
+section, respectively. The L2 metric for open-loop planning is
+consistently around 0.32 meters and is therefore omitted for space.
+The lighter unified Q-Former, when equipped with a zero-initialized
+gate, outperforms using two independent Q-Formers for the image
+and LiDAR modalities, demonstrating the effectiveness of Gradual
+Fusion Q-Former.
+Q-Former
+Modality
+Zero-init.
+Gate
+Open-loop planning
+Grounding
+CR (%) ↓
+IR (%) ↓
+mIoU ↑
+Independent
+C
+N/A
+0.33
+3.32
+0.18
+L
+N/A
+0.39
+3.26
+0.17
+C+L
+N/A
+0.29
+3.20
+0.19
+Unified
+(Ours)
+C+L
+No
+0.40
+3.45
+0.17
+Single
+0.30
+2.99
+0.21
+Multi-head
+0.28
+2.93
+0.21
+LVLDrive produces answers that better capture the key spa-
+tial cues, object attributes, and driving-relevant semantics
+present in human responses. Thus, while syntax overlap
+remains comparable across models, LVLDrive demonstrates
+stronger 3D scene understanding and spatial reasoning, re-
+flecting the advantages of our proposed LiDAR injection and
+spatial-aware fine-tuning.
+4.5. Ablation Study
+Ablation on Model Configuration. In Tab. 3, we exam-
+ine how different input modalities, Q-Former configuration
+and gating variants affect both open-loop planning and 3D
+grounding. The first three rows compare models using cam-
+era input only (C), LiDAR input only (L), and their combina-
+tion (C+L), where image and LiDAR features are retrieved
+by separate Q-Formers. Adding LiDAR as an additional
+modality yields moderate improvements, demonstrating that
+it provides complementary geometric cues beneficial for both
+planning and grounding. However, the additional Q-Former
+also brings extra computation and memory consumption,
+making it a suboptimal solution. In the unified Q-Former
+setting (bottom three rows), we further investigate the im-
+pact of different gating mechanisms. The multi-head gate
+achieves the best overall performance, reducing collision
+rate from 0.40% to 0.28% and intersection rate from 3.45%
+to 2.93% compared to the no-gate baseline, while improv-
+ing mIoU from 0.17 to 0.21. These results indicate that the
+proposed zero-initialized multi-head gate improves training
+stability, leading to more robust planning and grounding. Ad-
+ditionally, the lightweight unified Q-Former, when equipped
+with a zero-initialized gate, surpasses the separate Q-Former
+design, further demonstrating the effectiveness of Gradual
+Fusion Q-Former.
+Ablation on Dataset Composition. Table 4 evaluates the
+contributions of different components in our SA-QA dataset
+Table 4. Ablation on dataset composition. P. and R. stand for
+perception and reasoning QAs, respectively. CR and IR denote
+collision rate and intersection, respectively. The L2 metric for open-
+loop planning is consistently around 0.32 meters and is therefore
+omitted for space.
+OmniDrive
+SA-QA
+Open-loop planning
+Grounding
+P.
+R.
+CR (%) ↓
+IR (%) ↓
+mIoU ↑
+✓
+0.39
+3.17
+0.00
+✓
+✓
+0.29
+2.89
+0.20
+✓
+✓
+0.33
+2.84
+0.11
+✓
+✓
+✓
+0.27
+2.83
+0.22
+by separating perception-oriented QAs (e.g. 3D ground-
+ing, drivable-area judgment) from reasoning-oriented QAs
+(e.g. estimating inter-object distances, predicting agent in-
+tentions). Interestingly, when trained solely on the Om-
+niDrive dataset [50], LVLDrive collapses on the ground-
+ing task. Although the model can still produce seemingly
+reasonable textual responses, it consistently omits key in-
+formation required to reconstruct a 3D box—such as size
+or orientation—making it impossible to parse a valid box
+from the output. As a result, the grounding metric drops to
+zero. Incorporating perception QAs notably improves all
+metrics, reducing the collision rate from 0.39% to 0.29% and
+the intersection rate from 3.17% to 2.89%. Incorporating
+reasoning QAs further boosts overall performance relative
+to training solely on OmniDrive. Nevertheless, compared
+with adding only perception QAs, the CR and mIoU are
+still inferior. We attribute this to the scarcity of reasoning
+questions that demand accurate 3D information about in-
+dividual objects, which limits the model’s ability to learn
+robust instruction-following behavior. When both percep-
+tion and reasoning QAs are used during training, the model
+achieves the best overall results, with the lowest CR (0.27%),
+lowest IR (2.83%), and highest mIoU (0.22). These findings
+demonstrate that perception and reasoning QAs offer com-
+plementary supervision signals that jointly enhance spatial
+understanding and decision-making.
+5. Conclusion
+In this work, we introduced LVLDrive, a LiDAR-Vision-
+Language framework that enhances Vision-Language Mod-
+els (VLMs) with robust 3D metric spatial understanding
+for autonomous driving. By integrating LiDAR informa-
+tion through our Gradual Fusion Q-Former, LVLDrive effec-
+tively fuses LiDAR and image inputs while preserving the
+linguistic and visual reasoning capabilities of the pre-trained
+VLM backbone. In addition, we proposed a spatial-aware
+question-answering dataset that explicitly guides the model
+to interpret and utilize LiDAR point clouds through carefully
+designed QA pairs covering 3D grounding, spatial reasoning,
+8
+
+and future state prediction. Our experiments demonstrate the
+effectiveness of integrating explicit 3D spatial information
+into VLMs, leading to improved reasoning and decision-
+making in autonomous driving systems.
+Limitations and Future Work. Despite the benefits of
+our gradual fusion strategy, LVLDrive is still constrained
+by the limited availability of large-scale, naturally paired
+text–LiDAR data. In an ideal setting, one would pretrain
+a unified model on large-scale aligned language–LiDAR
+samples, enabling the representation space of 3D geometry
+and linguistic concepts to be co-optimized from scratch. The
+construction of such datasets remains extremely challenging,
+and closing this gap is an important direction for future work.
+References
+[1] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin
+Ge, Sibo Song, Kai Dang, Peng Wang, Shijie Wang, Jun
+Tang, et al. Qwen2. 5-vl technical report. arXiv preprint
+arXiv:2502.13923, 2025. 3
+[2] Holger Caesar, Varun Bankiti, Alex H. Lang, Sourabh Vora,
+Venice Erin Liong, Qiang Xu, Anush Krishnan, Yu Pan, Gian-
+carlo Baldan, and Oscar Beijbom. nuScenes: A multimodal
+dataset for autonomous driving. In CVPR, 2020. 5, 6, 7, 1, 2
+[3] Mathilde Caron, Hugo Touvron, Ishan Misra, Herv´e J´egou,
+Julien Mairal, Piotr Bojanowski, and Armand Joulin. Emerg-
+ing properties in self-supervised vision transformers. In ICCV,
+2021. 3
+[4] Boyuan Chen, Zhuo Xu, Sean Kirmani, Brian Ichter, Danny
+Driess, Pete Florence, Dorsa Sadigh, Leonidas Guibas, and
+Fei Xia. SpatialVLM: Endowing Vision-Language Models
+with Spatial Reasoning Capabilities. In CVPR, 2024. 3
+[5] Li Chen, Chonghao Sima, Yang Li, Zehan Zheng, Jiajie Xu,
+Xiangwei Geng, Hongyang Li, Conghui He, Jianping Shi,
+Yu Qiao, and Junchi Yan. Persformer: 3d lane detection
+via perspective transformer and the openlane benchmark. In
+European Conference on Computer Vision (ECCV), 2022. 6,
+1, 2
+[6] Xinlei Chen, Saining Xie, and Kaiming He. An empirical
+study of training self-supervised vision transformers. In ICCV,
+2021. 3
+[7] An-Chieh Cheng, Hongxu Yin, Yang Fu, Qiushan Guo, Rui-
+han Yang, Jan Kautz, Xiaolong Wang, and Sifei Liu. Spa-
+tialRGPT: Grounded Spatial Reasoning in Vision Language
+Models. In NeurIPS, 2024-10-15. 3
+[8] Tushar Choudhary, Vikrant Dewangan, Shivam Chandhok,
+Shubham Priyadarshan, Anushka Jain, Arun K Singh, Sid-
+dharth Srivastava, Krishna Murthy Jatavallabhula, and K Mad-
+hava Krishna.
+Talk2bev: Language-enhanced bird’s-eye
+view maps for autonomous driving. In 2024 IEEE Inter-
+national Conference on Robotics and Automation (ICRA),
+pages 16345–16352. IEEE, 2024. 2
+[9] Thierry Deruyttere, Simon Vandenhende, Dusan Grujicic,
+Luc Van Gool, and Marie Francine Moens. Talk2car: Taking
+control of your self-driving car. In Proceedings of the 2019
+conference on empirical methods in natural language pro-
+cessing and the 9th international joint conference on natural
+language processing (EMNLP-IJCNLP), pages 2088–2098,
+2019. 2
+[10] Xinpeng Ding, Jianhua Han, Hang Xu, Xiaodan Liang, Wei
+Zhang, and Xiaomeng Li. Holistic autonomous driving un-
+derstanding by bird’s-eye-view injected multi-modal large
+models. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition, pages 13668–13677,
+2024. 2, 3
+[11] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov,
+Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner,
+Mostafa Dehghani, Matthias Minderer, Georg Heigold, Syl-
+vain Gelly, Jakob Uszkoreit, and Neil Houlsby. An image is
+worth 16x16 words: Transformers for image recognition at
+scale. In ICLR, 2021. 3
+[12] Lue Fan, Feng Wang, Naiyan Wang, and Zhaoxiang Zhang.
+Fsd v2: Improving fully sparse 3d object detection with vir-
+tual voxels. IEEE Transactions on Pattern Analysis and Ma-
+chine Intelligence, 2024. 6
+[13] Yuxin Fang, Quan Sun, Xinggang Wang, Tiejun Huang, Xin-
+long Wang, and Yue Cao. Eva-02: A visual representation
+for neon genesis. Image and Vision Computing, page 105171,
+2024. 6
+[14] Haoyu Fu, Diankun Zhang, Zongchuang Zhao, Jianfeng Cui,
+Dingkang Liang, Chong Zhang, Dingyuan Zhang, Hongwei
+Xie, Bing Wang, and Xiang Bai. ORION: A Holistic End-to-
+End Autonomous Driving Framework by Vision-Language
+Instructed Action Generation. In ICCV, 2025. 7
+[15] Akshay Gopalkrishnan, Ross Greer, and Mohan Trivedi.
+Multi-Frame, Lightweight & Efficient Vision-Language Mod-
+els for Question Answering in Autonomous Driving.
+In
+CVPRw, 2024. 7
+[16] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir-
+shick. Mask r-cnn. In Proceedings of the IEEE international
+conference on computer vision, pages 2961–2969, 2017. 3
+[17] Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr
+Doll´ar, and Ross Girshick. Masked autoencoders are scalable
+vision learners. In CVPR, 2021. 3
+[18] Yihan Hu, Jiazhi Yang, Li Chen, Keyu Li, Chonghao Sima,
+Xizhou Zhu, Siqi Chai, Senyao Du, Tianwei Lin, Wenhai
+Wang, et al. Planning-oriented autonomous driving. In Pro-
+ceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pages 17853–17862, 2023. 7
+[19] Yidong Huang, Jacob Sansom, Ziqiao Ma, Felix Gervits,
+and Joyce Chai. Drivlme: Enhancing llm-based autonomous
+driving agents with embodied and social experiences. In 2024
+IEEE/RSJ International Conference on Intelligent Robots and
+Systems (IROS), pages 3153–3160. IEEE, 2024. 3
+[20] Aaron Hurst, Adam Lerer, Adam P Goucher, Adam Perelman,
+Aditya Ramesh, Aidan Clark, AJ Ostrow, Akila Welihinda,
+Alan Hayes, Alec Radford, et al. Gpt-4o system card. arXiv
+preprint arXiv:2410.21276, 2024. 3
+[21] Mengdi Jia, Zekun Qi, Shaochen Zhang, Wenyao Zhang,
+Xinqiang Yu, Jiawei He, He Wang, and Li Yi. Omnispa-
+tial: Towards comprehensive spatial reasoning benchmark for
+vision language models. arXiv preprint arXiv:2506.03135,
+2025. 3
+[22] Bo Jiang, Shaoyu Chen, Qing Xu, Bencheng Liao, Jiajie Chen,
+Helong Zhou, Qian Zhang, Wenyu Liu, Chang Huang, and
+9
+
+Xinggang Wang. Vad: Vectorized scene representation for ef-
+ficient autonomous driving. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 8340–
+8350, 2023. 7
+[23] Jinkyu Kim, Anna Rohrbach, Trevor Darrell, John Canny,
+and Zeynep Akata.
+Textual explanations for self-driving
+vehicles.
+In Proceedings of the European conference on
+computer vision (ECCV), pages 563–578, 2018. 2
+[24] Boyi Li, Yue Wang, Jiageng Mao, Boris Ivanovic, Sushant
+Veer, Karen Leung, and Marco Pavone. Driving everywhere
+with large language model policy adaptation. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 14948–14957, 2024. 1, 3
+[25] Junnan Li, Dongxu Li, Caiming Xiong, and Steven Hoi. Blip:
+Bootstrapping language-image pre-training for unified vision-
+language understanding and generation. In ICML, 2022. 3
+[26] Junnan Li, Dongxu Li, Silvio Savarese, and Steven Hoi. Blip-
+2: bootstrapping language-image pre-training with frozen
+image encoders and large language models. In ICML, 2023.
+3
+[27] Zhiqi Li, Zhiding Yu, Shiyi Lan, Jiahan Li, Jan Kautz, Tong
+Lu, and Jose M. Alvarez. Is ego status all you need for open-
+loop end-to-end autonomous driving? In CVPR, 2024. 7
+[28] Tingting Liang, Hongwei Xie, Kaicheng Yu, Zhongyu Xia,
+Zhiwei Lin, Yongtao Wang, Tao Tang, Bing Wang, and Zhi
+Tang. Bevfusion: A simple and robust lidar-camera fusion
+framework. In Advances in Neural Information Processing
+Systems, 2022. 2
+[29] Chin-Yew Lin. Rouge: A package for automatic evaluation
+of summaries. In ACL Workshop, 2004. 7
+[30] Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee.
+Visual instruction tuning. Advances in neural information
+processing systems, 36:34892–34916, 2023. 3
+[31] Haotian Liu, Chunyuan Li, Yuheng Li, and Yong Jae Lee.
+Improved baselines with visual instruction tuning. In CVPR,
+2024-05-15. 3, 6
+[32] Jingping Liu, Ziyan Liu, Zhedong Cen, Yan Zhou, Yinan Zou,
+Weiyan Zhang, Haiyun Jiang, and Tong Ruan. Can multi-
+modal large language models understand spatial relations?
+arXiv preprint arXiv:2505.19015, 2025. 3
+[33] Pei Liu, Qingtian Ning, Xinyan Lu, Haipeng Liu, Weil-
+iang Ma, Dangen She, Peng Jia, Xianpeng Lang, and Jun
+Ma.
+Omnireason:
+A temporal-guided vision-language-
+action framework for autonomous driving. arXiv preprint
+arXiv:2509.00789, 2025. 7
+[34] Wufei Ma, Haoyu Chen, Guofeng Zhang, Yu-Cheng Chou,
+Jieneng Chen, Celso de Melo, and Alan Yuille. 3dsrbench: A
+comprehensive 3d spatial reasoning benchmark. In Proceed-
+ings of the IEEE/CVF International Conference on Computer
+Vision, pages 6924–6934, 2025. 3
+[35] Jiageng Mao, Yuxi Qian, Junjie Ye, Hang Zhao, and Yue
+Wang. Gpt-driver: Learning to drive with gpt. arXiv preprint
+arXiv:2310.01415, 2023. 3
+[36] Ana-Maria Marcu, Long Chen, Jan H¨unermann, Alice Karn-
+sund, Benoit Hanotte, Prajwal Chidananda, Saurabh Nair,
+Vijay Badrinarayanan, Alex Kendall, Jamie Shotton, et al.
+Lingoqa: Visual question answering for autonomous driving.
+In European Conference on Computer Vision, pages 252–269.
+Springer, 2024. 2
+[37] Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Car-
+roll Wainwright, Pamela Mishkin, Chong Zhang, Sandhini
+Agarwal, Katarina Slama, Alex Ray, et al. Training language
+models to follow instructions with human feedback. Advances
+in neural information processing systems, 35:27730–27744,
+2022. 3
+[38] Chenbin Pan, Burhaneddin Yaman, Tommaso Nesti, Abhirup
+Mallik, Alessandro G Allievi, Senem Velipasalar, and Liu
+Ren. Vlp: Vision language planning for autonomous driving.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 14760–14769, 2024.
+1, 2
+[39] Kishore Papineni, Salim Roukos, Todd Ward, and Wei-Jing
+Zhu. Bleu: a method for automatic evaluation of machine
+translation. In ACL, 2002. 7
+[40] Tianwen Qian, Jingjing Chen, Linhai Zhuo, Yang Jiao, and
+Yu-Gang Jiang. Nuscenes-qa: A multi-modal visual question
+answering benchmark for autonomous driving scenario. In
+Proceedings of the AAAI Conference on Artificial Intelligence,
+pages 4542–4550, 2024. 2
+[41] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry,
+Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen
+Krueger, and Ilya Sutskever. Learning transferable visual
+models from natural language supervision. In ICML, 2022. 3
+[42] Hao Shao, Yuxuan Hu, Letian Wang, Guanglu Song, Steven L
+Waslander, Yu Liu, and Hongsheng Li. Lmdrive: Closed-loop
+end-to-end driving with large language models. In Proceed-
+ings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 15120–15130, 2024. 1, 2
+[43] Chonghao Sima, Katrin Renz, Kashyap Chitta, Li Chen,
+Hanxue Zhang, Chengen Xie, Jens Beißwenger, Ping Luo,
+Andreas Geiger, and Hongyang Li. Drivelm: Driving with
+graph visual question answering. In European conference on
+computer vision, pages 256–274. Springer, 2024. 1, 2, 7
+[44] Nan Song, Bozhou Zhang, Xiatian Zhu, Jiankang Deng, and
+Li Zhang. LMAD: Integrated end-to-end vision-language
+model for Explainable Autonomous Driving. arXiv preprint:
+2508.12404, 2025. 7
+[45] Tao Tang, Dafeng Wei, Zhengyu Jia, Tian Gao, Changwei
+Cai, Chengkai Hou, Peng Jia, Kun Zhan, Haiyang Sun, Fan
+JingChen, et al. Bev-tsr: Text-scene retrieval in bev space for
+autonomous driving. In Proceedings of the AAAI Conference
+on Artificial Intelligence, pages 7275–7283, 2025. 2
+[46] Kexin Tian, Jingrui Mao, Yunlong Zhang, Jiwan Jiang, Yang
+Zhou, and Zhengzhong Tu. NuScenes-SpatialQA: A Spa-
+tial Understanding and Reasoning Benchmark for Vision-
+Language Models in Autonomous Driving. In ICCVw, 2025.
+1, 2, 3
+[47] Xiaoyu Tian, Junru Gu, Bailin Li, Yicheng Liu, Yang Wang,
+Zhiyong Zhao, Kun Zhan, Peng Jia, Xianpeng Lang, and
+Hang Zhao. Drivevlm: The convergence of autonomous
+driving and large vision-language models. In Conference on
+Robot Learning (CoRL), 2024. 3, 7
+[48] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Mar-
+tinet, Marie-Anne Lachaux, Timoth´ee Lacroix, Baptiste
+10
+
+Rozi`ere, Naman Goyal, Eric Hambro, Faisal Azhar, et al.
+Llama: Open and efficient foundation language models. arXiv
+preprint arXiv:2302.13971, 2023. 3
+[49] Ramakrishna Vedantam, C. Lawrence Zitnick, and Devi
+Parikh. Cider: Consensus-based image description evalu-
+ation. In CVPR, 2015. 7
+[50] Shihao Wang, Zhiding Yu, Xiaohui Jiang, Shiyi Lan, Min Shi,
+Nadine Chang, Jan Kautz, Ying Li, and Jose M Alvarez. Om-
+nidrive: A holistic vision-language dataset for autonomous
+driving with counterfactual reasoning. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages
+22442–22452, 2025. 2, 3, 6, 7, 8
+[51] Zitian Wang, Zehao Huang, Yulu Gao, Naiyan Wang, and
+Si Liu. Mv2dfusion: Leveraging modality-specific object
+semantics for multi-modal 3d detection. In IEEE Transactions
+on Pattern Analysis and Machine Intelligence, 2025. 2
+[52] Zhiyu Wu, Xiaokang Chen, Zizheng Pan, Xingchao Liu, Wen
+Liu, Damai Dai, Huazuo Gao, Yiyang Ma, Chengyue Wu,
+Bingxuan Wang, et al. Deepseek-vl2: Mixture-of-experts
+vision-language models for advanced multimodal understand-
+ing. arXiv preprint arXiv:2412.10302, 2024. 3
+[53] Enze Xie, Wenhai Wang, Zhiding Yu, Anima Anandkumar,
+Jose M Alvarez, and Ping Luo.
+Segformer: Simple and
+efficient design for semantic segmentation with transformers.
+Advances in neural information processing systems, 34:12077–
+12090, 2021. 3
+[54] Qingyao Xu, Siheng Chen, Guang Chen, Yanfeng Wang, and
+Ya Zhang. Chatbev: A visual language model that understands
+bev maps. arXiv preprint arXiv:2503.13938, 2025. 2
+[55] Yiran Xu, Xiaoyin Yang, Lihang Gong, Hsuan-Chu Lin, Tz-
+Ying Wu, Yunsheng Li, and Nuno Vasconcelos. Explainable
+object-induced action decision for autonomous vehicles. In
+Proceedings of the IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition, pages 9523–9532, 2020. 2
+[56] Zhenhua Xu, Yujia Zhang, Enze Xie, Zhen Zhao, Yong Guo,
+Kwan-Yee K Wong, Zhenguo Li, and Hengshuang Zhao.
+Drivegpt4: Interpretable end-to-end autonomous driving via
+large language model. IEEE Robotics and Automation Letters,
+2024. 3
+[57] Jihan Yang, Shusheng Yang, Anjali W Gupta, Rilyn Han, Li
+Fei-Fei, and Saining Xie. Thinking in space: How multimodal
+large language models see, remember, and recall spaces. In
+Proceedings of the Computer Vision and Pattern Recognition
+Conference, pages 10632–10643, 2025. 1, 3
+[58] Senqiao Yang, Jiaming Liu, Renrui Zhang, Mingjie Pan, Ziyu
+Guo, Xiaoqi Li, Zehui Chen, Peng Gao, Hongsheng Li, Yan-
+dong Guo, et al. Lidar-llm: Exploring the potential of large
+language models for 3d lidar understanding. In Proceed-
+ings of the AAAI Conference on Artificial Intelligence, pages
+9247–9255, 2025. 3
+[59] Junwei You, Haotian Shi, Zhuoyu Jiang, Zilin Huang, Rui
+Gan, Keshu Wu, Xi Cheng, Xiaopeng Li, and Bin Ran.
+V2x-vlm: End-to-end v2x cooperative autonomous driv-
+ing through large vision-language models. arXiv preprint
+arXiv:2408.09251, 2024. 3
+[60] Jiang-Tian Zhai, Ze Feng, Jinhao Du, Yongqiang Mao, Jiang-
+Jiang Liu, Zichang Tan, Yifu Zhang, Xiaoqing Ye, and Jing-
+dong Wang. Rethinking the open-loop evaluation of end-
+to-end autonomous driving in nuscenes.
+arXiv preprint
+arXiv:2305.10430, 2023. 7
+[61] Enming Zhang, Xingyuan Dai, Min Huang, Yisheng Lv, and
+Qinghai Miao. MiniDrive: More Efficient Vision-Language
+Models with Multi-Level 2D Features as Text Tokens for
+Autonomous Driving. arXiv preprint: 2409.07267, 2025-05-
+21. 7
+[62] Renrui Zhang, Jiaming Han, Chris Liu, Peng Gao, Aojun
+Zhou, Xiangfei Hu, Shilin Yan, Pan Lu, Hongsheng Li, and
+Yu Qiao. LLaMA-Adapter: Efficient Fine-tuning of language
+models with Zero-init Attention. In ICLR, 2024. 4
+[63] Ye Zhang and Yiming Nie. Interndrive: A multimodal large
+language model for autonomous driving scenario understand-
+ing. In Proceedings of the 2024 4th International Conference
+on Artificial Intelligence, Automation and High Performance
+Computing, pages 294–305, 2024. 3
+[64] Zhiyuan Zhang, Xiaofan Li, Zhihao Xu, Wenjie Peng, Zi-
+jian Zhou, Miaojing Shi, and Shuangping Huang. MPDrive:
+Improving spatial understanding with Marker-Based Prompt
+Learning for Autonomous Driving. In CVPR, 2025. 7
+[65] Xingcheng Zhou, Xuyuan Han, Feng Yang, Yunpu Ma,
+and Alois C Knoll. Opendrivevla: Towards end-to-end au-
+tonomous driving with large vision language action model.
+arXiv preprint arXiv:2503.23463, 2025. 3
+[66] Zewei Zhou, Tianhui Cai, Seth Z Zhao, Yun Zhang, Zhiyu
+Huang, Bolei Zhou, and Jiaqi Ma.
+Autovla: A vision-
+language-action model for end-to-end autonomous driving
+with adaptive reasoning and reinforcement fine-tuning. In
+NeurIPS, 2025. 3
+11
+
+Spatial-aware Vision Language Model for Autonomous Driving
+Supplementary Material
+6. Abstract
+This supplementary material provides additional details and
+analyses of our work. Further information about our pro-
+posed SA-QA dataset is presented in Sec. 7, and a detailed
+comparison with NuScenes-SpatialQA is provided in Sec. 8.
+Additional details on the 3D grounding benchmark are in-
+cluded in Sec. 9.
+7. More Details on SA-QA Dataset
+This dataset is built on top of nuScenes [2] and enriched us-
+ing the ground-truth annotations provided by both nuScenes
+and OpenLane [5] to generate question-answering (QA)
+pairs. The specific QA formats and the step-by-step gen-
+eration procedure are summarized in Tab. 5 and Tab. 6. Note
+that before generating any QA pairs, we convert all anno-
+tations and LiDAR point clouds into the ego coordinate
+system.
+8. Comparison with NuScenes-SpatialQA
+NuScenes-SpatialQA [46] is a concurrent study that shares
+certain similarities with our proposed SA-QA dataset. While
+both datasets focus on the spatial reasoning of Vision-
+Language Models (VLMs), SA-QA diverges by prioritiz-
+ing instruction tuning, explicit metric grounding, and cross-
+modal alignment.
+Training vs. Evaluation Focus. NuScenes-SpatialQA is
+constructed exclusively on the nuScenes validation split (150
+scenes). Its primary purpose is to serve as a zero-shot bench-
+mark to evaluate existing general-purpose VLMs. In contrast,
+SA-QA is designed as a massive-scale instruction-tuning
+dataset constructed on the training split (850 scenes). This
+scale allows LVLDrive to learn complex spatial relationships
+rather than merely being tested on them.
+Enhanced Cross-Modality Interaction. To promote robust
+alignment across modalities, SA-QA introduces specific task
+designs targeting Text-Vision-LiDAR integration. We im-
+plement modality masking (Tab. 5, SP-04), which masks
+the target in the image to encourage the model to retrieve
+geometric information directly from the LiDAR data. Fur-
+thermore, we utilize visual cues (Tab. 5, SP-03; Tab. 6, SR-
+03), where prompts explicitly reference arrows drawn on the
+image. This design drives the model to bind language with
+joint image–LiDAR features, enabling richer 2D–3D spatial
+reasoning.
+Explicit 3D Grounding vs.
+Relative Depth.
+While
+NuScenes-SpatialQA utilizes 3D annotations to generate
+answers, its questions are largely limited to relative 3D dis-
+tances or topological relationships (e.g. “Is object A closer
+than object B?”), omitting explicit 3D locations. This allows
+models to rely on approximate depth cues without mastering
+metric space. Conversely, SA-QA dataset requires explicit
+3D grounding, asking the model to output precise coordi-
+nates (x, y) and absolute dimensions (Tab. 5, SP-02). This
+forces the model to internalize a true metric understanding
+of the 3D environment.
+Global Perception vs. Intra-View Limitations. A critical
+limitation of NuScenes-SpatialQA is that questions are typi-
+cally restricted to the same camera view. This relies on local
+visual comparisons and omits a holistic perception of the
+surrounding environment. SA-QA explicitly challenges this
+by constructing cross-view reasoning tasks (Tab. 6, SR-03)
+where target objects may appear in disparate sensors (e.g.
+Front Camera vs. Back-Right Camera). To answer these cor-
+rectly, the model cannot rely on a single 2D image but must
+fuse information into a unified global coordinate system.
+Automated Efficiency vs.
+LLM Latency.
+NuScenes-
+SpatialQA relies on heavy Large Language Models to gen-
+erate dense captions and formulate questions, a process that
+introduces significant computational latency and cost. In
+contrast, SA-QA is fully automated and rule-based. By de-
+riving QA pairs directly from ground-truth annotations, our
+generation process is computationally negligible. This high
+efficiency supports dynamic augmentation, allowing us to
+apply random sampling strategies on the fly—specifically
+randomizing target objects, lane segments, and temporal
+intervals for future prediction.
+9. More Details on 3D Grounding Benchmark
+Throughout model development, we observed that planning-
+only evaluation is insufficient and fails to capture a model’s
+understanding of the spatial distribution of surrounding ob-
+jects. To better assess this capability, we construct a ground-
+ing benchmark using the ground-truth annotations of the
+nuScenes nuscenes validation set.
+Distance-Based Object Sampling. Traversing all annotated
+objects would lead to prohibitive inference time, so we sam-
+ple target objects based on distance. For each frame, we
+compute the distance from the bottom center of every anno-
+tated 3D bounding box to the ego vehicle and sort all objects
+by distance. The objects are then grouped into four ranges.
+After experimenting with interval sizes of 15 m, 20 m, and
+25 m, we found that a 15 m step yields the most balanced
+distribution across groups, and thus adopt 15 m as the inter-
+1
+
+Table 5. Generation logic for spatial perception (SP) tasks in the SA-QA dataset.
+ID
+Prompt Template
+Input Data
+Transformation
+Generation Logic
+Answer Generation
+SP-01
+“For a potential future
+position at (x, y), is it in a
+drivable area?”
+None.
+1. Randomly sample a query point in the front region
+of the ego-vehicle (5≤X≤20, −5≤Y ≤5).
+2. Generate a drivable mask in BEV by buffering lane
+centerlines with a 1.75m margin.
+3. Check point inclusion against the mask.
+Binary: “Yes” if inside; “No”
+otherwise.
+SP-02
+“Identify the object in <CAM,
+xmin, ymin, xmax, ymax>
+and describe its 3D
+information.”
+None.
+1. Project 3D annotations to the 2D planes of all 6
+cameras.
+2. Compute 2D bounding boxes
+[xmin, ymin, xmax, ymax] clamped to image dims,
+filtering out candidates that are invisible or too small.
+3. Sample an object and format the answer.
+4. Format the prompt with the target object’s
+coordinates.
+Text: “The object is a
+<category> in the <CAM>,
+location: (x, y), length: <l>,
+width: <w>, height: <h>,
+angles in degree: <yaw>.”
+(Rounded to 0.1).
+SP-03
+“Identify the object cued by
+the arrow and describe its 3D
+information.”
+Draw an arrow on
+the image.
+1–3. Follow steps 1–3 of SP-02 to filter candidates
+and sample one object.
+4. Draw a visual arrow on the image pointing to the
+center of the target’s 2D mask.
+5. Construct the prompt referencing the arrow cue.
+Text: Same format as SP-02.
+SP-04
+“Identify the object in the
+masked region and describe
+its 3D information.”
+Mask a region of
+the image.
+1–3. Follow steps 1–3 of SP-02 to filter candidates
+and sample one object.
+4. Apply a mask to the target’s 2D bounding box
+region (forcing LiDAR reliance).
+5. Construct the prompt referencing the masked
+region.
+Text: Same format as SP-02.
+Table 6. Generation logic for spatial reasoning (SR) tasks in the SA-QA dataset.
+ID
+Prompt Template
+Input Data
+Transformation
+Generation Logic
+Answer Generation
+SR-01
+“What objects are on the lane
+defined by points
+(x1, y1), (x2, y2), (x3, y3)?”
+None.
+1. Randomly select a lane centerline from the
+OpenLane [5] map annotations.
+2. Aggregate the associated objects located on the
+selected lane centerline from the OpenLane
+annotation set [5].
+3. Format the prompt and answer.
+List: “The object is a
+<category>, location...”.
+SR-02
+“What is the nearest object in
+the <DIRECTION>
+direction?”
+None.
+1. Define 4 spatial sectors (e.g. Front-Left, Back-Left)
+relative to the current ego-vehicle heading.
+2. Filter objects located within the target area.
+3. Calculate Euclidean distances for all candidates and
+sort in ascending order.
+4. Format the prompt and answer.
+Text: Description of the
+object with index 0 (minimum
+distance), using the format
+from SP-02.
+SR-03
+“Please determine the metric
+distance (in meters) separating
+the two indicated objects.”
+Draw arrows on the
+images.
+1. Select two distinct visible objects (OA, OB),
+potentially across different camera views.
+2. Draw visual arrows pointing to OA and OB in
+their respective images (following SP-03).
+3. Compute the L2 norm between their 3D centroids:
+∥CA −CB∥2.
+Scalar: “D.” (The value is
+rounded to 0.1 meters).
+SR-04
+“What is the future position of
+the object at (x, y) after T
+second?”
+None.
+1. Randomly sample one object that possesses a future
+trajectory within the nuScenes annotation set [2].
+2. Randomly select a future position and time interval
+for the sampled object, and subsequently structure the
+input prompt and the corresponding target answer.
+Coordinate: “(xfut, yfut).”
+2
+
+Table 7. Distribution of object counts across distance ranges in
+our grounding benchmark.
+0-15m
+15-30m
+30-45m
+45m-Inf
+Overall
+5,304
+5,684
+5,367
+3,903
+20,258
+val. Finally, for each frame, we randomly sample one object
+from each distance range to form our grounding benchmark.
+The number of objects in each range is shown in Tab. 7.
+Question and Answer Generation. For each selected ob-
+ject, we format its 3D bounding box parameters using the
+following answer template: The object is a <class> in the
+<direction>, location: (X, Y ), length: L, width: W, height:
+H, angles in degrees: θ. Meanwhile, we project the eight
+corners of the 3D box onto the image plane and compute the
+corresponding 2D bounding box (xmin, ymin, xmax, ymax),
+which is incorporated into the question. If any of these coor-
+dinates fall outside the image bounds, they are clipped to the
+valid image range.
+Answer Parsing and Evaluation. Because similar QA
+patterns are also used during training, the model typically
+produces answers that closely follow the desired template.
+This allows us to reliably parse a BEV bounding box
+(X, Y, L, W, θ) from the predicted answer and compute the
+BEV mIoU. Concretely, we first compute the IoU for each
+individual object. We then average the IoUs within each of
+the four distance ranges, and finally report the mean of these
+four group-wise IoUs as the overall grounding metric.
+3

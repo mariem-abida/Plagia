@@ -1,0 +1,2852 @@
+RedunCut: Measurement-Driven Sampling and Accuracy Performance Modeling
+for Low-Cost Live Video Analytics
+Gur-Eyal Sela1, Kumar Krishna Agrawal1, Bharathan Balaji∗∗2, Joseph Gonzalez1, and Ion Stoica1
+1UC Berkeley
+2Amazon
+Abstract
+Live video analytics (LVA) runs continuously across massive
+camera fleets, but inference cost with modern vision models
+remains high. To address this, dynamic model size selection
+(DMSS) is an attractive approach: it is content-aware but
+treats models as black boxes, and could potentially reduce
+cost by up to 10× without model retraining or modification.
+Without ground truth labels at runtime, we observe that DMSS
+methods use two stages per segment: (i) sampling a few mod-
+els to calculate prediction statistics (e.g., confidences), then
+(ii) selection of the model size from those statistics. Prior
+systems fail to generalize to diverse workloads, particularly
+to mobile videos and lower accuracy targets. We identify
+that the failure modes stem from inefficient sampling whose
+cost exceeds its benefit, and inaccurate per-segment accuracy
+prediction.
+In this work, we present RedunCut, a new DMSS system
+that addresses both: It uses a measurement-driven planner
+that estimates the cost-benefit tradeoff of sampling, and a
+lightweight, data-driven performance model to improve accu-
+racy prediction. Across road-vehicle, drone, and surveillance
+videos and multiple model families and tasks, RedunCut re-
+duces compute cost by 14-62% at fixed accuracy and remains
+robust to limited historical data and to drift.
+1
+Introduction
+Live video analytics (LVA) performs continuous inference
+on camera streams to detect events and trigger real-time ac-
+tions. It now underpins public safety, traffic, retail, industrial,
+and consumer applications [1–6], with deployments spanning
+millions of concurrent video streams across edge-cloud infras-
+tructure [6–12]. Since state-of-the-art vision model inference
+is expensive per frame [7,13–19] and total cost grows roughly
+linearly with video volume (number of videos, frame rates,
+duration) [20], the cost of processing a single 30 fps video
+stream can exceed $1,000/month [7]. At scale, the accuracy-
+cost tradeoff dominates system design.
+∗Work unrelated to Amazon
+Beyond growth in scale and cost, LVA applications have
+broadened along two axes. First, sources are increasingly mo-
+bile: improvements in cellular and Wi-Fi networks [21–23]
+enable inference on video feeds from road vehicles and
+UAVs [24–27], extending existing uses (e.g., license-plate
+queries for AMBER alerts, on-road hazard detection [28–30])
+and enabling new ones (e.g., search-and-rescue, wildfire spot-
+ting, crop monitoring [31–33]). Second, accuracy targets span
+a wide range: safety-critical tasks demand high accuracy (e.g.,
+weapon/intruder detection, drone-assisted search-and-rescue
+[34–36]), whereas cost-sensitive analytics tolerate approx-
+imate answers and aggregates (e.g., foot-traffic/occupancy
+estimation [4], signage/lane-marking defects and pothole de-
+tection from dashcams [37]). Consequently, an LVA system
+must serve both ends, delivering high accuracy as well as
+inexpensive, approximate analytics when requested.
+Goals. Our goal is to create an LVA system that minimizes
+compute cost while meeting the application’s specified accu-
+racy target. This should be done while serving applications
+running on a range of video workload types (mobile and sta-
+tionary) as well as a range of accuracy targets (low to high).
+Methods to improve LVA. Existing methods to improve
+LVA can be classified as (i) content-agnostic and (ii) content-
+aware. Content-agnostic methods ignore video content and
+optimize cost and accuracy via dynamic batching, place-
+ment, and accelerator tuning [38–41]. They use the same
+model size throughout the video (static model size selection)
+and do not adapt resource allocation to the video content,
+missing cost-reduction opportunities. To fill this gap, recent
+content-aware works adapt resource allocation across differ-
+ent parts of the video based on content (e.g., dynamic model
+training [6,7], early-exit mechanisms [42,43], and mixture
+of experts [44,45]). While these works achieve greater cost
+reduction, many modify base model weights or architectures
+and require significant machine-learning expertise to port to
+new tasks, workloads, and model types.
+Opportunity: Dynamic model size selection (DMSS). In
+contrast, dynamic model size selection is a different content-
+aware method that treats the models as black boxes (no modi-
+1
+arXiv:2512.24386v1 [cs.CV] 30 Dec 2025
+
+fication), and allows the use of off-the-shelf pretrained model
+zoos, which simplifies development, reduces engineering ef-
+fort, and speeds deployment while still meeting the applica-
+tion’s accuracy target. In DMSS, the video is divided into
+segments (e.g., 2 seconds [46]), and a different model size is
+used to process each video segment. This approach exploits
+the fact that the accuracy of different model sizes changes
+across video segments. A smaller, inexpensive model is used
+on video segments where its accuracy is high, while the larger
+model is reserved for the rest of the video segments. For ex-
+ample, with an accuracy target of 33.9 MOTA, EDet-D3 (a
+“small” model with average accuracy of 27.08) still exceeds
+the target on 31.7% of the video segments, and can be se-
+lected in those video segments. Indeed, we find that using
+DMSS can achieve up to 10× lower cost than static model
+size selection while preserving the accuracy target (§2).
+The use of prediction statistics in DMSS. Selecting the
+best model size in each video segment requires determin-
+ing the accuracy of all candidate model sizes on each video
+segment at runtime. The optimal solution, which runs all mod-
+els on all frames and compares the predictions to ground
+truth labels (e.g., human annotations), cannot be used: First, it
+costs more than a static selection method that runs the largest,
+most-accurate model alone. Second, the ground truth labels
+are infeasible or too expensive to access at runtime. Instead,
+current systems combine two alternatives (Figure 2). First,
+they evaluate only a few exemplar frames (e.g., the first few
+frames) and extrapolate accuracy to the rest of the segment.
+Second, they replace using ground-truth labels with properties
+of model predictions that correlate with the accuracy (e.g.,
+confidence, entropy, disagreement score, sum of objectness
+scores [6,7,47–52]). We collectively refer to these properties
+as prediction statistics. Together, the processing of each video
+segment at runtime can be broken into two stages: (i) sam-
+pling: one or more of the model sizes are sampled by running
+on exemplar frames to get their predictions, and using these
+predictions to calculate the prediction statistics. (ii) selection:
+These prediction statistics are used to select the model size
+that optimizes cost and accuracy on the entire video segment.
+This process is repeated in each video segment to adapt to
+changing video content.
+Challenges when using prediction statistics: sampling
+and selection (§2).
+1. What is the optimal subset of model sizes to sample on
+the exemplar frames to calculate prediction statistics? Sam-
+pling too many or too few model sizes may both result in
+prohibitively high cost. The optimal number of models to
+sample also widely varies across video segments.
+2. Given only a subset of prediction statistics, which model
+size to select to run on the entire video segment? The decision
+must be made from prediction statistics that may only weakly
+correlate with the accuracy.
+Existing works use manually-crafted rules for both steps:
+sample all model sizes once then fix a size for the rest of the
+video [50,53]; cascades that sample from small to large with
+early exits [47–49,51,54]; or more elaborate rule sets [46].
+These manually-crafted rules are tuned for surveillance work-
+loads and high-accuracy targets. However, in mobile-camera
+workloads (e.g., road vehicles, drones) and at lower accuracy
+targets, we see up to 75% higher cost than the static selection
+baseline. We isolate two factors that drive this gap (§3):
+A. Inefficient sampling. Sampling each additional model
+has two opposing effects: (i) Cost: Sampling increases cost,
+and (ii) Benefit: Sampling may also reveal a prediction statis-
+tic that can be used to select a better model size, e.g., a smaller,
+less expensive model that preserves accuracy. Existing works
+do not estimate the net effect of sampling and often sample
+when the cost exceeds the expected benefit, resulting in a net
+cost increase.
+B. Suboptimal selection. The relationship between predic-
+tion statistics and accuracy is weak and varies across video
+segments and workload types. Using thresholds [49,50,53]
+and heuristic rules [46] misses this complexity, resulting in
+suboptimal model size selection even when sampling is ade-
+quate.
+Implications. A better approach must (i) estimate the net
+value of each potential model to sample, and (ii) better cap-
+ture the relationship between the prediction statistics and the
+accuracy to improve accuracy prediction, and thereby model
+size selection.
+To implement these design principles and achieve the cost-
+saving and simplicity advantages of dynamic model size se-
+lection across different accuracy targets and workload types,
+in this paper we propose RedunCut, a new live video analytics
+system.
+Solution. System overview: RedunCut dynamically selects
+the model size for different segments throughout the video.
+It is a model-agnostic shim-layer that bolts on top of any
+prediction-serving system, and has a control plane (con-
+taining the sampler and the selector) and a data plane that
+runs the selected model size. The sampler runs a sequential,
+measurement-driven planner on the exemplar frames to de-
+cide which models to sample, producing prediction statistics.
+The selector uses these prediction statistics and a lightweight,
+learned accuracy performance model to predict the accuracy,
+which is used to select the best model size. The data plane
+runs the selected model size on the entire video segment.
+Sampling: measurement-driven planner. RedunCut uses
+the key insight that prediction statistics of different model
+sizes correlate with each other (§3). Leveraging this insight,
+RedunCut uses the prediction statistics of models that were
+sampled to narrow the range of the possible values of predic-
+tion statistics of model sizes that were not sampled yet. This
+narrower range of values is used by RedunCut’s measurement-
+driven planner to better estimate the net effect of sampling
+models that were not sampled yet.
+Selection: Accuracy performance model. Prediction statis-
+tics are imperfect proxy metrics for accuracy, and their rela-
+2
+
+tionship to accuracy varies across workloads and model fami-
+lies (§3.3). We therefore treat accuracy prediction as a perfor-
+mance modeling problem: we use a learned, lightweight pre-
+dictor that maps available prediction statistics to each model’s
+accuracy, analogous to systems that use purpose-built perfor-
+mance models to predict target metrics (e.g., latency/through-
+put) from noisy proxy metrics at runtime [55–57]. RedunCut
+uses a lightweight kNN model that is robust to missing pre-
+diction statistics. Its accuracy predictions are used to select
+the model size in each video segment.
+Evaluation. We evaluate RedunCut on instance segmenta-
+tion and multi-object tracking across six combinations span-
+ning three model families (EfficientDet [14], YOLO [16],
+DETR [58]), and three video workload types (surveillance,
+road vehicles, drones). Compared with state-of-the-art base-
+lines [7,46,48,49], RedunCut lowers GPU cost by 14-62%
+for the same target accuracy. RedunCut remains robust when
+the historical workload data (i) is reduced by 8×, (ii) under-
+goes data drift, or (iii) when ground-truth labels are machine-
+generated. In ablation studies, we find that on average 61%
+of the cost reduction is achieved by using the new sampling
+approach, while the rest of the improvement comes from bet-
+ter accuracy prediction during selection. We also find that
+RedunCut’s accuracy prediction has 3.5 −10× lower error
+versus rules used in existing works.
+In summary, our paper’s contributions are the following:
+1. To our knowledge, this is the first study to investigate dy-
+namic model size selection in mobile video sources. We
+show that estimating the cost-benefit of sampling and learn-
+ing the weak and variable relationships of prediction statis-
+tics and accuracy is essential to improve performance in such
+videos.
+2. We develop a system (RedunCut) that integrates these
+insights to generalize to a wide variety of video workload
+types and accuracy targets.
+3. We evaluate this video analytics system and find that it
+reduces cost by 14-62% over existing methods for the same
+accuracy target across different video workload types, model
+architectures, and tasks.
+2
+Background and Motivation
+System goals. The LVA system aims to minimize the cost,
+i.e., the total computational cost (e.g., GFLOPs) spent on pro-
+cessing the videos, while meeting the application’s accuracy
+target, i.e., the aggregate accuracy of the predictions on the
+videos’ frames.
+Determining the optimal model size. To achieve optimal
+DMSS, it is necessary to know both the cost and accuracy in
+each video segment. For example, Figure 1 (top) shows the
+accuracies of EfficientDet [14] models of varying sizes in a
+video. The accuracies are computed over 2-second segments
+along the video. By knowing the accuracy of different model
+sizes, the system can determine the best model sizes in each
+video segment that minimize total cost while meeting the
+Video segment (interval=2s)
+0.50
+0.75
+Accuracy
+(MOTA)
+target
+EDet-D3
+EDet-D5
+EDet-D7x
+2
+4
+6
+8
+10
+Video segment (interval=2s)
+EDet-D3
+EDet-D5
+EDet-D7x
+Model size
+choice
+Figure 1: The accuracy of various model sizes in a 20 second
+video (top), and the resulting model size selection (bottom). Top:
+The accuracy (y-axis) of different model sizes (color) on 2-second
+video segments of a road vehicle video (x-axis). Bottom: The result-
+ing model size selection (y-axis) for each video segment (x-axis).
+The models are taken from the EfficientDet (EDet) [14] family.
+LVA
+System
+(1) Sampling: 
+Run models, 
+calculate 
+prediction 
+statistics
+(2) Selection: Select the 
+model size to run on 
+entire video segment
+LVA
+system
+(3) Repeat
+periodically
+video segment
+next video segment
+exemplar 
+frames
+Figure 2: Periodic sampling and selection.
+aggregate accuracy target (Fig. 1, bottom). Over many videos,
+optimal dynamic model size selection (Figure 3 left, blue)
+can reduce cost by up to 10× when compared to the static
+selection (“sample once”), which selects and fixes the same
+model size for the entire video.
+Prediction statistics. To overcome the absence of ground-
+truth labels at runtime, prior works use prediction statistics
+calculated from model predictions [6,7,46,47,49–52,59,60].
+These prediction statistics typically require only a few arith-
+metic operations on model predictions (e.g., summing ob-
+jectness scores [51, 52, 60]) and are therefore inexpensive
+to compute. These works use the prediction statistics as in-
+dicators for the accuracy in order to select the model size
+to run on the video segment. This is done in many settings,
+including perception tasks [49,51,61], as well as other modal-
+ities [62–65].
+Using historical workload data to set sampling/selection
+parameters. The use of prediction statistics often intro-
+duces system parameters (e.g. the confidence score thresh-
+old of model cascade [48, 49, 51]) that control how models
+are sampled and selected [7, 46, 49]. Determining the pa-
+rameter values analytically is complex. Therefore, existing
+works [6,7,46,49,51] rely on historical workload data that
+is representative of the video content encountered at runtime.
+This data is used to search for the best set of parameter values
+that allows the system to optimize the cost and accuracy.
+3
+
+Challenges in sampling.
+Sampling too many models or
+none at all is suboptimal. For example, we find (Figure 3,
+left) that sampling every model in every segment (checkered
+gray bar, representing a high-sampling version of one DMSS
+method, Tiered-sampling [46]) drives cost above the static
+selection (red “sample-once” bar). At the other extreme, never
+sampling throughout the video results in performance equal
+to that of the static selection, losing the potential savings of
+DMSS. The challenge is therefore to strike a balance.
+In addition, we find that the optimal number of models to
+sample varies across video segments and videos, as well as
+across workload types and accuracy targets (Figure 19, §F).
+Challenges in selection. After a subset of the models is sam-
+pled, first, their prediction statistics are implicitly or explicitly
+used to estimate the accuracy, and then the estimated accu-
+racy is used to select the best model size. However, as shown
+in Figure 6, the prediction statistics often only have a weak
+correlation (e.g., < 0.4) with the accuracy. It is very uncom-
+mon that the correlation is strong (e.g., > 0.8), which would
+indicate a direct, linear relationship between the prediction
+statistics and the accuracy. These results suggest that the rela-
+tionship between the prediction statistics and the accuracy is
+often weak and potentially noisy. Since the best model size to
+select is determined from the accuracy, the lack of a strong
+linear relationship between the prediction statistics and the
+accuracy makes it challenging to determine the best model
+size from the prediction statistics.
+3
+RedunCut’s Solution approach
+We first describe the problem with existing works that use
+manually-crafted rules for sampling and selection (§3.1).
+Then, we present our ideas to improve sampling (§3.2) and
+selection (§3.3), which guide the design of RedunCut.
+3.1
+Problem with existing works
+Prior DMSS methods [46, 49, 51, 53] decide which model
+to run by using manually-crafted rules for sampling and se-
+lection. These rules were developed for static-camera work-
+loads (e.g., surveillance) and for high accuracy targets. As
+expected, on surveillance videos these methods (e.g., cas-
+cade [48,49,51,54], Tiered-sampling [46]) beat the simple
+baseline that selects and fixes one model size for the rest of
+the video (sample-once); see Figure 3, left. However, when
+we adapt the same methods to mobile-camera workloads (e.g.,
+road vehicle video) and to lower accuracy targets, the results
+flip: they cost more than the sample-once baseline in low-to-
+medium accuracy targets (Fig. 3, right).
+To understand the cause, we separate the effect of sampling
+from the effect of selection using two diagnostic variants:
+(a) Inefficient sampling. We first remove the cost of sam-
+pling from existing works (Tiered-sampling) while keeping
+the original selection rules (no-cost sampling, Fig. 3 right).
+The remaining gap to “sample-once” reflects the cost savings
+achieved by DMSS alone. On road vehicle videos, this gap is
+small (e.g., ∼20% cost reduction at 28 MOTA, Fig. 3 right).
+This gap is less than the cost of sampling that was removed.
+Together, the models that these methods sample often do not
+“pay for themselves,” so total cost increases.
+(b) Suboptimal selection. Next, we also replace the original
+selection rules with oracle selection, which has access to the
+true accuracy that each model would achieve on the segment
+(no-cost sampling + oracle accuracy, Fig. 3, right). This hy-
+pothetical variant cuts cost by as much as 50% relative to
+no-cost sampling, indicating that the accuracy prediction used
+by current selection rules to select a model size has too much
+error, resulting in suboptimal model size selection.
+3.2
+Improving sampling
+Analysis of sampling. Sampling a model M has two opposing
+effects:
+1. The cost of running M on the exemplar frames (to get its
+predictions and calculate the prediction statistic).
+2. The potential benefit from changing to a better model size
+selection given the calculated value of the prediction statistic
+of model M (e.g. reduction in cost of the selected model for
+the same accuracy).
+For clarity, we will refer to these as component (i) and
+component (ii), respectively.
+Sampling should happen when the net effect is positive, i.e.
+component (ii) > component (i). Existing works [46,48,49,
+51,53] do not explicitly estimate these components. Instead,
+they use rules that incorporate fixed assumptions about their
+relative effect. We propose to explicitly estimate and compare
+these components at runtime.
+Estimating the benefit (component (ii)). Component (i) is
+known upfront, before sampling, as a fixed cost of model
+inference. In contrast, component (ii) is the benefit we might
+get after sampling, when model M’s prediction statistic causes
+the system to switch to more optimal model size. Since the
+prediction statistic is only revealed after sampling, we cannot
+know the exact benefit at decision time. To overcome this, we
+estimate the benefit in advance from historical workload data.
+Using historical workload data. Although model M’s predic-
+tion statistic is unknown before sampling, its distribution can
+be estimated from historical workload data. Using empirical
+frequencies of past video segments (Figure 5, blue), we assign
+probabilities to each possible value and compute the expected
+value of the benefit (component (ii)). This expected value is
+compared against the known sampling cost (component (i))
+to decide whether to sample model M.
+Example 1. Consider a system with three model sizes (Small,
+Medium, and Large), with selection costs of 30, 55, and
+100, respectively (Figure 4). The objective (as used in prior
+work [46, 49]) is to select the least expensive model size
+whose accuracy has at least 90% chance of being above the
+4
+
+45
+50
+55
+60
+65
+0
+1
+2
+MEVA (surveillance)
+28
+30
+32
+34
+36
+Waymo (road vehicles)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Accuracy target (MOTA)
+0.0
+0.5
+1.0
+Cost multiplier
+to Sample-once
+Optimal
+Sample-once
+Cascade
+Tiered-sampling
+Tiered-sampling
+(high-sample)
+No-cost sampling
+No-cost sampling +
+oracle accuracy
+Figure 3: The cost of various model size selection methods in different video workload types and accuracy targets. The cost (y-axis)
+of various model size selection methods (color, bar pattern), normalized to the cost of the sample-once method (red) in surveillance (left
+panel) and road vehicle camera (right panel) video workloads across several accuracy targets (x-axis). Bars with patterns (e.g. Tiered-sampling
+(high-sample)), represent hypothetical solutions.
+accuracy target. We consider two possible sampling decisions
+and estimate component (i) and (ii) to decide which is better:
+(a) No sampling (baseline). Historical workload data indi-
+cates (Fig. 4, top center) that the Small, Medium, and Large
+model’s accuracies exceed the target in 20%, 70%, and 100%
+of the video segments. Without sampling, Large must be se-
+lected (cost=100).
+(b) Sampling the Large model. We sample Large
+(cost=10), and calculate its prediction statistic, the sum of
+objectness score across all objects in the frame [51, 52]. A
+high score indicates that the video segment’s scene is busy,
+and thus more challenging: More chance for small objects,
+occlusions, or unusual angles that are harder to detect. If the
+Large model is sampled, its prediction statistic has three possi-
+ble values: A, B, and C (representing a low, medium, and high
+objectness score). Historical data show (Figure 4, bottom):
+1. If the prediction statistic is A: All models meet target →
+select Small (cost=30)
+2. If B: Medium and Large meet target →select Medium
+(cost=55)
+3. If C: Only Large meets target →select Large (cost=100)
+The expected value of the selection cost after sampling =
+0.2 × 30 + 0.5 × 55 + 0.3 × 100 = 63.5. The benefit from
+improving selection (component (ii)) = 100 −63.5 = 36.5,
+which exceeds the sampling cost (component (i))=10. There-
+fore, sampling the Large model is preferred over no sampling.
+Using correlations between prediction statistics. Before
+sampling, we only have a broad range for a model’s prediction
+statistic based on all past segments (Figure 5, blue), making
+our benefit estimate (component (ii)) imprecise. To narrow
+down this range of potential values, we observe that the pre-
+diction statistics of different model sizes show a moderate to
+strong correlation (0.6-0.9) across workload types, prediction
+statistic types, and model families (§H). This means that pre-
+diction statistic values tend to move together, so the value of
+one model’s prediction statistic helps narrow down the likely
+values of other prediction statistics of models that weren’t
+sampled yet, improving component (ii)’s estimate.
+This is shown in Fig. 5: The blue histogram shows model
+Model 
+size
+Sampling 
+cost
+Selection 
+cost
+Small
+5
+30
+Medium
+7
+55
+Large
+10
+100
+Large model’s 
+Prediction 
+statistic values
+% of video 
+segments 
+(out of all)
+% of video 
+segments (in which 
+med pred. stat = L)
+Predicted 
+accuracy
+Selected 
+model 
+size
+Selection 
+cost
+A
+20
+80
+Small, medium, 
+large > target
+Small
+30
+B
+50
+18
+Medium, large > 
+target
+Medium
+55
+C
+30
+2
+Large > target
+Large
+100
+Model 
+size
+% of video segments 
+where accuracy > target
+Small
+20
+Medium
+70
+Large
+100
+Objective: To select 
+the least expensive 
+model that has at 
+least 90% chance of 
+accuracy > target
+Figure 4: Example for the use of historical workload data to
+estimate components (i) and (ii). Top left: The costs of sampling
+and selection. Top center: Predicted accuracy when no models are
+sampled. Bottom: Varying outcomes of sampling Large, based on the
+prediction statistic value in the video segment. See text for details.
+EDet-D7X’s prediction statistic distribution across all video
+segments. When the historical data is filtered only to segments
+where EDet-D5’s statistic=3, the likely range of EDet-D7X’s
+prediction statistic narrows markedly. Multiple sampled mod-
+els compound this effect: Filtering by both EDet-D5=3 and
+EDet-D7=4 (green) narrows the likely values further.
+Example 2: A narrower value range flips the sampling
+decision. Suppose we already sampled the Medium model
+and its prediction statistic is L. With this observation, the
+tentative selection is the Medium (meets >90% objective)
+with cost 55. Now, consider three options:
+1. No further sampling (baseline). Keep Medium selection,
+cost=55
+2. Sample Large using overall frequencies (ignoring L).
+From historical data (Fig. 4, bottom), the Large models’ pre-
+diction statistic values A, B, C occur in 20%, 50%, and 30%
+of the video segments. Following the same analysis in the
+previous example: The sampling cost (component (i)) = 10,
+the expected selection cost = 63.5, so the change in cost from
+updated selection (Component (ii)) = 55 −63.5 = −8.5.
+Component (ii) < component (i) →Don’t sample.
+3. Sample the Large model using the filtered frequen-
+cies (taking L into account). Historical data filtered by L
+(Fig. 4 (bottom)) shows that A, B, C occur in 80%, 18%,
+and 2% of the video segments (the frequencies become
+5
+
+0
+10
+20
+EDet-D7X prediction statistic value
+0
+10000
+Video
+segment count
+All video segments
+Only video segments in which
+the models' prediction statistic values are:
+EDet-D5: 3
+EDet-D3: 12
+EDet-D5: 3 and EDet-D7: 4
+Figure 5: Using the historical workload data (filtered and unfil-
+tered) to get the range of likely values of prediction statistics. The
+histogram of the prediction statistic (sum of objectness score [51,52])
+of model EDet-D7X [14] in different video segments of the histor-
+ical workload data (road vehicles videos [66]). The histogram is
+shown unfiltered for all video segments (blue), and filtered: only
+for segments where EDet-D5=3 (orange), only for segments where
+EDet-D3=12 (red), and only for segments where EDet-D5=3 and
+also EDet-D7=4 (green).
+concentrated on A (80%). The sampling cost (component
+(i)) is 10, but now the expected value of the selection cost
+= 0.8×30+0.18×55+0.02×100 = 35.9, so component
+(ii) = 55−35.9 = 19.1. Since component (ii) > component
+(i) →Sample the Large model (decision flipped!).
+Takeaway. Using historical workload data (Ex. 1) and fil-
+tering it using the prediction statistics of previously-sampled
+models (Ex. 2) yields explicit (and more precise) estimates of
+component (ii), which can be used to decide which model to
+sample and which to avoid.
+3.3
+Improving selection
+Varying and weak correlation between prediction statis-
+tics and accuracy. Selection depends on predicting each
+model’s accuracy from prediction statistics. These statistics
+(e.g. prediction confidence score) are imperfect proxy met-
+rics for accuracy. Figure 6 shows that the Pearson correlation
+between each model size’s prediction statistic (x-axis) and
+the accuracy of other models (y-axis) ranges from nearly 0 to
+≈0.8, and varies substantially with workload type, prediction
+statistic, and model family (similar trends using Spearman
+correlation are shown in §E).1 This variation implies that
+simple hand-crafted rules (e.g., single-variable thresholds or
+formulas [46–49,51]) will not predict the accuracy well across
+all settings, motivating a more robust approach.
+Adopting a performance modeling perspective. We view
+predicting accuracy from prediction statistics as a perfor-
+mance modeling problem. In systems scheduling, perfor-
+mance models are widely used when the mapping from task
+configuration and proxy metrics (e.g., % CPU utilization) to
+the end-to-end metric (e.g., latency) is complex and platform-
+dependent [55–57,70–74]. Our setting is analogous: the map-
+ping from prediction statistics to accuracy depends on com-
+plex interactions between the model and the input distribution
+and can vary across models and workload types.
+1More broadly, prior work shows the relationship between common pre-
+diction statistics and accuracy can be non-linear and dataset- and model-
+dependent [67–69].
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+Accuracy of
+various model sizes
+(small →large)
+.16
+.18
+.19
+.18
+.17
+.16
+.18
+.18
+.26
+.09
+.53
+.58
+.58
+.45
+.19
+.75
+.8
+.71
+.52
+.22
+.84
+.75
+.66
+.47
+.17
+(a) Surveillance ⋆
+Disagreement ▲
+EﬃcientDet •
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+.28
+.32
+.34
+.35
+.34
+.3
+.33
+.35
+.36
+.34
+.38
+.43
+.45
+.43
+.41
+.51
+.56
+.5
+.48
+.44
+.62
+.55
+.46
+.44
+.4
+(b) Vehicles ⋆
+Disagreement
+EﬃcientDet
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+.01
+.01
+.0
+.0
+.03
+.0
+.0
+.02
+.05
+.05
+.03
+.09
+.17
+.23
+.27
+.05
+.14
+.3
+.37
+.42
+.11
+.31
+.45
+.48
+.51
+(c) Surveillance
+Sum of objectness ▲
+EﬃcientDet
+T
+S
+B
+L
+L
+B
+S
+T
+.21
+.18
+.17
+.16
+.25
+.2
+.2
+.18
+.28
+.25
+.23
+.21
+.37
+.33
+.33
+.29
+(d) Surveillance
+Disagreement
+CoDETR •
+0.00
+0.25
+0.50
+0.75
+1.00
+Correlation coeﬃcient
+Prediction statistics of various model size (small →large)
+Figure 6: The varied correlation between prediction statistics
+and accuracy. The correlation (Pearson) between the prediction
+statistics (x-axis) and the accuracy (y-axis) across different model
+sizes. Heading: Blue: Workload type. Orange: Prediction statis-
+tic type. Green: Model type. The correlation varies depending on
+the workload type ((a) vs (b)), prediction statistic ((a) vs (c)), and
+model type ((a) vs (d)). The maximum and minimum values in each
+heatmap are emphasized (bold/red).
+Prediction-serving 
+system + model zoo
+Video segment
+Data plane
+Control plane
+Sampler
+Prediction-serving 
+system + model zoo
+video
+Update decision
+Take frames
+Measurement-
+driven planner
+Predictions on the 
+video segment
+Sample 
+model size
+Prediction 
+statistics (e.g. 
+conﬁdence score)
+Selector
+Data-driven 
+performance 
+model (predictor)
+Sampled
+prediction
+statistics
+Predicted 
+accuracy values
+Exemplar 
+frames
+Selected model size
+Application
+Figure 7: RedunCut’s architecture and workflow.
+A data-driven performance model for accuracy. We
+therefore use a learned performance model [55,56,72] that
+leverages historical workload data to predict the accuracy of
+each model size from prediction statistics. Compared with
+manually-crafted rules, a learned model can combine multi-
+ple weak proxy metrics and remain robust in the presence of
+noise [57, 74]. In §5.5, we show this data-driven approach
+improves accuracy prediction substantially (3.5×–10× lower
+error versus manually-crafted baselines), which in turn im-
+proves model selection.
+These key insights (explicit cost-benefit analysis for sam-
+pling and using a data-driven accuracy performance model
+for selection) guide RedunCut’s design.
+4
+RedunCut Design
+RedunCut is a dynamic model size selection system for live
+video analytics. Its goals are (i) simplicity: no changes to the
+base-models or additional training, and (ii) cost reduction by
+adapting model size to video content. RedunCut works with
+any prediction-serving system and model zoo (Figure 7). It
+consists of a control plane for sampling and selection and a
+data plane that executes the selected model size. The control
+and data planes are separated to keep selection off the critical
+path (§4.4) and give the data plane priority when selection
+and execution call the same prediction-serving system.
+6
+
+RedunCut’s workflow (Figure 7). For each new video seg-
+ment, exemplar frames are sent to the control plane. Inside
+the sampler (§4.2), a measurement-driven planner uses histor-
+ical workload data to guide an iterative sampling process that
+efficiently determines which model to sample or avoid. The
+prediction statistics of the models sampled are passed to the
+selector (§4.3), which uses a data-driven performance model
+to predict each model’s accuracy. RedunCut then calculates
+the cost-accuracy objective (§4.1) for each model, selects the
+best model size, and sends the selection back to the data plane
+to run on the video segment.
+4.1
+Objective
+The application’s cost and accuracy goals are calculated in
+aggregate over all videos at the end of execution. In contrast,
+at runtime, LVA processing only has access to past videos.
+Therefore, different works [46,49,50] use a surrogate objec-
+tive to guide sampling and selection in each video segment.
+RedunCut uses a scalarized objective that linearly combines
+normalized accuracy and cost in a single expression, using a
+tunable trade-off parameter α ∈[0,1]:
+ \label {e: c ost-accuracy} \text {cost}\_\text {acc}\_\text {obj} = \alpha \times \text {cost} + (1 - \alpha ) \times (1 - \text {acc})
+(1)
+This objective is simple to calculate and is used extensively
+in utility and objective functions in prior work [50,75,76].
+4.2
+Efficient Sampling
+§3 shows how historical workload data can be used to esti-
+mate component (ii), and that as more prediction statistics are
+known, the estimates and the sampling decisions improve.
+Sequential operation. To maximally exploit these ideas,
+RedunCut avoids sampling models in parallel, which pre-
+cludes using one model’s prediction statistic to improve sam-
+pling for other models. Instead, we design a measurement-
+driven planner that samples sequentially, one model at a time.
+This allows using the observed prediction statistics of all pre-
+viously sampled models in order to get increasingly precise
+estimates of component (ii) for the next model to sample.
+This sequential sampling design abides by anytime seman-
+tics: As more iterations are run, more cost is expected to be
+saved since each additional iteration is designed to improve
+the objective through careful estimation of component (ii).
+Probability estimation from historical workload data.
+Component (ii) is estimated using the expected value of the
+prediction statistic of the model m considered for sampling.
+This requires estimating pm(s|O), the probability that predic-
+tion statistic value s will be calculated after sampling model
+m on the video segment, given prediction statistics set O
+observed from previously sampled models. Since the sam-
+pling process may repeatedly query pm(s|O) to calculate the
+expected value, its estimation must be computationally in-
+expensive and fast. Therefore, we use empirical probability
+estimates for pm(s|O) based on observed frequencies in the
+historical data [77–79].
+Let O = {(mi,si)}k
+i=1, where prediction statistic si was ob-
+served for model mi in the current video segment. Define
+N(O) to be the number of video segments in the historical
+data in which these prediction statistics were also observed:
+ \lab e l { e:p robabilit
+y-estimation} \widehat {p}_m(s \mid \mathcal {O}) \;=\; \frac {N(\mathcal {O} \cup \{(m, s)\})}{N(\mathcal {O})} 
+(2)
+Continuous prediction statistics (e.g. confidence score [48],
+sum of objectness score [51]) are discretized via binning. The
+number of bins is tuned for each workload type based on
+the historical data. We found that using 10-20 bins for each
+prediction statistic is a good default across workload types.
+Sampling planner overview. The planner operates itera-
+tively: (1) Estimate component (ii) and the net benefit (com-
+ponent (ii) - component (i)) for each unsampled model, (2)
+Sample the model with the highest net benefit, stopping when
+no models have positive net benefit. To estimate component
+(ii), the planner calls the selector and the accuracy prediction
+model (§4.3) for each potential prediction statistic value.
+Estimating component (ii). We define J(O) as the objec-
+tive when selecting based on the prediction statistics in O:
+ \b e gin {split} J(\mathcal {O}) = Objective(&c(Select(\mathcal {O})),\ \widehat {a}(Select(\mathcal {O}), \mathcal {O})) \end {split} 
+(3)
+Select(O) is the model selected by the system based on
+prediction statistics O (§4.3), c(·) is the model’s selection
+cost, ba is the predicted accuracy of the model (§4.3), and
+Objective is the objective function (Eq. (1)).
+Component (ii) is then estimated as:
+ \label { e:compo n
+ent-ii} \ begin {spli t} &Compon
+ent\ ii( m, \m athca l {O}) = \
+\ &\m a
+thbb
+ {E} [J(\tex t {pred. stats before sampling})] \\&- J(\text {pred. stats after sampling}) = \\ &J(\mathcal {O}) - \sum _{s \in \mathcal {S}_m} \widehat {p}_m(s | \mathcal {O}) \times J(\mathcal {O} \cup \{(m, s)\}) \end {split} 
+(4)
+Where Sm is the potential values that model m’s prediction
+statistic can take. Using Eq. (4), the full sampling routine for
+a new video segment is shown in Algorithm 1.
+Data drift and outlier detection. At runtime, sampling
+yields various combinations of values of different prediction
+statistics (O). To ensure we only trust probability estimates
+bpm(s|O) that are sufficiently supported by data, RedunCut
+requires at least Tmin matching video segments (by default
+Tmin = 10) in the historical data. If the matched count falls
+below Tmin, the video segment’s prediction statistic combina-
+tion O is treated as underrepresented in the data. In this case,
+RedunCut halts sampling, removes the last prediction statistic
+from O whose inclusion caused the count drop, and passes the
+remaining prediction statistics to the selector. This approach
+allows RedunCut to avoid inflating cost by running long sam-
+pling sequences on new video data not sufficiently represented
+in the historical data. In the extreme, if an outlier is detected
+7
+
+Algorithm 1: Measurement-driven sampling planner
+Input: Candidate models M
+Output: Prediction statistics O
+1 O ←∅
+// Observed (model, stat) pairs
+2 while true do
+3
+foreach unsampled m ∈M do
+4
+G[m] ←Comp. ii(m,O)−SAMPLECOST(m)
+// Eq. (4)
+5
+if maxm G[m] ≤0 then
+6
+return O
+7
+m⋆←argmaxm G[m];
+s ←SAMPLE(m⋆);
+8
+O ←O ∪{(m⋆,s)}
+Algorithm 2: Selector
+Input: prediction statistics O, candidate models M
+Output: Selected model m⋆
+1 foreach m ∈M do
+2
+ˆa[m] ←ACCURACYPREDICT(m,O)
+// §4.3
+3
+ob j[m] ←Objective(c(m), ˆa[m])
+// §4.1
+4 m⋆←argminm∈M obj[m]; return m⋆
+after sampling the first model, RedunCut immediately falls
+back on the default model size for O = ∅. This mechanism
+gracefully handles severe data drift. We extensively evaluate
+robustness to drift in §5.4.
+4.3
+Data-driven accuracy prediction
+Selector overview. As shown in Algorithm 2, the selector pre-
+dicts the accuracy of each candidate model size and chooses
+the one that minimizes the cost-accuracy objective.
+Accuracy performance model. RedunCut uses a learned
+performance model to capture complex interactions between
+prediction statistics and accuracy. The performance model
+must: (i) tolerate changing input features (varying O per seg-
+ment), (ii) be computationally fast for repeated invocations.
+For our design, we use a k-nearest neighbors (kNN) model
+for accuracy prediction [80, 81]. kNN can naturally handle
+missing features [81], achieves sub-ms inference on a single
+CPU core, and requires no training beyond storing historical
+data. When using kNN for accuracy prediction, the same
+neighbors (computed from the prediction statistics O) predict
+accuracy for all M models, via model-specific voting, which
+reduces the number of operations done by the model. When
+no model has been sampled (O = ∅), the predictor returns
+each model’s average accuracy in the historical data, which
+results in selecting the best model on average. We tune k and
+the distance metric on historical data.
+Caching. To further reduce the accuracy prediction over-
+head, RedunCut caches the accuracy predictions for com-
+monly repeated combinations of prediction statistics (e.g. the
+empty set O = ∅, when no models have been sampled yet).
+4.4
+Managing latency
+Many video analytics applications impose deadlines of 2-15
+sec [50,82]. Sequential sampling may overrun the deadline
+because of transient delays in the prediction-serving system
+(e.g., from cloud contention). To ensure that the best model
+size selection available is submitted on time for execution, we
+decouple the control plane (sampling/selection) from the data
+plane (execution), giving the data plane higher priority.
+Workflow. On arrival at time tarr, each video segment is
+assigned a default model size (the selector’s choice when O =
+∅) and a control-plane commit timestamp tcommit. At each
+planner iteration (Algorithm 1), the control plane passes the
+current prediction statistics O to the selector, obtains a tenta-
+tive choice mcurr, and asynchronously updates ⟨mcurr, tcommit⟩.
+The commit time is:
+tcommit = tarr +Tdeadline −ˆq−ˆtexec(mcurr)
+where ˆq is the estimated queuing delay and ˆtexec(mcurr)
+is estimated execution time (from past latency profiles). At
+tcommit, the data plane executes the latest mcurr. ˆq is estimated
+via a direct measurement. We leave exploring richer queue
+wait time prediction for future work.
+5
+Evaluation
+We evaluate RedunCut on road vehicle, drone, and surveil-
+lance camera videos in two perception tasks and three model
+architecture families, making the following findings:
+1. RedunCut reduces compute cost by 14-62% over Tiered-
+sampling [46] and 11-60% over a gating network [7] while
+maintaining the same accuracy in road vehicle videos.
+2. The majority (62% on average) of RedunCut’s perfor-
+mance improvement comes from the sampler.
+3. RedunCut remains robust to data drift that results in a mis-
+match between the historical data and the videos at runtime.
+4. Additional sampling iterations monotonically improve per-
+formance and contribute to 5%-40% of RedunCut’s overall
+improvement.
+5.1
+Experimental setup and methodology
+Implementation. RedunCut is implemented using Ray [83],
+and uses Ray Serve [84] as the prediction serving system. We
+use separate actor pools for the control and data planes, which
+communicate asynchronously (§4.4). During runtime, we use
+nodes with 2 Titan RTX GPUs.
+Datasets. We evaluate RedunCut on road vehicle, drone, and
+surveillance camera datasets, covering a range of camera
+movement speeds, weather conditions, and times of day.
+8
+
+• Road Vehicles: We use the front-facing camera footage
+in the Waymo [66] dataset. This dataset is composed of 798
+training and 202 validation videos, all of length 20 seconds.
+• Drone: We use the VisDrone [85] dataset, in which videos
+shorter than 20 seconds are discarded for uniformity (leav-
+ing an average video length of 37 seconds). The dataset is
+composed of 35 training videos and 14 test videos.
+• Stationary camera surveillance: We use the MEVA [86]
+dataset of indoor and outdoor wall-mounted security camera
+footage. The dataset has 28 training and 8 test videos, with
+video lengths range from 30 seconds to 5 minutes.
+Models. To evaluate and compare DMSS methods, we use
+a range of multi-object tracking and instance segmentation
+model sizes. The trackers are built using EfficientDet [14],
+YOLOX [16], or DETR [58] models for detection followed
+by SORT [87] for tracking. These models span over two
+orders of magnitude of cost (1.08-410 GFLOP), and range in
+accuracy from 25.8 to 55.1 mAP. To stay consistent with the
+methodology of prior works [46,49,50], we use model sizes
+whose cost and accuracy are Pareto optimal. The models are
+run using TensorFlow [88], and are pretrained on the COCO
+dataset [89,90].
+Metrics. We evaluate model size selection in multi-object
+tracking and instance segmentation, both key tasks in video
+analytics [50, 51]. Accuracy is calculated for each task us-
+ing standard metrics: the MOTA tracking score [91] and the
+segmentation Average Precision [89], respectively. Compute
+cost is measured using floating-point operations (FLOPs)
+based on reported values [14, 16]. The final accuracy of a
+model size selection method is determined as follows: (i)
+model sizes are selected in the videos (ii) the selected models
+make predictions on the videos (iii) the method’s accuracy
+is the aggregate accuracy of these predictions on the videos.
+The total cost is the average FLOPs/frame performed by the
+selected models.
+Trace-driven simulator. We also built a simulator to test
+RedunCut under a wide range of configurations, resource
+constraints, and longer execution times. The simulator takes
+as input the cached model predictions on the video frames,
+as well as the inference cost logs. This exhaustive approach
+allows us to mimic our implementation’s execution with high-
+fidelity under different constraints.
+Comparing methods. Model size selection methods are
+compared by measuring the minimal compute cost that each
+method requires in order to meet the same accuracy target.
+Setting control parameters. As discussed in §2, several
+methods [7,46–48] introduce multiple parameters that control
+sampling and selection. We run standard random search with
+the historical workload data to find the optimal parameter
+value combinations for each method at each accuracy target.
+Setup details. Following the prevailing evaluation method-
+ology used in existing works [7, 46, 49, 92], we use gener-
+ated labels for the MEVA (surveillance) dataset (which lacks
+human-annotated labels) via large model prediction. To get
+high-fidelity predictions, we combine the state-of-the-art de-
+tection model DETA [93] and tracking module Unicorn [94].
+5.2
+End-to-end results
+First, we evaluate and compare RedunCut against the follow-
+ing dynamic model size selection methods:
+1. Tiered-sampling: This is a sampling method used by
+Chameleon [46] in which expensive sampling is performed
+infrequently while inexpensive sampling is done more fre-
+quently (details on control parameters in §A). To keep eval-
+uation fair, the following complementary methods are not
+included in the solution: (i) The hill-climbing method is not
+used because optimization takes place over a single dimen-
+sion (model size). (ii) Further, our evaluation uses camera
+feeds that do not share the same space and time dimensions,
+so the spatial locality approach does not apply.
+2. Gating network: We adapt the “expert” model selection
+mechanism in RECL [7] to model size selection. In this ap-
+proach, a lightweight gating neural network is trained to se-
+lect the top-k model sizes on a video frame. Afterwards, run-
+time profiling is used to filter down to the top-1 model size.
+We adapt RECL’s labeling schema by setting the labels to be
+the model size choice that best optimizes the cost-accuracy
+objective. The gating network is then trained in separate
+trials using labels produced with different threshold values
+to modulate between cost and accuracy. We use the same
+routing network architecture as RECL (a ResNet18 [95]).
+This model size has negligible compute cost.
+3. Cascade: The model cascade samples models from small
+to large [47–49]. The model cascade is assembled using
+the smallest and the largest models used in each dataset
+(§5.1), following existing works. As far as we know, there are
+no adaptations of a model cascade to multi-object tracking.
+Therefore, we develop a straightforward confidence-score
+based early-exit rule described in §C.
+4. Sample-once [50,53]: Static selection in which the opti-
+mal model size is determined once at the beginning of the
+video and fixed for the rest of it. To keep evaluation con-
+sistent, the model is determined using the same selection
+method used by Tiered-sampling [46].
+The end-to-end evaluation on surveillance, road vehicle,
+and drone videos is shown in Figure 8. The figure illustrates
+the cost of various methods across different accuracy targets.
+A line is plotted across the cost-accuracy tradeoff points of
+each method to distinctly visualize them. The results show
+that RedunCut achieves higher accuracy at a lower cost than
+the rest of the methods, across a wide accuracy spectrum
+and across the video workload types. In contrast, the other
+methods tend to vary in their cost-efficiency compared to
+one another. Existing works sample and select models using
+rules that result in inefficient sampling and suboptimal se-
+9
+
+200
+400
+27.5
+30.0
+32.5
+35.0
+Accuracy (MOTA)
+Waymo (road vehicles)
+0
+50
+100
+40
+50
+60
+70
+MEVA (surveillance)
+200
+400
+22
+24
+26
+28
+VisDrone (drones)
+Cost (avg FLOPs (1e9) / frame)
+Tiered-sampling
+Sample-once
+Cascade
+Gating network
+RedunCut Figure
+8:
+End-to-end
+cost-
+accuracy
+Pareto
+frontier
+of
+RedunCut and other methods
+evaluated in road vehicle (a),
+Surveillance (b), and drone (c)
+videos. The Pareto frontier of
+each method represents the lowest
+compute cost (x-axis) that each
+method requires to reach a certain
+accuracy (y-axis). §5.1 describes
+the generation of the Pareto frontier
+curve. The dashed, blue line is
+described in §5.2.
+lection. Instead, RedunCut achieves significant cost savings
+by explicitly calculating the net effect of sampling and using
+data-driven accuracy prediction.
+To more clearly compare RedunCut with existing methods,
+we directly measure the compute cost that each method re-
+quires in order to meet a range of accuracy targets. To simplify
+comparison, the compute cost of every method is normalized
+by dividing it by the compute cost of the sample-once base-
+line. Results are shown on the Waymo (road vehicle) dataset
+in Figure 9. We make the following observations:
+Comparison to RedunCut. The performance difference be-
+tween RedunCut and other methods varies depending on the
+accuracy target. In road vehicle videos, RedunCut saves 19-
+62% over the Tiered-sampling method [46] and 11-60% in
+compute cost over the gating network [7]. Likewise, in station-
+ary camera surveillance videos, RedunCut saves 42-76% over
+Tiered-sampling and 38-61% over the gating network (§D).
+Similar improvements are achieved in drone videos (18-67%
+over Tiered-sampling, see §D).
+Gating network limitation. Due to a limitation in the adap-
+tation to model size selection, the gating network’s cost and
+accuracy do not extend to the top-right of the tradeoff space.
+This is related to the large fraction of scenarios in which
+smaller models have equal to or better accuracy than the large
+model [96] (see §B). To overcome this, we simulate an ideal
+adaptation of the gating network in which the largest model
+size is always selected. This gives the highest possible point
+(dashed blue segment and asterisk in Fig. 8 and translucent
+blue bars in Fig. 9).
+5.3
+Generalization
+Across model families. Next, we evaluate RedunCut using
+different model architecture families: The YOLOX [16] (Fig-
+ure 10 (a)) and the CoDETR model families [58] (Figure 10
+(b)). The cost reduction range over Tiered-sampling is 16%-
+84% for the same accuracy target. The high cost of the cascade
+baseline in the YOLOX family may be attributed to the wider
+accuracy gap in the YOLOX models used in the cascade (25.8
+and 49.7 mAP) than in the EfficientDet models used in the
+28
+30
+32
+34
+36
+Accuracy target (MOTA)
+0
+1
+Cost multiplier
+to Sample-once
+-62%
+Sample-once
+Tiered-sampling
+Cascade
+Gating network
+RedunCut
+Figure 9: Cost comparison between RedunCut and other meth-
+ods in road vehicle videos. Each method (color) is evaluated on a
+range of accuracy targets (x-axis). Each method’s compute cost is
+normalized by the compute cost of the sample-once method (y-axis).
+The translucent blue bars are described in §5.2.
+20
+24
+28
+0
+1
+2
+-80%
+(a) YOLO
+42
+44
+46
+-37%
+(b) DETR
+22.5
+25.5
+28.5
+-61%
+(c) Ins. segment.
+Accuracy target
+Cost multiplier
+to Sample-once
+Sample-once
+Tiered-sampling
+Cascade
+RedunCut
+Figure 10: RedunCut’s performance across model families
+(a [16], b [58]) and tasks (c, instance segmentation). The normal-
+ized compute cost (y-axis) of several model size selection methods
+(bar color) is shown across different accuracy targets (x-axis).
+cascade (47.2 vs 55.1 mAP). Thus, when the accuracy gap in
+the cascade is higher, the larger model selection based on the
+small model’s confidence score is less optimal, resulting in
+higher cost.
+Across tasks. We evaluate RedunCut in a different task,
+instance segmentation, using the YOLOX-seg model fam-
+ily [16] and the KITTI-STEP [97] road vehicle dataset. The
+results (Figure 10 (c)) show that RedunCut improves across
+all accuracy targets, with a cost reduction range of 44-61%.
+5.4
+Robustness benchmarks
+To further understand RedunCut’s advantages and limits, we
+conduct evaluation in resource-constrained settings.
+Less historical workload data. RedunCut uses the historical
+workload data for both sampling and selection (§4). Redun-
+10
+
+28
+30
+32
+34
+36
+0
+1
+(a) Waymo
+45
+50
+55
+60
+65
+(b) MEVA
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Accuracy target (MOTA)
+0.0
+0.5
+1.0
+Cost multiplier
+to Sample-once
+Sample-once
+Tiered-sampling
+RedunCut (x1)
+RedunCut (x1/8)
+Figure 11: RedunCut’s robustness in settings with less historical
+workload data. The normalized compute cost (y-axis) of several
+model size selection policies (bar color) across different accuracy
+targets (x-axis) in road vehicles (a) and surveillance (b) videos.
+Historical video data length is reduced from 4.4 hours (×1) to 0.5
+hours (×1/8) in Waymo and 2.3 hours (×1) to 0.3 hours (×1/8) in
+MEVA.
+Cut is designed for video analytics at scale, in which large
+amounts of historical data are expected to be available. How-
+ever, to understand RedunCut’s limits, we investigate its per-
+formance when historical workload data is scarce. To this end,
+we reduce the amount of data available to RedunCut by ×8
+(Figure 11). The results show that RedunCut’s performance
+is largely preserved in both Waymo and MEVA datasets (30
+minutes and 18 minutes, respectively).
+Robustness to drift between historical workload data and
+runtime videos (location, camera setup, workload type).
+Data drift [6,7,98] or operational mistakes can make runtime
+videos differ from RedunCut’s historical data. We evaluate
+RedunCut by deliberately mismatching historical data and
+runtime videos along three axes: geography (e.g., San Fran-
+cisco/Phoenix vs. New York), camera configuration (sensor,
+resolution, frame rate, mount angle), and workload type (road
+vehicles vs. static surveillance). In Waymo runtime videos
+(Figure 12a), when we evaluate location and camera setup
+mismatches (BDD100k HD, a different road-vehicle work-
+load), cost remains within 5–10% of using matched Waymo
+historical data. Mismatch in the workload type is tougher: Us-
+ing MEVA (surveillance) historical data for Waymo runtime
+further increases cost, while the reverse (Waymo historical
+data and MEVA runtime) has a smaller effect (Fig. 12a–b).
+Together, RedunCut reduces cost over existing methods under
+mixed conditions, and can leverage other video sources when
+matching videos are unavailable.
+Historical workload data without human labeling. Like
+other methods (§2), RedunCut requires labels in the histor-
+ical workload data. Obtaining high-quality human labels is
+costly and time-consuming. A common alternative is to au-
+tomatically generate labels using a high-accuracy model, an
+approach adopted by several recent works [6,7,46,50]. Here,
+in Figure 13, we evaluate RedunCut with historical workload
+data whose labels were automatically generated. The data’s
+labels are generated using the largest model available for se-
+lection at runtime. Results show that across Waymo (Fig. 13
+28
+30
+32
+34
+0
+1
+(a) Waymo runtime
+45
+50
+55
+60
+65
+(b) MEVA runtime
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Accuracy target (MOTA)
+0.0
+0.5
+1.0
+Cost multiplier
+to Sample-once
+Sample-once
+Tiered-sampling
+RCut (HD: Waymo)
+RCut (HD: MEVA)
+RCut (HD: BDD100k)
+RCut (HD: MEVA)
+RCut (HD: Waymo)
+Figure 12: RedunCut’s (RCut) robustness to data drift
+between historical data (HD) and runtime videos (location,
+camera setup, workload type). Various combinations of Re-
+dunCut’s HD source were mixed and matched with various
+runtime video workloads: (a) road vehicle and (b) surveil-
+lance. The normalized compute cost (y-axis) is shown across
+different accuracy targets (x-axis). See §5.4.
+28
+30
+32
+34
+36
+0
+1
+(a) Waymo
+45
+50
+55
+60
+65
+(b) MEVA
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Accuracy target (MOTA)
+0.0
+0.5
+1.0
+Cost multiplier
+to Sample-once
+Sample-once
+Tiered-sampling
+RedunCut (manual labels)
+RedunCut (automatic labels)
+Figure 13: RedunCut’s robustness when the historical workload
+data is automatically labeled. The normalized compute cost (y-
+axis) of several model size selection methods (bar color) across
+different accuracy targets (x-axis) in road vehicle (a) and surveillance
+(b) videos. Label schema: (i) Manual human labeling (clear, purple)
+and (ii) Automatic labeling by model (purple with circles).
+(a)) and MEVA (Fig. 13 (b)), performance remains largely
+unchanged when automated labels are used. This result broad-
+ens the potential use of RedunCut to settings in which human
+annotation is absent or expensive.
+5.5
+Analysis of RedunCut’s performance
+The contribution of additional iterations in the planner.
+In each iteration, RedunCut’s planner only samples model
+sizes that it estimated to have a positive net effect on cost
+and accuracy. To quantify the value of additional iterations,
+we ablate the maximum number of iterations that the plan-
+ner can do {0,1,2,5}. The 5-iteration configuration is the
+full RedunCut solution. With 0 iterations, no sampling is per-
+formed: RedunCut simply selects the best-on-average model
+by computing each model’s average accuracy on the historical
+workload data and using that value as the predicted accuracy
+when selecting a model size (§4.3).
+Figure 14 shows that the benefit of additional iterations
+increases in higher accuracy targets (x-axis). At low targets
+(28-30 MOTA) sampling only adds ∼5% of RedunCut’s total
+cost savings, while ≥90% of the savings come from the best-
+on-average model alone. At the highest target (36) sampling
+accounts for ∼40% of the total savings, with the remaining
+∼60% still coming from selecting the best-on-average model.
+11
+
+28
+30
+32
+34
+36
+Accuracy target (MOTA)
+0
+1
+Fraction of 
+cost savings
+~40%
+5%
+Tiered-sampling
+RedunCut (iter. 0)
+RedunCut (iter. 1)
+RedunCut (iter. 2)
+RedunCut (iter. 5)
+Figure 14: The effect of sampling iterations on RedunCut’s
+performance. The fraction of RedunCut’s cost savings over Tiered-
+sampling [46] (y-axis) after a different number of sampling iterations
+(bar pattern) across accuracy targets (x-axis) in road vehicle videos.
+Higher y-axis values indicate better performance.
+30
+35
+Accuracy target (MOTA)
+0.0
+0.5
+1.0
+Fraction of
+cost savings
+Selector
+Sampler
+.19
+.57
+.31
+.22
+.59
+.81
+.43
+.69
+.78
+.41
+Figure 15: The contribution of the sampler and selector to Re-
+dunCut’s performance. RedunCut’s cost improvement over Tiered-
+sampling [46] (y-axis) contributed by each component (color) across
+different accuracy targets (x-axis) in Waymo (road vehicle) videos.
+Takeaway. In low accuracy targets, a single model size se-
+lection using the average accuracy suffices and additional sam-
+pling is largely redundant. As the accuracy target increases,
+additional sampling iterations can help in improving selection
+between small and large models.
+Ablation of sampler vs selector. RedunCut replaces the man-
+ually crafted rules in prior work by using two new mecha-
+nisms: (i) efficient, measurement-driven sampling by the plan-
+ner (Secs. 3.2 and 4.2) and (ii) selection via data-driven accu-
+racy prediction by RedunCut’s selector (Secs. 3.3 and 4.3). We
+quantify each mechanism’s contribution by swapping our sam-
+pler with Tiered-sampling [46] while retaining RedunCut’s
+selector. In Figure 15, both sampling and selection are crucial
+to RedunCut’s improvement over prior methods; the sampler
+accounts for 41–81% of RedunCut’s total cost savings. The
+opposite ablation (RedunCut’s sampler and Tiered-sampling’s
+selection), shows a similar attribution to performance by the
+selector (§I), suggesting a degree of overlap in effect.
+Error in accuracy prediction. We evaluate RedunCut’s
+learned performance model (kNN) for predicting accuracy
+from prediction statistics, and compare it to rules used in
+prior works. Across workload types (Road Vehicles, Drones),
+model families (EfficientDet, YOLOX), and model sizes, Re-
+dunCut reduces prediction error by 3.5×–10× vs. Tiered-
+sampling [46] (Figure 21; §G).
+6
+Related works
+Dynamic model size selection. A number of works have
+taken advantage of the tradeoff between cost and accuracy
+across model sizes [99–103]. DMSS is a narrower setup in
+which the system navigates this tradeoff per input on live data.
+This setting is challenging since decision making is more
+local (lacking access to all video data at a given point in time)
+and requires finer-grained decisions using rapidly changing
+information. As discussed in §1 and §2, DMSS has been
+explored in both video analytics and other applications [46,
+48, 49, 53, 54, 104]. We show that these approaches fail to
+generalize to important workload types and accuracy targets,
+and we propose RedunCut to fill this gap.
+Complementary first-stage data similarity and dedupli-
+cation methods. Chameleon [46] uses cross-camera similar-
+ity to reduce the number of configurations that they sample.
+Potluck [105] uses a cache-based system to detect duplicated
+inputs across video sources, and other works [49, 92, 106]
+explore frame skipping on the same video when they are ex-
+pected to remain same. Frame dropping is complementary to
+our method, because (like recent works [6,7]) we focus on
+resource allocation to model inference once it is determined
+that the input cannot be deduplicated or dropped.
+“Expert” model training and selection. Recent works
+[6, 7, 107], present cost-effective methods to boost the ac-
+curacy of a small model by fine-tuning it on specific video
+content at runtime (creating “experts”) using student-teacher
+learning [108]. To further save cost, RECL [7] proposes a
+“gating network” to select between previously trained experts.
+These methods show promise in environments with limited
+memory and compute. However, when compute and mem-
+ory are sufficiently available, system designers may prefer
+to avoid the complexity of training expert models on the fly:
+Model training requires expertise, and maintaining a large,
+dynamic pool of models (> 150 experts [7]) is expensive. Fur-
+ther, even after training, expert models may still substantially
+deviate from the predictions of the teacher model [7,107]. In-
+stead, in environments with sufficient memory and compute,
+the teacher model may be run directly.
+General model similarity. The use of prediction statistics is
+part of a line of works that aim to quantify and characterize
+model differences [109–111]. The methods in these works
+could be used to improve accuracy prediction at runtime.
+7
+Conclusion
+Dynamic model size selection can significantly reduce LVA
+cost, but prior methods use manually-crafted rules that over-
+sample and misselect outside their intended workload types
+and accuracy targets. RedunCut reframes sampling as an ex-
+plicit cost-benefit decision from historical data, and predicts
+accuracy using a lightweight performance model. As a model-
+agnostic shim layer with sequential sampling, RedunCut low-
+ers compute cost by 14-62% for a given accuracy target across
+diverse workload types, model families, and tasks.
+12
+
+References
+[1] Sokemi Rene Emmanuel Datondji, Yohan Dupuis,
+Peggy Subirats, and Pascal Vasseur.
+A survey of
+vision-based traffic monitoring of road intersections.
+IEEE transactions on intelligent transportation sys-
+tems, 17(10):2681–2698, 2016.
+[2] Frank Cangialosi, Neil Agarwal, Venkat Arun, Srinivas
+Narayana, Anand Sarwate, and Ravi Netravali. Privid:
+practical, Privacy-Preserving video analytics queries.
+In 19th USENIX Symposium on Networked Systems
+Design and Implementation (NSDI 22), pages 209–228,
+2022.
+[3] SecurityInformed editorial team.
+Video
+ana-
+lytics
+applications
+in
+retail -
+beyond security.
+https://www.securityinformed.com/insights/co-2603-
+ga-co-2214-ga-co-1880-ga.16620.html.
+[4] Amazon
+Web
+Services.
+Smart
+store
+an-
+alytics:
+Creating
+profitable
+retail
+insights.
+https://aws.amazon.com/blogs/industries/smart-
+store-analytics-creating-profitable-retail-insights/,
+2022.
+[5] Voxel51.
+How computer vision is changing re-
+tail. https://voxel51.com/blog/how-computer-vision-is-
+changing-retail/, 2024.
+[6] Romil Bhardwaj, Zhengxu Xia, Ganesh Anantha-
+narayanan, Junchen Jiang, Yuanchao Shu, Nikolaos
+Karianakis, Kevin Hsieh, Paramvir Bahl, and Ion Sto-
+ica.
+Ekya: Continuous learning of video analytics
+models on edge compute servers. In 19th USENIX
+Symposium on Networked Systems Design and Imple-
+mentation (NSDI 22), pages 119–135, 2022.
+[7] Mehrdad Khani, Ganesh Ananthanarayanan, Kevin
+Hsieh, Junchen Jiang, Ravi Netravali, Yuanchao Shu,
+Mohammad Alizadeh, and Victor Bahl. RECL: Re-
+sponsive Resource-Efficient continuous learning for
+video analytics. In 20th USENIX Symposium on Net-
+worked Systems Design and Implementation (NSDI
+23), pages 917–932, 2023.
+[8] Ganesh Ananthanarayanan, Paramvir Bahl, Peter
+Bodík, Krishna Chintalapudi, Matthai Philipose, Lenin
+Ravindranath, and Sudipta Sinha. Real-time video an-
+alytics: The killer app for edge computing. computer,
+50(10):58–67, 2017.
+[9] Clarion Security Systems. How many CCTV cameras
+are in london? https://clarionuk.com/resources/how-
+many-cctv-cameras-are-in-london/, 2022.
+[10] Solink Corporation.
+Video analytics and big
+data.
+https://solink.com/resources/4-comparisons-
+prove-video-biggest-big-data/, 2017.
+[11] Monica
+Davey.
+As
+Chicago
+ex-
+pands
+surveillance,
+a
+debate
+surges.
+https://www.nytimes.com/2018/05/26/us/chicago-
+police-surveillance.html, 2018. The New York Times,
+26 May 2018.
+[12] Quartz.
+Absolutely
+everywhere
+in
+Beijing
+is
+now
+covered by
+police
+video
+surveillance.
+https://qz.com/518874/absolutely-everywhere-in-
+beijing-is-now-covered-by-police-video-surveillance,
+2015.
+[13] Tsung-Yi Lin, Piotr Dollár, Ross Girshick, Kaiming
+He, Bharath Hariharan, and Serge Belongie. Feature
+pyramid networks for object detection. In Proceedings
+of the IEEE conference on computer vision and pattern
+recognition, pages 2117–2125, 2017.
+[14] Mingxing Tan, Ruoming Pang, and Quoc V Le. Effi-
+cientDet: Scalable and efficient object detection. In
+Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 10781–10790,
+2020.
+[15] Zhaowei Cai, Mohammad Saberian, and Nuno Vas-
+concelos. Learning complexity-aware cascades for
+deep pedestrian detection. In Proceedings of the IEEE
+international conference on computer vision, pages
+3361–3369, 2015.
+[16] Zheng Ge, Songtao Liu, Feng Wang, Zeming Li, and
+Jian Sun. YOLOX: Exceeding YOLO series in 2021.
+arXiv preprint arXiv:2107.08430, 2021.
+[17] Nicolas Carion, Francisco Massa, Gabriel Synnaeve,
+Nicolas Usunier, Alexander Kirillov, and Sergey
+Zagoruyko. End-to-end object detection with trans-
+formers. In European conference on computer vision,
+pages 213–229. Springer, 2020.
+[18] Andrew G Howard, Menglong Zhu, Bo Chen, Dmitry
+Kalenichenko, Weijun Wang, Tobias Weyand, Marco
+Andreetto, and Hartwig Adam. Mobilenets: Efficient
+convolutional neural networks for mobile vision appli-
+cations. arXiv preprint arXiv:1704.04861, 2017.
+[19] Xinyu Liu, Houwen Peng, Ningxin Zheng, Yuqing
+Yang, Han Hu, and Yixuan Yuan. Efficientvit: Memory
+efficient vision transformer with cascaded group atten-
+tion. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 14420–
+14430, 2023.
+[20] Samvit Jain, Ganesh Ananthanarayanan, Junchen Jiang,
+Yuanchao Shu, and Joseph Gonzalez. Scaling video
+analytics systems to large camera deployments. In
+Proceedings of the 20th International Workshop on
+13
+
+Mobile Computing Systems and Applications, pages
+9–14, 2019.
+[21] Yunzhe Ni, Zhilong Zheng, Xianshang Lin, Fengyu
+Gao, Xuan Zeng, Yirui Liu, Tao Xu, Hua Wang, Zhi-
+dong Zhang, Senlang Du, et al. Cellfusion: Multipath
+vehicle-to-cloud video streaming with network coding
+in the wild. In Proceedings of the ACM SIGCOMM
+2023 Conference, pages 668–683, 2023.
+[22] Dongzhu Xu, Anfu Zhou, Guixian Wang, Huanhuan
+Zhang, Xiangyu Li, Jialiang Pei, and Huadong Ma.
+Tutti: coupling 5G ran and mobile edge computing
+for latency-critical video analytics. In Proceedings of
+the 28th Annual International Conference on Mobile
+Computing And Networking, pages 729–742, 2022.
+[23] 5G technology as the backbone for commercial drone
+operations. Technical report, GSMA Foundry with
+Ericsson and TDC NET, 2022. Case study on 5G-
+enabled UAS with real-time video.
+[24] Mike Wong, Murali Ramanujam, Guha Balakrishnan,
+and Ravi Netravali.
+MadEye: Boosting live video
+analytics accuracy with adaptive camera configurations.
+In 21st USENIX Symposium on Networked Systems
+Design and Implementation (NSDI 24), pages 549–568,
+2024.
+[25] Yiding Wang, Weiyan Wang, Duowen Liu, Xin Jin,
+Junchen Jiang, and Kai Chen. Enabling edge-cloud
+video analytics for robotics applications. IEEE Trans-
+actions on Cloud Computing, 11(2):1500–1513, 2022.
+[26] Kien Nguyen, Clinton Fookes, Sridha Sridharan, Yingli
+Tian, Feng Liu, Xiaoming Liu, and Arun Ross. The
+state of aerial surveillance: A survey. arXiv preprint
+arXiv:2201.03080, 2022.
+[27] National Safety Council. Advanced driver assistance
+systems (adas).
+https://injuryfacts.nsc.org/motor-
+vehicle/occupant-protection/advanced-driver-
+assistance-systems/data-details/, 2024.
+[28] Shanhe Yi, Zijiang Hao, Qingyang Zhang, Quan Zhang,
+Weisong Shi, and Qun Li. Lavea: Latency-aware video
+analytics on edge computing platform. In Proceed-
+ings of the Second ACM/IEEE Symposium on Edge
+Computing, pages 1–13, 2017.
+[29] Qingyang Zhang, Hui Sun, Xiaopei Wu, and Hong
+Zhong. Edge video analytics for public safety: A re-
+view. Proceedings of the IEEE, 107(8):1675–1696,
+2019.
+[30] Osama ElSahly and Akmal Abdelfatah. A systematic
+review of traffic incident detection algorithms. Sustain-
+ability, 14(22):14859, 2022.
+[31] Mingyang Lyu, Yibo Zhao, Chao Huang, and Hailong
+Huang. Unmanned aerial vehicles for search and res-
+cue: A survey. Remote Sensing, 15(13):3266, 2023.
+[32] Julius Pesonen, Anna-Maria Raita-Hakola, Jukka
+Joutsalainen, Teemu Hakala, Waleed Akhtar, Niko
+Koivumäki, Lauri Markelin, Juha Suomalainen, Raquel
+Alves de Oliveira, Ilkka Pölönen, et al. Boreal forest
+fire: UAV-collected wildfire detection and smoke seg-
+mentation dataset. Scientific Data, 12(1):1419, 2025.
+[33] Emerging agricultural technologies workgroup report
+and recommendations for PPDC review. Technical
+report, U.S. Environmental Protection Agency (EPA),
+Office of Pesticide Programs.
+[34] Rajib Debnath and Mrinal Kanti Bhowmik. A com-
+prehensive survey on computer vision based concepts,
+methodologies, analysis and applications for automatic
+gun/knife detection. Journal of Visual Communication
+and Image Representation, 78:103165, 2021.
+[35] National
+Institute
+for
+Congestion
+Reduction
+(NICR).
+DARTS:
+Drone-based
+ai-powered
+real-time
+traffic
+incident
+detection
+system.
+https://nicr.usf.edu/2024/10/22/darts/, 2024.
+[36] Francesco Ciccone and Alessandro Ceruti. Real-time
+search and rescue with drones: A deep learning ap-
+proach for small-object detection based on YOLO.
+Drones, 9(8):514, 2025.
+[37] Yashar Safyari, Masoud Mahdianpari, and Hodjat Shiri.
+A review of vision-based pothole detection methods
+using computer vision and machine learning. Sensors,
+24(17):5652, 2024.
+[38] Daniel Crankshaw, Xin Wang, Guilio Zhou, Michael J
+Franklin, Joseph E Gonzalez, and Ion Stoica. Clipper:
+A Low-Latency online prediction serving system. In
+14th USENIX Symposium on Networked Systems De-
+sign and Implementation (NSDI 17), pages 613–627,
+2017.
+[39] Haichen Shen, Lequn Chen, Yuchen Jin, Liangyu
+Zhao, Bingyu Kong, Matthai Philipose, Arvind Krish-
+namurthy, and Ravi Sundaram. Nexus: A GPU cluster
+engine for accelerating dnn-based video analysis. In
+Proceedings of the 27th ACM Symposium on Operating
+Systems Principles, pages 322–337, 2019.
+[40] Lianmin Zheng, Zhuohan Li, Hao Zhang, Yonghao
+Zhuang, Zhifeng Chen, Yanping Huang, Yida Wang,
+Yuanzhong Xu, Danyang Zhuo, Eric P Xing, et al. Alpa:
+Automating inter-and Intra-Operator parallelism for
+distributed deep learning. In 16th USENIX Sympo-
+sium on Operating Systems Design and Implementa-
+tion (OSDI 22), pages 559–578, 2022.
+14
+
+[41] Francisco Romero, Qian Li, Neeraja J Yadwadkar, and
+Christos Kozyrakis. INFaaS: Automated model-less
+inference serving. In 2021 USENIX Annual Technical
+Conference (USENIX ATC 21), pages 397–411, 2021.
+[42] Anand Padmanabha Iyer, Mingyu Guan, Yinwei Dai,
+Rui Pan, Swapnil Gandhi, and Ravi Netravali. Im-
+proving DNN inference throughput using practical,
+per-input compute adaptation. In Proceedings of the
+ACM SIGOPS 30th Symposium on Operating Systems
+Principles, pages 624–639, 2024.
+[43] Yinwei Dai, Rui Pan, Anand Iyer, Kai Li, and Ravi
+Netravali. Apparate: Rethinking early exits to tame
+latency-throughput tensions in ml serving. In Proceed-
+ings of the ACM SIGOPS 30th Symposium on Operat-
+ing Systems Principles, pages 607–623, 2024.
+[44] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz,
+Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff
+Dean.
+Outrageously large neural networks: The
+sparsely-gated mixture-of-experts layer. arXiv preprint
+arXiv:1701.06538, 2017.
+[45] Jiamin Li, Yimin Jiang, Yibo Zhu, Cong Wang, and
+Hong Xu. Accelerating distributed MoE training and
+inference with lina. In 2023 USENIX Annual Technical
+Conference (USENIX ATC 23), pages 945–959, 2023.
+[46] Junchen
+Jiang, Ganesh Ananthanarayanan, Peter
+Bodik, Siddhartha Sen, and Ion Stoica. Chameleon:
+scalable adaptation of video analytics. In Proceedings
+of the 2018 conference of the ACM special interest
+group on data communication, pages 253–266, 2018.
+[47] Xin Wang, Yujia Luo, Daniel Crankshaw, Alexey Tu-
+manov, Fisher Yu, and Joseph E Gonzalez. Idk cas-
+cades: Fast deep learning by learning not to overthink.
+arXiv preprint arXiv:1706.00885, 2017.
+[48] Yiding Wang, Kai Chen, Haisheng Tan, and Kun Guo.
+Tabi: An efficient multi-level inference system for large
+language models. In Proceedings of the Eighteenth Eu-
+ropean Conference on Computer Systems, pages 233–
+248, 2023.
+[49] Daniel Kang, John Emmons, Firas Abuzaid, Peter
+Bailis, and Matei Zaharia. Noscope: Optimizing neural
+network queries over video at scale. Proceedings of
+the VLDB Endowment, 10(11), 2017.
+[50] Haoyu Zhang, Ganesh Ananthanarayanan, Peter Bodik,
+Matthai Philipose, Paramvir Bahl, and Michael J Freed-
+man. Live video analytics at scale with approximation
+and Delay-Tolerance. In 14th USENIX Symposium on
+Networked Systems Design and Implementation (NSDI
+17), pages 377–392, 2017.
+[51] Kuntai Du, Ahsan Pervaiz, Xin Yuan, Aakanksha
+Chowdhery, Qizheng Zhang, Henry Hoffmann, and
+Junchen Jiang. Server-driven video streaming for deep
+learning inference. In Proceedings of the Annual con-
+ference of the ACM Special Interest Group on Data
+Communication on the applications, technologies, ar-
+chitectures, and protocols for computer communica-
+tion, pages 557–570, 2020.
+[52] Luyang Liu, Hongyu Li, and Marco Gruteser. Edge as-
+sisted real-time object detection for mobile augmented
+reality. In The 25th annual international conference on
+mobile computing and networking, pages 1–16, 2019.
+[53] Shiqi Jiang, Zhiqi Lin, Yuanchun Li, Yuanchao Shu,
+and Yunxin Liu. Flexible high-resolution object detec-
+tion on edge devices with tunable latency. In Proceed-
+ings of the 27th Annual International Conference on
+Mobile Computing and Networking, pages 559–572,
+2021.
+[54] Michael R Anderson, Michael Cafarella, German Ros,
+and Thomas F Wenisch. Physical representation-based
+predicate optimization for a visual analytics database.
+In 2019 IEEE 35th International Conference on Data
+Engineering (ICDE), pages 1466–1477. IEEE, 2019.
+[55] Christina Delimitrou and Christos Kozyrakis. Paragon:
+Qos-aware scheduling for heterogeneous datacenters.
+ACM SIGPLAN Notices, 48(4):77–88, 2013.
+[56] Christina Delimitrou and Christos Kozyrakis. Quasar:
+Resource-efficient and qos-aware cluster management.
+ACM Sigplan Notices, 49(4):127–144, 2014.
+[57] Romil Bhardwaj, Kirthevasan
+Kandasamy, Asim
+Biswal, Wenshuo Guo, Benjamin Hindman, Joseph
+Gonzalez, Michael Jordan, and Ion Stoica. Cilantro:
+Performance-Aware resource allocation for general ob-
+jectives via online feedback. In 17th USENIX Sympo-
+sium on Operating Systems Design and Implementa-
+tion (OSDI 23), pages 623–643, 2023.
+[58] Zhuofan Zong, Guanglu Song, and Yu Liu. Detrs with
+collaborative hybrid assignments training. In Proceed-
+ings of the IEEE/CVF international conference on com-
+puter vision, pages 6748–6758, 2023.
+[59] Xuechen Zhang, Samet Oymak, and Jiasi Chen. Post-
+hoc models for performance estimation of machine
+learning inference. arXiv preprint arXiv:2110.02459,
+2021.
+[60] Zheng Yang, Xu Wang, Jiahang Wu, Yi Zhao, Qiang
+Ma, Xin Miao, Li Zhang, and Zimu Zhou.
+Edge-
+duet: Tiling small object detection for edge assisted
+autonomous mobile vision. IEEE/ACM Transactions
+on Networking, 31(4):1765–1778, 2022.
+15
+
+[61] Neil Agarwal and Ravi Netravali. Boggart: Towards
+General-Purpose acceleration of retrospective video
+analytics. In 20th USENIX Symposium on Networked
+Systems Design and Implementation (NSDI 23), pages
+933–951, 2023.
+[62] Lexin Zhou, Pablo A Moreno-Casares, Fernando
+Martínez-Plumed, John Burden, Ryan Burnell, Lucy
+Cheke, Cèsar Ferri, Alexandru
+Marcoci, Behzad
+Mehrbakhsh, Yael Moros-Daval, et al. Predictable arti-
+ficial intelligence. arXiv preprint arXiv:2310.06167,
+2023.
+[63] Mahdie Karbasi and Dorothea Kolossa. Asr-based
+speech intelligibility prediction: A review. Hearing
+Research, 426:108606, 2022.
+[64] Lorenzo Pacchiardi, Konstantinos Voudouris, Ben
+Slater, Fernando Martínez-Plumed, José Hernández-
+Orallo, Lexin Zhou, and Wout Schellaert.
+Pre-
+dictaboard: Benchmarking LLM score predictability.
+arXiv preprint arXiv:2502.14445, 2025.
+[65] Mingyu Liang, Hiwot Tadese Kassa, Wenyin Fu, Brian
+Coutinho, Louis Feng, and Christina Delimitrou. Lu-
+mos: Efficient performance modeling and estima-
+tion for large-scale LLM training.
+arXiv preprint
+arXiv:2504.09307, 2025.
+[66] Pei Sun, Henrik Kretzschmar, Xerxes Dotiwalla, Aure-
+lien Chouard, Vijaysai Patnaik, Paul Tsui, James Guo,
+Yin Zhou, Yuning Chai, Benjamin Caine, et al. Scal-
+ability in perception for autonomous driving: Waymo
+open dataset. In Proceedings of the IEEE/CVF con-
+ference on computer vision and pattern recognition,
+pages 2446–2454, 2020.
+[67] Yaniv Ovadia, Emily Fertig, Jie Ren, Zachary Nado,
+David Sculley, Sebastian Nowozin, Joshua Dillon, Bal-
+aji Lakshminarayanan, and Jasper Snoek. Can you
+trust your model’s uncertainty? evaluating predictive
+uncertainty under dataset shift. Advances in neural
+information processing systems, 32, 2019.
+[68] Emmanouil Antonios Platanios, Avinava Dubey, and
+Tom Mitchell. Estimating accuracy from unlabeled
+data: A bayesian approach. In International Confer-
+ence on Machine Learning, pages 1416–1425. PMLR,
+2016.
+[69] Chuan Guo, Geoff Pleiss, Yu Sun, and Kilian Q Wein-
+berger. On calibration of modern neural networks. In
+International conference on machine learning, pages
+1321–1330. PMLR, 2017.
+[70] Omid Alipourfard, Hongqiang Harry Liu, Jianshu
+Chen, Shivaram Venkataraman, Minlan Yu, and Ming
+Zhang. CherryPick: Adaptively unearthing the best
+cloud configurations for big data analytics. In 14th
+USENIX Symposium on Networked Systems Design
+and Implementation (NSDI 17), pages 469–482, 2017.
+[71] Shivaram Venkataraman, Zongheng Yang, Michael
+Franklin, Benjamin Recht, and Ion Stoica. Ernest: Effi-
+cient performance prediction for Large-Scale advanced
+analytics. In 13th USENIX symposium on networked
+systems design and implementation (NSDI 16), pages
+363–378, 2016.
+[72] Yanqi Zhang, Weizhe Hua, Zhuangzhuang Zhou, G Ed-
+ward Suh, and Christina Delimitrou. Sinan: Ml-based
+and qos-aware resource management for cloud mi-
+croservices. In Proceedings of the 26th ACM interna-
+tional conference on architectural support for program-
+ming languages and operating systems, pages 167–181,
+2021.
+[73] Andrew D Ferguson, Peter Bodik, Srikanth Kandula,
+Eric Boutin, and Rodrigo Fonseca. Jockey: guaranteed
+job latency in data parallel clusters. In Proceedings
+of the 7th ACM european conference on Computer
+Systems, pages 99–112, 2012.
+[74] Mingzhe Hao, Levent Toksoz, Nanqinqin Li, Ed-
+ward Edberg Halim, Henry Hoffmann, and Haryadi S
+Gunawi. LinnOS: Predictability on unpredictable flash
+storage with a light neural network. In 14th USENIX
+Symposium on Operating Systems Design and Imple-
+mentation (OSDI 20), pages 173–190, 2020.
+[75] Xukan Ran, Haolianz Chen, Xiaodan Zhu, Zhenming
+Liu, and Jiasi Chen. Deepdecision: A mobile deep
+learning framework for edge video analytics. In IEEE
+INFOCOM 2018-IEEE conference on computer com-
+munications, pages 1421–1429. IEEE, 2018.
+[76] Yiwen Zhang, Xumiao Zhang, Ganesh Anantha-
+narayanan, Anand Iyer, Yuanchao Shu, Victor Bahl,
+Z Morley Mao, and Mosharaf Chowdhury. Vulcan:
+Automatic query planning for live ML analytics. In
+21st USENIX Symposium on Networked Systems De-
+sign and Implementation (NSDI 24), pages 1385–1402,
+2024.
+[77] Larry Wasserman. All of statistics: a concise course
+in statistical inference. Springer Science & Business
+Media, 2013.
+[78] Christopher D Manning. Introduction to information
+retrieval. Syngress Publishing„ 2008.
+[79] Alan Agresti and Maria Kateri. Categorical data analy-
+sis. In International encyclopedia of statistical science,
+page 22. Springer, 2025.
+16
+
+[80] Trevor Hastie. The elements of statistical learning:
+data mining, inference, and prediction, 2009.
+[81] Han Jiawei and Kamber Micheline. Data mining: con-
+cepts and techniques. Morgan kaufmann, 2006.
+[82] State of practice for automated incident detection - final
+report. Technical report, ENTERPRISE Transportation
+Pooled Fund Program, 2022.
+[83] Philipp Moritz, Robert Nishihara, Stephanie Wang,
+Alexey Tumanov, Richard Liaw, Eric Liang, Melih Eli-
+bol, Zongheng Yang, William Paul, Michael I Jordan,
+et al. Ray: A distributed framework for emerging AI
+applications. In 13th USENIX symposium on operating
+systems design and implementation (OSDI 18), pages
+561–577, 2018.
+[84] Ray serve. https://docs.ray.io/en/latest/serve/index.html.
+[85] Pengfei Zhu, Longyin Wen, Xiao Bian, Haibin Ling,
+and Qinghua Hu. Vision meets drones: A challenge.
+arXiv preprint arXiv:1804.07437, 2018.
+[86] Kellie Corona, Katie Osterdahl, Roderic Collins, and
+Anthony Hoogs. MEVA: A large-scale multiview, mul-
+timodal video dataset for activity detection. In Pro-
+ceedings of the IEEE/CVF winter conference on appli-
+cations of computer vision, pages 1060–1068, 2021.
+[87] Alex Bewley, Zongyuan Ge, Lionel Ott, Fabio Ramos,
+and Ben Upcroft. Simple online and realtime track-
+ing. In 2016 IEEE international conference on image
+processing (ICIP), pages 3464–3468. IEEE, 2016.
+[88] Martín Abadi, Paul Barham, Jianmin Chen, Zhifeng
+Chen, Andy Davis, Jeffrey Dean, Matthieu Devin, San-
+jay Ghemawat, Geoffrey Irving, Michael Isard, et al.
+TensorFlow: a system for Large-Scale machine learn-
+ing. In 12th USENIX symposium on operating systems
+design and implementation (OSDI 16), pages 265–283,
+2016.
+[89] Tsung-Yi Lin, Michael Maire, Serge Belongie, James
+Hays, Pietro Perona, Deva Ramanan, Piotr Dollár, and
+C Lawrence Zitnick. Microsoft COCO: Common ob-
+jects in context. In Computer Vision–ECCV 2014: 13th
+European Conference, Zurich, Switzerland, September
+6-12, 2014, Proceedings, Part V 13, pages 740–755.
+Springer, 2014.
+[90] Kaiming He, Georgia Gkioxari, Piotr Dollár, and Ross
+Girshick. Mask R-CNN. In Proceedings of the IEEE
+international conference on computer vision, pages
+2961–2969, 2017.
+[91] Anton Milan, Laura Leal-Taixé, Ian Reid, Stefan Roth,
+and Konrad Schindler. MOT16: A benchmark for multi-
+object tracking.
+arXiv preprint arXiv:1603.00831,
+2016.
+[92] Yuanqi Li, Arthi Padmanabhan, Pengzhan Zhao, Yufei
+Wang, Guoqing Harry Xu, and Ravi Netravali. Re-
+ducto: On-camera filtering for resource-efficient real-
+time video analytics. In Proceedings of the Annual
+conference of the ACM Special Interest Group on Data
+Communication on the applications, technologies, ar-
+chitectures, and protocols for computer communica-
+tion, pages 359–376, 2020.
+[93] Jeffrey Ouyang-Zhang, Jang Hyun Cho, Xingyi Zhou,
+and Philipp Krähenbühl. NMS strikes back. arXiv
+preprint arXiv:2212.06137, 2022.
+[94] Bin Yan, Yi Jiang, Peize Sun, Dong Wang, Zehuan
+Yuan, Ping Luo, and Huchuan Lu.
+Towards grand
+unification of object tracking. In European Conference
+on Computer Vision, pages 733–751. Springer, 2022.
+[95] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian
+Sun. Deep residual learning for image recognition.
+In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 770–778, 2016.
+[96] Gal Kaplun, Nikhil Ghosh, Saurabh Garg, Boaz Barak,
+and Preetum Nakkiran. Deconstructing distributions:
+A pointwise framework of learning. arXiv preprint
+arXiv:2202.09931, 2022.
+[97] Mark Weber, Jun Xie, Maxwell Collins, Yukun Zhu,
+Paul Voigtlaender, Hartwig Adam, Bradley Green, An-
+dreas Geiger, Bastian Leibe, Daniel Cremers, et al.
+Step: Segmenting and tracking every pixel.
+arXiv
+preprint arXiv:2102.11859, 2021.
+[98] Sijie Dong, Qitong Wang, Soror Sahri, Themis Pal-
+panas, and Divesh Srivastava. Efficiently mitigating
+the impact of data drift on machine learning pipelines.
+Proceedings of the VLDB Endowment, 17(11):3072–
+3081, 2024.
+[99] Wei Wang, Sheng Wang, Jinyang Gao, Meihui Zhang,
+Gang Chen, Teck Khim Ng, and Beng Chin Ooi. Rafiki:
+Machine learning as an analytics service system. arXiv
+preprint arXiv:1804.06087, 2018.
+[100] Jiashen Cao, Karan Sarkar, Ramyad Hadidi, Joy Arul-
+raj, and Hyesoon Kim. FiGO: Fine-grained query op-
+timization in video analytics. In Proceedings of the
+2022 International conference on management of data,
+pages 559–572, 2022.
+17
+
+[101] Peizhen Guo, Bo Hu, and Wenjun Hu. Sommelier:
+Curating dnn models for the masses. In Proceedings
+of the 2022 International Conference on Management
+of Data, pages 1876–1890, 2022.
+[102] Jashwant Raj Gunasekaran, Cyan Subhra Mishra,
+Prashanth Thinakaran, Bikash Sharma, Mahmut Taylan
+Kandemir, and Chita R Das. Cocktail: A multidimen-
+sional optimization for model serving in cloud. In
+19th USENIX Symposium on Networked Systems De-
+sign and Implementation (NSDI 22), pages 1041–1057,
+2022.
+[103] Sohaib Ahmad, Hui Guan, Brian D Friedman, Thomas
+Williams, Ramesh K Sitaraman, and Thomas Woo. Pro-
+teus: A high-throughput inference-serving system with
+accuracy scaling. In Proceedings of the 29th ACM
+International Conference on Architectural Support for
+Programming Languages and Operating Systems, Vol-
+ume 1, pages 318–334, 2024.
+[104] Kevin Hsieh, Ganesh Ananthanarayanan, Peter Bodik,
+Shivaram Venkataraman, Paramvir Bahl, Matthai Phili-
+pose, Phillip B Gibbons, and Onur Mutlu.
+Focus:
+Querying large video datasets with low latency and
+low cost. In 13th USENIX Symposium on Operating
+Systems Design and Implementation (OSDI 18), pages
+269–286, 2018.
+[105] Peizhen Guo and Wenjun Hu.
+Potluck: Cross-
+application
+approximate
+deduplication
+for
+computation-intensive mobile applications.
+In
+Proceedings
+of
+the
+Twenty-Third
+International
+Conference on Architectural Support for Programming
+Languages and Operating Systems, pages 271–284,
+2018.
+[106] Christopher Canel, Thomas Kim, Giulio Zhou, Cong-
+long Li, Hyeontaek Lim, David G Andersen, Michael
+Kaminsky, and Subramanya Dulloor. Scaling video
+analytics on constrained edge nodes. Proceedings of
+Machine Learning and Systems, 1:406–417, 2019.
+[107] Mehrdad Khani, Pouya Hamadanian, Arash Nasr-
+Esfahany, and Mohammad Alizadeh. Real-time video
+inference on edge devices via adaptive model stream-
+ing. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 4572–4582,
+2021.
+[108] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distill-
+ing the knowledge in a neural network. arXiv preprint
+arXiv:1503.02531, 2015.
+[109] Hengrui Jia, Hongyu Chen, Jonas Guan, Ali Shahin
+Shamsabadi, and Nicolas Papernot. A zest of lime:
+Towards architecture-independent model distances. In
+International Conference on Learning Representations,
+2021.
+[110] Harshay Shah, Sung Min Park, Andrew Ilyas, and Alek-
+sander Madry. Modeldiff: A framework for comparing
+learning algorithms. In International Conference on
+Machine Learning, pages 30646–30688. PMLR, 2023.
+[111] Max
+Klabunde,
+Tobias
+Schumacher,
+Markus
+Strohmaier, and Florian Lemmerich.
+Similarity of
+neural network models: A survey of functional and
+representational measures. ACM Computing Surveys,
+57(9):1–52, 2025.
+18
+
+Supplementary Material: Table of contents
+• Control parameter search details (§A)
+• Gating network adaptation limitation (§B)
+• Multi-object tracker cascade design (§C)
+• MEVA and VisDrone main results (§D)
+• Spearman correlation between prediction statistics and
+accuracy (§E)
+• Optimal number of models to sample in different settings
+(§F)
+• Accuracy prediction error (§G)
+• Correlations between prediction statistics (§H)
+• Selector ablation (§I)
+A
+Control parameter search details
+Tiered-sampling. The following knobs are left as control
+parameters which we search and find separately as described
+in §5.1: profiling window length, segment length, subsegment
+profiling duration, the configuration subset size k, and the size
+of the reference model used as ground truth when sampling
+the top-k.
+B
+Gating network adaptation limitation
+Why doesn’t the gating network reach the top-right of the
+tradeoff space? This happens because of the way that the
+gating neural network in RECL [7] is adapted to model size
+selection in our setting. The adaptation trains the gating net-
+work to select the model size that optimizes the cost-accuracy
+objective used in RedunCut. The downside of this approach
+is that when the objective is set to prioritize maximizing ac-
+curacy (with no limit on cost), 49% of the model size labels
+(in the Waymo dataset) are not the largest model size. This
+takes place in scenarios in which a small model has an accu-
+racy equal to or (occasionally) greater than the accuracy of
+the large model [96]. As a result, the gating network that is
+adapted for model size selection is never trained to select the
+largest model for all video segments.
+C
+Multi-object tracker cascade design
+To the best of our knowledge, there are no known works
+that have adapted a model cascade for multi-object tracking.
+Therefore, we develop the following confidence-score based
+early-exit rule: the smaller model is run on the frame, and
+the resulting object predictions with a confidence score in
+the range [l, h) are recorded by the cascade. Then, their aver-
+age confidence score m is computed and compared against a
+confidence threshold c. When m < c, the larger model is run
+next and its predictions are chosen for the frame. Otherwise,
+the larger model is not run and the predictions of the smaller
+model are chosen for the frame. l, h, and c are left as control
+parameters that are searched as described in §5.1.
+45
+50
+55
+60
+65
+Accuracy target (MOTA)
+0.0
+0.5
+1.0
+Cost multiplier
+to Sample-once
+-76%
+Sample-once
+Tiered-sampling
+Cascade
+Gating network
+RedunCut
+Figure 16: The normalized compute cost of RedunCut and
+other video analytics methods in surveillance camera videos.
+Each method (color) is evaluated on a range of accuracy targets
+(x-axis). The resulting compute cost is normalized by dividing it by
+the compute cost of the sample-once method (y-axis). The single
+translucent blue bar is described in §5.2.
+22
+24
+26
+28
+Accuracy target (MOTA)
+0.0
+0.5
+1.0
+Cost multiplier
+to Sample-once
+-67%
+Sample-once
+Tiered-sampling
+Cascade
+RedunCut
+Figure 17: The normalized compute cost of RedunCut and other
+video analytics methods in drone camera videos. Each method
+(color) is evaluated on a range of accuracy targets (x-axis). The
+resulting compute cost is normalized by dividing it by the compute
+cost of the sample-once method (y-axis).
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+Accuracy of
+various model sizes
+(small →large)
+.73
+.75
+.75
+.69
+.5
+.73
+.75
+.76
+.7
+.49
+.75
+.77
+.76
+.68
+.47
+.79
+.8
+.73
+.65
+.44
+.84
+.77
+.69
+.61
+.41
+(a) Surveillance ⋆
+Disagreement ▲
+EﬃcientDet •
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+.39
+.46
+.51
+.54
+.54
+.41
+.48
+.53
+.57
+.54
+.46
+.54
+.59
+.57
+.55
+.57
+.66
+.6
+.58
+.55
+.7
+.64
+.55
+.52
+.49
+(b) Vehicles ⋆
+Disagreement
+EﬃcientDet
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+.24
+.35
+.45
+.51
+.52
+.23
+.35
+.45
+.51
+.52
+.22
+.35
+.45
+.53
+.53
+.2
+.33
+.51
+.58
+.57
+.2
+.46
+.61
+.66
+.62
+(c) Surveillance
+Sum of objectness ▲
+EﬃcientDet
+T
+S
+B
+L
+L
+B
+S
+T
+.67
+.63
+.63
+.61
+.67
+.64
+.64
+.59
+.67
+.65
+.63
+.59
+.68
+.64
+.64
+.59
+(d) Surveillance
+Disagreement
+CoDETR •
+0.00
+0.25
+0.50
+0.75
+1.00
+Correlation coeﬃcient
+Prediction statistics of various model size (small →large)
+Figure 18: Spearman correlation between the prediction statis-
+tics and the accuracy.
+D
+MEVA and VisDrone main results
+Figure 16 and Figure 17 show the main results from Figure 8
+in barplot form.
+E
+Spearman correlation between prediction
+statistics and accuracy
+See Figure 18.
+19
+
+1
+3
+5
+7
+9
+Video segments
+9
+5
+1
+Videos
+0
+5
+Optimal number of
+models to sample
+Figure 19: The optimal number of models to sample in different
+segments of videos. The optimal number of models to sample (color)
+across different video segments (x-axis) of different videos (y-axis).
+0
+100
+7
+3
+0
+Surveillance Videos
+Accuracy target:
+High
+0
+100
+7
+3
+0
+Accuracy target:
+Medium
+0
+100
+7
+3
+0
+Accuracy target:
+Low
+0
+20
+13
+6
+0
+Drones Videos
+0
+20
+13
+6
+0
+0
+20
+13
+6
+0
+0
+5
+Video segments
+19
+9
+0
+Vehicles Videos
+0
+5
+Video segments
+19
+9
+0
+0
+5
+Video segments
+19
+9
+0
+0
+1
+2
+3
+4
+5
+6
+Optimal number of models to sample
+Figure 20: The optimal number of models to sample in different
+accuracy targets and workload types.
+F
+Optimal number of models to sample in dif-
+ferent settings
+See Figure 19 and Figure 20.
+G
+Accuracy prediction error
+See Figure 21.
+H
+Correlations between prediction statistics
+See Figure 22.
+D0 D3 D6
+0.0
+0.2
+Waymo
+(vehicles)
+D0 D3 D6
+0.0
+0.1
+0.2
+VisDrone
+(drones)
+N T S M L
+0.0
+0.2
+0.4
+N T S M L
+0.0
+0.1
+0.2
+Model size
+Error (MSE) in
+accuracy prediction
+RedunCut
+Tiered-sampling
+Figure 21: The error of different accuracy prediction methods.
+The error of accuracy prediction (Mean-squared error, y-axis) of
+different methods (color) across different datasets (left/right), model
+families (top/bottom), and different model sizes (x-axis). Redun-
+Cut’s error is 3.4-10× lower than the error that Tiered-sampling [46]
+achieves using the model disagreement score [6,7,46,50].
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+Prediction statistics of
+various model size
+(small →large)
+.28
+.34
+.39
+.33
+1.0
+.6
+.67
+.74
+1.0
+.33
+.82
+.89
+1.0
+.74
+.39
+.91
+1.0
+.89
+.67
+.34
+1.0
+.91
+.82
+.6
+.28
+(a) Surveillance ⋆
+Disagreement ▲
+EﬃcientDet •
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+.56
+.68
+.78
+.85
+1.0
+.61
+.74
+.83
+1.0
+.85
+.65
+.78
+1.0
+.83
+.78
+.78
+1.0
+.78
+.74
+.68
+1.0
+.78
+.65
+.61
+.56
+(b) Vehicles ⋆
+Disagreement
+EﬃcientDet
+D0
+D2
+D4
+D6
+D7
+D7
+D6
+D4
+D2
+D0
+.51
+.73
+.88
+.93
+1.0
+.59
+.81
+.93
+1.0
+.93
+.69
+.89
+1.0
+.93
+.88
+.81
+1.0
+.89
+.81
+.73
+1.0
+.81
+.69
+.59
+.51
+(c) Surveillance
+Sum of objectness ▲
+EﬃcientDet
+T
+S
+B
+L
+L
+B
+S
+T
+.81
+.82
+.84
+1.0
+.86
+.88
+1.0
+.84
+.87
+1.0
+.88
+.82
+1.0
+.87
+.86
+.81
+(d) Surveillance
+Disagreement
+CoDETR •
+0.00
+0.25
+0.50
+0.75
+1.00
+Correlation coeﬃcient
+Prediction statistics of various model size (small →large)
+Figure 22: Correlation among prediction statistics. The correla-
+tion (Pearson) between the prediction statistics of different model
+sizes across workload types, prediction statistics types, and model
+families. See the caption of Figure 6 for information about the head-
+ings and comparison between (a) - (d).
+I
+Selector ablation
+See Figure 23.
+20
+
+0
+200
+400
+600
+Cost (avg FLOPs (1e9) / frame)
+28
+30
+32
+34
+36
+Accuracy (MOTA)
+RedunCut
+RedunCut sampler + Tiered-sampling's selector
+Tiered-sampling
+Figure 23: An ablation of RedunCut’s selection mechanism.
+21

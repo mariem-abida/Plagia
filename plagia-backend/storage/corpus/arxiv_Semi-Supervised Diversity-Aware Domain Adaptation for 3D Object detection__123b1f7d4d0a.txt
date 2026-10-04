@@ -1,0 +1,2259 @@
+Semi-Supervised Diversity-Aware Domain
+Adaptation for 3D Object detection
+Jakub Winter1, Paweł Wawrzyński2, Andrii Gamalii1,
+Daniel Górniak1, Bartłomiej Olber1, Marcin Łojek1,
+Robert Marek Nowak1, Krystian Radlak1*
+1*Warsaw University of Technology, Poland.
+2IDEAS NCBR, Poland.
+*Corresponding author(s). E-mail(s): krystian.radlak@pw.edu.pl;
+Contributing authors: jakub.winter.stud@pw.edu.pl;
+pawel.wawrzynski@ideas-ncbr.pl; andrii.gamalii.stud@pw.edu.pl;
+daniel.gorniak@pw.edu.pl; bartlomiej.olber@pw.edu.pl;
+marcin.lojek.stud@pw.edu.pl; robert.nowak@pw.edu.pl;
+Abstract
+3D object detectors are fundamental components of perception systems in au-
+tonomous vehicles. While these detectors achieve remarkable performance on
+standard autonomous driving benchmarks, they often struggle to generalize
+across different domains—for instance, a model trained in the U.S. may per-
+form poorly in regions like Asia or Europe. This paper presents a novel LiDAR
+domain adaptation method based on neuron activation patterns, demonstrating
+that state-of-the-art performance can be achieved by annotating only a small,
+representative, and diverse subset of samples from the target domain if they are
+correctly selected. The proposed approach requires very small annotation budget
+and, when combined with post-training techniques inspired by continual learning
+prevent weight drift from the original model. Empirical evaluation shows that
+the proposed domain adaptation approach outperforms both linear probing and
+state-of-the-art domain adaptation techniques.
+Keywords: domain adaptation, LIDAR, 3D object detection, autonomous vehicles
+1
+arXiv:2512.24922v1 [cs.CV] 31 Dec 2025
+
+Waymo (USA)
+Zenseact (Europe)
+ONCE (China)
+Figure 1: Datasets. Exemplary databases captured in different ODDs. They uti-
+lize diverse LiDAR sensors, employ varied labeling specifications, and have different
+regions annotated. This diversity poses challenges in generalizing for 3D object detec-
+tion models.
+1 Introduction
+Recent advancements in the fields of computer vision and artificial intelligence have
+sparked the interest of researchers and the general public in autonomous driving. This
+curiosity has led to the development of numerous publicly available open datasets.
+The most popular and widely used of these datasets are KITTI Geiger et al. (2012),
+NuScenes Caesar et al. (2020) and Waymo Sun et al. (2020). Lesser known or newer
+datasets include Lyft Houston et al. (2021), Argoverse Wilson et al. (2021), Zenseact
+Alibeigi et al. (2023), Pandaset Xiao et al. (2021) and ONCE Mao et al. (2021).
+These datasets include annotated road traffic data recorded by LiDARs and cameras.
+Availability of such data has enabled researchers to develop increasingly better object
+detection methods.
+Most of these datasets, however, contain data gathered in only one city, state,
+country, or region (see Fig. 1). As it was shown in Wang et al. (2020), an object
+detector trained on one dataset does not achieve comparable performance on another
+dataset due to regional differences in types of vehicles, traffic infrastructure, weather
+conditions, or fixed sensing apparatus, showing very low model’s generalization ability,
+especially for the LiDAR data.
+It is the rule in the automotive industry that the operational limits of an automated
+driving system (ADS) are established early in the design process through the definition
+2
+
+Ford F150
+Volkswagen Golf
+PointPillar
+PointNet
+Pillar tensors for Ford F150
+Pillar tensors for Volkswagen Golf
+Figure 2: Vehicles of different sizes have different representations in the LiDAR point
+cloud, resulting in substantially different features being extracted.
+of its Operational Design Domain (ODD). The ODD specifies the conditions under
+which the ADS can safely operate and may be restricted to a specific region. However,
+the challenge arises when a company seeks to expand or adapt the ADS to a new
+ODD. In such cases, domain adaptation becomes a critical factor.
+State-of-the-art object detectors trained on AV datasets usually exhibit poor per-
+formance when applied in regions or countries not represented in their training data.
+Deployment of these detectors is far from straightforward and requires adaptation to
+the new domain. Such differences in the domain may be particularly visible in the case
+of cars, which differ substantially between Europe and the USA. The most popular
+car sold in Germany in 2023 was Volkswagen Golf Bekker (2024), while in the United
+States Ford F-series reigns supreme Smith (2024). Comparing the lengths of the two
+vehicles – 4.26m and 5.89m, respectively, one can note that the latter is 38% longer
+than the former. This leads to scenarios where a car detector trained on the KITTI
+dataset (captured in Europe) achieves an average precision of 68.9% when tested on
+KITTI but drops dramatically to just 12.3% when evaluated on the Waymo dataset
+(recorded in the USA).
+As can be seen in Fig. 2, the difference in vehicle size is reflected by object’s
+representation in the LiDAR point cloud, which then affects their downstream repre-
+sentation in the most of the state-of-the-art 3D object detectors, which use voxelisation
+or other similar feature extraction techniques from LiDAR point cloud. The size and
+shape of the vehicle’s point cloud representation significantly affects the feature vector
+extracted by the backbone of the 3D object detection models. For example, PointPil-
+lars Lang et al. (2019) extracts the features from LiDAR point cloud discretizing the
+3D point cloud into a 2D pseudoimage, by dividing it into a set of pillars, which can
+be interpreted as a 2D grid in the bird’s-eye view. Then, the collection of points from
+each pillar is encoded by a neural network which extracts the features from the pillar,
+returning a feature vector. We deeply investigate the chalenges in domain adaptation
+on various datasets in Appendices A and B.
+Domain adaptation may enable a model trained on one data distribution to per-
+form effectively on a similar, yet distinct, distribution, even when limited target data
+are available. For instance, a detector trained on data from Germany can be adapted
+for deployment in the USA. This adaptation can be achieved either by retraining the
+model or by introducing a new model to transform the input data. In the context of
+autonomous driving, such techniques are highly valuable, as they minimize the need
+for collecting extensive, region-specific datasets.
+Two general approaches to domain adaptation prevail in the literature. The first
+one is fine-tuning where the whole model is slightly adjusted to the few samples from
+3
+
+the new distribution. The second one is linear probing where the source model freezes
+and only its detection head is exhaustively trained using the few new samples. In this
+paper, we consider domain adaptation in object detection for autonomous vehicles
+vision systems. We argue that in this application low-level features of the data are
+crucial for the system effectiveness. Therefore, we focus on fine-tuning and look for
+its best setting for this application.
+In our approach to domain adaptation of autonomous driving data, the model
+is fine-tuned with some representative samples from the target domain. We adopt
+continual learning van de Ven et al. (2024) techniques to prevent the phenomenon
+of catastrophic forgetting van de Ven et al. (2024), where learning new information
+by the model causes it to perform worse on older data. In this work, we show that
+this approach delivers results comparable with the state-of-the-art domain adaptation
+algorithms, while also being less complicated and elaborate.
+The main contributions of this paper are:
+• We introduced a novel algorithm for LiDAR domain adaptation that uses neuron
+activation patterns to select the most diverse samples representing new domain.
+• We prove that domain adaptation in the field of 3D object detection is feasible with
+only a few samples from the target domain.
+• We evaluate several retraining and fine-tuning strategies to optimize model perfor-
+mance across both the source and target distributions comparing the results with
+state-of-the-art domain adaptation algorithms.
+2 Related work
+Domain adaptation for LiDAR data has gained significant attention in recent years
+due to the challenges posed by domain shifts in real-world applications. Over the
+years, various methods have been proposed to address these challenges.
+Supervised domain adaptation assumes that labeled data is available in both
+the source and target domains. Some solutions, such as Wang et al. (2019); Rist et al.
+(2019); Corral-Soto et al. (2021); Kim et al. (2024b), assume that target domain labels
+are pre-generated. To better generalize between domains, both Wang et al. (2019)
+and Corral-Soto et al. (2021) use discriminators to promote domain-invariant features.
+Additionally, Corral-Soto et al. (2021) adapts a 3D object detector to work within the
+CycleGAN Zhu et al. (2017) framework. The method in Kim et al. (2024b) employs
+mixing augmentation accounting for LiDAR characteristics and point-wise adversarial
+augmentation to align the features in the target domain. The authors of Rist et al.
+(2019) combine source datasets and propose an alternating training scheme across
+multiple tasks using a shared feature encoder.
+Other approaches, such as Yuan et al. (2023), identify source-domain samples that
+closely resemble the target domain, maximizing performance gains when annotated.
+This strategy effectively reduces the annotation budget.
+Unsupervised domain adaptation aims to generalize a model to a target do-
+main by using label information only from the source domain. The methods Wang
+et al. (2020); Luo et al. (2021); Yang et al. (2021) focus on minimizing the geometric
+objects mismatch between the source and target domains. The authors of Wang et al.
+4
+
+(2020) apply a simple correction based on the average size of the vehicle. The network
+used in Luo et al. (2021) employs a teacher-student paradigm to generate reliable and
+adaptive pseudolabels. ST3D (Self-training for Unsupervised Domain Adaptation on
+3D Object Detection) Yang et al. (2021) proposes to add random object scaling to
+pre-training on the source domain, which helps to overcome the bias in object size on
+the labeled source domain. A year later, the authors published ST3D++ Yang et al.
+(2022), which achieved even better results.
+The authors of Xu et al. (2021); Wei et al. (2022); Saleh et al. (2019) indicate
+the difference in geometry of the point clouds as the main domain gap to overcome.
+SPG (Semantic Point Generation) Xu et al. (2021) generates semantic points at the
+predicted foreground regions and faithfully recovers missing parts of the foreground
+objects. The method in Wei et al. (2022), in each iteration, firstly generates low-
+beam pseudo LiDAR by downsampling the high-beam point clouds. Then the teacher-
+student framework is employed to distill rich information from the data with more
+beams. SRDAN (Scale-aware and Range-aware Domain Adaptation Network) Zhang
+et al. (2021) combines both scale-aware and range-aware domain alignments. The
+authors of Saleh et al. (2019) employ a deep cycle-consistent generative adversarial
+network architecture to align synthetic and real point clouds in the bird’s-eye view.
+The methods Saltori et al. (2020); Fruhwirth-Reisinger et al. (2021); You et al.
+(2022) utilize object motion across sequential frames to create better pseudo-labels.
+SF-UDA3D (Source-Free Unsupervised Domain Adaptation) Saltori et al. (2020) uses
+the temporal consistency of detections between sequential frames. The authors of
+Fruhwirth-Reisinger et al. (2021) utilize scene flow information to compute an object’s
+mean flow, enhancing recall and enabling label propagation over time. Similarly, the
+method in You et al. (2022) generates pseudo-labels automatically after driving by re-
+playing previously recorded sequences. Object tracks from these replays are smoothed
+forward and backward in time, with detections interpolated and extrapolated for
+improved accuracy.
+Another approach is proposed in Tsai et al. (2022); Lu and Radha (2024), which
+utilizes upsampled labels. SEE-MTDA Tsai et al. (2022) first isolates objects, recovers
+their geometry by surface completion and then upsample every object’s triangle mesh
+to increase the confidence of 3D detectors. DALI Lu and Radha (2024) reduces bias
+in pseudo-label size distribution through a post-training size normalization strategy.
+To mitigate instance-level noise, it generates pseudo-points using a combination of
+a 3D model library and a LiDAR sensor library. CMT (Co-training Mean-Teacher)
+Chen et al. (2024) constructs a hybrid domain that aligns domain-specific features
+more effectively. The authors also developed batch adaptive normalization to achieve
+a more stable learning process.
+3 Proposed domain adaptation
+Formal problem definition. We consider the problem of domain adaptation. In its
+basic version, it is defined as follows. We are given a neural model, Mw0 with weights
+w0, fitted to a dataset, D0, sampled from a distribution, P0. The problem is to adjust
+the model Mw0 to fit a distribution P1, which is similar to P0 but still different. To
+5
+
+this end, a dataset D1 is given, sampled from P1. However, D1 is too small to support
+retraining M without significant overfitting.
+We are also interested in three additional variations of the above basic problem.
+The second considered problem is to adjust the model Mw0 to fit both P0 and P1
+at the same time. The third considered problem is to train the model Mw1 with the
+limited K datasets D1, . . . , DK for the model to fit the distributions P1, . . . , PK. The
+fourth problem is to train the single model Mw1 with the limited datasets D1, . . . , DK,
+for the model Mw1 to fit all the distributions P0, P1, . . . , PK.
+Interpretations. In this paper, we focus on a specific example of the above basic
+problem. That is, we consider Mw0 as a detector of 3D objects in LiDAR images taken
+from a car. The model has been trained on a dataset recorded in a certain geographic
+region. We wish to adjust the model to detect objects in a different geographic region.
+To this end, we have a handful of samples recorded in this other region.
+Secondly, we still require the new model Mw1 to work well also in the original
+region. Thirdly, we require the trained model to work well in several other regions
+from which we have a handful of training samples. Fourthly, we require the model to
+behave universally well both in the original region and in multiple others.
+Approaches. Looking for a solution to the above problems, we notice that the model
+Mw0 has already been trained to identify all features of the data necessary to process
+samples from both the P0 and P1 distributions. However, the same features may
+manifest slightly differently in P1.
+Therefore, in this paper, we verify several approaches to the domain adaptation
+problem. They are all based on post-training, which is training a model Mw to fit the
+given samples D1, while keeping w close to w0.
+We consider several strategies of post-training. In all strategies, we commence the
+post-training from w = w0. Next, one of the following is realized:
+• L2-SP regularization Xuhong et al. (2018) – during post-training, a penalty, Ω, is
+added to the loss function for deviating from the pre-trained model weights. The
+penalty function Ωis of the form Ω(w) = α∥w −w0∥2, where α is the regularization
+parameter setting the strength of the penalty.
+• Linear fading of learning rate – during post-training, we turn off the Adam Onecy-
+cle optimiser and replace it with a learning rate that linearly fades with each epoch
+to 0.
+• Small constant learning rate – we turn off the Adam Onecycle optimiser and
+replace it with a small constant learning rate. Here, the resulting weights w are
+close to w0 just because both the learning rate and the number of post-training
+epochs are small.
+In our experiments, for comparison, we also apply standard post-training techniques:
+• Usual fine-tuning – the post-training takes a limited number of epochs and its
+setting is similar to that applied in the original training.
+• Linear probing – in this approach only the last linear layer of the model is updated
+and the rest of the weights in the model are frozen.
+6
+
+4 Source-Target Distribution Alignment
+Source–target distribution matching has become a standard component of recent semi-
+supervised and unsupervised domain adaptation pipelines for 3D object detection. In
+our approach, we adopt the following two widely used techniques.
+4.1 Point Cloud Density Alignment
+A major source of domain shift arises from differences in LiDAR point cloud den-
+sity across datasets, caused by variations in sensor configurations, scanning patterns,
+and scene layouts. Several recent studies have demonstrated that aligning point cloud
+density between source and target domains during pretraining is highly effective.
+State-of-the-art methods such as LiDAR Distillation Wei et al. (2022), SSDA3D Wang
+et al. (2023), TODA Kim et al. (2024a), and Bi3D Yuan et al. (2023) consistently
+show that pretraining on source point clouds that are downsampled or upsampled to
+match the target-domain density leads to substantial performance improvements after
+adaptation.
+This strategy reduces geometric discrepancies between domains and enables the
+model to learn representations that are less sensitive to sensor-specific sampling char-
+acteristics. As a result, LiDAR distribution matching has become a de facto standard
+procedure in modern 3D domain adaptation and semi-supervised learning pipelines.
+4.2 Bounding Box Size Alignment
+In addition to point cloud density, object size distributions may differ significantly
+across datasets. Vehicle dimensions, for example, vary across regions and datasets
+due to differences in traffic composition and annotation standards. The work of Wang
+et al. (2020) introduced statistical normalization (SN, also referred to as Stat-Norm)
+to address this issue by aligning 3D bounding box dimension statistics between source
+and target domains.
+Stat-Norm rescales source-domain bounding boxes to match the target-domain size
+distribution, thereby reducing scale-related biases during training. This simple yet ef-
+fective technique has been shown to significantly improve cross-domain generalization
+and is now widely adopted in LiDAR-based domain adaptation methods.
+5 Diverse Frame Selection Algorithm
+To efficiently select informative target domain frames for fine-tuning, we propose a
+diverse frame selection algorithm based on latent activation patterns in the PV-RCNN
+ROI Head.
+5.1 Activation Pattern Extraction
+We extract activation patterns from ReLU-activated convolutional layers as follows:
+Feature Attribution: Each 3D bounding box b is associated with its latent
+ReLU-activated vector fb ∈Rd produced by the selected ROI Head layer. Clip-
+ping: We zero out the lesser half of the vector values, keeping only the larger, more
+7
+
+informative components:
+f clip
+b
+= cliptop-half(fb)
+Binarization: The remaining positive components are set to 1 to form a binary
+activation pattern:
+pb = sign(f clip
+b
+),
+pb ∈{0, 1}d
+This transforms latent features into discrete patterns encoding the presence of
+strong activations for each bounding box.
+5.2 Layer Selection for Pattern Extraction
+To select the most informative layer, we leverage the labeled source domain validation
+set. For each candidate layer, we compute activation patterns for true positive (TP)
+and false positive (FP) boxes detected on the source validation split. For each box
+b, we compute the Hamming distance to the nearest neighbor in the bank of source
+domain ground-truth patterns:
+D(b) =
+min
+pg∈PGT Hamming(pb, pg),
+where PGT is the set of all GT patterns from the source domain.
+We then evaluate how well the layer separates TP and FP boxes using AUROC
+over the nearest neighbor distances. The selected layer is the one for which TP patterns
+are closest to GT patterns while FP patterns are farthest. Our experiments show that
+the first ROI Head layer yields the most informative activation patterns.
+5.3 Frame-Level Diversity Score
+Given a target-domain frame f with detected boxes B(f), each box b ∈B(f) is
+assigned an integer-valued similarity score D(b) equal to the Hamming distance to its
+nearest source GT pattern.
+Since Hamming distances are integers, the set of distances
+Df = {D(b) : b ∈B(f)}
+induces a discrete probability distribution without any need for binning. Let πf(k)
+denote the normalized frequency of distance value k:
+πf(k) =
+1
+|B(f)| |{b ∈B(f) : D(b) = k}| ,
+X
+k
+πf(k) = 1.
+This distribution characterizes the heterogeneity of detected objects in latent
+space. Frames spanning a wide range of similarity values (i.e., containing both
+source-like and highly out-of-distribution objects) exhibit higher entropy.
+We therefore define the entropy score
+H(f) = −
+X
+k
+πf(k) log πf(k),
+which serves as an intra-frame diversity measure.
+8
+
+5.4 Iterative Diverse Frame Selection
+To prevent selecting multiple frames with similar characteristics, we adopt an iterative
+strategy in which the top-K proposal set is recomputed at every selection step. This
+ensures that once a frame is selected, it is removed from future candidate pools.
+Let Ftarget be the set of all target-domain frames and F(t)
+sel the set of frames selected
+after iteration t.
+1. Construct the iteration-specific proposal set:
+F(t)
+K = TopK
+
+H(f), f ∈Ftarget \ F(t−1)
+sel
+
+.
+2. For each f ∈F(t)
+K compute the inter-frame distance using a compact average-over-
+pairs form:
+Dist(f, F(t−1)
+sel
+) =
+
+
+
+
+
+
+
+1,
+F(t−1)
+sel
+= ∅,
+1
+|F(t−1)
+sel
+|
+P
+f ′∈F(t−1)
+sel
+Ham(f, f ′),
+otherwise,
+where the mean pairwise Hamming distance between two frames is
+Ham(f, f ′) =
+1
+|B(f)| |B(f ′)|
+X
+b∈B(f)
+X
+b′∈B(f ′)
+Ham(pb, pb′).
+3. Normalize both diversity factors over the proposal set F(t)
+K :
+ˆH(f) = norm(H(f)) ,
+d
+Dist(f) = norm
+
+Dist(f, F(t−1)
+sel
+)
+
+.
+4. Select the next frame:
+f ∗= arg max
+f∈F(t)
+K
+ˆH(f) · d
+Dist(f),
+and update
+F(t)
+sel = F(t−1)
+sel
+∪{f ∗}.
+5. Repeat until |F(t)
+sel | = N.
+This process guarantees that each iteration considers only the most informative
+yet-unselected frames, while also encouraging selection diversity at both the frame
+and detection levels.
+9
+
+Algorithm 1 Diverse Frame Selection for Target Domain
+Require: Pretrained source detector, target frames Ftarget, proposal size K, desired
+number N
+1: Extract source GT activation patterns PGT
+2: Infer all target frames; collect activation patterns pb for each box
+3: for each frame f ∈Ftarget do
+4:
+Compute similarity scores D(b) to PGT
+5:
+Compute entropy H(f) from discrete distribution πf(k)
+6: end for
+7: F(0)
+sel ←∅,
+t ←1
+8: while |F(t−1)
+sel
+| < N do
+9:
+F(t)
+K ←TopK
+ H(f), f ∈Ftarget \ F(t−1)
+sel
+
+10:
+for each f ∈F(t)
+K do
+11:
+Compute Dist(f, F(t−1)
+sel
+) (or set to 1 if empty)
+12:
+end for
+13:
+ˆH(f) ←norm(H(f)) over F(t)
+K
+14:
+d
+Dist(f) ←norm(Dist(f, F(t−1)
+sel
+)) over F(t)
+K
+15:
+f ∗←arg maxf∈F(t)
+K
+ˆH(f) · d
+Dist(f)
+16:
+F(t)
+sel ←F(t−1)
+sel
+∪{f ∗}
+17:
+t ←t + 1
+18: end while
+19: return F(t−1)
+sel
+6 Experiments and Analysis
+6.1 Setup
+Datasets. For the purposes of our study, we used the KITTI dataset Geiger et al.
+(2012), the NuScenes Caesar et al. (2020) and Waymo Caesar et al. (2020) datasets
+converted to the KITTI dataset format. We converted the datasets using the code
+attached to Wang et al. (2020). Additionally, in the converted point clouds, we scaled
+the range of the intensity attribute of the points to the range [0.0, 1.0], which is the
+same as in the data from the KITTI dataset.
+We also created smaller subsets of each dataset with 10 and 100 frames from the
+training set. These were used in experiments simulating limited target data, ensuring
+a diverse range of object sizes, distances, and LiDAR viewing angles.
+3D object detection. For 3D object detection in point clouds, we used TED Wu
+et al. (2023), a method that achieves state-of-the-art performance on the KITTI
+benchmark. TED employs a sparse convolutional backbone to extract voxel features.
+Subsequently, these features are aligned and aggregated into compact representations,
+enabling 3D object detection. Additionally, we use PV-RCNN Shi et al. (2020) ar-
+chitecture because this model is widely used in the state-of-the-art papers related to
+10
+
+domain adaptation problem. PV-RCNN uses 3D voxel convolutional neural network
+and PointNet-based set abstraction to learn more discriminative point cloud features.
+In our experiments, we trained the model in 40 epochs with a starting learning
+rate parameter equal to 0.01 set during training by Adam optimizer Smith and Topin
+(2019). We focused only on Car class because this category was also reported in
+state-of-the-art papers.
+Metrics. We evaluated 3D object detection performance using standard methods and
+metrics commonly applied to object detection algorithms on the KITTI dataset. In
+the results, we reported the values of the metric AP3D (Average Precision) at IoU =
+{0.5, 0.7} using the same protocol as it was used in Wang et al. (2020).
+6.2 Results of domain adaptation
+We conducted a series of experiments to evaluate the proposed domain adapta-
+tion strategies, assessing the model’s performance after adaptation to identify the
+most effective approach. To ensure a comprehensive comparison, we benchmarked
+the best-performing adaptation methods against state-of-the-art domain adaptation
+techniques.
+It is important to note that our results may differ from those obtained on the same
+datasets without applying the dataset conversion method proposed in Wang et al.
+(2020), even when using the same algorithm. This discrepancy arises due to differ-
+ences in data preprocessing across datasets. Notably, the performance on nuScenes
+is significantly lower than the results reported in the official nuScenes’s benchmark.
+This is likely due to the relative sparsity of the point cloud in nuScenes compared
+to other datasets, as well as differences in preprocessing—particularly the filtering of
+ground truth boxes in KITTI based on the number of points inside, which reduces
+the number of training examples.
+Size of the target domain. In the first experiment, we examined the impact of the
+number of target domain samples used in post-training. In this experiment, we address
+the basic problem of domain adaptation with the usual fine-tuning (Sec. 3). The
+results are contained in Tab. 1. Starting with models trained on the source dataset,
+we evaluated their performance on the validation sets of all three datasets. We denote
+as source dataset the dataset on which the model was trained, and as target dataset
+the one on which it was evaluated. To assess the effect of post-training, we fine-tuned
+each pre-trained model using small subsets of the target dataset. We used 10- and 100-
+frame subsets of the target dataset, selected either randomly or to maximize object
+diversity by including vehicles at varying distances from the ego vehicle.
+It is evident that post-training on a limited subset of the data results in a notable
+enhancement, while the annotation budget required to annotate 10 or 100 samples is
+very low. We can also observe that for 10 samples diverse object’s selection is better
+than random one. This leads to a reduction in the discrepancy between the AP metric
+value calculated with IoU thresholds of 0.5 and 0.7. Consequently, it enables for a
+more precise estimation of the object’s position. Fig. 3 illustrates the detection of the
+same object by a model that did not undergo post-training and by a model that did.
+We also conducted an additional experiment to assess the effectiveness of training the
+model from scratch on a selected subset (See Appendix C).
+11
+
+Table 1: Impact of post-training on the model performance using varying frames
+from target dataset.
+Src.
+Tar.
+Number
+KITTI
+NuScenes
+Waymo
+of frames
+AP0.5
+AP0.7
+AP0.5
+AP0.7
+AP0.5
+AP0.7
+KITTI
+0
+96.80
+87.99
+23.91
+7.26
+52.92
+11.21
++10 (div.)
+–
+–
+28.40
+14.35
+67.02
+51.55
++100 (div.)
+–
+–
+33.89
+17.35
+72.60
+58.22
++10 (rand.)
+–
+–
+27.49
+13.18
+66.62
+48.17
++100 (rand.)
+–
+–
+34.21
+17.92
+72.16
+57.10
+NuScenes
+0
+80.57
+23.58
+42.32
+25.96
+44.46
+18.58
++10 (div.)
+94.34
+81.09
+–
+–
+66.14
+49.04
++100 (div.)
+96.82
+82.45
+–
+–
+72.80
+57.60
++10 (rand.)
+92.71
+79.23
+–
+–
+65.51
+47.58
++100 (rand.)
+96.89
+83.16
+–
+–
+72.42
+57.65
+Waymo
+0
+88.93
+7.68
+19.40
+5.39
+78.70
+67.17
++10 (div.)
+95.07
+81.95
+27.07
+10.98
+–
+–
++100 (div.)
+97.39
+85.14
+34.56
+17.64
+–
+–
++10 (rand.)
+94.15
+80.87
+27.91
+11.29
+–
+–
++100 (rand.)
+97.26
+85.40
+34.44
+17.38
+–
+–
+Figure 3: Exemplary object detection in new domain (top) without and with (bot-
+tom) domain adaptation.
+Post-training on single vs. multiple domains. In the second experiment, we
+investigated whether domain adaptation could be applied simultaneously to multiple
+domains and what is the impact on the source domain, addressing four problems of
+Sec. 3 with the usual fine-tuning. We used a combined 10-frame subsets of the KITTI,
+NuScenes and Waymo datasets. We ran post-training on the models learned on each
+dataset and evaluations of each model resulting from post-training using the validation
+sets of all datasets. We summarised the results in Tab. 2.
+12
+
+Table 2: Post-training impact on the model performance using only 10 frames from
+single or multiple target domains.
+Src.
+Tar.
+Post-training
+KITTI
+NuScenes
+Waymo
+AP0.5
+AP0.7
+AP0.5
+AP0.7
+AP0.5
+AP0.7
+KITTI
+w/o
+96.80
+87.99
+23.91
+7.26
+52.92
+11.21
+target
+–
+–
+28.25
+14.19
+66.77
+46.04
+multi
+93.72
+83.03
+28.62
+13.88
+60.56
+29.89
+NuScenes
+w/o
+80.57
+23.58
+42.32
+25.96
+44.46
+18.58
+target
+93.45
+79.86
+–
+–
+65.64
+49.40
+multi
+93.45
+79.24
+30.69
+13.43
+58.25
+30.69
+Waymo
+w/o
+88.93
+7.68
+19.40
+5.39
+78.70
+67.17
+target
+96.73
+83.03
+30.86
+12.25
+–
+–
+multi
+93.57
+81.21
+28.97
+14.35
+64.29
+35.28
+The results obtained from post-training on data from different datasets are superior
+to those obtained on datasets other than the source dataset. However, the improve-
+ment observed is consistently less pronounced than that which would be achieved
+if only the target dataset were used. Furthermore, the post-training process has a
+markedly detrimental impact on the results obtained on the source dataset, indi-
+cating that it is not possible to develop a universal model through this approach.
+These results indicate that when a company plans to extend the ODD across multiple
+regions, domain adaptation must be performed separately for each region. Addition-
+ally, we tested the model’s performance on the original domain after adaptation (See
+Appendix C).
+Post-training strategies. In the third experiment, we evaluated different post-
+training strategies, checking the impact of the changes in learning rate and regulari-
+sation method, using various approaches proposed in Sec. 3. The optimal parameters
+were identified as a penalty factor for the L2-SP regularisation method of 0.01 or
+0.001, contingent on the adaptation task; a starting learning rate for the linear learn-
+ing rate fade of 0.01 or 0.005; and a learning rate of 0.001 or 0.005 for post-training
+with a constant learning rate. The results obtained using the optimal parameters are
+presented in Table 3, providing a comparison between the baseline performance with-
+out post-training, the results after applying post-training with default parameters,
+and the outcomes achieved using the proposed methods. We also evaluated the impact
+of post-training strategy on pedestrian class (see Appendix C).
+The results show that selection of the correct post-training strategy has the poten-
+tial to significantly enhance the adaptation performance. The proposed methods are
+better than linear probing and in most scenarios L2-SP Regularisation achieves the
+best performance, however the adaptation score may vary between different datasets.
+An alternative approach to optimising the adaptation score could be the imposition of
+constraints on the post-training phase, aimed at preventing the model from deviating
+significantly from the original weights.
+Comparison with state-of-the-art. The final experiment evaluated whether the
+proposed domain adaptation strategy, using only 10 representative frames from the
+13
+
+Table 3: Domain adaptation results for different post-training methods on 10 frames
+from the target domain.
+Src.
+Tar.
+Post-training
+KITTI
+NuScenes
+Waymo
+AP0.5
+AP0.7
+AP0.5
+AP0.7
+AP0.5
+AP0.7
+KITTI
+without
+96.80
+87.99
+23.91
+7.26
+52.92
+11.21
+default
+–
+–
+28.40
+14.35
+67.02
+51.55
+L2-SP reg.
+–
+–
+33.94
+20.16
+68.69
+51.59
+LR fading
+–
+–
+33.81
+19.85
+67.57
+51.21
+const LR
+–
+–
+33.05
+19.90
+67.42
+50.72
+linear probing
+–
+–
+30.04
+16.00
+61.78
+40.84
+NuScenes
+without
+80.57
+23.58
+42.32
+25.96
+44.46
+18.58
+default
+94.34
+81.09
+–
+–
+66.14
+49.04
+L2-SP reg.
+94.57
+82.10
+–
+–
+68.26
+51.70
+LR fading
+94.36
+81.86
+–
+–
+68.82
+51.64
+const LR
+95.56
+81.31
+–
+–
+67.37
+50.33
+linear probing
+94.85
+79.16
+–
+–
+65.44
+47.55
+Waymo
+without
+88.93
+7.68
+19.40
+5.39
+78.70
+67.17
+default
+95.07
+81.95
+27.07
+10.98
+–
+–
+L2-SP reg.
+97.15
+85.01
+34.47
+15.10
+–
+–
+LR fading
+96.65
+84.76
+32.97
+14.34
+–
+–
+const LR
+96.83
+84.17
+34.70
+15.92
+–
+–
+linear probing
+94.82
+76.39
+33.78
+16.18
+–
+–
+target domain with different post-training strategy, outperforms state-of-the-art meth-
+ods. To ensure a fair comparison, we used the same PV-RCNN architecture Shi et al.
+(2020) as in prior state-of-the-art papers related to domain adaptation problem. The
+results, presented in Tab. 4 and 5, show that the proposed approach with post-training
+using only 10 frames, combined with some post-training strategy, delivers surprisingly
+good performance, surpassing state-of-the-art domain adaptation techniques. More-
+over, this performance can be even higher when evaluation is performed following the
+evaluation protocol presented in Tsai et al. (2022). Our approach was outperformed
+only by Bi3D Yuan et al. (2023) in the Waymo →nuScenes adaptation scenario, how-
+ever Bi3D utilized 1% of the target dataset for adaptation, which corresponds to 281
+frames.
+With just 10 annotated, representative samples that requires only a few minutes
+of manual effort, the proposed method achieves performance comparable to training
+on the full target dataset. However, performance declines when linear probing is used
+as the post-training strategy. These results indicate that while state-of-the-art object
+detectors excel at feature extraction, accurate object localization still benefits greatly
+from domain adaptation. The key challenge lies in selecting a small yet representative
+subset from the target domain. These findings highlight an important implication:
+autonomous driving companies aiming to extend the ODD to new regions or sensor
+configurations can build a primary training dataset and then apply domain adaptation
+using only a small number of annotated samples from the new domain.
+These findings highlight a crucial insight. When autonomous driving companies
+seek to extend the ODD to new regions or different sensor setups, they can only pre-
+pare a small training database and then apply domain adaptation with a significantly
+14
+
+Table 4: Comparison with state-of-the art domain adaptation
+techniques and Source Only adaptation.
+Task
+Method
+AP0.7 ∆AP0.7
+N. →K.
+Target domain
+84.66
+–
+Source only
+37.26
+–
+Stat-Norm Wang et al. (2020)
+49.47
++12.21
+ST3D Yang et al. (2021)
+70.85
++33.59
+Bi3D (281 f.) Yuan et al. (2023)
+77.55
++40.29
+CMT Chen et al. (2024)
+75.51
++38.25
+10 f. + const LR (ours)
+78.17
++40.91
+37 f. + const LR (ours)
+80.21
++42.95
+100 f. + const LR (ours)
+80.90
++43.64
+W. →K.
+Target domain
+84.66
+–
+Source only
+29.24
+–
+Stat-Norm Wang et al. (2020)
+63.60
++34.36
+ST3D Yang et al. (2021)
+64.78
++35.54
+Bi3D (281 f.) Yuan et al. (2023)
+78.03
++48.79
+CMT Chen et al. (2024)
+74.53
++45.29
+10 f. + const LR (ours)
+79.22
++49.98
+37 f. + const LR (ours)
+81.39
++52.15
+100 f. + const LR (ours)
+82.23
++52.99
+W. →N.
+Target domain
+35.51
+–
+Source only
+19.16
+–
+Stat-Norm Wang et al. (2020)
+22.29
++3.13
+ST3D Yang et al. (2021)
+22.99
++3.83
+Bi3D (281 f.) Yuan et al. (2023)
+30.81
++11.65
+CMT Chen et al. (2024)
+26.38
++7.22
+10 f. + const LR (ours)
+29.57
++10.41
+100 f. + const LR (ours)
+32.14
++12.98
+281 f. + const LR (ours)
+33.41
++14.25
+SSDA3D (281 f.) Wang et al. (2023)
+33.01
++13.85
+TODA (281 f.) Kim et al. (2024a)
+32.18
++13.02
+smaller set of annotated samples from the new domain. This may save the cost of
+expensive data collection and labeling in new domains.
+7 Conclusion
+In this paper, we presented that simple domain adaptation techniques based on a
+handful of training examples and post-training strategies preventing against weight
+drift from the original model allows to achieve much better results than linear prob-
+ing and other state-of-the-art domain adaptation techniques for 3D object detection
+in the context of autonomous driving. Domain adaptation is crucial when OEMs seek
+to expand the ODD, as the conventional approach typically involves collecting a new
+training dataset from the target domain. Our experiments demonstrated that domain
+adaptation can be a more efficient alternative, achieving performance levels close to
+those obtained with a fully trained model on the target domain. In addition, domain
+adaptation across multiple domains is less effective than adaptation to a single do-
+main and after domain adaptation the model’s performance declines on the source
+15
+
+Table 5: Evaluation results on KITTI-format val set with ground
+truth 3D bounding boxes having <50 points being filtered out as
+in SEE Tsai et al. (2022).
+Adaptation task
+Method
+AP0.7 ∆AP0.7
+NuScenes →KITTI
+Target domain
+91.19
+–
+Source only
+45.27
+–
+SEE Tsai et al. (2022)
+72.51
++27.24
+10 f. + const LR (ours)
+82.12
++36.85
+10 f. + LR fading (ours)
+81.76
++36.49
+10 f. + L2-SP (ours)
+85.56
++40.29
+Waymo →KITTI
+Target domain
+91.19
+–
+Source only
+33.71
+–
+SEE Tsai et al. (2022)
+79.39
++45.68
+10 f. + const LR (ours)
+88.10
++54.39
+10 f. + LR fading (ours)
+87.53
++53.82
+10 f. + L2-SP (ours)
+88.91
++55.20
+Waymo →NuScenes
+Target domain
+70.56
+–
+Source only
+9.01
+–
+SEE Tsai et al. (2022)
+14.72
++5.71
+10 f. + const LR (ours)
+53.57
++44.56
+10 f. + LR fading (ours)
+44.01
++35.00
+10 f. + L2-SP (ours)
+56.14
++47.13
+Table 6: Ablation study for FT+SN - target domain N frames finetuning with
+3D bounding box statistical normalization, LiDAR distribution alignment for
+pretraining, and activation-pattern entropy frame selection.
+Frames
+FT + SN
+LIDAR dist. align.
+NAP
+Waymo→NuScenes
+10
+19.16 (source only)
++
+24.71 ( +5.55 )
++
++
+27.49 ( +2.78 )
++
++
++
+29.57 ( +2.08 )
+100
+19.16 (source only)
++
+27.62 ( +8.46 )
++
++
+31.68 ( +4.06 )
++
++
++
+32.14 ( +0.46 )
+281
+19.16 (source only)
++
+28.29 ( +9.13 )
++
++
+32.93 ( +4.64 )
++
++
++
+33.41 ( +0.48 )
+dataset. These findings demonstrate that extending the ODD in autonomous driving
+applications can be achieved with only a limited number of target domain samples.
+Acknowledgements
+This work was supported by the National Centre for Research and Development under
+the research project GOSPOSTRATEG8/0001/2022.
+16
+
+References
+Alibeigi M, Ljungbergh W, Tonderski A, et al (2023) Zenseact open dataset: A large-
+scale and diverse multimodal dataset for autonomous driving. In: Proc. of the Int.
+Conf. on Computer Vision (ICCV), pp 20178–20188
+Bekker H (2024) Best selling cars in Germany in 2023. https://www.best-selling-cars.
+com/germany/2023-full-year-germany-best-selling-car-models/, accessed: 2024-09-
+20
+Caesar H, Bankiti V, Lang AH, et al (2020) nuscenes: A multimodal dataset for
+autonomous driving. In: Proc. of the Conference on Computer Vision and Pattern
+Recognition (CVPR), pp 11621–11631
+Carballo A, Lambert J, Monrroy A, et al (2020) LIBRE: The Multiple 3D LiDAR
+Dataset. In: 2020 IEEE Intelligent Vehicles Symposium (IV), pp 1094–1101, https:
+//doi.org/10.1109/IV47402.2020.9304681
+Chen S, Zhuo J, Li X, et al (2024) CMT: Co-training Mean-Teacher for Unsupervised
+Domain Adaptation on 3D Object Detection. In: ACM Multimedia 2024
+Corral-Soto ER, Nabatchian A, Gerdzhev M, et al (2021) Lidar few-shot domain
+adaptation via integrated cyclegan and 3D object detector with joint learning delay.
+In: Proc. of the Int. Conf. on Robotics and Automation (ICRA), IEEE, pp 13099–
+13105
+Fang J, Zhou D, Zhao J, et al (2024) LiDAR-CS dataset: LiDAR point cloud dataset
+with cross-sensors for 3D object detection. In: Proc. of the Int. Conf. on Robotics
+and Automation (ICRA), IEEE, pp 14822–14829
+Fruhwirth-Reisinger C, Opitz M, Possegger H, et al (2021) FAST3D: Flow-aware
+self-training for 3D object detectors. arXiv preprint arXiv:211009355
+Geiger A, Lenz P, Urtasun R (2012) Are we ready for Autonomous Driving? The
+KITTI Vision Benchmark Suite. In: Proc. of the Conference on Computer Vision
+and Pattern Recognition (CVPR)
+Geyer J, Kassahun Y, Mahmudi M, et al (2020) A2d2: Audi autonomous driving
+dataset. arXiv preprint arXiv:200406320
+Heinzler RK (2022) Lidar-based weather detection: Automotive lidar sensors in
+adverse weather conditions
+Houston J, Zuidhof G, Bergamini L, et al (2021) One thousand and one hours: Self-
+driving motion prediction dataset. In: Proc. of the Conference on Robot Learning
+(CORL), PMLR, pp 409–418
+17
+
+Kim Y, Lee J, Park C, et al (2024a) Semi-supervised domain adaptation using
+target-oriented domain augmentation for 3d object detection. IEEE Transactions
+on Intelligent Vehicles
+Kim Y, Lee J, Park C, et al (2024b) Semi-supervised domain adaptation using target-
+oriented domain augmentation for 3D object detection. IEEE Trans on Intelligent
+Vehicles
+Lang AH, Vora S, Caesar H, et al (2019) Pointpillars: Fast encoders for object detec-
+tion from point clouds. In: Proc. of the Conference on Computer Vision and Pattern
+Recognition (CVPR), pp 12697–12705
+Li Y, Ibanez-Guzman J (2020) Lidar for Autonomous Driving: The Principles, Chal-
+lenges, and Trends for Automotive Lidar and Perception Systems. IEEE Signal
+Processing Magazine 37(4):50–61. https://doi.org/10.1109/MSP.2020.2973615
+Lu X, Radha H (2024) DALI: Domain Adaptive LiDAR Object Detection via
+Distribution-level and Instance-level Pseudo Label Denoising. IEEE Trans on
+Robotics
+Luo Z, Cai Z, Zhou C, et al (2021) Unsupervised domain adaptive 3D detection with
+multi-level consistency. In: Proc. of the Int. Conf. on Computer Vision (ICCV), pp
+8866–8875
+Mao J, Niu M, Jiang C, et al (2021) One Million Scenes for Autonomous Driving:
+ONCE Dataset. arXiv preprint arXiv:210611037
+Matuszka T, Barton I, Butykai Á, et al (2022) aiMotive Dataset: A Multimodal
+Dataset for Robust Autonomous Driving with Long-Range Perception. ArXiv
+abs/2211.09445. URL https://api.semanticscholar.org/CorpusID:253581598
+Pham QH, Sevestre P, Pahwa RS, et al (2020) A*3D Dataset: Towards Autonomous
+Driving in Challenging Environments. In: Proc. of the Int. Conf. on Robotics
+and Automation (ICRA), pp 2267–2273, https://doi.org/10.1109/ICRA40945.2020.
+9197385
+Rist CB, Enzweiler M, Gavrila DM (2019) Cross-sensor deep domain adaptation for
+lidar detection and segmentation. In: Proc. of the Intelligent Vehicles Symposium
+(IV), IEEE, pp 1535–1542
+Saleh K, Abobakr A, Attia M, et al (2019) Domain adaptation for vehicle detec-
+tion from bird’s eye view LiDAR point cloud data. In: Proc. of the Int. Conf. on
+Computer Vision Workshops (ICCV), pp 0–0
+Saltori C, Lathuiliére S, Sebe N, et al (2020) SF-UDA3D: Source-free unsupervised
+domain adaptation for LiDAR-based 3D object detection. In: Proc. of the Int. Conf.
+on 3D Vision (3DV), IEEE, pp 771–780
+18
+
+Sanchez J, Soum-Fontez L, Deschaud JE, et al (2024) ParisLuco3D: a High-
+Quality Target Dataset for Domain Generalization of LiDAR Perception. IEEE
+Robotics and Automation Letters 9(6):5496–5503. https://doi.org/10.1109/LRA.
+2024.3393209
+Shi S, Guo C, Jiang L, et al (2020) Pv-rcnn: Point-voxel feature set abstraction for
+3d object detection. In: Proc. of the Conference on Computer Vision and Pattern
+Recognition (CVPR), pp 10526–10535
+Smith C (2024) Best selling cars in the USA in 2023. https://www.motor1.com/
+features/703891/best-selling-cars-2023/, accessed: 2024-09-20
+Smith LN, Topin N (2019) Super-convergence: Very fast training of neural networks
+using large learning rates. In: Artificial intelligence and machine learning for multi-
+domain operations applications, SPIE, pp 369–386
+Sun P, Kretzschmar H, Dotiwalla X, et al (2020) Scalability in perception for au-
+tonomous driving: Waymo open dataset. In: Proc. of the Conference on Computer
+Vision and Pattern Recognition (CVPR)
+Tsai D, Berrio JS, Shan M, et al (2022) See eye to eye: A lidar-agnostic 3D detection
+framework for unsupervised multi-target domain adaptation. IEEE Robotics and
+Automation Letters 7(3):7904–7911
+van de Ven GM, Soures N, Kudithipudi D (2024) Continual learning and catastrophic
+forgetting. URL https://arxiv.org/abs/2403.05175, arXiv:2403.05175
+Wang P, Huang X, Cheng X, et al (2018) The ApolloScape Open Dataset for
+Autonomous Driving and Its Application. IEEE Trans on Pattern Analysis and Ma-
+chine Intelligence 42:2702–2719. URL https://api.semanticscholar.org/CorpusID:
+52842854
+Wang Y, Chen X, You Y, et al (2020) Train in Germany, Test in the USA: Making
+3D Object Detectors Generalize. In: Proc. of the Conference on Computer Vision
+and Pattern Recognition (CVPR), pp 11710–11720
+Wang Y, Yin J, Li W, et al (2023) Ssda3d: Semi-supervised domain adaptation for
+3d object detection from point cloud. In: Proceedings of the 37th AAAI Conference
+on Artificial Intelligence (AAAI), pp 2707–2715
+Wang Z, Ding S, Li Y, et al (2019) Range adaptation for 3D object detection in
+LiDAR. In: Proc. of the Int. Conf. on Computer Vision Workshops (ICCV), pp 0–0
+Wei Y, Wei Z, Rao Y, et al (2022) LiDAR Distillation: Bridging the Beam-Induced
+Domain Gap for 3D Object Detection. In: Proc. of the European Conference on
+Computer Vision (ECCV), Springer, pp 179–195
+19
+
+Wilson B, Qi W, Agarwal T, et al (2021) Argoverse 2: Next Generation Datasets
+for Self-Driving Perception and Forecasting. In: Proc. of the Neural Information
+Processing Systems Track on Datasets and Benchmarks (NeurIPS Datasets and
+Benchmarks 2021)
+Wu H, Wen C, Li W, et al (2023) Transformation-Equivariant 3D Object Detection
+for Autonomous Driving. In: AAAI
+Xiao P, Shao Z, Hao S, et al (2021) Pandaset: Advanced sensor suite dataset for au-
+tonomous driving. In: Proc. of the International Intelligent Transportation Systems
+Conference (ITSC), IEEE, pp 3095–3101
+Xu Q, Zhou Y, Wang W, et al (2021) SPG: Unsupervised domain adaptation for
+3D object detection via semantic point generation. In: Proc. of the Int. Conf. on
+Computer Vision (ICCV), pp 15446–15456
+Xuhong L, Grandvalet Y, Davoine F (2018) Explicit inductive bias for transfer learn-
+ing with convolutional networks. In: Proc. of the Int. Conf. on Machine Learning
+(ICML), PMLR, pp 2825–2834
+Yang J, Shi S, Wang Z, et al (2021) ST3D: Self-training for unsupervised domain
+adaptation on 3D object detection. In: Proc. of the Int. Conf. on Computer Vision
+and Pattern Recognition (CVPR), pp 10368–10378
+Yang J, Shi S, Wang Z, et al (2022) ST3D++: Denoised self-training for unsupervised
+domain adaptation on 3D object detection. IEEE Trans on pattern analysis and
+machine intelligence 45(5):6354–6371
+You Y, Diaz-Ruiz CA, Wang Y, et al (2022) Exploiting playbacks in unsupervised
+domain adaptation for 3D object detection in self-driving cars. In: Proc. of the Int.
+Conf. on Robotics and Automation (ICRA), IEEE, pp 5070–5077
+Yuan J, Zhang B, Yan X, et al (2023) Bi3D: Bi-domain active learning for cross-
+domain 3D object detection. In: Proc. of the Conference on Computer Vision and
+Pattern Recognition (CVPR), pp 15599–15608
+Zhang B, Yuan J, Shi B, et al (2023) Uni3D: A Unified Baseline for Multi-Dataset
+3D Object Detection. In: Proc. of the Conference on Computer Vision and Pattern
+Recognition (CVPR), pp 9253–9262
+Zhang W, Li W, Xu D (2021) SRDAN: Scale-aware and range-aware domain adapta-
+tion network for cross-dataset 3D object detection. In: Proc. of the Conference on
+Computer Vision and Pattern Recognition (CVPR), pp 6769–6779
+Zhu JY, Park T, Isola P, et al (2017) Unpaired image-to-image translation using cycle-
+consistent adversarial networks. In: Proc. of the Int. Conf. on Computer Vision
+(ICCV), pp 2223–2232
+20
+
+Appendix A
+Challenges in domain adaptation
+Effective LiDAR domain adaptation requires a comprehensive understanding of the
+characteristics of the LiDAR point clouds inherent to various datasets and the en-
+vironmental conditions under which they were collected. This section examines how
+sensor properties and environmental factors influence model performance in domain
+adaptation. Additionally, we provide an overview of prominent LiDAR datasets, de-
+tailing their sensor specifications and discuss how the domain adaptation can be
+affected. The summary of the factors that can affect domain adaptation between re-
+gions or environmental conditions is presented in Tab. A2. The goal of this analysis
+is to show when domain adaptation could be easier, which can support the decision
+about recording a new training database, when a product is planned to be deployed
+in a new environment, e.g., city or country or with a new LiDAR sensor.
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0
+22.5
+25.0
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+Bounding box volume
+Density
+KITTI
+Waymo
+NuScenes
+Zenseact
+Figure A1: Distribution of volumes of vehicle annotations. These distributions result
+from the cultural and geographical features as well as from the labeling guideline.
+21
+
+A.1
+Sensor Characteristics
+A.1.1
+Resolution and Point Cloud Density
+Lidar sensors differ in resolution, affecting point cloud density. High-resolution sen-
+sors produce dense point clouds, while low-resolution ones result in sparser data. This
+disparity presents challenges when transferring models between datasets. In case of
+domain transfer from higher to lower resolution, we can directly remove the redun-
+dant LiDAR lines, but adaptation from lower to higher LiDAR resolution is more
+challenging.
+Horizontal and vertical resolution in LiDAR sensors differ due to the underlying
+scanning patterns and sensor configurations. Horizontal resolution is generally deter-
+mined by the angular increment between successive laser beams as the sensor rotates
+around its vertical axis (mechanical spinning LiDARs). Since a full rotation typically
+covers 360°, a finer horizontal resolution means more laser pulses per rotation, leading
+to a denser horizontal sampling of the environment. In contrast, vertical resolution is
+defined by the number and spacing of the laser channels in the sensor stacked verti-
+cally. A LiDAR sensor with more vertical channels or tighter vertical spacing produces
+denser sampling in the vertical direction.
+Because of these differing resolutions, the same object within a scene may be
+represented by varying numbers of points both horizontally and vertically. A sensor
+with high vertical resolution can capture a more detailed structure of the height
+and shape of an object, providing a rich vertical point distribution. Meanwhile, a
+sensor with higher horizontal resolution will present a more detailed view of the width
+and lateral features of an object. When transitioning between datasets with different
+horizontal and vertical resolutions, models must effectively adapt to these variations
+in point density, ensuring that features remain robustly identifiable even when the
+underlying point distributions along horizontal or vertical axes differ significantly.
+For example, direct transfer of models between datasets with differing sensor res-
+olutions, such as from nuScenes (32 beams) to KITTI (64 beams), yields notable
+performance reductions. This outcome is not surprising when observing the distribu-
+tion of points per object presented in Figure A2. Domain adaptation techniques such
+as ST3D Yang et al. (2021) and ST3D++ Yang et al. (2022) have demonstrated no-
+table improvements, particularly in the context of adapting from lower-resolution to
+higher-resolution datasets.
+A.1.2
+Field of View (FoV)
+Differences in vertical and horizontal FoV influence the extent of the captured envi-
+ronment. For example, the Waymo Open Dataset, which uses multiple LiDARs with
+varying FoVs, provides extensive environmental coverage. A narrow FoV can lead to
+missing information, complicating model transfer across datasets.
+Furthermore, some datasets (e.g. original KITTI or Zenseact Open Dataset) con-
+tain annotations for the objects only visible from the front-facing camera. The cameras
+also may have different FoVs - the one from KITTI has horizontal resolution of 90°
+while the camera used in Zenseact captures 120° of the environment. Thus, the models
+22
+
+0.11
+0.12
+0
+25
+50
+75
+100
+125
+150
+175
+200
+0.00
+0.01
+0.02
+0.03
+0.04
+0.05
+0.06
+Number of LIDAR points in box
+Density
+KITTI
+Waymo
+NuScenes
+Zenseact
+Figure A2: Distribution of LiDAR points in the annotation boxes. These distribu-
+tions result from the point cloud density and the labeling policy
+trained on such datasets will better detect objects located in front of the ego vehicle
+than those located by the sides or behind it.
+Finally, the translation and rotation of the sensors must be considered. The same
+object captured by the same LiDAR will appear differently from different viewpoints.
+In general, the objective is to maximize the number of points representing objects of
+interest. Therefore, when creating such a dataset, it is worthwhile to test different
+sensors’ position setups to ensure optimal results.
+A.1.3
+Beam Pattern and Scanning Mechanism
+Variations in beam patterns (e.g., uniform vs. non-uniform) and scanning mecha-
+nisms (mechanical vs. solid-state) affect point distribution. For example, the Hesai
+PandarGT sensor used in PandaSet, has a different scanning mechanism compared to
+the Velodyne sensors used in the most popular open datasets, potentially leading to
+inconsistencies in model transfer.
+Mechanical spinning systems, such as those used in popular Velodyne sensors, use
+rotating mirrors to achieve the 360° horizontal FoV, but are bulky and susceptible
+to mechanical wear in harsh conditions. In contrast, solid-state systems, including
+MEMS-based LiDARs, reduce moving parts by utilizing miniature electromechanical
+23
+
+mirrors, offering improved robustness for automotive use. Flash LiDARs, a type of
+solid-state system, completely eliminate moving parts by illuminating the entire scene
+simultaneously with a single pulse and capturing reflections with a 2D sensor array.
+However, they are limited in range because of power restrictions for eye safety and
+their inability to dynamically adjust the FoV.
+Newer optical phased-array (OPA) technologies provide true solid-state scanning
+by steering laser beams through phase modulation, but their commercial adoption re-
+mains limited. Each of these mechanisms impacts the density and uniformity of point
+cloud data. According to Li and Ibanez-Guzman (2020), the selection of the appro-
+priate scanning mechanism is critical to adapt LiDAR systems to specific operational
+environments, as differences in beam density, range, and precision influence perception
+performance.
+Subsequently, the disparities in LiDAR are reflected in the point cloud and its
+representations utilized in models. As shown in Figure A3 the same object (car) is
+represented differently in the point clouds by LiDARs with different scanning mecha-
+nisms. The visible difference is apparent to the unassisted eye. It is also apparent from
+the pillar representation that current state-of-the-art detection models were not de-
+signed for such cases. The question arises as to why the same physical object appears
+different for the model when recorded by different LiDARs. It is clear that the point
+cloud feature extraction layer must be enhanced to address the domain gap created
+by the growing diversity of the LiDAR sensors market. Until then, the intersensor
+LiDAR domain adaptation will remain a significant topic.
+A.1.4
+Laser Source and Wavelength
+The majority of the popular sensors available on the market use pulsed-laser diodes
+as a laser source to emit laser beams at near-infrared wavelengths (typically 850-950
+nm). The sole exception mentioned in our paper is the Hesai PandarGT, a solid-state
+LiDAR that utilizes short-wave infrared (1550 nm) beams emitted by a fiber laser.
+The 1550-nm wavelength exhibits a higher power limit than 905 nm for Class 1 eye
+safety, thereby enabling the laser to scan at greater distances. However, they are more
+susceptible to absorption and scattering in rain and fog compared to 905-nm systems.
+A.2
+Weather Conditions
+Adverse weather conditions, such as rain, fog, or snow, significantly degrade the quality
+of LiDAR data, as shown in Heinzler (2022) by introducing noise and reducing the
+reflectivity of the points. Studies indicate a significant drop in model quality when
+trained on sunny-day data and tested in rainy conditions. The Waymo and nuScenes
+datasets, collected in varying weather conditions, show that models trained in clear
+weather perform poorly in rain or fog. The SPG paper Xu et al. (2021) on domain
+adaptation highlights this as a significant adaptation challenge.
+A.3
+Cultural and Geographic Factors
+Culture and geography have a significant impact on the types of vehicles in use around
+the world, directly affecting their size, design, and overall appearance. For instance,
+24
+
+(a) Car point cloud - me-
+chanical spinning LiDAR
+(b) Car point cloud - solid-
+state LiDAR
+(c) Car point cloud - merge
+of both LiDARs
+(d) Car pillar representa-
+tion - mechanical spinning
+LiDAR
+(e) Car pillar representation
+- solid-state LiDAR
+(f) Car pillar representation
+- merge of both LiDARs
+Figure A3: Car captured by LiDARs with different scanning mechanism (height of
+pillar - max intensity, color is max value in embedding)
+Dataset
+Length [m] Width [m] Height [m]
+KITTI
+4.4
+1.79
+1.49
+NuScenes
+4.61
+1.95
+1.73
+Waymo
+5.15
+1.93
+1.71
+Table A1: Average car bounding box size
+in AV databases.
+North American roads tend to feature larger SUVs, pickup trucks, and full-size sedans,
+while European cities are often dominated by smaller, more compact cars. In some
+parts of Asia, the prevalence of small sedans, scooters, rickshaws or motorcycles also
+significantly changes the overall makeup of road traffic. The mean values of car bound-
+ing boxes in leading databases are noticeably different as can be seen in Tab.A1. These
+region-specific preferences are further reinforced by local regulations (e.g., emissions
+laws, engine size taxes) and infrastructure constraints (e.g., narrow European streets
+vs. expansive American road networks), creating systematic shifts in the distribution
+of object sizes and shapes observed by LiDAR sensors. These variations introduce do-
+main gaps (see Fig. A1) that can impede model generalization; a detector primarily
+trained in one region (where certain vehicle types are overrepresented) may struggle
+when deployed in areas with different vehicle shapes or sizes.
+25
+
+A.4
+Object labeling policy
+Another factor that could hinder domain adaptation results is the way datasets label
+objects. The most notable difference in labeling policies is the inclusion of vehicles’
+side view mirrors. Waymo dataset specifies that vehicle bounding boxes shall include
+side view mirrors, while NuScenes labeling specification excludes them. Although dif-
+ferences might seem minute, such metrics as IoU are very sensitive to small shifts and
+size differences. Such differences in data labeling policy results in errors not caused
+by errors in detections, but contradictory labeling guidelines. Figure A1 demonstrates
+the extent of the vehicle sizes gap among datasets.
+Furthermore, not all datasets have a labeling specification. KITTI dataset, in which
+side view mirrors are not included in the box, does not provide a labeling specification
+similar to the aforementioned Waymo and Nuscenes sets. Zenseact dataset also doesn’t
+publish a detailed labeling specification, and more problematically, is not coherent
+in the inclusion of side view mirrors in annotations, meaning that some cars include
+them while other don’t. The difference in side view mirror inclusion is illustrated by
+figure A4.
+Figure A4: Inconsistencies in the inclusion of side view mirrors in the annota-
+tion could have a detrimental effect to the efficiency of domain adaptation between
+datasets. Waymo dataset (left) includes mirrors, while KITTI (right) doesn’t.
+Other minor differences in labeling include crane arms, which are omitted in the
+NuScenes dataset if their height is above 1.5m, while Waymo labels such objects with
+26
+
+a separate bounding box from the rest of the vehicle. Another difference lies in the case
+of humanoid mannequins: NuScenes requires them do be labeled as adult pedestrians,
+while Waymo doesn’t count them as objects of interest. KITTI dataset, recorded in
+a city with a tram network, labels trams, while Waymo instructions exclude labeling
+of any rail vehicles.
+Finally, differences in labeling policies are visible in the number and types of
+object classes. Waymo categorizes all motor vehicles with "vehicle" label, while KITTI
+differentiates between a "car", "truck" and "van". NuScenes and Zenseact datasets
+use multi-level categories, so that the user can select the granulation level of labels.
+0
+20
+40
+60
+80
+100
+120
+140
+0.000
+0.005
+0.010
+0.015
+0.020
+0.025
+Distance from ego (meters)
+Density
+KITTI
+Waymo
+NuScenes
+Zenseact
+Figure A5: Distribution of distances of annotations from the ego vehicle. These
+distributions result both from the range of point clouds as well as from the labeling
+guideline.
+Labeling guidelines specify the maximum distance of annotated objects from the
+ego vehicle. Datasets like NuScenes, KITTI and Zenseact require all objects visible in
+the image to be annotated, with Waymo being a notable exception where the area of
+interest is restricted to 80 meters from the ego vehicle, due to very low point cloud
+visibility above that mark. Figure A5 illustrates the differences in distributions of
+annotation distances.
+27
+
+A.5
+Additional considerations
+Cross-regional adaptations, such as the transfer of models from European datasets
+(KITTI) to US datasets (Waymo) Wang et al. (2020), reveal a significant decrease in
+performance due to differences in object sizes, frequently leading to predictions that do
+not meet the Intersection over Union (IoU) threshold. In these cases, implicit methods
+like Statistical Normalization (SN) prove effective by aligning feature distributions
+between domains to improve detection consistency.
+In addition, regional differences often introduce new challenges in the form of
+unique animals or obstacles that are specific to a given environment. For example,
+transitioning from European to US datasets may require adaptation to detect region-
+specific wildlife (e.g., deer or wild boar) or infrastructure variations. The detection and
+classification of such region-specific objects often require additional model adjustments
+or fine-tuning, which can further complicate cross-domain adaptation processes.
+Furthermore, big differences in point cloud ranges (PCR) or detection region of
+interest (DRoI) between datasets contribute to loss of detection quality when training
+models on the merge of the datasets as shown in Zhang et al. (2023), necessitating
+adjustments of the point cloud range and detection region of interest to maintain
+consistent object detection quality across domains.
+A.6
+Existing datasets
+Many LiDAR datasets have been developed to support autonomous driving research,
+each offering unique sensor configurations and environmental contexts. Table A2
+provides a comparative overview of the most popular datasets, focusing on sensor
+specifications and weather conditions important to domain adaptation strategies.
+Each dataset varies in terms of sensor models used that differ in number of beams,
+fields of view (FoV), angular resolutions, capturing frequency, etc. Those differences
+result in different representations of the surrounding world. As the authors of Fang
+et al. (2024) show, current models struggle to generalize to the point clouds produced
+by LiDARs of different specifications.
+Thus, one should analyze the target dataset from this point of view, and find the
+best matching source dataset for better domain adaptation performance.
+KITTI Geiger et al. (2012). The KITTI dataset, one of the first for autonomous
+driving research, uses the spinning Velodyne HDL-64E sensor with 64 beams, a verti-
+cal resolution of 0.4°, and a horizontal resolution of 0.08°. It contains data of driving
+environments in and around the city of Karlsruhe in Germany in clear weather. How-
+ever, only the objects visible from the front-facing camera, featuring 90° horizontal
+field of view, were annotated.
+nuScenes Caesar et al. (2020). The nuScenes dataset uses a Velodyne HDL-32E
+sensor with 32 beams, vertical resolution of 1.33° and horizontal resolution of 0.32°
+rotating at 20Hz frequency. The lower resolution and number of beams compared
+to KITTI results in much sparser point clouds, which makes the task of domain
+adaptation in the case of nuScenes even more challenging. It includes 360° annotated
+data in urban scenes of Boston and Singapore in various weather conditions.
+28
+
+Waymo Sun et al. (2020). The Waymo Open dataset employs a high-resolution
+setup with multiple Velodyne LiDARs, including a top-mounted LiDAR with 64
+beams, and 4 side-mounted short-distance LiDARs. This configuration allowed for
+dense environmental mapping across urban and suburban areas of the US. Un-
+fortunately, the authors do not provide any details on the LiDAR models they
+used.
+Lyft Level 5 Houston et al. (2021). The Lyft Level 5 dataset includes data from
+multiple sensors, but specific LiDAR details, such as the exact sensor model and their
+resolutions, are not publicly available. The dataset covers diverse urban Palo Alto
+scenes with 360-degree annotations in clear weather conditions. Although 3 LiDARs
+were used, the point clouds in the dataset seem to be fairly sparse with ≈60K points
+per frame.
+Argoverse 1 & 2 Wilson et al. (2021). Another approach was used in the Ar-
+goverse dataset. The vehicle was equipped with two roof-mounted, rotating 32 beam
+LiDAR sensors. One on top of the other, each with 40° vertical field of view resulting
+in 30° vertical FoV overlap and a total of 50° vertical field of view. LiDAR range is up
+to 200 meters, roughly twice the range as the sensors used in nuScenes and KITTI.
+The authors state that on average, their LiDAR sensors produce a point cloud in each
+sweep with a density three times the density of the LiDAR sweeps in the nuScenes
+Caesar et al. (2020) dataset, which is known to be quite sparse. The two LiDAR sen-
+sors rotate at 10 Hz and are out of phase, i.e. rotating in the same direction and speed
+but with an offset to avoid interference.
+Zenseact Open Dataset Alibeigi et al. (2023). This dataset features aggregated
+point clouds from 3 Velodyne LiDAR sensors, the top one with 128 beams, and two
+side ones capturing 16 beams. The dataset is the densest among the ones mentioned
+in this paper, providing ≈254K points per frame. Similarly to KITTI, the Zenseact
+dataset contains only annotations of the objects visible from the front-facing camera
+that has a horizontal field of view of 120°.
+PandaSet Xiao et al. (2021). PandaSet utilizes 2 Hesai LiDARs of different na-
+ture. The Pandar64 sensor on the top offers 64 beams with a vertical angular resolution
+ranging from 0.17° to 6° and a horizontal angular resolution of 0.2°. The second
+PandarGT sensor is so-called solid-state LiDAR. It uses a solid-state laser and a pho-
+todetector to measure distances. Unlike mechanical LiDAR, solid-state LiDAR does
+not have moving parts, making it more reliable and less susceptible to failure. The
+dataset provides high-density point clouds captured in complex urban environments
+in San Francisco and the El Camino Real route.
+ONCE Mao et al. (2021). The dataset features a million scenarios from multiple
+Chinese cities captured by a 40-beam top LiDAR with 40° vertical FoV and 360°
+horizontal FoV. It includes data registered in clear, cloudy, and rainy weather. The
+average of ≈70K points per frame makes the ONCE point clouds sparser than most
+of the previously mentioned datasets.
+AiMotive Matuszka et al. (2022). This dataset contains scenes from USA, Aus-
+tria, and Hungary recorded by a 64-beam LiDAR. The distinguishing feature of the
+aiMotive dataset is long-range 3D annotations reaching up to 200 meters away from
+29
+
+the ego vehicle, allowing for long-range perception. Unfortunately, the information on
+the LiDAR used in the dataset is not publicly available.
+ApolloScape Wang et al. (2018). The ApolloScape dataset adopts the Riegl
+VMX-1HA acquisition system. The system features two VUX-1HA 360° horizontal
+FoV laser scanners. Although the specific sensor characteristics are not mentioned,
+the authors state that their system is able to achieve higher density point clouds
+than the ones captured by the common Velodyne HDL-64E LiDAR. The dataset has
+many complex scenes recorded in Beijing, China, perfectly suited to the dense urban
+environment of eastern Asian countries.
+A2D2 Geyer et al. (2020). A2D2 is another dataset for autonomous vehicle appli-
+cations recorded in Germany. It utilizes five synchronized Velodyne VLP-16 LiDARs
+having 16 beams and capturing data at 10Hz frequency, which seems enough to create
+colored 3D maps. Although being good at short-range scanning, the setup struggles
+to capture long-range objects. The dataset provides 3D bounding boxes for the points
+within the field of view of the front-center camera having 60° horizontal FoV.
+ParisLuco3D Sanchez et al. (2024). ParisLuco3D is a dataset captured around
+the Luzembourg Garden in Paris. The LiDAR data was recorded by the same sensor
+as the nuScenes dataset, with the only difference being the capturing frequency. While
+the nuScenes sensor rotated at 20Hz, the ParisLuco3D setup used the LiDAR at a
+10Hz rotating speed, which allowed for the use of a lower HAR, resulting in a twofold
+increase in the density of the point cloud per frame. This is beneficial for the object
+detection task.
+LIBRE Carballo et al. (2020). LIBRE is a dataset recorded by 10 different LiDARs
+from a vehicle driving on public urban roads around Nagoya University, Japan. This
+includes Velodyne LiDARs: VLS-128, HDL-64S2, HDL-32E, VLP-32C, and VLP-16;
+Pandar LiDARs: Pandar64, Pandar40P; Ouster LiDARs: OS1-64, OS1-16; RoboSense
+LiDAR: RS-Lidar32. More details on sensor configurations can be found in Carballo
+et al. (2020). The dataset features scenarios of a trajectory recorded by each sensor
+at three time periods during the day.
+A*3D Pham et al. (2020). The A*3D dataset is a diverse dataset that covers the
+whole variety of the Singapore road environment (unlike nuScenes, which contains
+only a small portion of it). It features 3D annotations of the objects visible from any
+of the frontal-view cameras like KITTI, Zenseact and A2D2.
+Each of these datasets brings unique LiDAR configurations and environmental
+diversity, significantly impacting domain adaptation strategies. Differences in beam
+count, vertical and horizontal angular resolutions, and field of view influence the
+adaptability of models trained on a single dataset to new domains.
+Appendix B
+Effective domain transfer
+When creating a new labeled LiDAR dataset, an effective strategy is to begin with a
+model already trained on data that closely matches the sensor setup and environmental
+conditions of the target domain. For instance, if you plan to capture Polish road data
+using a Velodyne VLS128 sensor at 10Hz, it’s more straightforward to adapt a model
+trained on the Zenseact dataset—collected with the same or very similar LiDAR
+30
+
+Dataset
+Country
+Env
+Sensors
+SM
+VAR
+HAR
+Beams
+WC
+MPF
+KITTI
+Germany
+Urban,
+subur-
+ban,
+high-
+ways
+1xVelodyne
+HDL-64E
+1xMS
+0.4
+0.08
+1x64
+Clear
+120K
+nuScenes
+USA,
+Singa-
+pore
+Urban
+1xVelodyne
+HDL-32E
+1xMS
+1.33
+0.32
+1x32
+Clear,
+cloud,
+rain
+34K
+Waymo
+USA
+Urban,
+subur-
+ban
+1x
+mid-range
+LiDAR
+4x short-range
+LiDARs
+5xMS
+0.31
+-
+0.16
+-
+1x64
+-
+Clear,
+cloud,
+rain
+177K
+Lyft Level 5
+USA
+Urban
+1xTop LiDAR*
+2xFront
+Li-
+DAR*
+3xMS
+-
+-
+1x64
+2x40
+Clear
+62K
+Argoverse 1
+USA
+Urban,
+subur-
+ban
+2xVelodyne
+VLP-32C
+2xMS
+0.33!
+0.2
+2x32
+Diverse*
+107K
+Argoverse 2
+USA
+Urban,
+subur-
+ban
+2xVelodyne
+VLP-32C
+2xMS
+0.33!
+0.2
+2x32
+Diverse*
+107K
+Zenseact
+14 Eu-
+ropean
+coun-
+tries
+Urban,
+subur-
+ban,
+high-
+ways
+1xVelodyne
+VLS-128
+2xVelodyne
+VLP-16
+3xMS
+0.11!
+2
+0.2
+0.2
+1x128
+2x16
+Clear,
+cloud,
+rain,
+snow
+254K
+PandaSet
+USA
+Urban,
+subur-
+ban
+1xPandar64
+1xPandarGT
+1xMS
+1xSS
+0.17!
+0.07!
+0.2
+0.1
+1x64
+1x150
+Clear
+169K
+ONCE
+China
+Urban
+1xTop LiDAR*
+1xMS
+0.33!
+0.2
+1x40
+Clear,
+cloud,
+rain
+70K
+aiMotive
+USA,
+Aus-
+tria,
+Hun-
+gary
+Urban
+1xTop LiDAR*
+1xMS
+-
+-
+1x64
+Clear,
+cloud,
+rain,
+glare
+120K
+ApolloScape
+China
+Urban
+2xRIEGL
+VUX-1HA
+2xMS
+-
+-
+-
+Diverse*
+-
+A2D2
+Germany
+Urban,
+subur-
+ban,
+high-
+ways
+5xVelodyne
+VLP-16
+5xMS
+2
+0.2
+5x16
+Clear,
+cloud,
+rain
+-
+ParisLuco3D
+France
+Urban
+1xVelodyne
+HDL-32E
+1xMS
+1.33
+0.16
+1x32
+-
+68K
+LIBRE
+Japan
+Urban
+10
+sensors
+from
+4
+differ-
+ent producers
+10xMS
+Var
+Var
+Var
+Clear,
+cloud
+Var
+A*3D
+Singapore
+Urban,
+subur-
+ban
+1xVelodyne
+HDL-64ES3
+1xMS
+0.33-
+0.5
+0.17
+1x64
+Clear,
+cloud,
+rain
+133K
+Table A2: Each dataset varies in terms of recordings location, sensor models of dif-
+ferent scanning mechanisms (SM) used (MS: mechanical spinning, SS: solid-state),
+vertical and horizontal angular resolutions (VAR and HAR), number of beams,
+weather conditions (WC), and mean points per frame (MPF). These distinctions play
+a crucial role in how well models trained on one dataset can adapt to another.
+(-) - no information is provided.
+(*) - details are not specified
+(!) - minimum (finest) resolution, a sensor has variable angle delta between beams
+(Var) - variable, the scenes were recorded by different setups
+settings—than to start with datasets like nuScenes or Waymo, which use different
+sensors in different environments.
+31
+
+B.1
+Domain Transfer Across Regions
+In this subsection we consider domain transfer across the regions of the greatest
+autonomous vehicles development potential.
+Europe - USA: This transfer requires careful adjustment due to significant dif-
+ferences in road infrastructure and driving habits. For example, European cities often
+have narrower roads, more pedestrian zones, and different traffic patterns compared
+to the USA’s grid-like road systems and wider lanes.
+USA - Asia: Domain transfer to regions like Japan or South Korea introduces
+even greater complexity due to highly urbanized environments, dense traffic, and
+specific road regulations unique to Asian countries. In addition, differences in signage
+and lane usage add to adaptation challenges.
+Europe - Asia: Similarly to the USA-to-Asia case, transferring models from Euro-
+pean roads to Asian domains involves overcoming variations in infrastructure, signage,
+and traffic patterns. However, urbanization levels and driving behaviors in certain
+European countries (e.g., densely populated areas like Germany or the Netherlands)
+may be more comparable to Asian cities.
+B.2
+Intra-Regional Domain Transfer
+Domain transfer within a given region is often less complex when adapting LiDAR-
+based autonomous vehicle models, thanks to shared road systems, regulations, and
+vehicle types. For example, within Europe, a LiDAR model trained on data from
+Germany can be adapted for operation in Poland, France, or Spain without substantial
+modifications, as these countries share many driving patterns. A similar scenario is
+evident in the United States, where a LiDAR model developed in one state can often
+be transferred to another with only minor adjustments to account for local variations
+in road infrastructure or climate conditions. In both cases, sensor setups generally
+remain consistent and modest adaptations, such as fine-tuning environmental models
+to address climate differences or local topographical features, are typically sufficient
+to ensure reliable performance.
+B.3
+Conclusion
+Domain transfer is easiest within regions with similar driving environments and in-
+frastructure, such as states in the United States or countries within Europe. Transfers
+between continents, such as from the United States to Europe or Asia, are more
+challenging due to infrastructure differences, environmental variations, and regulatory
+diversity. For the most effective results, models should be trained and fine-tuned on
+datasets that closely match the target domain in terms of sensor configuration and
+environmental conditions.
+Appendix C
+Additional experiments
+Size of the target domain. In this experiment, we trained the model from scratch
+using prepared small subsets of the KITTI, NuScenes and Waymo datasets. The de-
+tector performance we obtained is shown in Tab. C3. Prior to these experiments, we
+32
+
+increased the number of epochs in the training setup from 40 to 4,000 so that the
+model weights could establish themselves. This was due to the fact that when using a
+small amount of data during one epoch, the model weights update more slowly than
+when there is more data. Therefore, with a small portion of data, a training consisting
+of more epochs is needed.
+The results obtained in this way are unexpectedly high, but markedly lower than
+when learning on the entire training set. There are considerable discrepancies in the
+AP metric value calculated with an IoU threshold of 0.5 and a threshold of 0.7,
+indicating that the detector is capable of locating the object with reasonable precision,
+but is unable to accurately estimate its size and precise location. It is worth noting that
+these results are lower than those achieved when the model was initially trained on a
+different domain. This suggests that when a company has limited access to annotated
+data in the development period, it is more effective to first train the model on the
+publicly available datasets for commercial purposes and then apply post-training using
+the available samples from the currently possessed data.
+Table C3: Comparison of model results with post-training using only 10 frames from
+the target dataset. The evaluation is shown for both source (upper row) and target
+(lower row) datasets. Result before / sign is without post training and after / sign is
+after post training.
+S.
+T.
+KITTI
+NuScenes
+Waymo
+AP0.5
+AP0.7
+AP0.5
+AP0.7
+AP0.5
+AP0.7
+K.
+–
+–
+96.8 / 86.8
+88.0 / 17.7
+96.8 / 94.0
+88.0 / 51.8
+23.9 / 28.3
+7.3 / 14.2
+52.9 / 66.8
+11.2 / 46.0
+N.
+42.3 / 25.9
+26.0 / 5.1
+–
+–
+42.3 / 24.9
+26.0 / 11.1
+80.6 / 93.5
+23.6 / 79.9
+44.5 / 65.6
+18.6 / 49.4
+W.
+78.7 / 57.3
+67.2 / 17.6
+78.7 / 13.8
+67.2 / 5.7
+–
+–
+88.9 / 96.7
+7.7 / 83.0
+19.4 / 30.9
+5.4 / 12.3
+Post-training on single vs. multiple domains. Additionally, we evaluated the
+model’s performance on the source dataset after post-training on the target do-
+main. The primary objective was to determine whether domain adaptation affects the
+model’s ability to perform on the original domain. The results, presented in Tab.??,
+indicate a noticeable decline in performance on the source dataset—showing a slight
+drop in AP0.5, and a more significant decrease is observed for AP0.7. This suggests that
+while the model can still detect objects from the source domain, its precision is sub-
+stantially reduced. These findings highlight the model’s susceptibility to catastrophic
+forgetting, where adapting to a new domain leads to a loss of previously learned knowl-
+edge. To mitigate this issue, more advanced techniques from continual learning could
+be applied to preserve the model’s original performance after domain adaptation.
+Post-training strategy. To further investigate the impact of different post-training
+strategies in the context of domain adaptation, we conducted an additional experiment
+focused specifically on the pedestrian class again using only 10 frames. This was
+motivated by the typically observed variability in performance across semantic classes
+33
+
+in 3D object detection problem. Pedestrians often represents a challenging category
+due to their diverse appearances and frequent occlusions.
+The experiment evaluates the effectiveness of various post-training (fine-tuning)
+strategies in enhancing cross-domain generalization for the pedestrian class. The cor-
+responding results are summarized in Table C4. Interestingly, for the pedestrian
+category, the model achieves even higher performance on the KITTI dataset after post-
+training than it does on the target domain itself. This counterintuitive result may be
+attributed to the greater diversity of pedestrian instances in the Waymo and nuScenes
+datasets, which likely contributes to a more robust and generalized pedestrian rep-
+resentation during adaptation. In contrast, for the vehicle class, the post-training
+domain adaptation results in a marginal drop in performance compared to the tar-
+get domain, suggesting that the benefits of post-training may be class-dependent and
+influenced by the variability present in the source and target datasets.
+Table C4: Performance of pedestrian domain adap-
+tation using only 10 frames on PV-RCNN with AP0.5
+metric.
+Adaptation task
+Method
+AP0.5
+NuScenes →KITTI
+Target domain
+34.44
+Source only
+2.88
+10 f. + const LR (ours)
+43.25
+10 f. + LR fading (ours)
+41.76
+10 f. + L2-SP (ours)
+44.07
+Waymo →KITTI
+Target domain
+34.44
+Source only
+46.66
+10 f. + const LR (ours)
+51.38
+10 f. + LR fading (ours)
+50.92
+10 f. + L2-SP (ours)
+52.83
+Waymo →NuScenes
+Target domain
+22.48
+Source only
+6.32
+10 f. + const LR (ours)
+12.88
+10 f. + LR fading (ours)
+14.36
+10 f. + L2-SP (ours)
+13.23
+Impact of the samples selection. In last experiment, we examined how the choice
+of sample selection strategy influences the effectiveness of domain adaptation. Specif-
+ically, we compared the performance of the model when adapted using randomly
+selected samples versus samples selected to maximize diversity. To evaluate the consis-
+tency of the random selection approach, we performed three independent runs using
+different random subsets. This allowed us to observe the variation in results and com-
+pare it with the performance achieved through diverse sampling. The detailed results
+of this comparison are provided in Tab. C5.
+As can be observed, when using 10 samples, the performance variation between
+the worst and best results reaches up to 5%, indicating a relatively high sensitiv-
+ity to sample selection. In contrast, with 100 samples, the variation is significantly
+reduced, suggesting greater stability and robustness in the adaptation process. This
+34
+
+Table C5: Diverse vs random fine-tuning frame selection. TED detector, AP0.7
+metric. The results for the random selection correspond to three independent runs,
+with the values in parentheses indicating the average performance across these three
+experiments.
+S.
+T.
+Frames
+KITTI
+NuScenes
+Waymo
+KITTI
++10 (div.)
+–
+14.4
+51.6
++100 (div.)
+–
+17.4
+58.2
++10 (ran.)
+–
+12.9 / 13.2 / 13.5 (13.2)
+49.0 / 45.9 / 49.6 (48.2)
++100 (ran.)
+–
+17.7 / 17.2 / 18.8 (17.9)
+58.0 / 56.2 / 57.1 (57.1)
+NuScenes
++10 (div.)
+81.1
+–
+49.0
++100 (div.)
+82.5
+–
+57.6
++10 (ran.)
+78.6 / 81.5 / 77.6 (79.2)
+–
+48.4 / 46.4 / 48.0 (47.6)
++100 (ran.)
+83.5 / 83.7 / 82.3 (83.2)
+–
+57.9 / 57.2 / 57.8 (57.7)
+Waymo
++10 (div.)
+82.0
+11.0
+–
++100 (div.)
+85.1
+17.6
+–
++10 (ran.)
+78.5 / 83.3 / 80.9 (80.9)
+12.4 / 9.5 / 12.0 (11.3)
+–
++100 (ran.)
+85.4 / 85.6 / 85.2 (85.4)
+16.3 / 17.4 / 18.5 (17.4)
+–
+demonstrates that when a larger and more representative subset is used for domain
+adaptation, the specific choice of samples becomes less critical. In the context of au-
+tonomous driving, this implies that effective adaptation to a new target domain can
+be achieved by fine-tuning the model on a small set of carefully selected scenarios from
+a new ODD. These scenarios should include representative examples of all relevant
+classes and capture a range of distances from the ego vehicle to ensure comprehensive
+coverage of typical driving conditions.
+35

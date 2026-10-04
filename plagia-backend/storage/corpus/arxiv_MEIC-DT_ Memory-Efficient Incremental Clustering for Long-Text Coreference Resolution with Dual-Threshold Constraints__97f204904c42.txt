@@ -1,0 +1,2523 @@
+MEIC-DT: Memory-Efficient Incremental Clustering for Long-Text
+Coreference Resolution with Dual-Threshold Constraints
+Kangyang Luo♠, Shuzheng Si♠, Yuzhuo Bai♠, Cheng Gao♠, Zhitong Wang♠
+Cheng Huang♠, Yingli Shen♠, Yufeng Han♠, Wenhao Li♠, Cunliang Kong♠
+Maosong Sun*♠♣⋆
+♠Department of Computer Science and Technology, Tsinghua University
+♣Institute for AI, Tsinghua University
+⋆Jiangsu Collaborative Innovation Center for Language Ability
+Abstract
+In the era of large language models (LLMs),
+supervised neural methods remain the state-
+of-the-art (SOTA) for Coreference Resolution.
+Yet, their full potential is underexplored, par-
+ticularly in incremental clustering, which faces
+the critical challenge of balancing efficiency
+with performance for long texts. To address the
+limitation, we propose MEIC-DT, a novel dual-
+threshold, memory-efficient incremental clus-
+tering approach based on a lightweight Trans-
+former. MEIC-DT features a dual-threshold
+constraint mechanism designed to precisely
+control the Transformer’s input scale within
+a predefined memory budget.
+This mecha-
+nism incorporates a Statistics-Aware Eviction
+Strategy (SAES), which utilizes distinct sta-
+tistical profiles from the training and infer-
+ence phases for intelligent cache management.
+Furthermore, we introduce an Internal Regu-
+larization Policy (IRP) that strategically con-
+denses clusters by selecting the most repre-
+sentative mentions, thereby preserving seman-
+tic integrity. Extensive experiments on com-
+mon benchmarks demonstrate that MEIC-DT
+achieves highly competitive coreference perfor-
+mance under stringent memory constraints.
+1
+Introduction
+Coreference Resolution (CR) is a fundamental task
+in Natural Language Processing (NLP), which
+aims to identify different text spans (i.e., men-
+tions) within a document that refer to the same
+entity (Karttunen, 1976; Lee et al., 2017, 2018).
+It plays a critical role in a variety of downstream
+applications, such as text summarization (Liu et al.,
+2024b), knowledge graph construction (Pan et al.,
+2024; Chen et al., 2025), question answering(Pan
+et al., 2024; Jang et al., 2025), and named entity
+recognition (Shang et al., 2025). Current main-
+stream CR methods can fall into three types: super-
+vised neural methods (Xu and Choi, 2020; Wu et al.,
+*Corresponding author
+2020; Kirstain et al., 2021; Lai et al., 2022; Otmaz-
+gin et al., 2022a,b; Guo et al., 2023; Martinelli et al.,
+2024), generative methods (Liu et al., 2022; Bohnet
+et al., 2023; Zhang et al., 2023), and large language
+model-based methods (Le and Ritter, 2023; Gan
+et al., 2024; Zhu et al., 2025). Among these, su-
+pervised neural methods demonstrate significant
+advantages in terms of training cost, inference effi-
+ciency, while achieving competitive performance.
+However, their potential, particularly for challeng-
+ing scenarios like long-text processing, has not yet
+been fully explored. See the related works in Ap-
+pendix A for more details.
+Within supervised neural methods, incremen-
+tal clustering—a strategy inspired by human incre-
+mental cognitive processing (Altmann and Steed-
+man, 1988)—is widely adopted for long-text sce-
+narios. However, despite significant progress in
+CR, existing methods (Xia et al., 2020; Toshni-
+wal et al., 2020; Guo et al., 2023; Martinelli et al.,
+2024) still face a critical challenge in balancing
+efficiency and performance during mention cluster-
+ing. For example, conventional incremental cluster-
+ing approaches (Xia et al., 2020; Toshniwal et al.,
+2020; Guo et al., 2023) typically employ a fixed-
+size cache and a linear classifier to associate can-
+didate mentions with coreference clusters (each
+represented as a single vector) tracked by the cache.
+These approaches decide whether a mention should
+join an existing cluster or form a new one. Upon
+reaching capacity, a predefined rule-based eviction
+strategy—LRU (Least Recently Used) or a dual-
+cache mechanism combining LRU and LFU (Least
+Frequently Used)—removes certain entities to up-
+date the cache dynamically. While computation-
+ally efficient, such approaches often fail to capture
+the complex nonlinear dependencies between men-
+tions and clusters, and result in limited semantic
+representations due to excessive intra-cluster com-
+pression. Moreover, these strategies either rely on
+a single heuristic (e.g., LRU) that may discard es-
+arXiv:2512.24711v1 [cs.IR] 31 Dec 2025
+
+40
+60
+80
+100
+120
+140
+160
+180
+Number of Coreference Clusters per Document (w)
+50
+100
+150
+200
+250
+Max Cluster Size max
+j
+(|cj|)
+(a) Distribution of w and max
+j
+(|cj|) in Litbank
+10/10
+10/20
+10/30
+30/30
+50/30
+unbound
+Constrained Condition
+0
+2000
+4000
+6000
+8000
+10000
+12000
+14000
+16000
+Train Average Memory (MB)
+976
+1,629
+2,119
+7,045
+14,581
+OOM
+(Out of Memory)
+(b) Memory Usage and Avg.F1 across Different Constraints in MEIC-DT
+Train Average Memory (MB)
+Unavailable (Out of Memory)
+Avg.F1 (%)
+40
+60
+80
+100
+120
+140
+160
+77
+78
+79
+80
+81
+82
+Avg.F1 (%)
+77.93%
+78.20%
+78.61%
+79.18%
+81.27%
+Figure 1: Analysis of motivations om the LitBank training corpus. Notably, the "unbound" condition failed due to
+out-of-memory (OOM) errors under our memory constraints.
+sential clusters, or employ a dual-cache mechanism
+that adds to the complexity of cache management.
+Crucially, the same eviction strategy is used across
+both training and inference. This does not account
+for the inherent differences in information avail-
+ability between the two phases and thus hinders the
+model’s overall effectiveness.
+Recently, Martinelli et al. (2024) introduced a
+lightweight Transformer model. Its input is formed
+by concatenating the representation of a candidate
+mention with representations of all mentions from
+historical coreference clusters, effectively model-
+ing the global intra-cluster structure and signifi-
+cantly improving clustering accuracy. However, a
+major drawback is that the input size grows poly-
+nomially with the number of clusters and the num-
+ber of mentions per cluster, causing a surge in
+memory usage and computational latency. This
+severely limits the model’s practicality and scalabil-
+ity under typical academic computational resources.
+These considerations motivate our investigation
+into pushing the boundaries of supervised neural
+models in the era of LLMs.
+To tackle the above issues, we propose MEIC-
+DT, a novel memory-efficient incremental clus-
+tering approach with dual-threshold constraints
+based on a lightweight Transformer, which aims
+to achieve competitive coreference resolution per-
+formance while adhering to a strict, predefined
+memory budget. MEIC-DT incorporates a dual-
+threshold constraint mechanism that regulates the
+Transformer’s input scale along two key dimen-
+sions: first, by leveraging distinctive information
+available during training and inference, we design
+a statistics-aware eviction strategy to preserve cru-
+cial coreference clusters within the constrained
+cache space; second, we introduce an internal reg-
+ularization policy that limits the number of men-
+tions per cluster, enabling the selection of only
+the most representative mentions for computation
+under tight memory conditions. To sum up, we
+highlight our contributions as follows:
+• We propose a novel approach MEIC-DT,
+which reduces the memory and computational
+burden of Transformer-based coreference clus-
+tering while maintaining competitive perfor-
+mance.
+• We design a dual-threshold constraint mecha-
+nism, integrating a statistics-aware eviction
+strategy for phase-adaptive cache manage-
+ment and an internal regularization policy for
+cluster condensation, to ensure robust and effi-
+cient operation under stringent memory limits.
+• Extensive experiments on several commonly
+used CR benchmarks (i.e., OntoNotes, Lit-
+Bank and WikiCoref) show that MEIC-
+DT achieves competitive coreference perfor-
+mance in memory-constrained scenarios.
+2
+Preliminaries
+Notations. Given a long text D = [t1, t2, . . . , tn]
+composed of n tokens, let H = [h1, · · · , hn] ∈
+Rn×dh denote the hidden representation of D
+from a text encoder, where dh is the hidden di-
+mension. During mention clustering, the set of
+candidate mentions output by a mention extrac-
+tor is defined as M = [m1, m2, · · · , mr], where
+each mention mi is represented by the start and
+end tokens (ti,s, ti,e). Historical coreference clus-
+ters (i.e., entities) are denoted as {cj}w
+j=1
+=
+{[mf
+j,1, · · · , mg
+j,|cj|]}w
+j=1, where f and g are in-
+dices of mentions in M with f ≤g, and w is
+the total number of clusters.
+Transformer-based incremental model. To our
+knowledge, Martinelli et al. (2024) were the first to
+
+Different shapes represent different mention texts of an entity; the same shape with different 
+(or same) colors represents mention texts that have an inclusion relationship (or are identical).
+Original Text: Jesus called 
+his twelve apostles together . 
+He gave them power to heal 
+sicknesses and power to force 
+demons out of people . (....) 
+He answered , `` The foxes 
+have holes to live in . The 
+birds have nests . But the Son 
+of Man has no place where 
+he can rest his head . '' Jesus 
+said to another man , `` 
+Follow me ! '' But the man 
+said , `` Lord , let me go and 
+bury my father first . '' But 
+Jesus said to him , `` Let the 
+people who are dead bury 
+their own dead . You must go 
+a n d t e l l a b o u t G o d ' s 
+kingdom . '' Another man 
+said , `` I will follow you , 
+Lord , but first let me go and 
+say goodbye to my family . '' 
+Jesus said , `` Anyone who 
+begins to plow a field but 
+looks back is not prepared for 
+God 's kingdom . ''
+MEIC-DT
+Text 
+Encoder
+Mention 
+Extractor
+Coreference Clusters: 
+[... [(his, 1692, 1692), 
+(Jesus, 1696, 1696), 
+(Jesus, 1726, 1726) ...], 
+[(another man, 1699, 
+1700) ...], [(the man, 1708, 
+1709)...]...]
+Mention Representation
+��= FC(��,�⨁��,�)
+Hidden Representation
+�= [�1, ⋯, ��]
+Candidate Mentions
+ �= [�1, ⋯, ��]
+�1
+��
+⋯
+⋯
+��
+⋯
+⋯
+Overall Pipeline
+�= [�1, �2, ⋯, ��]
+Transformer-based
+Classifier
+max���
+�(��) > 0.5
+Create a new coreference cluster
+��+1 ←{��}
+��1 ←{��}
+Statistics-Aware 
+Eviction Strategy
+�< �1
+�= �1
+��
+��
+�1
+Tracked Coreference Clusters 
+⋯⋯
+⋯⋯
+Cache Space 
+Information
+Update 
+Cache Space
+Internal Regularization 
+Policy
+Condensed cluster of �� 
+with ��:
+�1 = [�1, �1,2⋯, �1,�2]
+Internal Regularization 
+Policy
+Condensed cluster of �� 
+with ��:
+�1 = [�1, �1,2⋯, �1,�2]
+Internal Regularization 
+Policy
+Yes
+No
+Update the coreference 
+cluster ���� with the 
+highest probability:
+ ����←����∪{��}
+Condensed �1 with ��:
+�1 = [��, �1,2, ⋯, �1,�2]
+Figure 2: The MEIC-DT Coreference Resolution pipeline. The core innovation is a dual-threshold constraint
+mechanism—comprising a statistics-aware eviction strategy and an internal regularization policy—that enables
+high-performance, memory-efficient incremental clustering.
+employ a lightweight Transformer for mention clus-
+tering. Their model achieves SOTA performance
+on long texts by computing clustering probabilities
+between candidate mentions and existing clusters,
+using all mentions in them as input.
+Specifically, the representation of a candidate
+mention mi is formed by concatenating the hidden
+states of its start and end tokens, followed by a fully
+connected (FC) layer, i.e., mi = FC(hi,s ⊕hi,e) ∈
+Rdh, where ⊕denotes concatenation operator. For
+historical clusters {cj}w
+j=1 (where f ≤g < i), the
+representations of all mentions in each cluster are
+combined with mi as follows:
+Mj = [mi, mf
+j,1, · · · , mg
+j,|cj|],
+M = [M1; · · · ; Mw],
+(1)
+where M ∈Rw×(maxj(|cj|)+1)×dh. Notably, clus-
+ters with fewer than maxj(|cj|) mentions are
+padded with the [PAD] token’s embedding.
+A
+Transformer (TF) encoder then processes M, and
+the output of the [CLS] token is used:
+T[CLS]
+i
+= TF(M) ∈Rw×dh.
+(2)
+Finally, an MLP classifier followed by a sigmoid
+function σ computes the clustering probabilities:
+pc(mi) = σ(MLP(T[CLS]
+i
+)) ∈Rw×1.
+(3)
+The mention mi is assigned to the cluster with the
+highest probability if maxj pj
+c(mi) > 0.5; oth-
+erwise, a new cluster is created. The process is
+initialized with c1 = [m1].
+3
+Methodology
+3.1
+Analytical Motivation
+Although Eq. (2) can model the global information
+of historical coreference clusters, the dimension of
+M ∈Rw×(maxj(|cj|)+1)×dh expands rapidly as w
+and maxj(|cj|) increase. This leads to substantial
+growth in memory usage during training, severely
+limiting the model’s practicality for long texts. To
+illustrate this issue, Fig. 1(a) shows the distribu-
+tions of w and maxj(|cj|) in the LitBank training
+corpus. It shows that many samples have large w or
+maxj(|cj|) values, directly inflating the dimension
+of M. Under computationally constrained settings,
+even using a lightweight Transformer model entails
+a non-negligible overhead, as shown in Fig. 1(b).
+See Section 4 for more details.
+To address this, the proposed MEIC-DT ap-
+proach employs a dual-threshold mechanism to
+control the input size of the lightweight Trans-
+former by simultaneously limiting the number of
+historical coreference clusters and the number of
+mentions per cluster. Thereafter, we detail the de-
+sign of MEIC-DT, including Statistics-Aware Evic-
+tion Strategy and Internal Regularization Policy.
+3.2
+Statistics-Aware Eviction Strategy
+To retain crucial coreference clusters in a fixed-
+size cache, we propose a Statistics-Aware Eviction
+Strategy (SAES). SAES leverages the distinct in-
+formation available in each phase: global statis-
+tics during training and real-time state during in-
+ference. This allows us to design differentiated,
+phase-specific eviction criteria. Our strategy not
+
+only bounds computational cost by limiting the
+cache to at most τ1 clusters in the cache, where
+τ1 > 0 is a predefined integer threshold, but also
+improves the cache hit rate of target mentions.
+Specifically, during training, where ground-
+truth coreference cluster annotations are available,
+we construct a ranking score for each tracked clus-
+ter cj (j ∈[1, τ1]) based on its number of remain-
+ing mentions rmj and the number of steps since its
+last access lruj:
+SAEStrain,j = rmj ·
+
+1 +
+1
+lruj + δ
+
+,
+(4)
+where δ is a very small positive scalar (default
+1 × 10−5). When the model’s clustering confi-
+dence for the current mention mi is insufficient (i.e.,
+maxj pj
+c(mi) ≤0.5) and the number of tracked
+clusters reaches τ1, the cluster with the smallest
+SAEStrain,j is evicted. Otherwise, a new cluster
+cw+1 = [mi] is created. This design prioritizes
+clusters with more remaining mentions (i.e., domi-
+nated by rmj), which helps maintain long-distance
+coreference links. The second term acts as a tie-
+breaker: when rmj is tied, a larger lruj results
+in a lower score, enforcing LRU eviction. When
+lruj = 0 (i.e., the cluster was just accessed), the
+second term is maximized, giving that cluster the
+highest protection from eviction.
+During inference, the true rmj value is unavail-
+able. Relying solely on LRU may mistakenly re-
+move important clusters. Therefore, we introduce
+a composite score that combines the number of ex-
+isting mentions emj in tracked cluster cj, the total
+number of steps since its creation agej, and lruj:
+SAESinf,j = emj
+agej
+·
+
+1 +
+1
+lruj + δ
+
+.
+(5)
+Here, the ratio emj
+agej reflects the tracked cluster’s ac-
+tivity level—a higher value suggests greater coref-
+erence potential. Similarly, clusters are sorted by
+SAESinf,j in ascending order. When clustering
+confidence is low and the number of tracked clus-
+ters reaches τ1, the cluster with the smallest score
+is evicted.
+Moreover, the second term ensures
+that among clusters with identical mention activity
+level, the one with the largest lruj (least recently
+used) is evicted.
+Comment 1. Unlike prior methods that rely
+solely on LRU (Xia et al., 2020; Toshniwal et al.,
+2020) or complex dual-cache mechanisms (Guo
+et al., 2023), SAES employs a unified yet statistics-
+aware scoring function. It utilizes richer infor-
+mation (global mention counts in training, activ-
+ity rates in inference) while maintaining a simple,
+single-cache architecture, thus simplifying manage-
+ment.
+3.3
+Internal Regularization Policy
+To select representative mentions under constrained
+memory, we introduce an Internal Regularization
+Policy (IRP) that operates on each tracked coref-
+erence cluster. This policy limits the number of
+mentions stored per cluster to a predefined posi-
+tive integer threshold τ2. Clusters with at most τ2
+mentions are left unchanged; larger clusters are
+condensed to their τ2 most representative mentions.
+The key challenge is to select a subset of mentions
+that best preserves the cluster’s semantic informa-
+tion. To achieve this, we craft a two-stage algo-
+rithm: (1) a grouping strategy based on mention
+textual relations, and (2) a group-based sampling
+for selecting representative mentions.
+Specifically, in the first stage, we use a Union-
+Find algorithm to efficiently cluster semantically
+similar mentions based on textual equivalence/in-
+clusion relationships and a pronoun lexicon (see
+Appendix C), forming groups that serve as the sam-
+pling units. In the second stage, we adopt a group-
+based sampling strategy. It deterministically retains
+the first and last mentions of the original cluster
+to preserve contextual boundaries. For the remain-
+ing τ2 −2 slots, quotas are dynamically allocated
+across groups: if the number of groups exceeds
+available slots, the largest groups are prioritized;
+otherwise, at least one mention is selected from
+each group. This strategy maximizes the cover-
+age of diverse semantic units within the condensed
+cluster. Pseudocode is provided in Appendix B.
+Comment 2. The two-stage design of IRP ef-
+fectively selects a compact yet representative set
+of mentions from the original cluster.
+Com-
+pared to the existing Transformer-based incremen-
+tal model (Martinelli et al., 2024), IRP is, to our
+knowledge, the first design to successfully demon-
+strate the feasibility of maintaining CR perfor-
+mance under strict memory constraints by its
+structured information preservation policy.
+Comment 3. Together, IRP and SAES ensure
+that the representation M is bounded in size by
+Rτ1×(τ2+1)×dh, guaranteeing that the incremental
+clustering process runs efficiently within the prede-
+fined memory budget.
+
+4
+Experiments
+4.1
+Experimental Settings
+Datasets. We train and evaluate the performance
+of our proposed approach on two widely used CR
+datasets: OntoNotes (Pradhan et al., 2012) and Lit-
+Bank (Bamman et al., 2020). To assess the gener-
+alization capability of approaches, models trained
+on OntoNotes are also tested on the out-of-domain
+dataset WikiCoref (Ghaddar and Langlais, 2016).
+Statistics are detailed in Table 1.
+Datasets
+#Train
+#Val
+#Test
+Avg. W
+Avg. M
+OntoNotes
+2802
+343
+348
+467
+56
+LitBank
+80
+10
+10
+2105
+291
+WikiCoref
+-
+-
+30
+1996
+230
+Table 1: Dataset statistics: number of documents in
+each dataset split (#Train/Val/Test), average number of
+words (i.e., Avg. W) and mentions (i.e., Avg. M) per
+document.
+Baselines. As outlined in Related Work (see Ap-
+pendix A), while numerous CR approaches exist,
+our work specifically focuses on memory efficiency
+for incremental clustering. Accordingly, we select
+the most relevant baselines: LRU (Xia et al., 2020;
+Toshniwal et al., 2020) and Dual-cache (Guo et al.,
+2023). To gauge the performance of MEIC-DT
+(which integrates SAES and IRP), we follow Luo
+et al. (2025b) in adopting Imcoref as Mention Ex-
+tractor and DeBERTabase (He et al., 2021) as Text
+Encoder (see Fig. 2). Furthermore, we conduct
+coreference clustering experiments adopting two
+distinct classifiers—a linear classifier (Xia et al.,
+2020; Toshniwal et al., 2020; Guo et al., 2023)
+and a lightweight Transformer classifier (Martinelli
+et al., 2024)—to thoroughly evaluate the effective-
+ness of MEIC-DT.
+Metrics. In our experiments, we evaluate per-
+formance using the F1 scores of the MUC (Vilain
+et al., 1995), B3 (Bagga and Baldwin, 1998), and
+CEAFϕ4 (Luo, 2005) metrics. The overall CoNLL-
+F1 score (abbreviated as Avg.F1) is the average
+of these three F1 scores. To ensure reliability, we
+report the average for each experiment over 3 dif-
+ferent random seeds.
+Configurations. Unless noted otherwise, we set
+τ1 = 50 and τ2 = 30 for the Transformer classifier,
+and τ1 = 50 for the linear classifier. For the linear
+classifier, we follow prior works Xia et al. (2020);
+Toshniwal et al. (2020); Guo et al. (2023) in repre-
+senting each historical cluster with a single vector,
+which eliminates the need for additional parameters
+beyond τ1. We set δ = 1 × 10−5 and employ the
+Adafactor optimizer (Shazeer and Stern, 2018) for
+model training, with learning rates configured as
+2e-5 for DeBERTabase and 3e-4 for the remaining
+model layers. All experiments are implemented
+using the PyTorch-Lightning framework. Each run
+is executed on a single RTX 4090 GPU with 24GB
+of VRAM. Due to space limitations, the complete
+experimental settings are provided in Appendix D.
+4.2
+Main Results
+This section presents a systematic evaluation and
+comparative analysis of LRU, Dual-cache, and
+MEIC-DT across multiple datasets. Note that LRU
+and Dual-cache only constrain the number of histor-
+ical coreference clusters (τ1), whereas MEIC-DT
+jointly constrains both the number of clusters (τ1)
+and the number of mentions per cluster (τ2) through
+the synergistic operation of its SAES and IRP mod-
+ules. To comprehensively assess the performance
+of these methods, experiments are designed in two
+phases. First, incremental clustering is performed
+for τ1 ∈{10, 30, 50, 100, 200} by a linear clas-
+sifier. Subsequently, under a Transformer archi-
+tecture, experiments are conducted with τ1/τ2 ∈
+{10/10, 10/20, 10/30, 30/30, 50/30}. In partic-
+ular, since the IRP module is first introduced in
+this paper, we retain it while replacing the SAES
+strategy in MEIC-DT with either LRU or Dual-
+cache, thereby constructing comparable hybrid
+frameworks. Thus, in the experiments reported
+here, “LRU+IRP” and “Dual-cache+IRP” actually
+correspond to LRU and Dual-cache. The over-
+all performance comparison of all methods is pre-
+sented in Table 2.
+LitBank Experiments on the LitBank dataset
+clearly reveal the combined impact of classifier
+architecture and constraint strategies. First, the
+Transformer Classifier consistently and signifi-
+cantly outperforms the Linear Classifier across all
+approaches. For instance, MEIC-DT achieves an
+Avg.F1 of 81.27% under τ1/τ2 = 50/30, a sub-
+stantial improvement over its linear counterpart
+(77.04%), demonstrating stronger contextual mod-
+eling capability. Notably, when using the Linear
+Classifier, all approaches peak in performance at
+τ1 = 50 (with τ2 as -), while further relaxing con-
+straints to τ1 = 100 or 200 leads to a drop in
+Avg.F1. This highlights that classifiers with weaker
+contextual modeling struggle to effectively utilize
+excessively large memory capacity. Second, under
+different τ1/τ2 settings, the performance of all ap-
+
+Methods
+τ1/τ2
+Litbank
+OntoNotes
+WikiCoref
+MUC
+B3
+CEAFϕ4
+Avg.F1
+MUC
+B3
+CEAFϕ4
+Avg.F1
+MUC
+B3
+CEAFϕ4
+Avg.F1
+Linear Classifier
+Unbound
+-/-
+84.52±0.77
+65.67±0.87
+76.59±0.37
+75.59±0.86
+89.71±0.28
+77.31±0.68
+69.88±0.72
+78.97±0.58
+72.19±0.38
+53.34±0.20
+64.28±0.59
+63.27±0.12
+LRU
+10/-
+83.77±0.37
+66.76±0.40
+74.94±0.27
+75.16±0.27
+87.94±0.17
+75.15±0.43
+66.15±0.74
+76.41±0.91
+71.43±0.09
+54.43±0.19
+62.62±0.73
+62.83±0.99
+30/-
+83.91±0.19
+72.38±0.83
+71.37±0.14
+75.89±0.32
+88.49±0.38
+76.05±0.92
+68.05±1.84
+77.53±1.02
+73.01±0.63
+53.80±0.42
+64.08±0.98
+63.63±0.80
+50/-
+84.96±0.73
+66.27±0.91
+77.55±0.36
+76.26±0.17
+87.68±0.34
+75.48±0.75
+71.28±0.44
+78.15±0.47
+72.41±0.34
+52.80±0.43
+65.03±0.50
+63.42±0.63
+100/-
+84.76±1.38
+65.14±0.82
+77.35±1.20
+75.75±0.97
+88.76±0.31
+75.85±0.31
+71.14±0.17
+78.58±0.13
+72.35±0.10
+53.95±0.01
+64.23±0.92
+63.51±0.83
+200/-
+84.52±0.77
+65.67±0.87
+76.59±1.37
+75.59±0.86
+8.68±0.37
+75.78±0.75
+71.48±0.55
+78.65±0.36
+72.65±0.82
+53.94±0.67
+65.21±0.75
+63.93±0.43
+Dual-cache
+10/-
+84.06±1.40
+66.63±0.72
+73.71±0.46
+74.80±0.19
+87.23±0.81
+75.18±1.00
+70.50±0.46
+77.64±0.75
+71.68±0.50
+54.26±0.85
+61.34±0.99
+62.43±0.18
+30/-
+85.26±0.34
+66.63±0.72
+76.73±0.81
+76.21±0.08
+87.19±0.69
+75.26±0.94
+71.42±0.60
+77.96±0.65
+72.86±0.13
+54.25±0.04
+64.37±0.87
+63.83±0.05
+50/-
+85.42±0.55
+66.46±0.98
+78.20±0.27
+76.69±0.52
+88.54±0.42
+76.39±0.38
+71.63±0.75
+78.85±0.56
+73.04±0.68
+54.1±0.26
+65.82±0.76
+64.32±0.90
+100/-
+84.22±0.43
+65.36±0.98
+77.01±0.27
+75.53±0.52
+88.21±0.32
+75.41±0.31
+71.31±0.42
+78.31±0.31
+71.82±0.72
+53.01±0.39
+64.65±0.47
+63.16±0.16
+200/-
+84.52±0.77
+65.67±0.87
+76.59±0.37
+75.59±0.86
+88.27±0.44
+75.86±0.39
+71.81±0.76
+78.65±0.53
+73.45±0.76
+52.98±0.89
+64.79±0.65
+63.74±0.75
+MEIC-DT
+10/-
+84.71±0.10
+65.84±0.15
+76.83±0.19
+75.79±0.75
+87.17±0.39
+75.49±0.73
+70.76±0.21
+77.81±0.63
+71.31±0.19
+52.69±0.75
+64.07±0.73
+62.69±0.30
+∆
++0.79
+-0.85
+2.51
++0.81
+-0.41
++0.32
++2.44
++0.79
+-0.25
+-1.66
++2.09
++0.06
+30/-
+84.98±0.54
+67.49±0.59
+77.20±1.00
+76.56±0.96
+87.13±0.48
+76.06±0.95
+71.17±0.66
+78.12±0.64
+72.44±0.46
+54.97±0.42
+64.65±0.49
+64.02±0.67
+∆
+-0.33
++1.12
++0.63
++0.48
+-0.71
++0.41
++1.44
++0.38
+-0.50
++0.95
++0.43
++0.29
+50/-
+85.41±0.44
+67.57±0.14
+78.15±0.65
+77.04±0.28
+87.53±0.37
+77.58±0.42
+72.85±0.88
+79.32±0.67
+72.84±0.43
+55.06±0.42
+65.64±0.47
+64.51±0.49
+∆
++0.22
++1.21
++0.28
++0.57
+-0.58
++1.65
++1.40
++0.82
++0.12
++1.61
++0.22
++0.64
+100/-
+85.56±0.05
+67.46±0.11
+78.02±0.42
+77.01±0.46
+87.95±0.42
+76.17±0.41
+72.96±0.85
+79.03±0.59
+73.02±0.19
+54.94±0.27
+65.50±0.22
+64.49±0.41
+∆
++1.07
++2.21
++0.84
++1.37
+-0.53
++0.54
++1.73
++0.59
++0.94
++1.46
++1.06
++1.16
+200/-
+84.52±0.77
+65.67±0.87
+76.59±0.37
+75.59±0.86
+87.38±0.27
+76.37±0.54
+72.41±0.69
+78.72±0.43
+73.53±0.72
+54.65±0.62
+65.32±0.71
+64.50±0.68
+∆
++0.00
++0.00
++0.00
++0.00
+-1.10
++0.55
++0.76
++0.07
++0.48
++1.19
++0.32
++0.66
+Transformer Classifier
+LRU+IRP
+10/10
+84.54±0.39
+70.29±0.14
+72.25±0.64
+75.69±0.63
+87.82±0.43
+76.50±0.37
+68.09±0.12
+77.47±0.62
+77.63±0.68
+63.38±0.61
+65.34±0.38
+68.78±0.89
+10/20
+85.36±0.76
+66.11±0.94
+76.40±1.24
+75.96±0.97
+87.75±0.01
+76.80±0.26
+69.82±0.69
+78.12±0.33
+76.97±0.10
+65.44±0.26
+64.47±0.39
+68.96±0.08
+10/30
+84.70±0.24
+73.69±0.42
+71.90±0.92
+76.76±0.49
+88.25±0.17
+77.10±0.92
+73.74±0.21
+79.70±0.64
+77.79±0.79
+66.74±0.41
+64.96±0.79
+69.83±0.66
+30/30
+86.39±0.21
+74.44±0.63
+75.22±0.80
+78.68±0.59
+89.15±0.15
+78.02±0.18
+74.04±0.76
+80.40±0.22
+78.89±0.31
+64.56±0.48
+67.93±0.36
+70.46±0.73
+50/30
+86.68±0.71
+74.96±0.13
+75.95±0.64
+79.19±0.21
+89.24±0.05
+78.57±0.49
+74.43±0.83
+80.75±0.36
+78.92±0.35
+65.65±0.68
+67.93±0.49
+70.83±0.65
+Dual-cache+IRP
+10/10
+85.40±0.18
+71.81±0.21
+73.52±0.64
+76.91±0.89
+88.41±0.34
+77.11±0.78
+68.25±0.69
+77.92±0.59
+78.46±0.29
+64.88±0.46
+66.57±0.42
+69.97±0.35
+10/20
+85.37±0.54
+72.59±0.28
+74.43±0.93
+77.46±0.12
+88.84±0.48
+77.74±0.37
+70.96±0.65
+79.18±0.44
+78.37±0.15
+65.61±0.24
+67.45±0.43
+70.48±0.18
+10/30
+86.20±0.94
+74.37±0.84
+73.90±0.43
+78.16±0.38
+89.19±0.41
+79.52±0.38
+71.56±0.63
+80.09±0.37
+79.21±0.31
+64.89±0.09
+68.21±0.63
+70.74±0.11
+30/30
+86.89±0.10
+74.79±0.11
+76.03±0.59
+79.24±0.15
+90.18±0.10
+80.27±0.44
+72.35±0.56
+80.93±0.27
+79.17±0.09
+66.67±0.46
+67.83±0.61
+71.22±0.32
+50/30
+87.40±0.39
+77.04±0.16
+77.40±0.73
+80.61±0.71
+90.29±0.46
+79.30±0.53
+75.72±0.97
+81.77±0.64
+79.73±0.24
+64.30±0.20
+69.83±0.41
+71.29±0.27
+MEIC-DT
+10/10
+86.09±0.94
+72.66±0.18
+75.05±0.20
+77.93±0.76
+88.59±0.99
+77.58±0.14
+69.07±0.89
+78.42±0.89
+79.13±0.24
+65.69±0.23
+68.08±0.41
+70.97±0.26
+∆
++1.12
++1.61
++2.17
++1.63
++0.48
++0.77
++0.90
++0.73
++1.09
++1.56
++2.13
++1.60
+10/20
+86.46±0.94
+72.63±0.16
+75.52±0.40
+78.20±0.16
+89.23±0.58
+77.75±0.19
+74.48±1.00
+80.49±0.46
+79.33±0.24
+65.50±0.53
+68.40±0.39
+71.08±0.26
+∆
++1.82
++0.15
++2.62
++1.52
++0.94
++0.48
++4.09
++1.84
++1.66
+-0.02
++2.44
++1.36
+10/30
+86.55±0.33
+73.92±0.91
+75.37±0.65
+78.61±0.92
+89.40±0.89
+78.40±0.40
+74.58±0.39
+80.80±0.56
+79.41±0.38
+66.73±0.45
+68.21±0.32
+71.45±0.31
+∆
++1.10
+-0.11
++2.47
++1.15
++0.68
++0.09
++1.93
++0.90
++0.91
++0.92
++1.63
++1.17
+30/30
+86.86±0.18
+74.77±0.99
+75.91±0.79
+79.18±0.08
+90.05±0.46
+80.49±0.31
+73.24±0.16
+81.26±0.63
+79.73±0.18
+67.69±0.33
+68.90±0.60
+72.11±0.38
+∆
++0.22
++0.16
++0.28
++0.22
++0.38
++1.35
++0.04
++0.59
++0.70
++2.08
++1.02
++1.27
+50/30
+87.85±0.28
+78.53±0.24
+77.42±0.03
+81.27±0.41
+90.53±0.43
+79.43±0.42
+76.19±0.49
+82.05±0.67
+80.16±0.25
+68.38±0.21
+69.35±0.43
+72.63±0.24
+∆
++0.31
++2.53
+-0.26
++0.87
++0.77
++0.50
++1.11
++0.79
++0.83
++3.40
++0.47
++1.57
+Table 2: Results of different approaches on varing datasets. We report the MUC, B3, and CEAFϕ4 F1 scores (%),
+their average (Avg. F1). Of note, Bold and underline highlight the best τ1/τ2 within each approach and the best
+overall Avg.F1, respectively. ∆measures the average gain of our method over baselines: ∆= (a−b)+(a−c)
+2
+(a: our
+method, b, c: baselines). "Unbound" means no constraint on cluster count for the linear classifier.
+proaches follows a regular pattern: more relaxed
+constraints (e.g., τ1 = 50, τ2 = 30) generally yield
+the best results, indicating that providing moder-
+ate memory capacity is beneficial for this dataset.
+Finally, compared to baseline approaches, MEIC-
+DT significantly outperforms LRU+IRP (79.19%)
+and Dual-cache+IRP (80.61%) under identical con-
+straint settings (e.g., 50/30), with its ∆gains con-
+sistently positive. This validates the advantage of
+the synergistic optimization between SAES and
+IRP, particularly evident in key metrics such as B3.
+OntoNotes Results on OntoNotes further con-
+solidate the effectiveness of our approach. The
+Transformer Classifier again demonstrates supe-
+rior performance over the Linear Classifier, with
+MEIC-DT reaching a peak Avg.F1 of 82.05% un-
+der the Transformer, higher than the 79.32% of its
+linear version. Similarly, under the Linear Classi-
+fier, most approaches achieve their optimal Avg.F1
+at τ1 = 50 (except LRU), with performance declin-
+ing under more relaxed settings, further confirming
+the necessity of appropriate constraints. Regarding
+the tuning of τ1/τ2, an interesting observation is
+that under tighter memory constraints (e.g., 10/10),
+the improvement of MEIC-DT over baselines (the
+∆value) is particularly significant, indicating that
+its dual-threshold mechanism better maintains per-
+formance stability in resource-constrained scenar-
+ios. In direct comparison with existing baselines,
+MEIC-DT leads LRU+IRP and Dual-cache+IRP
+in Avg.F1 across almost all tested τ1/τ2 combina-
+tions, showing robust performance especially on
+the CEAFϕ4 metric, which highlights its improve-
+ments in clustering quality and consistency.
+WikiCoref On the cross-domain generalization
+test set WikiCoref, this experiment evaluates the
+adaptability of models trained on OntoNotes. The
+results again confirm the effective generalization
+of the Transformer Classifier, with its performance
+across all approaches far surpassing that of the cor-
+responding Linear Classifier versions. Even in out-
+of-domain testing, the Linear Classifier exhibits a
+similar trend, performing best at τ1 = 50 before
+degrading, underscoring the stability of the Trans-
+
+0
+20
+40
+60
+80
+100
+120
+Epochs
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+Avg.F1
+(a)LitBank (Linear,50/-)
+MEIC-DT(1.89h)
+Dual-cache(1.72h)
+LRU(1.68h)
+Unbounded(2.83h)
+0
+20
+40
+60
+80
+100
+Epochs
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+(b)LitBank (Transformer,50/30)
+MEIC-DT(7.88h)
+Dual-cache+IRP(7.66h)
+LRU+IRP(7.52h)
+0
+20
+40
+60
+80
+100
+120
+Epochs
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+(c)OntoNotes (Linear,50/-)
+MEIC-DT(5.62h)
+Dual-cache(5.83h)
+LRU(6.29h)
+Unbounded(7.89h)
+0
+20
+40
+60
+80
+100
+120
+Epochs
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+(d)OntoNotes (Transformer,50/30)
+MEIC-DT(13.34h)
+Dual-cache+IRP(17.04h)
+LRU+IRP(15.81h)
+Figure 3: Learning curves and total training time. Results are shown for configurations with τ1/τ2 = 50/−and
+50/30, across different datasets (LitBank, OntoNotes) and classifier backbones.
+former architecture in complex scenarios. Regard-
+ing constraint parameters, MEIC-DT achieves an
+optimal Avg.F1 of 72.63% under τ1/τ2 = 50/30,
+suggesting that a balanced constraint configuration
+helps the model capture cross-domain coreference
+structures. More importantly, compared to the two
+baselines, MEIC-DT achieves the most significant
+lead on this out-of-domain test set (e.g., outper-
+forming the best baseline, Dual-cache+IRP, by ap-
+proximately 1.34 Avg.F1 points). Its ∆values are
+positive and substantial in most settings, strongly
+demonstrating that the mechanisms proposed in
+MEIC-DT possess superior domain generalization
+capability and robustness.
+τ1/τ2
+Litbank
+OntoNotes
+WikiCoref
+TAM
+IAM
+IAT
+TAM
+IAM
+IAT
+IAM
+IAT
+Linear Classifier
+-/-
+255.44
+19.87
+0.46
+150.31
+19.83
+0.31
+19.86
+0.42
+10/-
+72.22
+19.15
+0.62
+52.86
+19.14
+0.37
+19.15
+0.46
+30/-
+153.31
+19.34
+0.64
+89.43
+19.34
+0.43
+19.35
+0.49
+50/-
+207.14
+19.53
+0.69
+99.23
+19.51
+0.47
+19.52
+0.53
+100/-
+251.24
+19.83
+0.72
+120.54
+19.78
+0.53
+19.81
+0.58
+200/-
+255.44
+19.87
+0.46
+147.37
+19.81
+0.55
+19.84
+0.59
+Transformer Classifier
+10/10
+975.93
+20.16
+1.12
+616.58
+19.59
+0.67
+19.82
+0.89
+10/20
+1628.74
+21.83
+1.15
+964.71
+20.98
+0.71
+21.62
+1.01
+10/30
+2118.95
+23.43
+1.22
+1166.23
+22.46
+0.73
+22.89
+1.13
+30/30
+7045.07
+36.55
+1.41
+3046.73
+31.93
+0.77
+36.31
+1.29
+50/30
+14581.14
+38.68
+1.81
+7635.27
+38.33
+0.80
+38.49
+1.68
+Table 3: Average resource consumption under identical
+settings. Note: Metrics are averaged across different
+approaches for each fixed configuration of dataset, clas-
+sifier, and τ1/τ2. TAM, IAM, and IAT denote Training
+Average Memory (MB), Inference Average Memory
+(MB), and Inference Average Time (s), respectively.
+4.3
+Speed and Memory Usage
+Our experiments reveal that under identical config-
+urations of dataset, classifier, and τ1/τ2 constraints,
+different approaches exhibit negligible differences
+in terms of Training Average Memory (TAM), In-
+ference Average Memory (IAM), and Inference
+Average Time (IAT). Therefore, we report the aver-
+aged values of these metrics under each such fixed
+setting in Table 3. In contrast, the training dynam-
+ics and time consumption vary significantly across
+approaches. Figure 3 presents the learning curves
+and total training time for various approaches un-
+der the τ1/τ2 settings of 50/−and 50/30, across
+different datasets and classifiers.
+As shown in Table 3, the Transformer Classi-
+fier incurs significantly higher TAM than the Lin-
+ear Classifier due to its more complex architec-
+ture. However, the gap in IAM and IAT between
+the two is relatively small, indicating that the con-
+straint configuration (τ1/τ2) is the dominant fac-
+tor for inference cost. As τ1/τ2 increases, both
+IAM and IAT rise monotonically across all con-
+figurations. Notably, under the Transformer ar-
+chitecture, memory consumption surges sharply
+from 30/30 to 50/30. This trend directly aligns
+with the performance peak observed at 50/30 (see
+Table 2), clearly revealing the inherent trade-off
+between performance and efficiency. Figure 3 pro-
+vides a deeper analysis of the training dynamics.
+On LitBank, MEIC-DT slightly increases training
+time compared to baselines, yet its learning curve
+consistently dominates, indicating higher conver-
+gence efficiency. On OntoNotes, MEIC-DT demon-
+strates a more pronounced advantage: it not only
+requires substantially less training time (e.g., only
+13.34 hours with the Transformer backbone, signif-
+icantly lower than the baselines’ 17.04 and 15.81
+hours) and fewer epochs but also exhibits a learn-
+ing curve that is superior throughout or in later
+stages. Together, these results demonstrate that the
+dual-threshold mechanism of MEIC-DT not only
+enhances final performance (see Table 2) but also
+accelerates model convergence through a more effi-
+cient and stable optimization process, achieving a
+dual advantage in both effectiveness and efficiency.
+4.4
+Ablation Study
+The Efficacy of SAES. We look into the efficacy
+of SAES in Litbank and OntoNotes using Trans-
+former classifier with τ1/τ2 = 50/30.
+As de-
+
+tailed in Section 3.2, MEIC-DT employs distinct
+eviction criteria for training and inference, termed
+SAEStrain and SAESinf. To ablate the contribu-
+tion of each stage, we construct hybrid variants
+by replacing the corresponding SAES module with
+either LRU or Dual-cache during training or in-
+ference. We report results in Table 4. As shown
+in Table 4, employing the SAEStrain/SAESinf strat-
+egy yields the highest Avg.F1 on both LitBank and
+OntoNotes. Replacing SAESinf with LRU during
+inference alone causes a marked performance drop
+(e.g., from 81.27% to 79.43% on LitBank), under-
+scoring the effectiveness of SAESinf in preserving
+critical clusters via mention activity (emj/agej) in
+the absence of gold annotations. Similarly, substi-
+tuting SAEStrain with LRU or Dual-cache in train-
+ing also degrades results, validating the superiority
+of its eviction criterion based on gold remaining
+mentions (rmj). These results collectively demon-
+strate that the stage-specific strategies of SAES—
+tailored to the distinct information available dur-
+ing training and inference—are both indispensable,
+and their synergy is crucial to MEIC-DT’s leading
+performance.
+Train/Inference
+MUC
+B3
+CEAFϕ4
+Avg.F1
+Litbank
+SAEStrain/SAESinf
+87.85±0.28
+78.53±0.24
+77.42±0.03
+81.27±0.41
+SAEStrain/LRU
+86.87±0.54
+75.42±0.31
+76.01±0.22
+79.43±0.25
+SAEStrain/Dual-cache
+87.56±0.46
+77.08±0.28
+77.34±0.62
+80.66±0.39
+LRU/SAESinf
+86.17±0.51
+75.63±0.11
+75.06±0.38
+79.15±0.21
+Dual-cache/SAESinf
+87.02±0.38
+76.99±0.26
+76.89±0.14
+80.30±0.27
+SAESinf/SAESinf
+87.45±0.42
+77.29±0.48
+77.38±0.38
+80.71±0.67
+OntoNotes
+SAEStrain/SAESinf
+90.53±0.43
+79.43±0.42
+76.19±0.49
+82.05±0.67
+SAEStrain/LRU
+89.29±0.54
+78.57±0.14
+74.25±0.35
+80.71±0.16
+SAEStrain/Dual-cache
+90.31±0.32
+79.46±0.24
+75.69±0.14
+81.82±0.52
+LRU/SAESinf
+89.48±0.17
+78.52±0.26
+74.41±0.33
+80.80±0.29
+Dual-cache/SAESinf
+90.33±0.58
+78.35±0.47
+75.89±0.34
+81.86±0.71
+SAESinf/SAESinf
+90.28±0.61
+79.45±0.57
+75.96±0.38
+81.89±0.55
+Table 4: The Impact of the SAES Module in MEIC-
+DT. Evaluation on LitBank and OntoNotes with the
+Transformer classifier under τ1/τ2 = 50/30.
+IRP
+MUC
+B3
+CEAFϕ4
+Avg.F1
+Litbank
+Group-based Samping (ours)
+87.85±0.28
+78.53±0.24
+77.42±0.03
+81.27±0.41
+Random Sampling
+87.12±0.15
+76.98±0.27
+77.01±0.13
+80.37±0.22
+OntoNotes
+Group-based Samping (ours)
+90.53±0.43
+79.43±0.42
+76.19±0.49
+82.05±0.67
+Random Sampling
+89.08±0.22
+78.33±0.54
+75.04±0.19
+80.82±0.37
+Table 5: The utility of the IRP Module in MEIC-DT.
+Evaluation on LitBank and OntoNotes with the Trans-
+former classifier under τ1/τ2 = 50/30.
+The utility of IRP. We conduct an ablation study
+to assess the utility of the IRP module in MEIC-
+DT on OntoNotes and LitBank, using the Trans-
+former classifier under τ1/τ2 = 50/30. As in-
+troduced in Section 3.3, IRP is a core innovation
+that employs group-based sampling by leverag-
+ing mention textual relations to select the most
+representative mentions per cluster. To validate
+this strategy, we compare it against a random sam-
+pling baseline, which selects mentions uniformly
+at random from each cluster without grouping. Re-
+sults are presented in Table 5. From 5, the group-
+based sampling significantly outperforms random
+sampling on both LitBank and OntoNotes (e.g.,
+achieving a +1.23 gain in Avg.F1 on OntoNotes).
+This confirms that IRP can more effectively pre-
+serve the core semantic information of each clus-
+ter through semantic-relation-based grouping and
+stratified sampling. The semantic space visual-
+ization in Fig. 4 further reveals that the mentions
+selected by group-based sampling exhibit a more
+reasonable and representative distribution, which
+directly explains its superiority in maintaining CR
+performance and validates the key role of IRP as a
+structured information compression strategy.
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(a)Random Sampling
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+(b)Group-based sampling
+Figure 4: An example of semantic space distributions
+for different sampling strategies on OntoNotes.
+5
+Conclusion
+This paper presents MEIC-DT, a memory-efficient
+incremental clustering model for CR that oper-
+ates under strict dual-threshold (τ1, τ2) mem-
+ory constraints. The core of our approach is a
+dual-threshold constraint mechanism, instantiated
+through two novel components: a Statistics-Aware
+Eviction Strategy (SAES) for phase-adaptive cache
+management, and an Internal Regularization Pol-
+icy (IRP) for semantically representative cluster
+condensation. Extensive experiments demonstrate
+that MEIC-DT achieves a superior balance between
+performance and memory efficiency compared to
+existing baselines, validating the effectiveness of its
+synergistic design in managing the inherent trade-
+offs for long-text processing.
+
+Limitations
+While our method demonstrates significant ad-
+vances in memory-efficient incremental cluster-
+ing for coreference resolution, several limitations
+warrant discussion.
+First, in the current era
+dominated by large language models (LLMs),
+our work—focusing on supervised neural meth-
+ods—might appear to swim against the tide. How-
+ever, we note that recent studies (Liu et al., 2024b)
+have shown high-performing supervised corefer-
+ence resolvers can effectively enhance LLMs’ ca-
+pabilities in downstream tasks such as generation
+and question answering, which presents a clear and
+valuable application niche for our efficient model.
+Second, our experiments were conducted under
+constrained computational budgets. We acknowl-
+edge that with more generous resources (e.g., larger
+τ1/τ2 or model capacity), performance could po-
+tentially be further improved. Finally, we believe
+more effective memory constraint strategies may
+exist. Future work could explore adaptive threshold
+learning or reinforcement learning-based policies
+for dynamic memory allocation.
+References
+Josh Achiam, Steven Adler, Sandhini Agarwal, Lama
+Ahmad, Ilge Akkaya, Florencia Leoni Aleman,
+Diogo Almeida, Janko Altenschmidt, Sam Altman,
+Shyamal Anadkat, and 1 others. 2023. Gpt-4 techni-
+cal report. arXiv preprint arXiv:2303.08774.
+Gerry Altmann and Mark Steedman. 1988. Interac-
+tion with context during human sentence processing.
+Cognition, 30(3):191–238.
+Amit Bagga and Breck Baldwin. 1998. Algorithms for
+scoring coreference chains. In The first international
+conference on language resources and evaluation
+workshop on linguistics coreference, volume 1, pages
+563–566. Citeseer.
+Yuzhuo Bai, Kangyang Luo, Wenhao Li, Shuzheng Si,
+Gang Chen, Fanchao Qi, and Maosong Sun. Sis-
+fact: Towards systematic, interpretable and scalable
+factuality evaluation for llm. In Knowledgeable Foun-
+dation Models at ACL 2025.
+David Bamman, Olivia Lewke, and Anya Mansoor.
+2020. An annotated dataset of coreference in English
+literature. In Proceedings of the Twelfth Language
+Resources and Evaluation Conference, pages 44–54,
+Marseille, France. European Language Resources
+Association.
+Iz Beltagy, Matthew E Peters, and Arman Cohan. 2020.
+Longformer: The long-document transformer. arXiv
+preprint arXiv:2004.05150.
+Bernd Bohnet, Chris Alberti, and Michael Collins. 2023.
+Coreference resolution through a seq2seq transition-
+based system. Transactions of the Association for
+Computational Linguistics, 11:212–226.
+Ruirui Chen, Weifeng Jiang, Chengwei Qin, Bo Xiong,
+Fiona Liausvia, Dongkyu Choi, and Boon Kiat
+Quek. 2025. Are large language models effective
+knowledge graph constructors?
+arXiv preprint
+arXiv:2510.11297.
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+Kristina Toutanova. 2019. BERT: Pre-training of
+deep bidirectional transformers for language under-
+standing. In Proceedings of the 2019 Conference of
+the North American Chapter of the Association for
+Computational Linguistics: Human Language Tech-
+nologies, Volume 1 (Long and Short Papers), pages
+4171–4186, Minneapolis, Minnesota. Association for
+Computational Linguistics.
+Vladimir Dobrovolskii. 2021. Word-level coreference
+resolution. In Proceedings of the 2021 Conference
+on Empirical Methods in Natural Language Process-
+ing, pages 7670–7675, Online and Punta Cana, Do-
+minican Republic. Association for Computational
+Linguistics.
+Karel D’Oosterlinck, Semere Kiros Bitew, Brandon Pa-
+pineau, Christopher Potts, Thomas Demeester, and
+Chris Develder. 2023. Caw-coref: conjunction-aware
+word-level coreference resolution. arXiv preprint
+arXiv:2310.06165.
+Yujian Gan, Massimo Poesio, and Juntao Yu. 2024. As-
+sessing the capabilities of large language models in
+coreference: An evaluation. In Proceedings of the
+2024 Joint International Conference on Computa-
+tional Linguistics, Language Resources and Eval-
+uation (LREC-COLING 2024), pages 1645–1665,
+Torino, Italia. ELRA and ICCL.
+Abbas Ghaddar and Phillippe Langlais. 2016. Wiki-
+Coref: An English coreference-annotated corpus of
+Wikipedia articles. In Proceedings of the Tenth In-
+ternational Conference on Language Resources and
+Evaluation (LREC’16), pages 136–142, Portorož,
+Slovenia. European Language Resources Association
+(ELRA).
+Qipeng Guo, Xiangkun Hu, Yue Zhang, Xipeng Qiu,
+and Zheng Zhang. 2023. Dual cache for long docu-
+ment neural coreference resolution. In Proceedings
+of the 61st Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers),
+pages 15272–15285, Toronto, Canada. Association
+for Computational Linguistics.
+Pengcheng He, Xiaodong Liu, Jianfeng Gao, and
+Weizhu Chen. 2021. Deberta: Decoding-enhanced
+bert with disentangled attention. In International
+Conference on Learning Representations.
+Youngjoon Jang, Seongtae Hong, Junyoung Son,
+Sungjin Park, Chanjun Park, and Heuiseok Lim. 2025.
+
+From ambiguity to accuracy: The transformative ef-
+fect of coreference resolution on retrieval-augmented
+generation systems. In Proceedings of the 63rd An-
+nual Meeting of the Association for Computational
+Linguistics (Volume 4: Student Research Workshop),
+pages 422–433, Vienna, Austria. Association for
+Computational Linguistics.
+Mandar Joshi, Danqi Chen, Yinhan Liu, Daniel S Weld,
+Luke Zettlemoyer, and Omer Levy. 2020. Spanbert:
+Improving pre-training by representing and predict-
+ing spans. Transactions of the association for com-
+putational linguistics, 8:64–77.
+Ben Kantor and Amir Globerson. 2019. Coreference
+resolution with entity equalization. In Proceedings
+of the 57th Annual Meeting of the Association for
+Computational Linguistics, pages 673–677.
+Lauri Karttunen. 1976. Discourse referents. In Notes
+from the linguistic underground, pages 363–385.
+Brill.
+Yuval Kirstain, Ori Ram, and Omer Levy. 2021. Coref-
+erence resolution without span representations. arXiv
+preprint arXiv:2101.00434.
+Tuan Manh Lai, Trung Bui, and Doo Soon Kim. 2022.
+End-to-end neural coreference resolution revisited: A
+simple yet effective baseline. In ICASSP 2022-2022
+IEEE International Conference on Acoustics, Speech
+and Signal Processing (ICASSP), pages 8147–8151.
+IEEE.
+Nghia T Le and Alan Ritter. 2023. Are large language
+models robust coreference resolvers? arXiv preprint
+arXiv:2305.14489.
+Kenton Lee, Luheng He, Mike Lewis, and Luke Zettle-
+moyer. 2017. End-to-end neural coreference resolu-
+tion. arXiv preprint arXiv:1707.07045.
+Kenton Lee, Luheng He, and Luke Zettlemoyer. 2018.
+Higher-order coreference resolution with coarse-to-
+fine inference. arXiv preprint arXiv:1804.05392.
+Aixin Liu, Bei Feng, Bin Wang, Bingxuan Wang,
+Bo Liu, Chenggang Zhao, Chengqi Dengr, Chong
+Ruan, Damai Dai, Daya Guo, and 1 others. 2024a.
+Deepseek-v2: A strong, economical, and efficient
+mixture-of-experts language model. arXiv preprint
+arXiv:2405.04434.
+Tianyu Liu, Yuchen Eleanor Jiang, Nicholas Monath,
+Ryan Cotterell, and Mrinmaya Sachan. 2022. Autore-
+gressive structured prediction with language models.
+In Findings of the Association for Computational
+Linguistics: EMNLP 2022, pages 993–1005, Abu
+Dhabi, United Arab Emirates. Association for Com-
+putational Linguistics.
+Yanming Liu, Xinyue Peng, Jiannan Cao, Shi Bo,
+Yanxin Shen, Tianyu Du, Sheng Cheng, Xun Wang,
+Jianwei Yin, and Xuhong Zhang. 2024b.
+Bridg-
+ing context gaps: Leveraging coreference resolution
+for long contextual understanding. arXiv preprint
+arXiv:2410.01671.
+Kangyang Luo, Yuzhuo Bai, Cheng Gao, Shuzheng
+Si, Yingli Shen, Zhu Liu, Zhitong Wang, Cunliang
+Kong, Wenhao Li, Yufei Huang, and 1 others. 2025a.
+Gltw: Joint improved graph transformer and llm via
+three-word language for knowledge graph comple-
+tion. arXiv preprint arXiv:2502.11471.
+Kangyang Luo, Yuzhuo Bai, Shuzheng Si, Cheng Gao,
+Zhitong Wang, Yingli Shen, Wenhao Li, Zhu Liu,
+Yufeng Han, Jiayi Wu, and 1 others. 2025b. Imcoref-
+ces: An improved lightweight pipeline for corefer-
+ence resolution with llm-based checker-splitter re-
+finement. arXiv preprint arXiv:2510.10241.
+Kangyang Luo, Zichen Ding, Zhenmin Weng, Lingfeng
+Qiao, Meng Zhao, Xiang Li, Di Yin, and Jinlong
+Shu. 2024. Let’s be self-generated via step by step:
+A curriculum learning approach to automated rea-
+soning with large language models. arXiv preprint
+arXiv:2410.21728.
+Xiaoqiang Luo. 2005. On coreference resolution perfor-
+mance metrics. In Proceedings of human language
+technology conference and conference on empirical
+methods in natural language processing, pages 25–
+32.
+Giuliano Martinelli, Edoardo Barba, and Roberto Nav-
+igli. 2024. Maverick: Efficient and accurate corefer-
+ence resolution defying recent trends. In Proceedings
+of the 62nd Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers),
+pages 13380–13394, Bangkok, Thailand. Association
+for Computational Linguistics.
+Shon Otmazgin, Arie Cattan, and Yoav Goldberg. 2022a.
+F-coref: Fast, accurate and easy to use coreference
+resolution. arXiv preprint arXiv:2209.04280.
+Shon Otmazgin, Arie Cattan, and Yoav Goldberg. 2022b.
+Lingmess:
+Linguistically informed multi expert
+scorers for coreference resolution. arXiv preprint
+arXiv:2205.12644.
+Shirui Pan, Linhao Luo, Yufei Wang, Chen Chen, Ji-
+apu Wang, and Xindong Wu. 2024. Unifying large
+language models and knowledge graphs: A roadmap.
+IEEE Transactions on Knowledge and Data Engi-
+neering, 36(7):3580–3599.
+Sameer Pradhan, Alessandro Moschitti, Nianwen Xue,
+Olga Uryupina, and Yuchen Zhang. 2012. CoNLL-
+2012 shared task: Modeling multilingual unrestricted
+coreference in OntoNotes. In Joint Conference on
+EMNLP and CoNLL - Shared Task, pages 1–40, Jeju
+Island, Korea. Association for Computational Lin-
+guistics.
+Yu-Ming Shang, Hongli Mao, Tian Tian, Heyan Huang,
+and Xian-Ling Mao. 2025. From local to global:
+Leveraging document graph for named entity recog-
+nition. Knowledge-Based Systems, 312:113017.
+Noam Shazeer and Mitchell Stern. 2018. Adafactor:
+Adaptive learning rates with sublinear memory cost.
+In International Conference on Machine Learning,
+pages 4596–4604. PMLR.
+
+Shuzheng Si, Shuang Zeng, Jiaxing Lin, and Baobao
+Chang. 2022.
+SCL-RAI: Span-based contrastive
+learning with retrieval augmented inference for un-
+labeled entity problem in NER. In Proceedings of
+the 29th International Conference on Computational
+Linguistics, pages 2313–2318, Gyeongju, Republic
+of Korea. International Committee on Computational
+Linguistics.
+Shuzheng Si, Haozhe Zhao, Gang Chen, Cheng Gao,
+Yuzhuo Bai, Zhitong Wang, Kaikai An, Kangyang
+Luo, Chen Qian, Fanchao Qi, and 1 others. 2025a.
+Aligning large language models to follow instructions
+and hallucinate less via effective data filtering. arXiv
+preprint arXiv:2502.07340.
+Shuzheng Si, Haozhe Zhao, Gang Chen, Yunshui Li,
+Kangyang Luo, Chuancheng Lv, Kaikai An, Fanchao
+Qi, Baobao Chang, and Maosong Sun. 2024. Gateau:
+Selecting influential samples for long context align-
+ment. arXiv preprint arXiv:2410.15633.
+Shuzheng Si, Haozhe Zhao, Cheng Gao, Yuzhuo Bai,
+Zhitong Wang, Bofei Gao, Kangyang Luo, Wenhao
+Li, Yufei Huang, Gang Chen, and 1 others. 2025b.
+Teaching large language models to maintain contex-
+tual faithfulness via synthetic tasks and reinforcement
+learning. arXiv preprint arXiv:2505.16483.
+Shuzheng Si, Haozhe Zhao, Kangyang Luo, Gang
+Chen, Fanchao Qi, Minjia Zhang, Baobao Chang,
+and Maosong Sun. 2025c. A goal without a plan
+is just a wish: Efficient and effective global planner
+training for long-horizon agent tasks. arXiv preprint
+arXiv:2510.05608.
+Kawshik Manikantan Sundar, Shubham Toshniwal,
+Makarand Tapaswi, and Vineet Gandhi. 2024. Ma-
+jor entity identification: A generalizable alternative
+to coreference resolution.
+In Proceedings of the
+2024 Conference on Empirical Methods in Natural
+Language Processing, pages 11679–11695, Miami,
+Florida, USA. Association for Computational Lin-
+guistics.
+Keren Tan, Kangyang Luo, Yunshi Lan, Zheng Yuan,
+and Jinlong Shu. 2024. An llm-enhanced adversar-
+ial editing system for lexical simplification. arXiv
+preprint arXiv:2402.14704.
+Qwen Team. 2025. Qwen3 technical report. Preprint,
+arXiv:2505.09388.
+Shubham Toshniwal, Sam Wiseman, Allyson Ettinger,
+Karen Livescu, and Kevin Gimpel. 2020. Learning to
+Ignore: Long Document Coreference with Bounded
+Memory Neural Networks. In Proceedings of the
+2020 Conference on Empirical Methods in Natural
+Language Processing (EMNLP), pages 8519–8526,
+Online. Association for Computational Linguistics.
+Marc Vilain, John D Burger, John Aberdeen, Dennis
+Connolly, and Lynette Hirschman. 1995. A model-
+theoretic coreference scoring scheme. In Sixth Mes-
+sage Understanding Conference (MUC-6): Proceed-
+ings of a Conference Held in Columbia, Maryland,
+November 6-8, 1995.
+Zhitong Wang, Cheng Gao, Chaojun Xiao, Yufei Huang,
+Shuzheng Si, Kangyang Luo, Yuzhuo Bai, Wenhao
+Li, Tangjian Duan, Chuancheng Lv, and 1 others.
+2025. Document segmentation matters for retrieval-
+augmented generation. In Findings of the Association
+for Computational Linguistics: ACL 2025, pages
+8063–8075.
+Wei Wu, Fei Wang, Arianna Yuan, Fei Wu, and Jiwei
+Li. 2020. CorefQA: Coreference resolution as query-
+based span prediction. In Proceedings of the 58th
+Annual Meeting of the Association for Computational
+Linguistics, pages 6953–6963, Online. Association
+for Computational Linguistics.
+Patrick Xia, João Sedoc, and Benjamin Van Durme.
+2020. Incremental neural coreference resolution in
+constant memory. In Proceedings of the 2020 Con-
+ference on Empirical Methods in Natural Language
+Processing (EMNLP), pages 8617–8624, Online. As-
+sociation for Computational Linguistics.
+Liyan Xu and Jinho D. Choi. 2020. Revealing the myth
+of higher-order inference in coreference resolution.
+In Proceedings of the 2020 Conference on Empirical
+Methods in Natural Language Processing (EMNLP),
+pages 8527–8533, Online. Association for Computa-
+tional Linguistics.
+Jianxiang Yu, Zichen Ding, Jiaqi Tan, Kangyang Luo,
+Zhenmin Weng, Chenghua Gong, Long Zeng, Ren-
+jing Cui, Chengcheng Han, Qiushi Sun, and 1 others.
+2024. Automated peer reviewing in paper sea: Stan-
+dardization, evaluation, and analysis. arXiv preprint
+arXiv:2407.12857.
+Wenzheng Zhang, Sam Wiseman, and Karl Stratos.
+2023. Seq2seq is all you need for coreference res-
+olution. In Proceedings of the 2023 Conference on
+Empirical Methods in Natural Language Process-
+ing, pages 11493–11504, Singapore. Association for
+Computational Linguistics.
+Lixing Zhu, Jun Wang, and Yulan He. 2025.
+Llm-
+Link: Dual LLMs for dynamic entity linking on
+long narratives with collaborative memorisation and
+prompt optimisation. In Proceedings of the 31st Inter-
+national Conference on Computational Linguistics,
+pages 11334–11347, Abu Dhabi, UAE. Association
+for Computational Linguistics.
+
+Appendix
+This appendix is organized as follows.
+• In Section A, we provide an overview of re-
+lated work and position our contributions in
+the context of prior studies.
+• In Section B, we present the detailed algorith-
+mic pseudocode for Internal Regularization
+Policy.
+• In Section C, we list all the pronouns.
+• In Section D, we provide a comprehensive
+description of the experimental setup, includ-
+ing the datasets employed, baseline methods
+compared, evaluation metrics utilized, and de-
+tailed implementation configurations.
+A
+Related Works
+Coreference Resolution (CR) has long been a cru-
+cial task in the field of NLP. The seminal work
+by (Lee et al., 2017) introduced the first end-to-end
+supervised neural method, i.e., the Coarse-to-Fine
+model, establishing the detect-then-cluster pipeline.
+This pipeline first identifies mentions likely to
+form coreference relations (mention extraction),
+followed by finding the most probable antecedent
+for each detected mention to achieve coreference
+clustering (mention clustering). Shortly thereafter,
+a panoply of efforts have focused on improving this
+method’s training efficiency, memory consumption,
+and coreference performance. For example, some
+methods (Dobrovolskii, 2021; Si et al., 2022; Kan-
+tor and Globerson, 2019; Xu and Choi, 2020; Wu
+et al., 2020; Kirstain et al., 2021; Lai et al., 2022;
+Otmazgin et al., 2022a,b; D’Oosterlinck et al.,
+2023; Sundar et al., 2024) retained the detect-then-
+cluster pipeline and leveraged pre-trained language
+models (e.g., BERT (Devlin et al., 2019), Span-
+BERT (Joshi et al., 2020), Longformer (Beltagy
+et al., 2020)) for document encoding, significantly
+boosting performance. However, they still grap-
+ple with substantial memory overhead. Also, gen-
+erative methods (Liu et al., 2022; Bohnet et al.,
+2023; Zhang et al., 2023), centered around large
+sequence-to-sequence architectures, once domi-
+nated the pursuit of high coreference performance.
+Nevertheless, their prohibitively expensive train-
+ing costs and high inference latency render their
+deployment infeasible.
+With super-sized training corpora and compu-
+tational cluster resources, LLMs have demon-
+strated powerful reasoning capabilities, thus en-
+abling SOTA performance in a wide range of natu-
+ral language tasks (Achiam et al., 2023; Liu et al.,
+2024a; Team, 2025; Luo et al., 2024; Tan et al.,
+2024; Yu et al., 2024; Si et al., 2025c; Wang
+et al., 2025; Si et al., 2025b; Luo et al., 2025a;
+Si et al., 2025a, 2024; Bai et al.). However, their
+performance in CR has yet to surpass mainstream
+supervised neural methods (Le and Ritter, 2023;
+Gan et al., 2024). This limitation stems from the
+“large but not precise” nature of LLMs, which hin-
+ders high-accuracy mention extraction (Liu et al.,
+2024b). Intriguingly, under ideal conditions where
+gold mentions are provided, LLMs leverage their
+strong reasoning capabilities to achieve CR perfor-
+mance that matches or even exceeds that of super-
+vised neural methods (Le and Ritter, 2023). Re-
+cently, other attempts to incorporate LLMs into CR
+either rely on overly idealistic assumptions (Sun-
+dar et al., 2024) or entail prohibitive computational
+costs to train multiple LLMs (Zhu et al., 2025).
+All in all, given the constraints of academic com-
+putational resources, generative methods are often
+not the preferred choice due to their high training
+costs and inference latency. Notably, recent super-
+vised neural model Maverickmes (Martinelli et al.,
+2024) trained with DeBERTa has achieved SOTA
+performance. In contrast, while LLMs struggle
+with the mention detection, preventing their coref-
+erence performance from surpassing supervised
+neural methods, they show a significant strength:
+given gold mentions, LLMs with powerful reason-
+ing capabilities can achieve competitive corefer-
+ence results (Le and Ritter, 2023). However, this
+prerequisite is rarely met in practical scenarios.
+Therefore, existing research indicates that in CR,
+the SOTA supervised neural methods demonstrate
+notable advantages in terms of training cost, infer-
+ence efficiency, and coreference performance, with
+their potential still not yet fully tapped.
+Of note, under supervised neural methods, there
+exists another line of works (Xia et al., 2020; Tosh-
+niwal et al., 2020; Guo et al., 2023; Martinelli et al.,
+2024) to drew inspiration from human cognitive
+incremental processing mechanisms for long-text
+scenarios. During the mention clustering, they pro-
+gressively evaluate the association between can-
+didate mentions and existing coreference clusters
+using linear classifiers or lightweight Transformer
+architectures to determine coreference links. How-
+
+ever, despite significant progress in CR, they still
+face a critical challenge in balancing efficiency
+and performance during mention clustering. For
+example, conventional incremental clustering ap-
+proaches (Xia et al., 2020; Toshniwal et al., 2020;
+Guo et al., 2023) typically employ a fixed-size
+cache and a linear classifier to associate candi-
+date mentions with coreference clusters (each rep-
+resented as a single vector) tracked by the cache.
+These approaches decide whether a mention should
+join an existing cluster or form a new one. Upon
+reaching capacity, a predefined rule-based eviction
+strategy—LRU (Least Recently Used) or a dual-
+cache mechanism combining LRU and LFU (Least
+Frequently Used)—removes certain entities to up-
+date the cache dynamically. While computationally
+efficient, such approaches often fail to capture the
+complex nonlinear dependencies between mentions
+and clusters, and yield limited semantic representa-
+tions due to excessive intra-cluster compression.
+Moreover, these strategies either rely on a sin-
+gle heuristic (e.g., LRU) that may discard essential
+clusters, or employ a dual-cache mechanism that
+increases the complexity of cache management.
+Crucially, the same eviction strategy is used across
+both training and inference. This does not account
+for the inherent differences in information availabil-
+ity between the two phases and thus constrains the
+model’s overall effectiveness. Recently, Martinelli
+et al. (2024) introduced a lightweight Transformer
+model. Its input is formed by concatenating the
+representation of a candidate mention with repre-
+sentations of all mentions from historical corefer-
+ence clusters, effectively modeling the global intra-
+cluster structure and significantly improving clus-
+tering accuracy. However, a major drawback is that
+the input size grows polynomially with the number
+of clusters and the number of mentions per cluster,
+causing memory usage and computational latency
+to surge during training, which severely limits its
+practicality and scalability given academic compu-
+tational resources. These considerations motivate
+our investigation into pushing the boundaries of
+supervised neural models in the era of LLMs.
+B
+Pseudocode of Internal Regularization
+Policy
+In this section, we present the detailed algorithmic
+pseudocode for Internal Regularization Policy, as
+shown in Algorithms 1-3.
+Algorithm 1 Internal Regularization Policy (IRP)
+Require: Cluster set C = {c1, c2, . . . , cτ1} where
+each ci = [(t1
+i,s, t1
+i,e), (t2
+i,s, t2
+i,e), . . . ] repre-
+sents mention spans, original word text words
+Require: Maximum cluster size threshold τ2
+Ensure: Compressed cluster set C′ where each
+cluster has at most τ2 mentions
+1: for each cluster ci ∈C do
+2:
+if |ci| > τ2 then
+3:
+Sort ci in ascending order, i.e., sort(ci)
+4:
+Initialize compressed cluster: c′
+i ←[ci[0]]
+{Preserve first mention}
+5:
+ˆci ←ci[1 : −1] {Exclude first and last
+mentions}
+6:
+ˆCgrouped
+i
+←SG(words, ˆci)
+7:
+ˆcsampled
+i
+←GS( ˆCgrouped
+i
+, τ2 −2)
+8:
+c′
+i.extend(ˆcsampled
+i
+)
+9:
+c′
+i.append(ci[−1]) {Preserve last men-
+tion}
+10:
+C′ ←C′ ∪{sort(c′
+i)}
+11:
+else
+12:
+C′ ←C′ ∪{ci} {Keep original cluster}
+13:
+end if
+14: end for
+15: return C′
+C
+Full Pronouns List
+We list all the pronouns in Table 6.
+i , me , my , mine , myself , you , your , yours ,
+yourself , yourselves , he , him , his , himself , she ,
+her , hers , herself , it , its , itself , we , us , our , ours
+, ourselves , they , them , their , themselves , that ,
+this
+Table 6: Full pronouns list. Note that in the specific
+experimental process, “it” should be removed from full
+pronouns list because “it” may lack referential signifi-
+cance.
+D
+Complete Experimental Settings
+Datasets and Baselines.
+We train and evalu-
+ate the performance of our proposed methods on
+two widely used CR datasets: OntoNotes (Prad-
+han et al., 2012) and LitBank (Bamman et al.,
+2020). Specifically, OntoNotes, originating from
+the CoNLL-2012 shared task, serves as the de facto
+standard for evaluating CR methods. It encom-
+passes seven text genres, including full-length doc-
+uments such as newswire articles, broadcast news,
+
+Algorithm 2 Semantic Grouping (SG)
+Require: words, ˆc: list of mention spans [(t1,s, t1,e), (t2,s, t2,e), . . . , (t|ˆc|−1,s, t|ˆc|−1,e)], and P: pronoun
+lexicon (see Appendix C)
+Ensure: ˆCgrouped: semantically grouped mention spans
+1: mentions ←[ ] {Store mention texts}
+2: for each (ts, te) ∈ˆc do
+3:
+span = []
+4:
+for idx ∈[ts, te] do
+5:
+span.append(words[idx].lower())
+6:
+end for
+7:
+mentions.append(concat(span))
+8: end for
+9: n ←|ˆc|
+10: uf ←UnionFind(n) {Initialize Union-Find data structure}
+11: for i = 0 to n −1 do
+12:
+for j = i to n −1 do
+13:
+if mentions[i] ∈P ∧mentions[j] ∈P then
+14:
+if mentions[i] = mentions[j] then
+15:
+uf.union(i, j)
+16:
+end if
+17:
+else if mentions[i] /∈P ∧mentions[j] /∈P then
+18:
+if mentions[i]
+=
+mentions[j] ∨mentions[i]
+⊆
+mentions[j] ∨mentions[j]
+⊆
+mentions[i] then
+19:
+uf.union(i, j)
+20:
+end if
+21:
+end if
+22:
+end for
+23: end for
+24: Initialize groups ←{}
+25: for i = 0 to n −1 do
+26:
+root ←uf.find(i)
+27:
+groups[root].append(i)
+28: end for
+29: ˆCgrouped ←[ ]
+30: for each group ∈groups.values() do
+31:
+cluster_group = []
+32:
+for i ∈group do
+33:
+cluster_group.append(cluster_idxs[i])
+34:
+end for
+35:
+ˆCgrouped.append(cluster_group)
+36: end for
+37: return ˆCgrouped
+
+Algorithm 3 Group-based Sampling (GS)
+Require: ˆCgrouped
+i
+= [G1, G2, . . . , Gm]: grouped mention spans, and k: number of mentions to sample
+Ensure: ˆcsampled: selected mention spans
+1: m ←| ˆCgrouped| {Number of groups}
+2: nlist ←[|Gi| for Gi ∈ˆCgrouped] {Sizes of each group}
+3: N ←P nlist {Total mentions}
+4: if k > N then
+5:
+error "Cannot sample more mentions than available"
+6: end if
+7: if k < m then
+8:
+{More groups than needed samples}
+9:
+Sort groups in ˆCgrouped by size in descending order
+10:
+samples ←[ ]
+11:
+for i = 0 to k −1 do
+12:
+Randomly select one mention from Gi
+13:
+samples.append(selected_mention)
+14:
+end for
+15:
+return samples
+16: end if
+{Case when k ≥m: allocate at least one sample per group}
+17: s ←[1, 1, . . . , 1] {Initialize with one sample per group}
+18: r ←k −m {Remaining samples to allocate}
+19: if r > 0 then
+20:
+capacityi ←[ni −1 for ni ∈nlist] {Remaining capacity per group}
+21:
+total_capacity ←P capacityi
+22:
+if r > total_capacity then
+23:
+r ←total_capacity
+24:
+end if
+25:
+while r > 0 do
+26:
+Find group j with maximum capacityj > 0
+27:
+s[j] ←s[j] + 1
+28:
+capacityj ←capacityj −1
+29:
+r ←r −1
+30:
+end while
+31: end if
+32: ˆcsampled ←[ ]
+33: for i = 0 to m −1 do
+34:
+Randomly select s[i] mentions from group Gi
+35:
+ˆcsampled.extend(selected_mentions)
+36: end for
+37: return ˆcsampled
+
+magazines, web text, and testament passages, as
+well as multi-speaker transcripts like broadcast con-
+versations and telephone conversations. LitBank is
+frequently employed for evaluating CR on long doc-
+uments and comprises 100 literary works. Note that
+OntoNotes and LitBank follow different annotation
+guidelines: OntoNotes does not annotate singleton
+clusters (i.e., single-mention clusters), whereas Lit-
+Bank provides such annotations. To assess the gen-
+eralization capability of methods, models trained
+on OntoNotes are also tested on the out-of-domain
+dataset WikiCoref (Ghaddar and Langlais, 2016).
+WikiCoref only contains 30 Wikipedia articles as
+its test set, with some texts reaching lengths of up
+to 9869 words. We detail these datasets in Table 7.
+Meanwhile, to gauge the effectiveness of MEIC-
+DT (including SAES and IRP), we follow Luo et al.
+(2025b) by adopting Imcoref as Mention Extractor
+and using DeBERTabase (He et al., 2021) as Text
+Encoder (see Fig. 2). Meanwhile, we select the
+most relevant approaches—LRU (Xia et al., 2020;
+Toshniwal et al., 2020) and Dual-cache (Guo et al.,
+2023)—as baselines.
+Datasets
+#Train
+#Val
+#Test
+Avg. W
+Avg. M
+OntoNotes
+2802
+343
+348
+467
+56
+LitBank
+80
+10
+10
+2105
+291
+WikiCoref
+-
+-
+30
+1996
+230
+Table 7: Dataset statistics: number of documents in
+each dataset split (#Train/Val/Test), average number of
+words (i.e., Avg. W) and mentions (i.e., Avg. M) per
+document.
+Metrics. In our experiments, coreference per-
+formance across different approaches is evaluated
+using the MUC (Vilain et al., 1995), B3 (Bagga and
+Baldwin, 1998), and CEAFϕ4 (Luo, 2005) metrics,
+with F1 scores reported for each. The overall per-
+formance of a approach is measured by the CoNLL-
+F1 score, computed as the average of the F1 scores
+from these three metrics (abbreviated as Avg.F1).
+To ensure reliability, we report the average for each
+experiment over 3 different random seeds.
+Configurations. In all experiments, unless oth-
+erwise specified, we adopt the default settings of
+τ1 = 50 and τ2 = 30 for the Transformer classifier,
+while maintaining τ1 = 50 for the linear classifier.
+When implementing the linear classifier, we fol-
+low Xia et al. (2020); Toshniwal et al. (2020); Guo
+et al. (2023) by representing each historical corefer-
+ence cluster as a vector representation. This formu-
+lation eliminates the necessity of additional param-
+eters beyond the threshold τ1. We set δ = 1×10−5
+and employ the Adafactor optimizer (Shazeer and
+Stern, 2018) for model training, with learning rates
+configured as 2e-5 for DeBERTabase and 3e-4 for
+the remaining model layers. All experiments are
+implemented using the PyTorch-Lightning frame-
+work. Each run is executed on a single RTX 4090
+GPU with 24GB of VRAM. We have eight such
+GPUs available, allowing multiple experiments to
+be conducted concurrently. For fairness, neither
+data nor model parallelism is employed in any ex-
+periment. During training, we accumulate gradi-
+ents every four steps and set the gradient clipping
+threshold at 1.0. A linear learning rate scheduler
+is adopted, incorporating a warm-up phase cover-
+ing 10% of all training steps. To monitor perfor-
+mance, a validation evaluation is performed every
+one epoch. The final model is selected based on
+Avg.F1 in the validation set, with an early stopping
+patience of 30.

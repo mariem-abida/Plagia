@@ -1,0 +1,1015 @@
+SourceBroken: A large-scale analysis on the (un)reliability of
+SourceRank in the PyPI ecosystem
+Biagio Montaruli
+biagio.montaruli@eurecom.fr
+EURECOM & SAP
+Nice, France
+Serena Elisa Ponta
+serena.ponta@sap.com
+SAP
+Mougins, France
+Luca Compagna
+lcompagna@endor.ai
+Endor Labs
+Palo Alto, USA
+Davide Balzarotti
+davide.balzarotti@eurecom.fr
+EURECOM
+Biot, France
+Abstract
+SourceRank is a scoring system made of 18 metrics that assess
+the popularity and quality of open-source packages. Despite being
+used in several recent studies, none has thoroughly analyzed its
+reliability against evasion attacks aimed at inflating the score of
+malicious packages, thereby masquerading them as trustworthy. To
+fill this gap, we first propose a threat model that identifies potential
+evasion approaches for each metric, including the URL confusion
+technique, which can affect 5 out of the 18 metrics by leveraging
+a URL pointing to a legitimate repository potentially unrelated to
+the malicious package.
+Furthermore, we study the reliability of SourceRank in the PyPI
+ecosystem by analyzing the SourceRank distributions of benign and
+malicious packages in the state-of-the-art MalwareBench dataset,
+as well as in a real-world dataset of 122,398 packages. Our analysis
+reveals that, while historical data suggests a clear distinction be-
+tween benign and malicious packages, the real-world distributions
+overlap significantly, mainly due to SourceRank’s failure to timely
+reflect package removals. As a result, SourceRank cannot be reliably
+used to discriminate between benign and malicious packages in
+real-world scenarios, nor to select benign packages among those
+available on PyPI.
+Finally, our analysis reveals that URL confusion represents an
+emerging attack vector, with its prevalence increasing from 4.2%
+in MalwareBench to 7.0% in our real-world dataset. Moreover, this
+technique is often used alongside other evasion techniques and can
+significantly inflate the SourceRank metrics of malicious packages.
+CCS Concepts
+• Security and privacy →Software security engineering.
+Keywords
+sourcerank, software supply chain security, metrics, reliability
+1
+Introduction
+Supply chain attacks are a growing threat to the software industry.
+According to a report released by Sonatype in 2024, the number of
+malicious packages discovered in the wild had a yearly increase of
+156%, with 512,847 new malicious packages identified in 2024 [23].
+Recently, PyPI, one of the main ecosystems for Python packages,
+has faced a growing number of attacks that even led to a temporary
+halt in the creation of new projects and the registration of new
+users [3, 6].
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+To ensure the reliability of the packages available in the ecosys-
+tem and automate decisions on the trustworthiness of open-source
+projects, several scoring systems have been proposed, such as
+SourceRank [24, 21, 1] and the OpenSSF Scorecard [27, 18]. In this
+work, we focus on SourceRank, a well-known scoring system de-
+veloped by Libraries.io for ranking open-source software packages,
+which combines 18 metrics, such as number of dependent pack-
+ages, frequency of releases, number of contributors, and presence
+of informative artifacts like README file, license, or repository.
+The SourceRank score has been adopted in several recent studies
+to validate the reliability of open-source packages recommended
+by Large Language Models (LLMs)-based systems such as ChatGPT
+and Copilot [14, 12, 13], to rank and select PyPI packages [10, 24,
+8], to serve as a feature for building a prediction model [7], as well
+as to infer dependencies of third-party packages [25]. However,
+none of the previous studies have thoroughly analyzed the security
+and reliability of SourceRank against potential evasion attacks that
+could be exploited by malicious actors to manipulate the metrics,
+thereby increasing the SourceRank score of a malicious package
+and making it appear trustworthy.
+In this study, we aim to fill this gap by proposing a threat model
+of the SourceRank score and analyzing its behavior for benign
+and malicious packages in the PyPI ecosystem. For each metric
+contributing to the SourceRank score, we identify potential evasion
+approaches aimed at manipulating the metric to increase the score
+of a malicious project, thereby making it appear trustworthy. In
+particular, we found a novel evasion approach, which we name
+URL confusion, that consists in leveraging the URL of a legitimate
+package’s repository even though the malicious package itself is
+not related to the referenced URL. Given that such a URL influences
+5 out of the 18 metrics used to compute the SourceRank score, this
+evasion technique can significantly increase the SourceRank of a
+malicious package by exploiting the URL of a legitimate one.
+We then perform a study on the PyPI ecosystem by analyzing the
+SourceRank distributions of benign and malicious packages from
+the state-of-the-art MalwareBench dataset [26], as well as from a
+large dataset of 122,398 newly uploaded packages collected daily
+from PyPI over 80 days. Our analysis shows that while on historical
+data (i.e., MalwareBench) there is a clear separation between the
+distributions of benign and malicious packages, in a real-world
+scenario they significantly overlap due to the fact that SourceRank
+does not promptly reflect the removal of malicious packages from
+PyPI. In fact, only 6 out of the 210 malicious packages in the real-
+world dataset were marked as removed after five months.
+Our results highlight that the SourceRank score is not effective
+in discriminating benign from malicious packages in a real-world
+scenario as the best achievable F1-score based on real-world data
+arXiv:2512.24400v1 [cs.CR] 30 Dec 2025
+
+B. Montaruli et al.
+is only 14.87%. Moreover, since SourceRank can only discriminate
+malicious packages once they are removed from PyPI and once
+such information is propagated to Libraries.io (information which
+is often delayed), it is unreliable for selecting benign packages from
+those available on PyPI.
+We finally analyze the presence of the URL confusion evasion
+approach in the datasets, and we show that, even though it is not
+widespread (7.0% of the packages in the real-world dataset), it is
+an emerging attack technique (i.e., was 4.2% of the packages in the
+MalwareBench dataset from 2024) that can significantly increase
+the SourceRank of a malicious package.
+The remainder of the paper is organized as follows. Section 2 first
+introduces the SourceRank score and then presents its threat model,
+including the evasion techniques we identified for each metric that
+contributes to SourceRank. Section 3 describes the datasets we used
+for our experiments, the research questions we aim to answer and
+the results of our experiments. Finally, Section 4 concludes the
+paper and summarizes the main findings of our study.
+2
+SourceRank Threat Modeling
+This section first provides an overview of SourceRank, and then
+presents its threat model describing how an attacker can manipulate
+it to make a malicious package appear as trustworthy.
+2.1
+SourceRank Overview
+SourceRank is a state-of-the-art ranking score developed by Li-
+braries.io to evaluate the popularity and trustworthiness of open-
+source packages [24, 21]. It consists of an integer score that is com-
+puted by summing up the values of 18 metrics, which are described
+in Table 1.
+As there isn’t any documentation page on SourceRank, the de-
+scription of the metrics is the result of our hands-on experience
+using it. The Libraries.io website only offers a brief overview of
+the metrics (and their value) in the SourceRank breakdown web-
+page for a given package. As an example, Figure 1 (left) shows
+the SourceRank breakdown page for the pandas package1. A note-
+worthy observation is that 5 out of the 18 metrics, namely All
+pre-releases, Any outdated dependencies, Is deprecated, Is unmain-
+tained, and Is removed (highlighted in red in Table 1), are not shown
+in the SourceRank breakdown webpage, but are provided by the
+Libraries.io API [15] and used to compute the SourceRank score.
+As visible in Figure 1, the SourceRank breakdown page (on the left)
+of pandas does not show the values for the 5 metrics, which are
+instead provided in the JSON report (on the right) obtained through
+the Libraries.io API.
+Such inconsistency, together with the lack of documentation,
+can lead to a misinterpretation of SourceRank, as users may not
+be aware of the existence of these metrics or their impact on the
+overall score.
+2.2
+Threat Model
+We present hereafter a threat model of the SourceRank score ac-
+cording to the following four criteria inspired by the adversarial
+machine learning literature [2].
+Goal. The goal of an attacker is to create a malicious package that
+1https://libraries.io/pypi/pandas/sourcerank
+{
+ "basic_info_present": 1,
+ "repository_present": 1,
+ "readme_present": 1,
+ "license_present": 1,
+ "versions_present": 1,
+ "follows_semver": 0,
+ "recent_release": 1,
+ "not_brand_new": 1,
+ "one_point_oh": 1,
+ "dependent_projects": 10,
+ "dependent_repositories": 4,
+ "stars": 5,
+ "contributors": 2,
+ "subscribers": 2,
+ "all_prereleases": 0,
+ "any_outdated_dependencies": 0,
+ "is_deprecated": 0,
+ "is_unmaintained": 0,
+ "is_removed": 0
+}
+JSON info provided by the Libraries.io API
+Figure 1: SourceRank score for the pandas package provided
+on the Libraries.io webpage (left) and obtained through the
+Libraries.io API as JSON (right).
+maximizes its SourceRank score, hence masquerading it as a trust-
+worthy one.
+Knowledge. We assume a white-box scenario: the attacker has full
+knowledge of SourceRank, including its metrics and how they are
+computed.
+Capability. The attacker has the capability to create a new package
+on PyPI (or, in general, any other ecosystem that uses the SourceR-
+ank score).
+Strategy. The attacker aims to manipulate the SourceRank metrics
+to increase the SourceRank score of the malicious package.
+To this end, for each metric, we identified several evasion ap-
+proaches that can be exploited by the attacker to manipulate the
+corresponding metric (see Table 1).
+Basic info present. The attacker can create a malicious package with:
+• a brief description. To make it more appealing to users, the
+attacker can use a description that is similar to well-known
+packages (e.g., by using popular buzzwords or appealing
+sentences);.
+• a URL that either points to a legitimate package (named in
+this paper as URL confusion attack), or to a new repository
+created by the attacker (even not containing any malicious
+code). This attack would be also effective if the URL points
+to a (well-known) website, potentially related to the topic
+of the package to make it more appealing to users;
+• keywords that are commonly used by users to search for
+packages (not necessarily related to the package itself), such
+as those related to popular legitimate packages or trending
+topics in the community.
+All the above techniques can be leveraged to increase the SourceR-
+ank of the malicious package to 1 to make it look like a well-known
+and trustworthy package. The key point is that there is no verifica-
+tion of the provided information, hence the attacker can provide
+any information that is appealing to users.
+Source repository present. The attacker can provide a URL that points
+to a legitimate source code repository (e.g., a GitHub repository) to
+obtain a value of 1. This can be achieved either by referencing an ex-
+isting one (e.g., from a well-known package) that is also potentially
+unrelated to the malicious package, or by creating a new repository
+
+SourceBroken
+Table 1: Summary of the metrics that make up the SourceRank score. For each metric, we provide a brief description and how
+an attacker can manipulate it to increase the SourceRank of a malicious package. The metrics highlighted in green are not
+shown on the Libraries.io website but are provided by the Libraries.io API and used to compute the SourceRank score.
+Metric
+Description
+Attack
+Basic info
+present
+Whether the package has basic information:
+description, homepage or repository URL, and keywords.
+Add basic info: an appealing description, commonly-used keywords,
+and a URL pointing to a repository related to a legitimate package
+(URL confusion) or to a new one created by the attacker.
+Source repository
+present
+Whether the package provides a URL
+referring to a repository.
+Use URL confusion: add a URL pointing to a repository
+related to a legitimate package.
+Create a new repository for the malicious package
+and provide its URL.
+Readme present
+Whether the related repository has a README file
+with information about the package.
+Use URL confusion or add a README file in repository
+related to the malicious package.
+Has multiple
+versions
+Whether the package has more than one release version.
+Create multiple releases of the package,
+even with legitimate code at first.
+Follows SemVer
+Whether the package follows Semantic Versioning (SemVer)
+for its releases.
+Follow the SemVer specification for the releases.
+Recent release
+Whether the package has a release in the last six months.
+Create a new release every 6 months,
+even with legitimate code at first.
+Not brand new
+Whether the package has existed for at least six months.
+Create a legitimate version of the package and wait
+for six months before updating it with malicious code.
+1.0.0 or greater
+Whether the package has a release version
+greater or equal to 1.0.0.
+Create a release with a version greater or equal to 1.0.0.
+Dependent
+packages
+The number of projects (packages) that depend on this package,
+scaled logarithmically in base 10 and multiplied by two.
+Create many other packages that depend on the malicious one.
+Dependent
+repositories
+The number of repositories provided for packages
+depending on this package, scaled logarithmically in base 10.
+Create a repository for each dependent package.
+Stars
+The number of stars the repository provided in the package
+has received, scaled logarithmically in base 10.
+Use URL confusion. The malicious package inherits
+the stars of the legitimate one.
+Create fake accounts to star the repository
+related to the malicious package.
+Contributors
+The number of contributors to the repository provided in the package,
+scaled logarithmically in base 10 and divided by two.
+Use URL confusion. The malicious package inherits
+the contributors of the legitimate one.
+Create fake accounts that contribute to the repository
+provided in the malicious package.
+Libraries.io
+Subscribers
+The number of subscribers to the package on Libraries.io,
+scaled logarithmically in base 10 and divided by two.
+Create fake accounts that subscribe to the package on Libraries.io.
+All pre-releases
+such as alpha or beta releases.
+Whether the package has all pre-release versions,
+Avoid creating pre-release versions of the malicious package.
+dependencies
+Any outdated
+Whether the package has any outdated dependencies.
+malicious package are up-to-date.
+Ensure that all dependencies of the
+Is deprecated
+If so, this metric is set to -5, else to 0
+Whether the package is deprecated.
+Not relevant: it is generally under control of the attacker.
+Is unmaintained
+If so, this metric is set to -5, else to 0
+Whether the package is unmaintained.
+Not relevant: it is generally under control of the attacker.
+Is removed
+If so, this metric is set to -5, else to 0
+Whether the package has been removed from the ecosystem.
+e.g., by using obfuscation techniques to hide the malicious code.
+Avoid detection by the maintainers of the ecosystem,
+on a popular platform (e.g., GitHub, GitLab). We refer to the first
+approach as URL confusion [22] as it consists in exploiting the URL
+of a legitimate package. It is worth noting that, as already explained
+for the Basic info present metric, the Libraries.io platform does not
+verify the legitimacy of the provided repository URL. Hence, the
+attacker can provide any URL that points to a legitimate source code
+repository. Finally, as for the second scenario, to increase the legit-
+imacy appeal when using the URL of a newly created repository,
+the attacker can also use typosquatting for the package name or
+additional evasion techniques such as alternate spelling or familiar
+term abuse [9, 17].
+
+B. Montaruli et al.
+Readme present. The attacker can simply provide a README file in
+the related repository to set this metric to 1. If the attacker leverages
+the URL confusion attack, the README file can be the one in the
+related repository of the legitimate package. On the other hand, if
+the attacker creates a new repository, the attacker can create a new
+one that is similar to the README file of a well-known package to
+make the README file more appealing.
+Has multiple versions. The attacker can create multiple releases of
+the malicious package to set this metric to 1. For instance the at-
+tacker can publish the first release of the package (or few initial
+releases) with legitimate code and then update it with malicious
+code in subsequent releases. This can be particularly effective if
+the attacker initially provides a legitimate package to gain the user
+trust, and then injects malicious code in subsequent releases.
+Follows SemVer. The attacker can follow the Semantic Versioning
+(SemVer) [20] specification to set this metric to 1.
+Recent release. The attacker can simply create a new release of the
+malicious package every six months to set this metric to 1. The
+main challenge for the attacker is to create a new release that is
+not detected as malicious by the maintainers of the ecosystem. To
+this end, the attacker can leverage several obfuscation techniques
+to hide the malicious code such as encryption and obfuscation of
+strings [11, 4].
+Not brand new. This metric is set to 1 if the package has existed
+for at least six months. From an attacker’s perspective, this means
+that the malicious package must remain undetected for at least six
+months after its creation. To achieve this, the attacker can create an
+initial version of the package that is legitimate and does not contain
+any malicious code, and then update it with malicious code after
+six months. The main drawback is that the attacker has to wait for
+six months before being able to inject the malicious code. On the
+other hand, as discussed above for the Recent release metric, the
+attacker can leverage several obfuscation techniques to hide the
+malicious code.
+1.0.0 or greater. The attacker can create a release with a version
+greater or equal to 1.0.0 to set this metric to 1.
+Dependent packages. This metric is related to the number of projects
+(i.e., packages available in the ecosystem) that depend on the mali-
+cious package. To obtain a high value for this metric, the attacker
+can create many additional packages (not necessarily malicious)
+that depend on the malicious one. It is worth noting that this so-
+lution may not be straightforward as it requires effort from the
+attacker to create new packages.
+Dependent repositories. This metric depends on the number of repos-
+itories that are provided for packages depending on the malicious
+one. Thus, is strictly related to the Dependent packages metric. To
+obtain a high value for this metric, the attacker can extend the
+previous approach by also creating a repository for each dependent
+package created.
+Stars. This metric is related to the number of stars received by
+the repository of the package. To boost this metric, the attacker
+can hijack a legitimate repository (i.e., providing in the malicious
+package a URL that points to a legitimate repository as discussed
+for the Source repository present metric), thus inheriting the stars
+of the legitimate package exploiting its popularity. Alternatively,
+the attacker can create a new repository for the malicious package
+and try to gain stars by promoting it on social media or by creating
+fake accounts that star the repository.
+Contributors. This metric is related to the number of contributors
+to the package and is obtained from the repository provided in the
+package. Similarly to the Stars metric, the attacker can leverage the
+repository of a legitimate package, thus inheriting its number of
+contributors, or create a new repository and fake accounts added
+as contributors.
+Subscribers. This metric is related to the number of subscribers to the
+package on Libraries.io. To obtain a high value for this metric, the
+attacker can create fake accounts on Libraries.io, which subscribe
+to the package.
+All pre-releases. This metric is set to -1 (i.e., it penalizes the SourceR-
+ank) if the package has all pre-release versions, such as alpha or
+beta releases, otherwise it is set to 0. Hence, the attacker can simply
+avoid creating pre-release versions for the malicious package.
+Any outdated dependencies. This metric is set to -1 (i.e., it penalizes
+the SourceRank) if the package has any outdated dependencies, 0
+otherwise. To avoid having this metric set to -1, the attacker can
+simply ensure that all dependencies of the malicious package are
+up-to-date, or if possible, avoid dependencies at all.
+Is deprecated. This metric is set to -5 (i.e., it heavily penalizes the
+SourceRank) if the package is deprecated. It is worth noting that
+even though this metric is not available on the Libraries.io website,
+we found out that it is set to -5 if the package is reported as depre-
+cated in the ecosystem. As for PyPI, since the status is set directly by
+the package maintainer, this metric is not useful for trustworthiness
+evaluation, as it is under the control of the attacker.
+Is unmaintained. This metric is set to -5 (i.e., it heavily penalizes
+the SourceRank) if the package is unmaintained. Similarly to the Is
+deprecated metric, this metric is not documented on the Libraries.io
+website, hence we assume it is set to -5 if the package is reported as
+unmaintained in the ecosystem. Moreover, also this metric is under
+the control of the attacker, as it is set by the package maintainer.
+Is removed. This metric is set to -5 (i.e., it heavily penalizes the
+SourceRank) if the package has been removed from the ecosystem.
+To avoid this, the attacker must ensure that the malicious package
+is not removed from the ecosystem, i.e., that is not detected as
+malicious by the maintainers of the ecosystem. To this end the
+attacker can leverage obfuscation techniques to hide the malicious
+code and ensure that the malicious package respects the policies of
+the ecosystem.
+Summary. We provide a summary of the manipulation strategies
+that can be exploited by the attacker to increase the SourceRank of a
+malicious package in Table 1. It is important to note that SourceRank
+is based on a set of metrics that can be easily manipulated by the
+attacker. Hence, only relying on the SourceRank score to evaluate
+the trustworthiness of a package is not sufficient and can lead
+to a false sense of security. Moreover, by just leveraging a URL
+that points to a legitimate repository, the attacker can influence
+several metrics at once: Basic info present, Source repository present,
+Readme present, Stars, and Contributors. In particular the attacker
+can exploit the popularity of the legitimate repository to obtain a
+high SourceRank score, as well-known projects often have a high
+number of stars and contributors. We will refer to this approach
+
+SourceBroken
+as URL confusion in the rest of the paper and will show that it
+is exploited in the wild by several malicious packages. On top of
+it, the attacker can easily manipulate other metrics such as Has
+multiple versions, Recent release, 1.0.0 or greater, All pre-releases, Any
+outdated dependencies to further increase the SourceRank score
+of the malicious package. As for the remaining metrics, we argue
+that Dependent packages, Dependent repositories, Subscribers and Not
+brand new are the most difficult to manipulate, as they require more
+effort from the attacker (e.g., creating many additional packages
+that import the malicious package as dependency, or creating fake
+accounts on Libraries.io to subscribe to the package). Finally, we
+note that the Is deprecated and Is unmaintained metrics are not
+useful for trustworthiness evaluation, as they are under the control
+of the attacker.
+3
+Experiments
+In this section, we present the experiments conducted to analyze
+how the SourceRank score behaves for benign and malicious pack-
+ages in the PyPI ecosystem, and to assess the prevalence of the
+evasion technique based on URL confusion. We first introduce the
+research questions we aim to answer in this work, then we describe
+the datasets we used for our analysis, and finally we present the
+results of our experiments.
+3.1
+Research Questions
+[RQ.1] SourceRank distributions analysis – How do the SourceR-
+ank distributions of benign and malicious packages compare within
+the PyPI ecosystem?
+[RQ.2] SourceRank effectiveness to discriminate benign from
+malicious packages. – How effective is the SourceRank to dis-
+criminate benign from malicious packages in the PyPI ecosystem?
+[RQ.3] Presence of URL confusion in the wild – How many
+malicious packages leverage the URL confusion evasion approach?
+3.2
+Datasets
+For our experiments we adopted two different datasets, namely
+MalwareBench [26] and a real-world dataset of Python packages
+collected from PyPI, which are described in the following.
+MalwareBench. MalwareBench is a state-of-the-art dataset col-
+lected by Zahan et al. [26], which includes 3,190 unique malicious
+and 3,368 unique benign Python packages. We use this dataset as
+baseline to analyze the distribution of the SourceRank score in the
+PyPI ecosystem, as well as to understand if the URL confusion eva-
+sion approach has been exploited by malicious packages in the past.
+We collected the SourceRank scores of the packages in the Mal-
+wareBench dataset on May 9th, 2025 using the Libraries.io API [15].
+We filtered out 39 packages (20 malicious and 19 benign) whose
+SourceRank was not available (e.g., when a package is removed
+from the ecosystem by its maintainer), and we took the latest re-
+lease of each package, resulting in a total of 3,170 malicious and
+3,349 benign packages.
+Real-world dataset. We built a real-world dataset by collecting all
+packages uploaded to PyPI over 80 days (from October 2nd, 2024
+to December 21st, 2024), using the PyPI feeds for newly uploaded
+Table 2: Statistics of the SourceRank score for MalwareBench
+and real-world datasets.
+Metric
+MalwareBench
+Real-world
+Benign
+Malicious
+Benign
+Malicious
+Min
+-3
+-4
+-3
+-3
+Max
+31
+19
+31
+15
+Mean ± Std
+9.21 ± 5.54
+-2.09 ± 3.35
+7.75 ± 3.64
+3.46 ± 2.57
+Median
+8
+-3
+7
+3
+packages2 and releases3. The dataset contains 48,711 unique pack-
+ages (214 malicious and 48,503 benign) and 122,398 releases. We
+collected the ground truth labels of the packages by leveraging the
+Open Source Security Foundation (OpenSSF) repository of mali-
+cious packages [19] and the private PyPI database [5], a private
+GitHub repository4 including the packages reported as malicious
+by the PyPI maintainers and the community. We collected the la-
+bels five days after the end of the collection period and rechecked
+them five months later, confirming that they were still valid. As for
+the MalwareBench dataset, we collected the SourceRank scores for
+the packages on the May 9th, 2025, using the Libraries.io API [15].
+Finally, we filtered out 51 packages (4 malicious and 47 benign)
+whose SourceRank was not available, and we took the latest release
+of each package, resulting in a total of 210 malicious and 48,456
+benign packages.
+3.3
+Experimental Setup
+All experiments were conducted on an Ubuntu 22.04.6 LTS server
+equipped with an Intel Xeon Platinum 8160 CPU @ 2.10 GHz (64
+cores) and 256 GB of RAM. To collect the SourceRank scores of
+the packages, we used the API provided by Libraries.io [15]. For
+the analysis of the datasets, we used Python 3.11.9 and the pandas
+library [16].
+3.4
+Results
+SourceRank distribution analysis. Figure 2 shows the distri-
+bution of the SourceRank score, expressed as the percentage of
+packages for each score value from -5 to 32, for benign and mali-
+cious packages in both datasets. We report the statistics (min, max,
+mean and std. deviation) in Table 2.
+While for the MalwareBench dataset (cf. Figure 2a) the distribu-
+tions for benign and malicious packages are well-separated with
+little overlap (the mean SourceRank of benign packages is 9.21,
+while for malicious ones is -2.09), in a real-world dataset, the distri-
+butions are more similar and tend to overlap (mean SourceRank of
+7.75 for benign packages and 3.46 for malicious ones). It is worth
+noting that while the mean SourceRank of benign packages remains
+similar in both datasets (9.21 vs. 7.75), for malicious packages the
+mean SourceRank significantly increases from -2.09 in the Mal-
+wareBench dataset to 3.46 in the real-world dataset.
+2https://pypi.org/rss/packages.xml
+3https://pypi.org/rss/updates.xml
+4access is granted by the PyPI security team
+
+B. Montaruli et al.
+5
+0
+5
+10
+15
+20
+25
+30
+SourceRank
+0
+5
+10
+15
+20
+25
+30
+35
+Percent
+Label
+Benign
+Malicious
+(a) MalwareBench dataset
+5
+0
+5
+10
+15
+20
+25
+30
+SourceRank
+0
+5
+10
+15
+20
+Percent
+Label
+Benign
+Malicious
+(b) Real-world dataset
+Figure 2: SourceRank distributions of benign (blue) and malicious (red) packages for (a) MalwareBench and (b) real-world
+datasets. The other color in the plot (purple), is given by the overlapping between the blue and red distributions.
+5
+0
+5
+10
+15
+20
+25
+30
+SourceRank
+0
+5
+10
+15
+20
+Percent
+Label
+Benign
+Malicious
+Figure 3: SourceRank distributions of benign and malicious
+packages for the real-world dataset after updating the Is
+Removed metric.
+We further investigated this difference and found that 91.8% of
+the malicious packages in the MalwareBench dataset that have a
+SourceRank lower or equal to 0 and 95.5% have the Is Removed
+metric set to -5, which indicates that the package has been removed
+from PyPI. On the other hand, in the real-world dataset, only 2.4% of
+the malicious packages have a SourceRank lower or equal to 0 and
+only 2.86% have the Is Removed metric set to -5. The last finding
+is quite surprising: although all malicious packages in the real-
+world dataset have been removed from PyPI (which we confirmed
+by querying the platform), the SourceRank scores do not always
+reflect this and have a value of 0 instead of -5 for the Is Removed
+metric for 204 out of the 210 malicious packages of the real-world
+5
+0
+5
+10
+15
+20
+25
+30
+SourceRank Threshold
+0
+20
+40
+60
+80
+F1 Score (%)
+MalwareBench
+Real-World
+Real-World Upd.
+Figure 4: Tuning of the SourceRank threshold for detection
+of malicious packages on the target datasets: MalwareBench
+(blue) and real-world (red for the original SourceRank, yellow
+for the one obtained after updating the Is Removed metric).
+dataset. In fact, only 6 (2.9%) packages are reported as removed
+by Libraries.io despite we collected the SourceRank scores five
+months after the end of the collection period, and most of the
+packages, i.e., 177 (84.3%) out 210 malware packages5, were already
+reported as malicious by the public OpenSSF database [19]. Hence,
+the information about the maliciousness of these packages was
+already available online but is not reflected by the SourceRank.
+We also investigated how the distributions change if we set
+the Is Removed metric to the correct value of -5 for all the mali-
+cious packages in the real-world dataset (see Figure 3). We found
+5the remaining 33 packages are included only in the PyPI private database [5]
+
+SourceBroken
+that the SourceRank distributions of the malicious packages are
+significantly shifted to the left, with a mean SourceRank of -1.40
+compared to 3.46 before, much closer to the MalwareBench dis-
+tribution. This confirms that a major cause of the misalignment
+between the distributions for the MalwareBench and real-world
+datasets is that SourceRank does not promptly reflect the fact that
+malicious packages have been removed from PyPI.
+[RQ.1] The SourceRank distributions of benign and malicious
+packages differ only on historical data (MalwareBench), due
+to the metric Is Removed that is set to -5 for all the malicious
+packages. In the real-world dataset, the distributions overlap
+significantly as SourceRank does not promptly reflect the real
+status of malicious packages that have been removed from PyPI.
+SourceRank effectiveness to discriminate benign from mali-
+cious packages. We analyze here the effectiveness of SourceRank
+in discriminating benign from malicious packages. To this end, we
+aim to find the best threshold for SourceRank that maximizes the
+F1-score (defined as the harmonic mean of precision and recall) on
+the MalwareBench dataset and validate it on the real-world dataset.
+The results, shown in Figure 4, confirm the findings of RQ1: while
+for the MalwareBench dataset (blue), a threshold of 1 achieves the
+best F1-score of 94.5%, with the same threshold on the real-world
+dataset (red), the F1-score drops to 3.66%. It is worth noting that
+even if we tune the threshold on the real-world dataset, the best
+F1-score is only 14.87% (with a threshold of 2), which is still signifi-
+cantly lower than the performance on the MalwareBench dataset
+and impractical for real-world use. On the other hand, if we update
+the Is Removed metric to -5 for all the malicious packages in the
+real-world dataset (green) and apply the same threshold tuned on
+the MalwareBench dataset, the F1-score increases to 80%. These
+results confirm again that the SourceRank score is not effective in
+discriminating malicious packages in a real-world scenario, mainly
+because it does not reflect whether a package has been removed.
+It is worth remarking that being able to discriminate malicious
+packages once they are removed is of little interest, as the package
+is no longer available on PyPI and cannot be downloaded by users.
+This result highlights the unreliability of the SourceRank score in
+selecting benign packages among those available on PyPI.
+[RQ.2] SourceRank is not effective in discriminating benign
+from malicious packages in a real-world scenario because it
+does not reflect whether a package has been removed from PyPI.
+Moreover, it is not reliable in selecting benign packages among
+those available on PyPI.
+Presence of URL confusion in the wild. In this RQ, we analyze
+the presence of URL confusion on both datasets. To this end, we
+first check if the packages in the datasets have the Source Reposi-
+tory Present metric set to 1, which means that the package has a
+source repository available. Then, we manually check if the URL
+of the package points to a repository associated with a legitimate
+package6. We found that this evasion approach is present in 134
+(4.2%) malicious packages of the MalwareBench dataset, while it is
+exploited in 15 (7.0%) malicious packages of the real-world dataset.
+6We consider a repository legitimate if it is associated with a package that is not
+malicious according to the OpenSSF database [19] and the PyPI private database [5].
+Table 3: Analysis of the URL confusion evasion approach for
+the real-world dataset.
+Repository
+Counting
+pypa/sampleproject
+3
+CowinDev/Discord-Bot
+1
+encode/httpx
+1
+fake-useragent/fake-useragent
+1
+psf/requests
+1
+cuongitl/python-bitget
+4
+others
+4
+Total
+15 (7%)
+This shows that, even though this evasion approach is not widely
+used, it is present in the wild with an increasing trend (from ∼4%
+in the MalwareBench dataset to 7% in the real-world dataset).
+Among the most common legitimate repositories exploited by the
+attackers, we found two different malware campaigns (3 packages
+in total) that exploit the sampleproject repository7, which is a
+template repository provided by the PyPI maintainers to help devel-
+opers create new packages. This template repository has more than
+5,000 stars on GitHub and more than 50 contributors, which makes
+it an attractive target for attackers to exploit. We also found another
+campaign made of 2 packages, namely discordbotpresence-0.6.78
+and discordbotstatus-0.6.79, that exploit the Discord-Bot10
+and httpx11 repositories, respectively, the latter of which is a popu-
+lar HTTP client for Python with more than 14,000 stars on GitHub
+and more than 200 contributors. In addition, we found a pack-
+age named fake-usreagent12 that leverages typosquatting to im-
+personate the fake-useragent13 package and leveraged the URL
+pointing to its repository14.
+We also found additional campaigns that exploit popular reposi-
+tories through similar typosquatting techniques and URL confusion.
+For instance, the frexco-pip-requests15 package exploits the
+well-known requests package, which is a popular HTTP library
+for Python with more than 50,000 stars on GitHub and more than
+600 contributors. It is worth noting that its name has been cho-
+sen to resemble the name of the requests package by using the
+prefix augmentation technique [17], a common approach for de-
+pendency confusion attacks [17]. Finally, we also found a campaign
+made of 4 packages obtained by suffix augmentation [17], namely
+python-bitget-api-3.3.516, python-bitget-connect-0.3.917,
+7https://github.com/pypa/sampleproject
+8https://libraries.io/pypi/discordbotpresence
+9https://libraries.io/pypi/discordbotstatus
+10https://github.com/CorwinDev/Discord-Bot
+11https://github.com/encode/httpx
+12https://libraries.io/pypi/fake-usreagent
+13Note that the attacker swapped the e with r in the useragent word: fake-useragent
+=⇒fake-usreagent
+14https://github.com/fake-useragent/fake-useragent
+15https://libraries.io/pypi/frexco-pip-requests
+16https://libraries.io/pypi/python-bitget-api
+17https://libraries.io/pypi/python-bitget-connect
+
+B. Montaruli et al.
+python-bitget-request-4.9.518, and python-bitget-wrapper-
+0.3.719, which exploit the bitget-api20 repository, a Python li-
+brary for cryptocurrency trading on the Bitget exchange.
+Finally, we analyzed the SourceRank of the packages that lever-
+age this evasion technique and found that the average SourceRank
+score is 10, while the maximum is 15, which is particularly high
+compared to the average SourceRank of malicious (3.46) and, above
+all, benign (7.75) packages in the real-world dataset. Moreover, all
+of them also leverage other evasion techniques described in the
+threat modeling (see Section 2) to manipulate other metrics that are
+very easy to manipulate, such as Follows SemVer or Readme present.
+This confirms that URL confusion, combined with other evasion
+approaches, can effectively increase the SourceRank of a malicious
+package, hence masquerading it as a trustworthy package.
+[RQ.3] The URL confusion evasion approach is an emerging
+technique that is exploited by 7% of the malicious packages in
+the real-world dataset (compared to 4.2% in the MalwareBench
+dataset). Combined with other evasion techniques, this approach
+can result in very high SourceRank scores (up to 15), hence
+allowing attackers to effectively masquerade a malicious package
+as a trustworthy one.
+4
+Conclusions and Future Work
+Conclusions. The software supply chain requires nowadays ro-
+bust and reliable scoring systems to assess the trustworthiness of
+open-source projects and packages. In this work, we focused on
+SourceRank, a well-known score developed by Libraries.io for rank-
+ing and evaluating the popularity of open source packages. Despite
+being adopted in several recent studies [14, 12, 13, 8, 24, 10, 25], its
+reliability against evasion attacks aiming at increasing the score
+of a malicious package has never been thoroughly analyzed. To
+address this open issue, we first performed a threat modeling of the
+SourceRank score and then analyzed its effectiveness in discrimi-
+nating benign from malicious packages in the PyPI ecosystem.
+We identified several evasion techniques against the metrics
+that contribute to the SourceRank score, and, among these, we
+discovered a new evasion technique named URL confusion, which
+consists in leveraging a URL that points to a legitimate package
+and can be exploited to manipulate 5 out of the 18 metrics that
+contribute to the score.
+We performed a study on the PyPI ecosystem by analyzing the
+SourceRank distribution of benign and malicious packages from
+two different datasets: the state-of-the-art MalwareBench dataset,
+and a large dataset of 122,398 packages collected daily from PyPI
+over 80 days. Our analysis revealed that SourceRank is not reliable
+in a real-world scenario, as it does not promptly reflect the removal
+of packages from PyPI. Malicious packages in our real-world dataset
+that had been removed from PyPI were still not recognized as re-
+moved five months after their collection, despite their maliciousness
+being publicly available on several advisories such as the OpenSSF
+malware database [19].
+18https://libraries.io/pypi/python-bitget-request
+19https://libraries.io/pypi/python-bitget-wrapper
+20https://github.com/cuongitl/python-bitget
+Finally, we analyzed the presence of URL confusion in our datasets,
+and showed that it is an emerging attack technique (from 4.2% of the
+packages in MalwareBench to 7.0% of the packages in the real-world
+dataset) and that malicious packages can achieve a significantly
+high SourceRank score (up to 15), especially when combined with
+other techniques.
+By empirically showing the limitations of SourceRank, our study
+raises awareness about the false sense of security it may create and
+helps to improve the existing scoring systems for evaluating the
+security posture of open source projects.
+Future Work. The analysis of SourceRank can be further extended
+to other ecosystems such as npm. Moreover, the same threat mod-
+eling can be applied to other scoring systems such as OpenSSF
+Scorecard [27, 18]. In addition, to counter the identified limitation
+of SourceRank about package removal status, some possible direc-
+tion are periodically checking the removal status though the repos-
+itory APIs, or leveraging reliable community reports such as the
+OpenSSF malware database [19]. Finally, to mitigate the URL confu-
+sion evasion technique, a possible direction is to implement a robust
+verification mechanism that checks whether the URL provided in
+a package’s metadata actually points to the package’s repository
+or project page. This can be achieved by combining several ver-
+ification methods, such as checking for the repository structure
+(same files and directories), compare release artifcats available in
+the repository with those in the package registry (if available) and
+time-based correlation of package releases and repository releses.
+References
+[1]
+Philipp Acsany. 2025. How to evaluate the quality of python packages. Accessed:
+January 1, 2026. (2025). https://realpython.com/python-package-quality/.
+[2]
+B. Biggio and F. Roli. 2018. Wild patterns: ten years after the rise of adversarial
+machine learning. Pattern Recognition, 84, 317–331.
+[3]
+Checkmarx. 2024. PyPi Is Under Attack: Project Creation and User Registration
+Suspended. https://checkmarx.com/blog/pypi-is-under-attack-project-creati
+on-and-user-registration-suspended. (Mar. 2024).
+[4]
+C.S. Collberg and C. Thomborson. 2002. Watermarking, tamper-proofing, and
+obfuscation - tools for software protection. IEEE Transactions on Software
+Engineering, 28, 8, 735–746. doi:10.1109/TSE.2002.1027797.
+[5]
+Python Software Foundation. 2025. PyPI Malicious Packages. (2025). https://git
+hub.com/pypi/pypi-observation-reports-private.
+[6]
+Dan Goodin. 2024. PyPI halted new users and projects while it fended off supply-
+chain attack. https://arstechnica.com/security/2024/03/pypi-halted-new-users-
+and-projects-while-it-fended-off-supply-chain-attack. (Mar. 2024).
+[7]
+Abbas Javan Jafari, Diego Elias Costa, Emad Shihab, and Rabe Abdalkareem.
+2023. Dependency update strategies and package characteristics. ACM Trans.
+Softw. Eng. Methodol., 32, 6, Article 149, (Sept. 2023), 29 pages. https://doi.org/1
+0.1145/3603110.
+[8]
+Xinyu Jia, Yu Zhou, Yasir Hussain, and Wenhua Yang. 2024. An empirical
+study on python library dependency and conflict issues. In 2024 IEEE 24th
+International Conference on Software Quality, Reliability and Security (QRS),
+504–515. doi:10.1109/QRS62785.2024.00057.
+[9]
+Piergiorgio Ladisa, Henrik Plate, Matias Martinez, and Olivier Barais. 2023.
+Sok: taxonomy of attacks on open-source software supply chains. In 2023 IEEE
+Symposium on Security and Privacy (SP), 1509–1526. doi:10.1109/SP46215.2023
+.10179304.
+[10]
+Piergiorgio Ladisa, Serena Elisa Ponta, Nicola Ronzoni, Matias Martinez, and
+Olivier Barais. 2023. On the feasibility of cross-language detection of malicious
+packages in npm and pypi. In Proceedings of the 39th Annual Computer Security
+Applications Conference (ACSAC ’23). Association for Computing Machinery,
+New York, NY, USA, 71–82. isbn: 9798400708862. doi:10.1145/3627106.3627138.
+[11]
+Piergiorgio Ladisa, Merve Sahin, Serena Elisa Ponta, Marco Rosa, Matias Mar-
+tinez, and Olivier Barais. 2023. The hitchhiker’s guide to malicious third-party
+dependencies. In Proceedings of the 2023 Workshop on Software Supply Chain
+Offensive Research and Ecosystem Defenses (SCORED ’23). Association for Com-
+puting Machinery, New York, NY, USA, 65–74. isbn: 9798400702631. doi:10.114
+5/3605770.3625212.
+
+SourceBroken
+[12]
+Jasmine Latendresse, Naoures Day, SayedHassan Khatoonabadi, and Emad Shi-
+hab. 2025. The software librarian: python package insights for copilot. In 2025
+IEEE/ACM 47th International Conference on Software Engineering: Companion
+Proceedings (ICSE-Companion), 17–20. doi:10.1109/ICSE-Companion66252.202
+5.00014.
+[13]
+Jasmine Latendresse, SayedHassan Khatoonabadi, Ahmad Abdellatif, and Emad
+Shihab. 2024. Is chatgpt a good software librarian? an exploratory study on
+the use of chatgpt for software library recommendations. (2024). https://arxiv
+.org/abs/2408.05128.
+[14]
+Jasmine Latendresse, SayedHassan Khatoonabadi, and Emad Shihab. 2025.
+How robust are llm-generated library imports? an empirical study using stack
+overflow. (2025). https://arxiv.org/abs/2507.10818.
+[15]
+Libraries.io. 2025. Libraries.io API. (2025). https://libraries.io/api.
+[16]
+Wes McKinney. 2010. Data structures for statistical computing in python. In
+Proceedings of the 9th Python in Science Conference, 51–56.
+[17]
+Shradha Neupane, Grant Holmes, Elizabeth Wyss, Drew Davidson, and Lorenzo
+De Carli. 2023. Beyond typosquatting: an in-depth look at package confusion.
+In USENIX Security 23. USENIX Association, (Aug. 2023), 3439–3456. isbn: 978-
+1-939133-37-3. https://www.usenix.org/conference/usenixsecurity23/present
+ation/neupane.
+[18]
+Open Source Security Foundation (OpenSSF). 2025. Openssf scorecard. Ac-
+cessed: January 1, 2026. (2025). https://scorecard.dev.
+[19]
+OpenSSF. 2025. OpenSSF Malicious Packages. (2025). https://github.com/ossf
+/malicious-packages.
+[20]
+Tom Preston-Werner. 2025. Semantic versioning (semver). Accessed: January
+1, 2026. (2025). https://semver.org.
+[21]
+Munish Saini, Rohan Verma, Antarpuneet Singh, and Kuljit Kaur Chahal. 2020.
+Investigating diversity and impact of the popularity metrics for ranking soft-
+ware packages. Journal of Software: Evolution and Process, 32, 9, e2265. e2265
+JSME-19-0234.R2. https://onlinelibrary.wiley.com/doi/abs/10.1002/smr.2265.
+[22]
+Kevin Saric, Felix Savins, Gowri Sankar Ramachandran, Raja Jurdak, and Surya
+Nepal. 2024. Hyperlink hijacking: exploiting erroneous url links to phantom
+domains. In Proceedings of the ACM Web Conference 2024 (WWW ’24). As-
+sociation for Computing Machinery, Singapore, Singapore, 1724–1733. isbn:
+9798400701719. doi:10.1145/3589334.3645510.
+[23]
+Sonatype. 2024. 10th Annual State of the Software Supply Chain. https://www
+.sonatype.com/state-of-the-software-supply-chain/Introduction. Accessed:
+January 1, 2026. (2024).
+[24]
+Yiming Sun, Daniel German, and Stefano Zacchiroli. 2023. Using the uniqueness
+of global identifiers to determine the provenance of python software source
+code. Empirical Softw. Engg., 28, 5, (July 2023), 35 pages. https://doi.org/10.1007
+/s10664-023-10317-8.
+[25]
+Hongjie Ye, Wei Chen, Wensheng Dou, Guoquan Wu, and Jun Wei. 2022.
+Knowledge-based environment dependency inference for python programs.
+In Proceedings of the 44th International Conference on Software Engineering
+(ICSE ’22). Association for Computing Machinery, Pittsburgh, Pennsylvania,
+1245–1256. isbn: 9781450392211. https://doi.org/10.1145/3510003.3510127.
+[26]
+Nusrat Zahan, Philipp Burckhardt, Mikola Lysenko, Feross Aboukhadijeh, and
+Laurie Williams. 2024. Malwarebench: malware samples are not enough. In
+Proceedings of the 21st International Conference on Mining Software Repositories
+(MSR ’24). Association for Computing Machinery, Lisbon, Portugal, 728–732.
+https://doi.org/10.1145/3643991.3644883.
+[27]
+Nusrat Zahan, Parth Kanakiya, Brian Hambleton, Shohanuzzaman Shohan, and
+Laurie Williams. 2023. Openssf scorecard: on the path toward ecosystem-wide
+automated security metrics. IEEE Security & Privacy, 21, 6, 76–88. doi:10.1109
+/MSEC.2023.3279773.

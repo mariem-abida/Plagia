@@ -1,0 +1,997 @@
+HaineiFRDM: Explore Diffusion to Restore High-resolution Real-World Films
+Rongji Xun1
+Junjie Yuan2
+Zhongjie Wang1*
+1Tongji University
+2Shanghai Film Restoration Laboratory
+rongji.xun@gmail.com
+sftp yuanjunjie@outlook.com
+wang zhongjie@tongji.edu.cn
+Abstract
+Existing open-source film restoration methods show limited
+performance compared to commercial methods due to train-
+ing with low-quality synthetic data and employing noisy
+optical flows. In addition, high-resolution films have not
+been explored by the open-source methods. We propose
+HaineiFRDM(Film Restoration Diffusion Model), a film
+restoration framework, to explore diffusion model’s powerful
+content-understanding ability to help human expert better re-
+store indistinguishable film defects. Specifically, we employ
+a patch-wise training and testing strategy to make restoring
+high-resolution films on one 24GB-VRAMR GPU possible
+and design a position-aware Global Prompt and Frame Fu-
+sion Modules. Also, we introduce a global-local frequency
+module to reconstruct consistent textures among different
+patches. Besides, we firstly restore a low-resolution result
+and use it as global residual to mitigate blocky artifacts
+caused by patching process. Furthermore, we construct a
+film restoration dataset that contains restored real-degraded
+films and realistic synthetic data. Comprehensive experi-
+mental results conclusively demonstrate the superiority of
+our model in defect restoration ability over existing open-
+source methods. Code and the dataset will be released at
+https://anonymous.4open.science/r/HaineiFRDM.
+1. Introduction
+For each film, film-restoration professionals have to restore
+every frame in a manual way. For instance, one 2 hour film
+has around 170, 000 frames so that it is a huge time and
+labor costs for professionals to restore the films, let alone
+there are tons of films waited to be restored. Therefore there
+exists an urgent need to design some models to alleviate the
+restoration burden.
+Also, in a common film restoration cooperation, each
+professional is usually equipped with one consumer device,
+like one 24GB VRAM RTX 4090 GPU. In this case, we
+have to take both the inference time and VRAM limmit into
+*Corresponding author.
+consideration when we design the video diffusion model.
+After comparing various restoration methods both open-
+sourced methods and commercial software, we find that
+current open-source research methods way lag behind com-
+mercial software, like MTI and DIAMANT. Here we con-
+clude most restoration problem for almost all open-source
+methods: 1) The current open-source methods’ training goal
+is quite different from what human experts want. At dust re-
+moval stage, human experts sometimes just expect to remove
+the dust and scratch, leave everything else still to keep the
+film with an old-time vibe, not bringing new quality issue by
+the model and leave color adjustment and shaking removal to
+next stage. And open-sourced methods usually use the syn-
+thetics methods used in RTN to generate low-quality data and
+try to restore everything including deblur, dust removal, color
+and contrast adjustment with one model. These LQ-GT data
+pairs generated with this method are quite different from the
+actual degraded film samples, which push models to bring
+every blur area to a clear area and may affect the shooting
+depth in the film and change the film directors’ aesthetic idea.
+Also, previous methods might introduce detail artifacts and
+large color distortion which add more stress to human expert
+and make the restored frames barely used. 2) Due to limited
+film restoration data, previous methods usually only restore
+the black and white films and leave color film aside, which
+limited their application. DeepRemaster trys to restor RGB
+film by turning RGB space into LAB space then only fix the
+L channel, which would show obvious artifact when playing
+films; 3) previous methods usually use REDS and DAVIS
+these vlog-style videos not even some film movie as their
+training data, which did not consider content-types, shooting-
+styles and degradation types and limited these methods gen-
+eralization ability; 4) previous methods have difficulty in fast
+movement shot. commercial methods like MTI, DIAMANT
+usually use frame-interpolation methods. And open-sourced
+methods usually use BasicVSR like framework and employs
+learned optical-flow to facilitate restoration. This method
+is cool with slow motion frames but the optical-flow may
+fail when the adjacent frames with large difference and alter
+the film content, which add more stress for human expert in
+human recheck stage; 5) previous methods usually evaluate
+1
+arXiv:2512.24946v1 [cs.CV] 31 Dec 2025
+
+on cropped 512 × 512 or rescaled resolution frames and
+lacks evaluation on actual film-scaned resolution data, like
+1080p, 2K, 4K resolution. And their methods may shows
+poor details artifact when test on 2K resolution film data.
+After emplyed 3D window inference methods like RVRT did,
+the result frames would show patchy effect, which is also
+unacceptable to human expert. The previous methods lack a
+common benchmark and previously they just use their own
+close-sourced synthetic dataset for evaluation. Also, there
+are lots of real-degraded film not categorized yet, which
+helps to unveil model’s actual performance.
+The challenges that we meet when exploiting diffusion
+models for film restoration: 1) train and test model on con-
+sumer graphic cards with low VRAM like 24GB VRAM.
+2) how to guide model with global aspect when restore a
+local patches and how to collaborate those different patches
+without color or details difference for same object.
+We explore the video diffusion’s generation prior for old-
+film restoration scenario with more generalized performance.
+Also, unlike previous works that detect scratch map by using
+noise-existing optical-flow to warp the neighboring frames,
+we did not design any scratch detection module and try to
+explore the diffusion model’s potential to understand the
+scratch degradation with their intrinsic real-world aware-
+ness. And we design one memory efficient pipeline to make
+employ the diffusion model on customer device possible.
+Our main contributions can be summarized as follows:
+• We explore diffusion model’s content understanding ability
+to restore fast-movement frames.
+• And we propose a memory-efficient pipeline that the
+model could be trained and evaluated on 24GB-VRAM
+consumers Graphic Cards. We put forward an efficient
+frequency-aware attention module to compensate the loss
+in extracting condition feature. Besides, we deploy patch-
+wise training and inference pipeline, which makes training
+on consumer device(24G GPU) possible. And we pro-
+pose to add global cross-attention module and VAE-fusing
+strategy to alleviate patch-wise inconsistency problem.
+• We propose a film- degradation dataset including real-
+degraded films and the Synthetic Degradation data gener-
+ated by our proposed synthetic model. And we propose a
+synthetic degradation benchmark and a real-degraded film
+benchmark in film-level resolution that could be used to
+fully evaluate the restoration result for further works.
+2. Related Works
+2.1. Film Restoration
+Films degradation could be classified to structured defects
+and non-structured degradation. Structured defects are phys-
+ical damages on film, like scratch, friction trace, dust, etc.
+Accordingly, non-structured degradations, include blurri-
+ness, gaussian noise, color fading, etc. Traditional methods
+[17, 18, 27] focus on restoring structured defects and are
+composed of defects detection and restoration stage, which
+helps to preserve the contents of the clean region while
+restoring the defects in the frame. However, because these
+methods are based on imperfect hypothesis, hand-crafted
+features and manual thresholds, these method lacks content-
+understanding ability which limits their defects detection
+and restoration performance on actual films. Especially for
+frame with fine textures, large size defects or large move-
+ment, these tradition methods may fail to detect most frame
+defects and cause texture inconsistency at defects area.
+More recently, deep-learning based methods tend to solve
+structured defects and non-structured degradations at same
+time. And these methods can be classified into optical-
+flow based methods[15, 20, 24, 30] and implicit motion-
+modeling methods[3, 13] based on their ways of temporal
+modeling. 1) Implicit motion-modeling methods directly
+use neural network to lean spatial-temporal features without
+using explicit motion information like optical-flows. For ex-
+ample, DeepRemaster[13] proposed a fully 3D convolution.
+However, limited by 3D convolution’s constrained recep-
+tive field, this method may not restore most defects, and its
+restored frames have poor temporal consistency. TAPE[3]
+used shifted-window mechanism[22] to propagate features
+within different frames. By using attention mechanism, this
+methods shows noticable performance. But this methods
+still struggle to differentiate defects with complex textures
+in frames; 2) Optical-flow based methods[15, 20, 24, 30],
+following BasicVSR[6] framework, tried to fix noisy optical
+flow and use optical flow to propagate frame features so as
+to detect defects and improve results’ temporal consistency.
+Additionally, these methods used window attention[30], fo-
+cal attention [33] or Mamba[8] to improve frames features’
+spatial-temporal consistency while decreasing model’s mem-
+ory consumption. However, the learned optical flow was
+still inaccurate, which the model was misled to incorrectly
+fix the clean area content as defects. Consequently, content
+structure like human’s arm may be erased in restored frames,
+which is unacceptable for human experts. Also, most meth-
+ods use limited synthetic data proposed in [30], which have
+large difference from actual films. ; 3) Frame-interpolation
+methods[1]
+To sum up, all above methods have limited content-
+understanding ability, which may cause content-structure
+erasing, temporal flickering problem. Also, these meth-
+ods have not consider different types of defects and have
+only been tested on low-resolution frames like 720p, and
+their restoring performance would slump for 2K or 4K high-
+resolution film data.
+2.2. Patch-based Image Generation
+Diffusion models[5, 26, 31, 35, 38] show promising poten-
+tial in restoration task. However, scanned films are usu-
+2
+
+CLIP
+Image Encoder
+Fourier
+Embeder
+(b t) N 64
+b t N=256 c=1024
+(b t) N c
+UNet
+Transform
+b t c h=224 w=224
+position-aware
+Globel Feature
+CLIP
+Text Encoder
+Global Prompt
+Fusion
+CLIP
+Image Encoder
+Global Frame
+Fusion
+frequency domain
+Texture
+Reconstruction
+Patch Coordinates
+Patch Coordinates
+"a sunny day with a green bus,
+several cars parked
+alongside the road ..."
+Full Frame Descriptions
+Self-Attn
+Cross-Attn
+Prompt Fusion
+Cross-Attn
+Visual Fusion
+Temporal Module
+Cross-Attn
+Texture Fusion
+Degraded Frames
+Mid Feature
+ControlNet
+MLP
+Preprocess
+Module
++
+Ground Truth(GT) Frames
+GT Patch
+diffusion loss
+defect loss
+preprocess loss
+Defect
+Mask
+Restored
+Patch
+VAE
+VAE
+VAE
+LayerNorm
+MLP
+GELU
+MLP
+3D FFT
+Degraded Patch
+(b) Texture-Reconstruction Module
+C
+3D FFT
+LayerNorm
+LayerNorm
+Mid Feature
+Re
+Im
+Degraded
+Local Patch
+Resized Degraded
+Global Frame
+C
+C
+3D FFT
+LayerNorm
+Re
+Im
+Cross-Attn
+C
+3D FFT
+LayerNorm
+Re
+Im
+MLP
+MLP
+MLP
+3D IFFT
+Conv
++
+VAE
+VAE
+b t c h w
+Patch Coordinates
+(x1,y1,x2,y2)
+Resized Degraded
+Global Frame
+C
+Cross-Attn
++
+(a) HaineiFRDM Training Pipeline
+Restoration-Guidance Network
+(c) Global Frame Fusion Module
+Figure 1. Training pipeline of our proposed HaineiFRDM. The model is input degraded patched frames and extracts each frame
+features with Preprocess Module. Then the frame features input into ControlNet, in which we use Global-Prompt-Fusion Module and
+Global-Frame-Fusion Module to help the model have a global-frame awareness and use freuqency mdoule to maintain origin frame textures.
+Lastly, the learned ControlNet residuals is input into Unet to produce restored frame features ˆz0 and we map ˆz0 into RGB space and use
+defect loss to highlight defects region in restored frames.
+ally of 2K or 4K high resolutions and training diffusion
+model on high-resolution video requires huge computational
+costs. And thus diffusion models are hard to directly restore
+high-resolution frames on restoration laboratory’s consumer-
+grade devices. In order to explore diffusion model’s content-
+understanding ability to restore tangled film defects, we refer
+to patch-based generation methods to lower computation
+cost.
+For Patch-based high-resolution image generation meth-
+ods, MultiDiffusion[4] used a sliding-window scheme to
+generate patches and fuse the patches to form a panoramic
+image. However, this method suffered from object repeti-
+tion issue. Additionally, a popular training-free approach
+is to generate a low-resolution image and then use super-
+resolution tricks to upscale the image. ScaleCrafter [9] and
+FouriScale[12] use dilated convolutions to upscale image fea-
+ture in diffusion denoising process. But these methods strug-
+gle to keep patches’ texture consistent in high-resolution
+result. Subsequently, DemoFusion[7], proposed a global
+residual framework by firstly generating a low-resolution
+image, upsampling the image in feature space and then use
+this feature as reference to guide diffusion denoising process
+to generate patch-consistent high resolution image, which
+inspiring its following studies[14, 21, 29]. In addition to
+training-free methods, some approaches like Inf-DiT[36]
+and HPDM[28], proposed to redesign network structures
+and fused explicit patch position information into the model
+so as to enable high-resolution generation.
+3. Film Restoration Dataset
+Due to lacking high-quality restoration data, we observed
+real films in restoration laboratory and constructed a dataset
+that comprising real-degraded films and synthetic data. And
+each data in our dataset is composed of degraded frames, re-
+stored frames, defects mask and video description, as showed
+in Fig.6.
+Real-degraded Film Data To construct restored real films,
+we firstly collected ‘before-after’ restoration videos that re-
+leased by Restoration Laboratories and some companies, in-
+cluding MTI[2], DIAMANT[1]. Secondly, we extracted de-
+graded and restored frames from the comparison videos and
+computed binary defect masks with paired frames. However,
+some restored videos suffer from pixel-mismatch problem
+because the frames may have been through video deflicker-
+ing, color toning procedures besides defect restoration. Also,
+some restored frames may still have defects remains due
+to imperfect restoration. To collect pixel-matching, well-
+restored high-resolution frames, we manually filter videos in
+a frame-by-frame manner. Finally, we used CogVLM2[10]
+to generate video caption, manually recheck the text and
+labeled the video with camera-angle and shot-size descrip-
+tors. As result, we collected restored real films with to-
+tally 5-minute duration(24fps) for training and collected
+2K-resolution real films with 10-minute duration for testing.
+Synthetic Degradation Data To enlarge dateset volume,
+we synthesized realistic degraded frames following Fig.6.
+Specifically, we collected flawless film clips according to
+different camera angles and shot sizes. And we collected
+different types film defect templates including sparse and
+3
+
+classified film-defect templates
+Human
+Labeling
+Synthetic
+Degradation Model
+quality
+degradation
+ blending
+simulate
+film texture
+degraded
+frames
+flawless
+frames
+defect
+masks
+video
+caption
+"A woman in a yellow jacket stands in a grassy
+field with two attentive dogs,..."
+augment
+templates
+sampling based on
+template's appearing
+probability
+compute
+defect masks
+random
+sample
+simulate
+film texture
+flawless film clips
+with different shooting styles
+Figure 2. Synthesize data workflow.
+intensive dust, cigarette-burn holes, flickering and constant
+scratches, etc. Furthermore, we randomly apply quality
+degradation(rescale,jpeg compression) and film texture sim-
+ulation(add grain) to sampled frames to increase diversity
+. After that, we add color to defects in templates refer to
+defects on colored films and then fuse the frames and the
+defects to get the degraded frames.
+4. Method
+To avoid content-distortion and imperfect restoration prob-
+lem when restoring fast-movement frames, we propose the
+HaineiFRDM(Film Restoration Diffusion Model) employing
+diffusion model’s content-understanding ability to recognize
+and restore frame defects without hurting the flawless con-
+tent. We design a patch-based training framework(Sec.4.1)
+and a global-residual-based inference framework(Sec.4.2) to
+solve patch-inconsistency problem and lower computational
+cost when restoring high-resolution frames.
+4.1. Patch-based Training Framework
+As depicted in Fig.1, our model’s training framework is
+mainly composed of VAE, UNet, Restoration-Guidance
+Network,
+Global-Frame-Fusion Module and Texture-
+Reconstruction Module. Considering industrial demands
+of restoring high-resolution frames on low-VRAM devices,
+we train our model to restore frames in latent space and
+use a patch-based training strategy. Specifically, we split
+full video frames into overlapped 3D-patches referring to
+shifted-window mechanism[19], randomly sample a patch
+Degraded Frames
+Defect Masks
+Patch Frames
+Figure 3. Example of a short caption, which should be centered.
+position and then prepare the corresponding degraded patch,
+GT patch and defect masks for training. Furthermore, we
+encode the degraded patch with our Preprocess Module to
+extract defect-irrelevant features and encode the flawless
+patch into latent space with VAE model to lower computa-
+tion overload. And we randomly sample a timestep t, add
+noise to GT patch’s VAE feature to get noisy feature zt and
+fuse the noisy feature and the preprocessed feature to input
+into our Restoration-Guidance Network.
+To exploit the generation prior and content-understanding
+ability of pretrained diffusion model, our Restoration-
+Guidance Network guide the generation process through
+injecting learned residuals into the pretrained UNet, refer-
+ring to ControlNet[37]. Inside of Restoration-Guidance
+Network, the fused feature would sequentially go through
+self-attn, global-prompt-fusion, global-frame-fusion, texture-
+reconstruction and temporal modules. Especially, we intro-
+duce the global-prompt-fusion and global-frame-fusion mod-
+ule to improve model’s global-frame awareness while restor-
+ing a local patch. And we design a Texture-Reconstruction
+Module to keep frame contents’ textures in restored frames
+consistent with the texture in original frames.
+Moreover, the learned residuals, generated by the
+Restoration-Guidance Network, is input into UNet to pro-
+duce restored frame features ˆz0. And we decode the restored
+feature ˆz0 into RGB frames and introduce a defect loss to
+highlight defects region in restored frames.
+4.1.1. Global Fusion Module
+Though restoring each patch separately lower the computa-
+tional requirements, a local patch may have inadequate infor-
+mation for the model to distinguish defects with flawless con-
+tent, which results in content-distortion and false-restoration
+problem when restoring high-resolution and fast-movement
+frames. For example, if merely observing the cropped patch
+frames showed in Fig.3, black defects have high similarities
+with hand rail object in the frames and showed information
+is not enough for human expert or model to understand the
+scene and restore defects correctly. To solve the problem,
+4
+
+we design global-frame-fusion and a global-prompt-fusion
+modules, Fig1(c), to exploit the global frames’ visual and
+textual information when restoring a local patch. For global-
+frame-fusion module, we fuse patch’s bounding box coordi-
+nates and global-frame to get a location-related visual feature
+and then inject the feature into the model via cross-attention
+mechanism, referring to object-location-control methods pro-
+posed in [23, 32]. Specifically, we firstly resize the Degraded
+Global Frames and feed each frame into CLIP[25] image en-
+coder to get visual patch tokens that bearing more positional
+information than CLS token. Secondly, we transform the
+patch coordinates into location features via Fourier Embeder
+and fuse the location feature with the visual patch tokens
+to get a position-aware Global frame feature. Finally, we
+use cross-attention mechanism to fuse the global-frame fea-
+ture with mid features that outputted from previous module
+and then inject the fused feature back into the Restoration-
+Guidance Network so as to exploit global frames’ visual
+information.
+For global-prompt-fusion module, we experiment to ex-
+ploit the prompt information to help model better understand
+the scene. One straightforward idea is to generate textual de-
+scriptions of every patches using LLMs[11]. But the prompt
+generation process is time-costing for high-resolution and
+long-duration films. So that we propose to generate full
+frame’s video descriptions and exploit the textual informa-
+tion via a similar procedure used in the global-frame-fusion
+module.
+4.1.2. Texture-reconstruction Frequency Module
+Restoration experts set strict criterion for preserving film
+details, expecting the restored frames keep highly consistent
+texture and content as in original films. As shown in Fig.4(c),
+though the global-frame-fusion module helps improving
+content-consistency of restored frames, high-frequency tex-
+ture of restored frames still have obvious texture-mismatch
+problem.
+To improve high-frequency detail’s consistency, we refer
+to SFHformer[16]’s idea to restore texture in frequency do-
+main and propose a frequency-based texture-reconstruction
+module, depicted in Fig.1(b). To be specific, we firstly ex-
+tract a degraded local patch’s VAE feature and transform
+the feature into freuqncy domain using 3D-FFT, expecting
+to extract high-frequency information. Meanwhile, we ex-
+tract frequency feature of resized degraded global frames
+and use it as reference information to maintain frame’s low-
+frequency information like overall color and lightness. After,
+we concatenate the real and image part of 3D-FFT’s result
+and use MLP to further optimize the frequency features.
+Lastly, we transform the model’s mid feature into frequency
+feature, use cross-attention to fuse the frequency feature
+with the mid feature and then use 3D-iFFT to transform the
+frequency-domain feature back into feature space.
+Figure 4. Example of a short caption, which should be centered.
+Figure 5. Example of a short caption, which should be centered.
+4.2. Patch-Consistent Inference Framework
+Using the model with above module to independently re-
+store every RGB patch could alleviate the patching artifact
+when restoring 720p-resolution frames, as shown in Fig.5.
+However, with film’s scanning resolution rise to displaying
+level(≥2K-resolution), each patch’s information is more
+limited and some defects becomes indistinguishable from
+frame content, which weaken the model’s restoration abil-
+ity. Also, the model lacks correlation in restoring different
+patches, which further results in inconsistent textures.
+To solve patching artifacts, we refer to high-resolution
+5
+
+image generation methods[4, 7, 36] and propose a patch-
+consistent inference framework, depicted in Fig., which
+using global residuals[7] to maintain full frame’s consis-
+tency. Specifically, we firstly downsample and pad the high-
+resolution frames to get a patch-sized frames, use the FRDM
+model to restore the frames and upsample the frames back
+to original resolution. These pre-restored frames have most
+frame defects restored and maintains global and content con-
+sistency, which is suitable for being a reference to instruct
+the color and structure at local patches. Therefore, we extract
+reference frames’ features and adding noise to get global
+residuals zGR
+t
+, providing reference information for each de-
+noised timestep. Secondly, we extract features for original
+degraded frames and add noise to get a noisy low-quality
+feature zLQ
+T .
+In each denoising timstep t, we firstly fuse the previous-
+timestep restored feature zRS
+t
+with the global residual feature
+zGR
+t
+using GRFM(Global Residual Fusion Module) to get
+a fused feature zfused
+t
+. The GRFM is implemented as a
+re-weighting model as eq.1.
+zfused
+t
+= (1 −ct) · zRS
+t
++ ct · zGS
+t
+(1)
+ct = 0.25 ·
+
+1 + cos(π · T −t
+T
+)
+
+,
+(2)
+where we use zLQ
+T
+as zRS
+T
+at timestep T. And we use a
+cosine-decreasing weight ct for the global residuals, as in
+eq.2. Furthermore, we patchify the fused feature zfused
+t
+,
+denoise each patch with our HaineiFRDM model respec-
+tively and assemble the patches to get a restored feature
+zRS
+t−1. Lastly, we repeat the above denoising process un-
+til getting the final restored frames’ features zRS
+0
+and use
+VAE Decoder to transform the feature back to RGB restored
+frames.
+Besides using the global residual to improve global consis-
+tency, we also use KV-cache[36] mechanism in self-attention
+module to pass previous patches’ restoration information to
+HaineiFRDM, so as to help model determine the texture used
+to restore the current patch.
+4.3. Loss Functions
+Firstly, we use Diffusion Loss Lnoise to guide training.
+Lnoise = Ez0,t,ϵ∼N(0,1)
+h
+∥ϵ −ϵθ (zt, t)∥2
+2
+i
+,
+(3)
+where t is a radom-sampled timestep, ϵ is a random noise, ϵθ
+denotes a noise predicted by diffusion model(parameterized
+by θ).
+And z0 is flawless frames features, zt denotes
+previous-timestep feature.
+Preprocess Loss To extract defect-irrelevant frame features,
+we follow [34] to extract frame features in multiple scales
+and then transform the feature back to RGB space to compute
+loss,
+Lpreprocess =
+S
+X
+j=1
+"
+1
+N
+N
+X
+i
+
+Ii,j
+preprocess −Ii
+GT
+
+1
+#
+,
+(4)
+where N is frames number, S is scale number, Ipreprocess
+denotes frame predicted by the Preprocess Module and IGT
+denote flawless frame.
+Defect Loss The above loss functions mainly supervise the
+global quality and the loss value of tiny defects might be
+overwhelmed by global loss, which make the trained model
+struggle to restore small defetcs. So that we design a defect
+loss, which transform the restored feature ˆz0 into RGB frame
+Ipred and then compute the loss of defect area by using
+defect masks mdefect.
+Ldefect = 1
+N
+N
+X
+i=1
+
+(Ii
+pred −Ii
+GT ) · mi
+defect
+
+1 ,
+(5)
+The above losses form our final optimization goal:
+Ltotal = Lnoise + αpLpreprocess + αdLdefect.
+(6)
+where we empirically use αp = 1 and αd = 81.
+5. Film Restoration Dataset
+Due to lacking high-quality restoration data, we observed
+real films in restoration laboratory and constructed a dataset
+that comprising real-degraded films and synthetic data. And
+each data in our dataset is composed of degraded frames, re-
+stored frames, defects mask and video description, as showed
+in Fig.6.
+Real-degraded Film Data To construct restored real films,
+we firstly collected ‘before-after’ restoration videos that re-
+leased by Restoration Laboratories and some companies, in-
+cluding MTI[2], DIAMANT[1]. Secondly, we extracted de-
+graded and restored frames from the comparison videos and
+computed binary defect masks with paired frames. However,
+some restored videos suffer from pixel-mismatch problem
+because the frames may have been through video deflicker-
+ing, color toning procedures besides defect restoration. Also,
+some restored frames may still have defects remains due
+to imperfect restoration. To collect pixel-matching, well-
+restored high-resolution frames, we manually filter videos in
+a frame-by-frame manner. Finally, we used CogVLM2[10]
+to generate video caption, manually recheck the text and
+labeled the video with camera-angle and shot-size descrip-
+tors. As result, we collected restored real films with to-
+tally 5-minute duration(24fps) for training and collected
+2K-resolution real films with 10-minute duration for testing.
+Synthetic Degradation Data To enlarge dateset volume,
+we synthesized realistic degraded frames following Fig.6.
+Specifically, we collected flawless film clips according to
+6
+
+classified film-defect templates
+Human
+Labeling
+Synthetic
+Degradation Model
+quality
+degradation
+ blending
+simulate
+film texture
+degraded
+frames
+flawless
+frames
+defect
+masks
+video
+caption
+"A woman in a yellow jacket stands in a grassy
+field with two attentive dogs,..."
+augment
+templates
+sampling based on
+template's appearing
+probability
+compute
+defect masks
+random
+sample
+simulate
+film texture
+flawless film clips
+with different shooting styles
+Figure 6. Synthesize data workflow.
+different camera angles and shot sizes. And we collected
+different types film defect templates including sparse and
+intensive dust, cigarette-burn holes, flickering and constant
+scratches, etc. Furthermore, we randomly apply quality
+degradation(rescale,jpeg compression) and film texture sim-
+ulation(add grain) to sampled frames to increase diversity
+. After that, we add color to defects in templates refer to
+defects on colored films and then fuse the frames and the
+defects to get the degraded frames.
+6. Experiments
+6.1. Implementation Details
+We train our model in two stage. In the first stage, we first
+train the VideoMamba Model with L1 Loss and Perceptual
+Loss with lr=1e−4.
+In the second stage, we train the video diffusion model.
+Constrained by 24G VRAM, we only train the controlnet
+module and fix all the temporal layers.
+6.1.1. Data
+Here we first introduce how we synthetic the old-film data
+for training.
+6.1.2. evaluation metrics
+we use PSNR, SSIM, LIPIPS, BRISQUE, FVD.
+6.2. Quantitative Evaluation
+for the synthetic dataset.
+6.3. Quantitative Evaluation
+for the synthetic dataset.
+6.4. Qualitative Evaluation
+Text-Based Polishing Ability: Previous works, like RTN
+[30], lack the text understanding ability. They usually trained
+with cropped region. The models may fail for some film
+cases, for instance, the zooming shot focusing mostly on
+faces. Without the additional information like text descrip-
+tion, previous models suffered from understanding the scene
+and simply copy the original image. In our methods, we
+employ the text-understanding ability of diffusion models to
+help the model better understand the local region.
+6.4.1. extreme degraded case
+show ‘pathenewsreel‘ results here. We find online.
+6.5. Ablation Study
+6.5.1. Self-Attn Memory + RoPE
+6.5.2. VideoMamba Block
+Memory comparison
+6.5.3. Global Frame Block
+6.5.4. FreqAttn Block
+6.5.5. Local Prompt Search VS GlobalPrompt
+After experimenting with two prompts employing strategy,
+we find that the whole frame’s prompt information con-
+strained with bounding box information could help the model
+learn the global frame content more easily. We find that
+the experiment with global prompt could converge more
+quickly. For example, to reach PSNR = 20dB as a pedestal,
+the global prompt strategy only uses 12w iterations, much
+faster than employing an enlarged fixed grid prompt costing
+20w iterations.
+And in the reality restoration scenario, it would be a lot of
+labor to provide a prompt for each region. By using position-
+aware CLIP embedding, our proposed global-prompt module
+could use the text description in a more efficient and practical
+way.
+7. Conclusion and Limitation
+We currently only consider the dust and scratch removal.
+And there are a lot other degradations included in human
+restoration process have not been explored, like color adjust-
+ment, dye fading, frame lost.
+Current Template Fusion method used in Data Synthetic
+model may still suffer from generating LQ and GT pair with
+color distortion in some situation.
+Here we find that the diffusion model still has some
+trouble recognizing and repainting for some constant lines
+scratches.
+7
+
+Generation Speed. Slow Feedback if deployed into soft-
+ware.
+Cross scene information have not been explored!
+Temporal length is more limited than previous works that
+employ traditional methods.
+Loss in exquisite details
+Acknowledgements: We would like to thank anonymous
+reviewers for their constructive comments.
+References
+[1] Diamant film restoration software.
+https://www.
+hs - art . com / index . php / research - main /
+deeprestore-menu. 2, 3, 6
+[2] Mti film restoration software. https://mtifilm.com/
+restoration/. 3, 6
+[3] Lorenzo Agnolucci, Leonardo Galteri, Marco Bertini, and
+Alberto Del Bimbo. Reference-based restoration of digitized
+analog videotapes. In Proceedings of the IEEE/CVF Winter
+Conference on Applications of Computer Vision, pages 1659–
+1668, 2024. 2
+[4] Omer Bar-Tal, Lior Yariv, Yaron Lipman, and Tali Dekel.
+Multidiffusion: Fusing diffusion paths for controlled image
+generation. 2023. 3, 6
+[5] Andreas Blattmann, Tim Dockhorn, Sumith Kulal, Daniel
+Mendelevitch, Maciej Kilian, Dominik Lorenz, Yam Levi,
+Zion English, Vikram Voleti, Adam Letts, et al.
+Stable
+video diffusion: Scaling latent video diffusion models to
+large datasets. arXiv preprint arXiv:2311.15127, 2023. 2
+[6] Kelvin CK Chan, Xintao Wang, Ke Yu, Chao Dong, and
+Chen Change Loy. Basicvsr: The search for essential compo-
+nents in video super-resolution and beyond. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 4947–4956, 2021. 2
+[7] Ruoyi Du, Dongliang Chang, Timothy Hospedales, Yi-Zhe
+Song, and Zhanyu Ma. Demofusion: Democratising high-
+resolution image generation with no $. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 6159–6168, 2024. 3, 6
+[8] Albert Gu and Tri Dao. Mamba: Linear-time sequence mod-
+eling with selective state spaces. In First conference on lan-
+guage modeling, 2024. 2
+[9] Yingqing He, Shaoshu Yang, Haoxin Chen, Xiaodong Cun,
+Menghan Xia, Yong Zhang, Xintao Wang, Ran He, Qifeng
+Chen, and Ying Shan.
+Scalecrafter: Tuning-free higher-
+resolution visual generation with diffusion models. In The
+Twelfth International Conference on Learning Representa-
+tions, 2023. 3
+[10] Wenyi Hong, Weihan Wang, Ming Ding, Wenmeng Yu, Qing-
+song Lv, Yan Wang, Yean Cheng, Shiyu Huang, Junhui Ji,
+Zhao Xue, et al.
+Cogvlm2: Visual language models for
+image and video understanding, 2024. URL https://arxiv.
+org/abs/2408.16500. 3, 6
+[11] Wenyi Hong, Weihan Wang, Ming Ding, Wenmeng Yu, Qing-
+song Lv, Yan Wang, Yean Cheng, Shiyu Huang, Junhui Ji,
+Zhao Xue, et al. Cogvlm2: Visual language models for image
+and video understanding. arXiv preprint arXiv:2408.16500,
+2024. 5
+[12] Linjiang Huang, Rongyao Fang, Aiping Zhang, Guanglu
+Song, Si Liu, Yu Liu, and Hongsheng Li. Fouriscale: A
+frequency perspective on training-free high-resolution image
+synthesis. In European conference on computer vision, pages
+196–212. Springer, 2024. 3
+[13] Satoshi Iizuka and Edgar Simo-Serra. Deepremaster: tem-
+poral source-reference attention networks for comprehensive
+video enhancement. ACM Transactions on Graphics (TOG),
+38(6):1–13, 2019. 2
+[14] Jinho Jeong, Sangmin Han, Jinwoo Kim, and Seon Joo Kim.
+Latent space super-resolution for higher-resolution image
+generation with diffusion models.
+In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages
+2355–2365, 2025. 3
+[15] Qin Jiang, Qinglin Wang, Lihua Chi, Wentao Ma, Feng Li,
+and Jie Liu. Deepenhancer: Temporally consistent focal
+transformer for comprehensive video enhancement. In Pro-
+ceedings of the 2024 International Conference on Multimedia
+Retrieval, pages 969–977, 2024. 2
+[16] Xingyu Jiang, Xiuhui Zhang, Ning Gao, and Yue Deng. When
+fast fourier transform meets transformer for image restoration.
+In European Conference on Computer Vision, pages 381–402.
+Springer, 2024. 5
+[17] Seong-Whan Kim and Ki-Hong Ko. Efficient optimization
+of inpainting scheme and line scratch detection for old film
+restoration. In Pacific Rim International Conference on Artifi-
+cial Intelligence, pages 623–631. Springer, 2006. 2
+[18] Anil C Kokaram. On missing data treatment for degraded
+video and film archives: a survey and a new bayesian ap-
+proach. IEEE Transactions on Image Processing, 13(3):397–
+415, 2004. 2
+[19] Jingyun Liang, Yuchen Fan, Xiaoyu Xiang, Rakesh Ranjan,
+Eddy Ilg, Simon Green, Jiezhang Cao, Kai Zhang, Radu
+Timofte, and Luc V Gool. Recurrent video restoration trans-
+former with guided deformable attention. Advances in Neural
+Information Processing Systems, 35:378–393, 2022. 4
+[20] Shan Lin and Edgar Simo-Serra. Restoring degraded old films
+with recursive recurrent transformer networks. In Proceed-
+ings of the IEEE/CVF Winter Conference on Applications of
+Computer Vision, pages 6718–6728, 2024. 2
+[21] Zhihang Lin, Mingbao Lin, Meng Zhao, and Rongrong Ji.
+Accdiffusion: An accurate method for higher-resolution im-
+age generation. In European Conference on Computer Vision,
+pages 38–53. Springer, 2025. 3
+[22] Ze Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng
+Zhang, Stephen Lin, and Baining Guo. Swin transformer:
+Hierarchical vision transformer using shifted windows. In
+Proceedings of the IEEE/CVF international conference on
+computer vision, pages 10012–10022, 2021. 2
+[23] Jian Ma, Junhao Liang, Chen Chen, and Haonan Lu. Subject-
+diffusion: Open domain personalized text-to-image genera-
+tion without test-time fine-tuning. In ACM SIGGRAPH 2024
+Conference Papers, pages 1–12, 2024. 5
+[24] Yudong Mao, Hao Luo, Zhiwei Zhong, Peilin Chen, Zhi-
+jiang Zhang, and Shiqi Wang. Making old film great again:
+Degradation-aware state space model for old film restoration.
+In Proceedings of the Computer Vision and Pattern Recogni-
+tion Conference, pages 28039–28049, 2025. 2
+8
+
+[25] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry,
+Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning
+transferable visual models from natural language supervi-
+sion. In International conference on machine learning, pages
+8748–8763. PmLR, 2021. 5
+[26] Robin Rombach, Andreas Blattmann, Dominik Lorenz,
+Patrick Esser, and Bj¨orn Ommer. High-resolution image
+synthesis with latent diffusion models. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 10684–10695, 2022. 2
+[27] Takahiro Saito, Takashi Komatsu, Tomohisa Hoshi, and Toshi-
+aki Ohuchi. Image processing for restoration of old film se-
+quences. In Proceedings 10th International Conference on
+Image Analysis and Processing, pages 709–714. IEEE, 1999.
+2
+[28] Ivan Skorokhodov, Willi Menapace, Aliaksandr Siarohin,
+and Sergey Tulyakov.
+Hierarchical patch diffusion mod-
+els for high-resolution video generation. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 7569–7579, 2024. 3
+[29] Athanasios Tragakis, Marco Aversa, Chaitanya Kaul, Roder-
+ick Murray-Smith, and Daniele Faccio. Is one gpu enough?
+pushing image generation at higher-resolutions with founda-
+tion models. arXiv preprint arXiv:2406.07251, 2(3):5, 2024.
+3
+[30] Ziyu Wan, Bo Zhang, Dongdong Chen, and Jing Liao. Bring-
+ing old films back to life. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 17694–17703, 2022. 2, 7
+[31] Zhiyao Wang, Xu Chen, Chengming Xu, Junwei Zhu, Xi-
+aobin Hu, Jiangning Zhang, Chengjie Wang, Yuqi Liu, Yiyi
+Zhou, and Rongrong Ji. Svfr: A unified framework for gener-
+alized video face restoration. In Proceedings of the Computer
+Vision and Pattern Recognition Conference, pages 7406–7415,
+2025. 2
+[32] Guangxuan Xiao, Tianwei Yin, William T Freeman, Fr´edo
+Durand, and Song Han. Fastcomposer: Tuning-free multi-
+subject image generation with localized attention. Interna-
+tional Journal of Computer Vision, 133(3):1175–1194, 2025.
+5
+[33] Jianwei Yang, Chunyuan Li, Pengchuan Zhang, Xiyang Dai,
+Bin Xiao, Lu Yuan, and Jianfeng Gao. Focal attention for
+long-range interactions in vision transformers. Advances in
+Neural Information Processing Systems, 34:30008–30022,
+2021. 2
+[34] Tao Yang, Rongyuan Wu, Peiran Ren, Xuansong Xie, and
+Lei Zhang. Pixel-aware stable diffusion for realistic image
+super-resolution and personalized stylization. In European
+conference on computer vision, pages 74–91. Springer, 2024.
+6
+[35] Xi Yang, Chenhang He, Jianqi Ma, and Lei Zhang. Motion-
+guided latent diffusion for temporally consistent real-world
+video super-resolution. In European conference on computer
+vision, pages 224–242. Springer, 2024. 2
+[36] Zhuoyi Yang, Heyang Jiang, Wenyi Hong, Jiayan Teng,
+Wendi Zheng, Yuxiao Dong, Ming Ding, and Jie Tang. Inf-
+dit: Upsampling any-resolution image with memory-efficient
+diffusion transformer. In European Conference on Computer
+Vision, pages 141–156. Springer, 2025. 3, 6
+[37] Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Adding
+conditional control to text-to-image diffusion models. In
+Proceedings of the IEEE/CVF international conference on
+computer vision, pages 3836–3847, 2023. 4
+[38] Shangchen Zhou, Peiqing Yang, Jianyi Wang, Yihang Luo,
+and Chen Change Loy. Upscale-a-video: Temporal-consistent
+diffusion model for real-world video super-resolution. In Pro-
+ceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 2535–2545, 2024. 2
+9

@@ -1,0 +1,2050 @@
+Nonlinear Noise2Noise for Efficient Monte Carlo Denoiser Training
+ANDREW TINITS, University of Waterloo, Canada
+STEPHEN MANN, University of Waterloo, Canada
+Input (8 spp)
+0.3631 (1.0000×)
+Ours (Orig.)
+0.0085 (0.0235×)
+Ours (Large)
+0.0111 (0.0307×)
+SBMC
+0.0060 (0.0164×)
+Reference (8192 spp)
+rMSE
+Fig. 1. A Monte Carlo rendering at 8 samples per pixel (spp), denoised with our models, denoised with the SBMC model, and the reference image rendered at
+8192 spp. Our models are trained with only noisy data, while SBMC is trained with clean reference images. (The Wooden Staircase by Wig42, CC BY 3.0)
+The Noise2Noise method allows for training machine learning-based denois-
+ers with pairs of input and target images where both the input and target
+can be noisy. This removes the need for training with clean target images,
+which can be difficult to obtain. However, Noise2Noise training has a major
+limitation: nonlinear functions applied to the noisy targets will skew the
+results. This bias occurs because the nonlinearity makes the expected value
+of the noisy targets different from the clean target image. Since nonlinear
+functions are common in image processing, avoiding them limits the types of
+preprocessing that can be performed on the noisy targets. Our main insight
+is that certain nonlinear functions can be applied to the noisy targets without
+adding significant bias to the results. We develop a theoretical framework for
+analyzing the effects of these nonlinearities, and describe a class of nonlinear
+functions with minimal bias.
+We demonstrate our method on the denoising of high dynamic range
+(HDR) images produced by Monte Carlo rendering, where generating high-
+sample count reference images can be prohibitively expensive. Noise2Noise
+training can have trouble with HDR images, where the training process is
+overwhelmed by outliers and performs poorly. We consider a commonly
+used method of addressing these training issues: applying a nonlinear tone
+mapping function to the model output and target images to reduce their
+dynamic range. This method was previously thought to be incompatible
+with Noise2Noise training because of the nonlinearities involved. We show
+that certain combinations of loss functions and tone mapping functions can
+reduce the effect of outliers while introducing minimal bias. We apply our
+Authors’ Contact Information: Andrew Tinits, University of Waterloo, Waterloo, On-
+tario, Canada, amtinits@uwaterloo.ca; Stephen Mann, University of Waterloo, Waterloo,
+Ontario, Canada, smann@uwaterloo.ca.
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+SA Conference Papers ’25, Hong Kong, Hong Kong
+© 2025 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-2137-3/2025/12
+https://doi.org/10.1145/3757377.3763931
+method to an existing machine learning-based Monte Carlo denoiser, where
+the original implementation was trained with high-sample count reference
+images. Our results approach those of the original implementation, but are
+produced using only noisy training data.
+CCS Concepts: • Computing methodologies →Image processing; Ray
+tracing; Neural networks.
+Additional Key Words and Phrases: Noise2Noise, nonlinear functions, Jensen
+gap, Monte Carlo denoising, high dynamic range, tone mapping
+ACM Reference Format:
+Andrew Tinits and Stephen Mann. 2025. Nonlinear Noise2Noise for Efficient
+Monte Carlo Denoiser Training. In SIGGRAPH Asia 2025 Conference Papers
+(SA Conference Papers ’25), December 15–18, 2025, Hong Kong, Hong Kong.
+ACM, New York, NY, USA, 15 pages. https://doi.org/10.1145/3757377.3763931
+1
+Introduction
+There are many applications in image processing where clean im-
+ages are hard to obtain, such as with long-exposure photography
+or Monte Carlo rendering. In these cases, the noise is gradually
+reduced through a lengthy process, making clean images expensive
+to produce. Denoising offers a solution to this problem, where the
+image generating process can be stopped before convergence, and
+post-processing techniques can be applied to reduce the remaining
+noise to an acceptable level. Denoising has contributed to recent suc-
+cesses in adapting Monte Carlo rendering for real-time applications,
+for example. Common denoising methods use either hand-tuned
+filters or machine learning models to reduce the noise.
+Learning-based denoisers are trained on large datasets of images
+and their associated feature data. In the supervised learning setting,
+these datasets contain pairs of noisy images with their correspond-
+ing clean reference images. However, difficulty in obtaining clean
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+arXiv:2512.24794v1 [cs.CV] 31 Dec 2025
+
+2
+•
+Andrew Tinits and Stephen Mann
+references presents a challenge to training denoisers with super-
+vised learning. A potential solution to this problem is to remove the
+need for clean reference images by changing to a different learning
+setting where clean references are not required. One such method
+is Noise2Noise, a weakly supervised learning approach where de-
+noisers are trained with pairs of noisy images [Lehtinen et al. 2018].
+For the common case where the noise distribution has zero mean,
+Noise2Noise is used with the 𝐿2 loss to recover the expectation of
+the noisy targets E[ ˆ𝑦], which is equal to the clean target𝑦[Lehtinen
+et al. 2018]. The error from the noisy targets approaches zero as the
+number of training examples increases [Lehtinen et al. 2018].
+Noise2Noise, in the zero-mean noise setting, has a major limi-
+tation: nonlinear functions applied to the noisy targets will skew
+the results [Lehtinen et al. 2018]. This bias occurs because the non-
+linearity 𝜑makes the expected value of the noisy targets E[𝜑( ˆ𝑦)]
+different from the clean target 𝜑(E[ ˆ𝑦]) [Lehtinen et al. 2018], since
+in general E[𝜑( ˆ𝑦)] ≠𝜑(E[ ˆ𝑦]). Nonlinear functions are common in
+image processing, so the current practice of avoiding nonlinearity
+limits the types of preprocessing that can be performed on the noisy
+targets. Our main insight is that certain nonlinear functions can be
+applied to the noisy targets without adding significant bias to the re-
+sults. We develop a theoretical framework, based on the Jensen gap
+E[𝜑( ˆ𝑦)] −𝜑(E[ ˆ𝑦]) [Jensen 1906], for analyzing the effects of these
+nonlinearities on Noise2Noise training. We then use our framework
+to describe a class of nonlinear functions with minimal bias.
+Noise2Noise training has been widely adopted for other denois-
+ing problems, but has not seen wide adoption for the denoising
+of Monte Carlo rendered images. Monte Carlo rendering is a ran-
+domized algorithm that samples the space of possible light paths
+through a scene. Although this process converges in the limit to
+the correct image, achieving a low noise level can require many
+thousands of samples, which can be prohibitively expensive. Monte
+Carlo noise has zero mean, which makes it an ideal candidate for
+Noise2Noise training. However, Monte Carlo renderings often have
+a high dynamic range (HDR) spanning many orders of magnitude,
+especially at low samples per pixel (spp). Noise2Noise training can
+have trouble with HDR images, where the 𝐿2 loss is overwhelmed
+by outliers and the training fails to converge [Lehtinen et al. 2018].
+The Noise2Noise authors offer a solution to this problem with their
+𝐿HDR loss function [Lehtinen et al. 2018], but in our testing this
+solution is insufficient, and the training still performs poorly. We
+attribute this difference in our findings to our more complex model
+and our significantly larger and more varied training dataset.
+One existing solution to the HDR training issues is to apply a non-
+linear tone mapping function to the model output and target images
+to reduce their dynamic range [Gharbi et al. 2019]. This method was
+previously thought to be incompatible with Noise2Noise training
+because of the nonlinearities involved [Lehtinen et al. 2018]. We
+show that this method can in fact be used with Noise2Noise training.
+We apply our theoretical framework to show that certain combi-
+nations of loss functions and tone mapping functions can reduce
+the effect of outliers while introducing minimal bias to the results.
+Our experimental results confirm the effectiveness of this approach.
+We apply our method to an existing machine learning-based Monte
+Carlo denoiser [Gharbi et al. 2019], where the original implemen-
+tation was trained with high-sample count reference images. Our
+denoising results approach those of the original implementation,
+but are produced using only low-sample count noisy training data.
+Monte Carlo denoising of varied scenes with complex models is
+therefore an example of an application where training from noisy
+data is made possible by our nonlinear Noise2Noise method.
+2
+Related Work
+2.1
+Weakly Supervised Image Denoising
+Noise2Noise [Lehtinen et al. 2018] was not the first work to rec-
+ognize that clean reference images are not necessary for image
+denoising. Outside of machine learning methods, there are classic
+algorithms such as NLM [Buades et al. 2005] and BM3D [Dabov
+et al. 2007] that denoise a single noisy image without requiring
+any additional information. These methods look at statistical in-
+formation from the rest of the image to determine how to denoise
+a particular pixel. Within machine learning, Noise2Noise is the
+first denoising method that can learn from noisy images without
+requiring prior knowledge of either the noise distribution or the
+distribution of the clean images [Lehtinen et al. 2018]. Other meth-
+ods that can train on noisy images, such as AmbientGAN [Bora
+et al. 2018] and GradNet [Guo et al. 2019], require either an explicit
+statistical model of the noise (AmbientGAN), or additional regular-
+ization that makes assumptions about the clean results (GradNet). In
+the case of Monte Carlo denoising, the noise distribution cannot be
+characterized analytically, so methods with the former requirement
+cannot be used [Lehtinen et al. 2018].
+Since the publication of Noise2Noise, several works have ex-
+tended the idea so that only individual noisy images are required for
+training, rather than the noisy image pairs required by Noise2Noise
+[Lehtinen et al. 2018]. These works include Noise2Void [Krull et al.
+2019], Noise2Self [Batson and Royer 2019], and the work of Laine
+et al. [2019]. Our idea of applying nonlinearity to the noisy targets
+can equally be used with these methods and others that make use
+of the Noise2Noise property. Single-image denoising is useful in
+settings where noisy image pairs are difficult to obtain, such as in
+biomedical imaging. However, these methods generally come with
+reduced performance when compared to Noise2Noise because they
+have less information available during training [Krull et al. 2019]. It
+therefore makes sense to use Noise2Noise in settings such as Monte
+Carlo denoising, where noisy image pairs are easy to obtain.
+This work is a continuation of previous experimental work by
+the first author [Tinits 2022]. To our knowledge, these two works
+are the first to successfully apply nonlinear functions to the noisy
+targets in Noise2Noise training.
+2.2
+Monte Carlo Denoising
+Monte Carlo denoising methods can be separated into two main cate-
+gories: traditional algorithms, and machine learning-based methods.
+We briefly review machine-learning based methods below. For a
+more comprehensive review, see the survey papers by Zwicker et al.
+[2015] and Huo and Yoon [2021].
+The use of machine learning for Monte Carlo denoising was initi-
+ated by Kalantari et al. [2015], who used a multi-layer perceptron
+(MLP) to predict the parameters of a cross-bilateral filter. Bako et al.
+improved this idea by using a deep convolutional neural network
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+Nonlinear Noise2Noise for Efficient Monte Carlo Denoiser Training
+•
+3
+(CNN) to predict filter kernels separately for each pixel [2017]. This
+kernel prediction idea is used by many later works [Back et al. 2020;
+Gharbi et al. 2019; Lin et al. 2020, 2021; Meng et al. 2020; Munkberg
+and Hasselgren 2020; Vogels et al. 2018]. Other recent works take the
+simpler approach of predicting the pixel radiances directly [Chai-
+tanya et al. 2017; Guo et al. 2019; Lu et al. 2020; Wong and Wong
+2019; Xu et al. 2019; Yang et al. 2018, 2019]. Gharbi et al. propose
+another alternative where splatting kernels are used to allow individ-
+ual pixels to determine their own contributions [2019]. This concept
+is extended by Munkberg and Hasselgren [2020], who divide the
+samples into layers and filter them separately to improve efficiency,
+and by Lin et al. [2021] and Cho et al. [2021], who add information
+about individual Monte Carlo paths. Other recent works use differ-
+ent model architectures, such as generative adversarial networks
+(GANs) [Lu et al. 2021, 2020; Xu et al. 2019], self-attention [Chen
+et al. 2023, 2024; Oh and Moon 2024; Yu et al. 2021], and diffusion
+models [Vavilala et al. 2024]. Several works in recent years have
+explored unsupervised learning [Back et al. 2022; Choi et al. 2024;
+Guo et al. 2019; Xu et al. 2020]. Weakly supervised learning for
+Monte Carlo denoising was studied by Cho et al. [2021], but their
+method uses high-sample count reference images for training.
+3
+Noise2Noise Theory
+The typical supervised machine learning regression task uses a
+model 𝑓with parameters 𝜃, a loss function 𝐿, and training data com-
+posed of pairs of example inputs and targets (𝑥𝑖,𝑦𝑖). Representing
+the inputs and targets with random variables 𝑥and 𝑦, the training
+procedure finds the parameters that result in the lowest average
+loss over the training data:
+argmin
+𝜃
+E𝑥,𝑦[𝐿(𝑓𝜃(𝑥),𝑦)] .
+(1)
+As noted by the Noise2Noise authors, this training procedure
+is equivalent to performing the minimization separately for each
+input [Lehtinen et al. 2018], so expression (1) becomes
+argmin
+𝜃
+E𝑥
+
+E𝑦|𝑥[𝐿(𝑓𝜃(𝑥),𝑦)]
+
+.
+(2)
+The Noise2Noise authors then show that the estimate is the same
+if the training targets 𝑦are replaced with any random variable
+ˆ𝑦whose expected value E[ ˆ𝑦] = 𝑦[Lehtinen et al. 2018]. In the
+denoising scenario, we can therefore replace the clean training
+targets with noisy ones without changing the result, as long as
+the noise has zero mean [Lehtinen et al. 2018]. For denoising, the
+training inputs are also noisy estimates ˆ𝑥of the clean targets 𝑦(not
+necessarily from the same distribution as the noisy targets ˆ𝑦), such
+that E[ ˆ𝑦| ˆ𝑥] = 𝑦[Lehtinen et al. 2018]. Substituting ˆ𝑥and ˆ𝑦into
+expression (2) results in the Noise2Noise training procedure:
+argmin
+𝜃
+E ˆ𝑥
+
+E ˆ𝑦| ˆ𝑥[𝐿(𝑓𝜃( ˆ𝑥), ˆ𝑦)]
+
+.
+(3)
+4
+Nonlinear Noise2Noise
+4.1
+Loss Functions
+Since the choice of loss function affects the training results, we
+start by analyzing the effects of some relevant loss functions on
+the Noise2Noise training process. As shown in Section 3, the target
+of the training is the minimum of the expected loss, which can
+be minimized separately for each input ˆ𝑥. Optimizing the model
+parameters 𝜃is equivalent to optimizing the model output 𝑓𝜃( ˆ𝑥).
+So, defining ˜𝑦= 𝑓𝜃( ˆ𝑥), expression (3) can therefore be minimized
+by finding the value of ˜𝑦that minimizes the inner expectation:
+argmin
+˜𝑦
+E ˆ𝑦| ˆ𝑥[𝐿( ˜𝑦, ˆ𝑦)] .
+(4)
+For some loss functions, the value of ˜𝑦that minimizes expres-
+sion (4) can be found analytically. We first derive the well-known
+result that the 𝐿2 loss, 𝐿2( ˜𝑦, ˆ𝑦) = ( ˜𝑦−ˆ𝑦)2, has its minimum at the
+mean, which in our case is the clean target 𝑦. This result can be
+found by setting the partial derivative to zero, and solving for ˜𝑦:
+0 = 𝜕
+𝜕˜𝑦E ˆ𝑦| ˆ𝑥
+
+( ˜𝑦−ˆ𝑦)2
+= 𝜕
+𝜕˜𝑦
+  ˜𝑦2 −2 ˜𝑦E ˆ𝑦| ˆ𝑥[ ˆ𝑦] + E ˆ𝑦| ˆ𝑥[ ˆ𝑦2]
+= 2 ˜𝑦−2 E ˆ𝑦| ˆ𝑥[ ˆ𝑦]
+˜𝑦= E ˆ𝑦| ˆ𝑥[ ˆ𝑦] = 𝑦.
+We can verify that this critical point is a minimum by looking at
+the second partial derivative,
+𝜕2
+𝜕2 ˜𝑦E ˆ𝑦| ˆ𝑥
+
+( ˜𝑦−ˆ𝑦)2
+= 2. This value is
+strictly greater than zero for all values of ˜𝑦, so the 𝐿2 loss is strictly
+convex, and 𝑦is its single global minimum.
+We next derive the minimum for the relative mean squared error
+(rMSE) loss, 𝐿rMSE = ( ˜𝑦−ˆ𝑦)2/( ˆ𝑦+𝜖)2, which is designed to minimize
+the effect of outliers in HDR images [Rousselle et al. 2011]. We again
+set the partial derivative to zero and solve for ˜𝑦:
+0 = 𝜕
+𝜕˜𝑦E ˆ𝑦| ˆ𝑥
+ ( ˜𝑦−ˆ𝑦)2
+( ˆ𝑦+ 𝜖)2
+
+= 2 ˜𝑦E ˆ𝑦| ˆ𝑥
+
+1
+( ˆ𝑦+ 𝜖)2
+
+−2 E ˆ𝑦| ˆ𝑥
+
+ˆ𝑦
+( ˆ𝑦+ 𝜖)2
+
+˜𝑦=
+E ˆ𝑦| ˆ𝑥
+h
+ˆ𝑦
+( ˆ𝑦+𝜖)2
+i
+E ˆ𝑦| ˆ𝑥
+h
+1
+( ˆ𝑦+𝜖)2
+i ≈
+E ˆ𝑦| ˆ𝑥
+h
+1
+ˆ𝑦
+i
+E ˆ𝑦| ˆ𝑥
+h
+1
+ˆ𝑦2
+i .
+(5)
+This value is not easy to simplify because of the nonlinear functions
+involved, since in general E[𝜑( ˆ𝑦)] ≠𝜑(E[ ˆ𝑦]). We will show how
+to analyze this value further in Section 4.3. For now, we can verify
+that this critical point is a minimum by looking at the first partial
+derivative above. Our variables represent images and are therefore
+nonnegative (ignoring negatives from color space transformations
+or negative filter lobes), so the derivative will be positive when
+2 ˜𝑦E ˆ𝑦| ˆ𝑥
+
+1
+( ˆ𝑦+ 𝜖)2
+
+> 2 E ˆ𝑦| ˆ𝑥
+
+ˆ𝑦
+( ˆ𝑦+ 𝜖)2
+
+˜𝑦>
+E ˆ𝑦| ˆ𝑥
+h
+ˆ𝑦
+( ˆ𝑦+𝜖)2
+i
+E ˆ𝑦| ˆ𝑥
+h
+1
+( ˆ𝑦+𝜖)2
+i ,
+which is the value in equation (5). Similarly, the derivative will be
+zero at this value, and negative when ˜𝑦is less than this value. 𝐿rMSE
+is therefore pseudoconvex for ˜𝑦≥0, and so the local minimum in
+equation (5) is also the single global minimum [Mangasarian 1965].
+The final loss function we consider is the 𝐿HDR loss, 𝐿HDR =
+( ˜𝑦−ˆ𝑦)2/( ˜𝑦+ 𝜖)2, which is proposed by the Noise2Noise authors as
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+4
+•
+Andrew Tinits and Stephen Mann
+an alternative to 𝐿rMSE that avoids the nonlinearity issues [Lehtinen
+et al. 2018]. Solving the partial derivative again, we have
+0 = 𝜕
+𝜕˜𝑦E ˆ𝑦| ˆ𝑥
+ ( ˜𝑦−ˆ𝑦)2
+( ˜𝑦+ 𝜖)2
+
+=
+2 ˜𝑦
+( ˜𝑦+ 𝜖)3
+ E ˆ𝑦| ˆ𝑥[ ˆ𝑦] + 𝜖 −
+2
+( ˜𝑦+ 𝜖)3
+ E ˆ𝑦| ˆ𝑥[ ˆ𝑦2] + 𝜖E ˆ𝑦| ˆ𝑥[ ˆ𝑦]
+˜𝑦= E ˆ𝑦| ˆ𝑥[ ˆ𝑦2] + 𝜖E ˆ𝑦| ˆ𝑥[ ˆ𝑦]
+E ˆ𝑦| ˆ𝑥[ ˆ𝑦] + 𝜖
+≈E ˆ𝑦| ˆ𝑥[ ˆ𝑦2]
+E ˆ𝑦| ˆ𝑥[ ˆ𝑦] = 𝑦+ Var( ˆ𝑦)
+𝑦
+,
+(6)
+where the last equality comes from the definition of variance: Var(𝑋) =
+E[𝑋2] −E[𝑋]2. The nonlinearity is easily removed in this case, re-
+vealing a bias term of the variance divided by the mean, which is also
+known as the index of dispersion. We can see that, in the same way
+as 𝐿rMSE, the first partial derivative above is negative before the min-
+imum at equation (6), zero at the minimum, and positive after. 𝐿HDR
+is therefore pseudoconvex for ˜𝑦≥0, and so the local minimum in
+equation (6) is also the single global minimum [Mangasarian 1965].
+Since the denominator can be separated from the expectation, 𝐿HDR
+can also be defined with the gradient of the denominator set to zero,
+which removes the bias [Lehtinen et al. 2018]. We call this definition
+𝐿∗
+HDR, and we evaluate it separately in Section 5.2.
+4.2
+Loss Functions with Nonlinearity
+We now introduce our method, where a nonlinear function 𝑇(𝑣) is
+applied to the model output ˜𝑦and the noisy target ˆ𝑦before they are
+passed to the loss function 𝐿, which then becomes 𝐿(𝑇( ˜𝑦),𝑇( ˆ𝑦)).
+𝑇(𝑣) must be twice differentiable, strictly monotonic, and nonnega-
+tive for 𝑣≥0. In our example application, 𝑇(𝑣) is a tone mapping
+function that reduces the dynamic range of the loss function inputs.
+We now analyze the same loss functions as in Section 4.1, but
+with 𝑇(𝑣) applied to their inputs. Starting with the 𝐿2 loss, we have:
+0 = 𝜕
+𝜕˜𝑦E ˆ𝑦| ˆ𝑥
+
+(𝑇( ˜𝑦) −𝑇( ˆ𝑦))2
+= 𝜕
+𝜕˜𝑦
+ 𝑇( ˜𝑦)2 −2𝑇( ˜𝑦) E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)] + E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)2]
+= 2𝑇( ˜𝑦)𝑇′( ˜𝑦) −2𝑇′( ˜𝑦) E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)]
+˜𝑦= 𝑇−1  E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)] .
+(7)
+To show that this value is a minimum, we look at the first partial
+derivative above, which is positive when
+2𝑇( ˜𝑦)𝑇′( ˜𝑦) > 2𝑇′( ˜𝑦) E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)]
+˜𝑦> 𝑇−1  E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)] ,
+zero at this value, and negative otherwise. For the last line above,
+the direction of the inequality changes twice if 𝑇(𝑣) is strictly de-
+creasing, resulting in no change to the direction. The expected loss
+is therefore pseudoconvex for ˜𝑦≥0, and so the local minimum in
+equation (7) is also the single global minimum [Mangasarian 1965].
+The 𝐿rMSE loss becomes (𝑇( ˜𝑦) −𝑇( ˆ𝑦))2/(𝑇( ˆ𝑦) + 𝜖)2 with our
+method, which has its single global minimum at
+˜𝑦= 𝑇−1 ©­­
+«
+E ˆ𝑦| ˆ𝑥
+h
+𝑇( ˆ𝑦)
+(𝑇( ˆ𝑦)+𝜖)2
+i
+E ˆ𝑦| ˆ𝑥
+h
+1
+(𝑇( ˆ𝑦)+𝜖)2
+i
+ª®®
+¬
+≈𝑇−1 ©­­
+«
+E ˆ𝑦| ˆ𝑥
+h
+1
+𝑇( ˆ𝑦)
+i
+E ˆ𝑦| ˆ𝑥
+h
+1
+𝑇( ˆ𝑦)2
+i
+ª®®
+¬
+,
+(8)
+while the 𝐿HDR loss becomes (𝑇( ˜𝑦) −𝑇( ˆ𝑦))2/(𝑇( ˜𝑦) + 𝜖)2 with our
+method, which has its single global minimum at
+˜𝑦= 𝑇−1
+ 
+E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)2] + 𝜖E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)]
+E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)] + 𝜖
+!
+≈𝑇−1
+ 
+E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)2]
+E ˆ𝑦| ˆ𝑥[𝑇( ˆ𝑦)]
+!
+,
+(9)
+using the same methods as above.
+The meaning of these minimum values is not immediately obvious
+because of the nonlinear functions present inside of the expectations.
+In the next section, we will show how to derive bounds on the bias
+introduced by these nonlinearities, and in the following section we
+will show how to ensure that these bounds are as small as possible.
+4.3
+Bounding the Jensen Gap
+Jensen’s inequality states that E[𝜑(𝑋)] ≥𝜑(E[𝑋]) for a finite ran-
+dom variable 𝑋when 𝜑is a convex function [Jensen 1906]. The dif-
+ference between the two sides of the inequality, E[𝜑(𝑋)] −𝜑(E[𝑋]),
+is known as the Jensen gap. We use the method of Liao and Berg
+[2019] to derive bounds for the Jensen gap, which only requires that
+𝜑is twice differentiable (not necessarily convex). With this method,
+lower and upper bounds for the Jensen gap can be derived with
+the form 𝐽(𝜇) Var(𝑋), where 𝐽is a function of the mean 𝜇that is
+related to the curvature of the nonlinear function 𝜑. Intuitively, the
+Jensen gap bound will be smaller when 𝜑is closer to being linear,
+especially around the mean 𝜇. The bound will also be smaller when
+the variance Var(𝑋) is smaller, since the random samples will be
+exposed to less of the nonlinearity of 𝜑. In particular, the Jensen
+gap bound of Liao and Berg [2019] is
+𝐽−(𝜇) Var(𝑋) ≤E[𝜑(𝑋)] −𝜑(E[𝑋]) ≤𝐽+(𝜇) Var(𝑋) ,
+(10)
+where
+𝐽−(𝜇) =
+inf
+𝑥∈(𝑎,𝑏) ℎ(𝑥, 𝜇) and 𝐽+(𝜇) = sup
+𝑥∈(𝑎,𝑏)
+ℎ(𝑥, 𝜇) ,
+and
+ℎ(𝑥, 𝜇) = 𝜑(𝑥) −𝜑(𝜇)
+(𝑥−𝜇)2
+−𝜑′(𝜇)
+𝑥−𝜇.
+In our case, we have 𝑎= 0, 𝑏= ∞, 𝑋= ˆ𝑦, and 𝜇= 𝑦. Note that
+the variance identity applied in equation (6) is a special case of
+inequality (10), where 𝐽−= 𝐽+ = 1 for 𝜑(𝑋) = 𝑋2. Note as well that
+it is possible to derive tighter bounds on the Jensen gap using higher
+central moments than Var(𝑋) [Lee et al. 2021], but these moments
+are less interpretable for arbitrary distributions.
+We now apply the method of Liao and Berg [2019] to the min-
+imum expected loss values derived in Section 4.2. Starting with
+the 𝐿2(𝑇( ˜𝑦),𝑇( ˆ𝑦)) loss, the nonlinearity in equation (7) is 𝑇( ˆ𝑦). We
+therefore set 𝜑(𝑋) = 𝑇( ˆ𝑦) in inequality (10), giving
+𝐽−(𝑦) Var( ˆ𝑦) ≤E[𝑇( ˆ𝑦)] −𝑇(E[ ˆ𝑦]) ≤𝐽+(𝑦) Var( ˆ𝑦)
+𝑇(𝑦) + 𝐽−(𝑦) Var( ˆ𝑦) ≤E[𝑇( ˆ𝑦)] ≤𝑇(𝑦) + 𝐽+(𝑦) Var( ˆ𝑦)
+𝑇−1(𝑇(𝑦) + 𝐽−(𝑦) Var( ˆ𝑦)) ≤˜𝑦≤𝑇−1(𝑇(𝑦) + 𝐽+(𝑦) Var( ˆ𝑦)) ,
+where in the last line we have applied equation (7). Note that both
+inequalities change direction in the last line if 𝑇(𝑣) is strictly de-
+creasing. Intuitively, we have bias terms of the form 𝐽(𝑦) Var( ˆ𝑦)
+that are applied in the nonlinear space defined by𝑇(𝑣), and then the
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+Nonlinear Noise2Noise for Efficient Monte Carlo Denoiser Training
+•
+5
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+푣
+0
+1
+2
+3
+4
+5
+푇(푣)
+(a)
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+푦
+0
+10−1
+100
+101
+102
+103
+104
+105
+106
+107
+퐽(푦)
+(b)
+0
+푀
+2
+푀
+휇
+0
+푀2
+8
+푀2
+4
+Variance Bound
+(c)
+Loss Function (퐿):
+Nonlinearity (휑):
+퐿2/HDR( ·,푇( ˆ푦)):
+푇R
+푇G
+푇RG
+퐿rMSE( ˜푦, ˆ푦):
+1
+( ˆ푦+휖)2
+ˆ푦
+( ˆ푦+휖)2
+퐿rMSE( ·,푇( ˆ푦)):
+1
+(푇R+휖)2
+푇R
+(푇R+휖)2
+1
+(푇G+휖)2
+푇G
+(푇G+휖)2
+1
+(푇RG+휖)2
+푇RG
+(푇RG+휖)2
+퐿HDR( ·,푇( ˆ푦)):
+푇2
+R
+푇2
+G
+푇2
+RG
+Fig. 2. (a) Tone mapping functions used for our experimental results. See Section 5.2 for details. (b) 𝐽(𝑦) functions for the listed 𝜑( ˆ𝑦) functions resulting from
+all combinations of our studied loss functions and tone mapping functions. 𝐽−(𝑦) and 𝐽+(𝑦) functions are represented together as max(|𝐽−(𝑦)| , |𝐽+(𝑦)|),
+with 𝜖= 0.01. See Section 4.3 for details on 𝐽(𝑦) functions, and Section A.1 for a list of the 𝐽(𝑦) functions plotted above. (c) Graphical representation of the
+Bhatia-Davis inequality for bounded probability distributions with minimum 𝑚= 0 and maximum 𝑀. See Section 4.4 for details.
+results are mapped back to the linear space by 𝑇−1(𝑣). We assume
+that the 𝐽−terms do not make the resulting values negative.
+For the 𝐿rMSE(𝑇( ˜𝑦),𝑇( ˆ𝑦)) loss, we apply the same procedure as
+above to equation (8) to obtain an upper bound of
+˜𝑦≤𝑇−1 ©­
+«
+𝑇(𝑦)
+(𝑇(𝑦)+𝜖)2 + 𝐽−1
++ (𝑦) Var( ˆ𝑦)
+1
+(𝑇(𝑦)+𝜖)2 + 𝐽−2
+−(𝑦) Var( ˆ𝑦)
+ª®
+¬
+,
+where again the inequality changes direction if 𝑇(𝑣) is strictly de-
+creasing (making this the lower bound). To obtain the other bound,
+change the direction of the inequality, and swap the subscripts of
+the 𝐽(𝑦) functions. Here, 𝐽−1
++/−(𝑦) and 𝐽−2
++/−(𝑦) mean the 𝐽+/−(𝑦)
+functions for 𝜑( ˆ𝑦) =
+𝑇( ˆ𝑦)
+(𝑇( ˆ𝑦)+𝜖)2 and 𝜑( ˆ𝑦) =
+1
+(𝑇( ˆ𝑦)+𝜖)2 , respectively.
+For the 𝐿HDR(𝑇( ˜𝑦),𝑇( ˆ𝑦)) loss, we apply the same procedure to
+equation (9) to obtain an upper bound of
+˜𝑦≤𝑇−1
+𝑇(𝑦)2 + 𝐽2
++(𝑦) Var( ˆ𝑦) + 𝜖(𝑇(𝑦) + 𝐽+(𝑦) Var( ˆ𝑦))
+𝑇(𝑦) + 𝐽−(𝑦) Var( ˆ𝑦) + 𝜖
+
+,
+where again the inequality changes direction if 𝑇(𝑣) is strictly de-
+creasing (making this the lower bound). To obtain the other bound,
+change the direction of the inequality, and swap the subscripts of
+the 𝐽(𝑦) functions. Here, 𝐽2
++/−(𝑦) and 𝐽+/−(𝑦) mean the 𝐽+/−(𝑦)
+functions for 𝜑( ˆ𝑦) = 𝑇( ˆ𝑦)2 and 𝜑( ˆ𝑦) = 𝑇( ˆ𝑦), respectively.
+We can also now derive the Jensen gap bound for the original
+𝐿rMSE( ˜𝑦, ˆ𝑦) loss, as promised in Section 4.1. Applying the same pro-
+cedure as above to equation (5), we obtain a bound of
+𝑦
+(𝑦+𝜖)2 + 𝐽−1
+−(𝑦) Var( ˆ𝑦)
+1
+(𝑦+𝜖)2 + 𝐽−2
++ (𝑦) Var( ˆ𝑦) ≤˜𝑦≤
+𝑦
+(𝑦+𝜖)2 + 𝐽−1
++ (𝑦) Var( ˆ𝑦)
+1
+(𝑦+𝜖)2 + 𝐽−2
+−(𝑦) Var( ˆ𝑦) ,
+where 𝐽−1
++/−(𝑦) and 𝐽−2
++/−(𝑦) mean the 𝐽+/−(𝑦) functions for 𝜑( ˆ𝑦) =
+ˆ𝑦
+( ˆ𝑦+𝜖)2 and 𝜑( ˆ𝑦) =
+1
+( ˆ𝑦+𝜖)2 , respectively.
+The 𝐽(𝑦) functions for the tone mapping functions we evaluate
+in our experiments (see Section 5.2) are plotted in Figure 2(b), and
+are listed in Section A.1.
+4.4
+Minimizing the Jensen Gap
+In Section 4.3 we showed how to derive Jensen gap bounds for
+nonlinear functions applied to some relevant loss functions. We
+now show how to ensure that these bounds are as small as possible.
+There are two cases where the bounds derived above are small,
+namely when Var( ˆ𝑦) is small, or when𝜑( ˆ𝑦) is nearly linear [Liao and
+Berg 2019]. The first case, where Var( ˆ𝑦) is small, can be difficult to
+achieve in practice. For applications like long-exposure photography
+or Monte Carlo rendering, the noise is gradually reduced over time,
+and zero noise is only reached after an infinite amount of time. Since
+we only have a finite amount of time in practice, there will always be
+some amount of noise remaining, even in the so-called “clean” target
+images. So, in a sense, we are always doing Noise2Noise training
+in these situations, even when training with “clean” targets [Tinits
+2022]. Therefore, the Jensen gap bound is a concern even with “clean”
+targets, although the effect will be larger when the targets have a
+significant amount of noise.
+The other case where the Jensen gap is small is when 𝜑( ˆ𝑦) is
+nearly linear. This is acceptable when nonlinear functions are not
+needed, but there are practical applications where nonlinear func-
+tions are useful. Dynamic range reduction, for example, is not pos-
+sible with a linear function, yet significantly improves the stability
+of the training process. It is therefore advisable to choose nonlinear
+functions that both have practical benefits, and also have low Jensen
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+6
+•
+Andrew Tinits and Stephen Mann
+gap bounds. For example, the tone mapping functions that we use
+for our experimental results are plotted in Figure 2(a). For effective
+dynamic range reduction, the function should have more curvature
+near zero, and less towards infinity. This property also results in
+low 𝐽(𝑦) values for most of the function domain, except near zero
+(see the solid lines in Figure 2(b)). HDR images will therefore often
+have low 𝐽(𝑦) values for these tone mapping functions, since the
+clean targets 𝑦will often have large values.
+There is also a separate reason for why the Jensen gap bound
+will be small when the clean target 𝑦is small. For most practical
+purposes, 𝑦will in fact have a maximum possible value 𝑀. This
+value could come from the maximum representable value of the data
+format, the maximum possible output value of the camera sensor, or
+the maximum brightness of the light sources in a rendered scene, for
+example. Given this maximum value 𝑀, the Bhatia-Davis inequality
+lets us bound the variance Var( ˆ𝑦) to
+Var( ˆ𝑦) ≤(𝑀−𝑦)(𝑦−𝑚) = −𝑦2 + 𝑀𝑦,
+for the minimum value 𝑚= 0 [Bhatia and Davis 2000]. This bound
+forms a parabola with roots at 𝑦= 0 and 𝑦= 𝑀, and a maximum
+value of 𝑀2
+4 at 𝑦= 𝑀
+2 (see Figure 2(c)). This maximum value is also
+known as Popoviciu’s inequality [Popoviciu 1935]. Because of the
+roots of the parabola, this bound on the variance will be small for 𝑦
+values near 𝑦= 0 and 𝑦= 𝑀.
+In summary, for a low Jensen gap bound, choose a nonlinear
+function with low curvature, especially near where the clean targets
+will be located. For bounded probability distributions, the function
+can have some curvature near the minimum and maximum possible
+values. In the next section, we present our experimental results, and
+show that the practical benefits of certain nonlinear functions can
+vastly outweigh the bias that they introduce to the results.
+5
+Experimental Results
+We demonstrate the effectiveness of our method by applying it to
+a Monte Carlo denoising task. We first describe our experimental
+methods (Section 5.1), then we evaluate several combinations of loss
+functions and tone mapping functions (Section 5.2), and then we
+compare our method to training with clean references (Section 5.3).
+5.1
+Methods
+We apply our training method to an offline Monte Carlo denoising al-
+gorithm called Sample-Based Monte Carlo Denoising (SBMC) [Gharbi
+et al. 2019]. We chose SBMC as our denoiser because of its adapt-
+ability to various simple loss functions, and because of its publicly
+available test set for comparisons [Gharbi et al. 2019]. Our aim was
+to reproduce the denoising results of the SBMC authors, but using
+Noise2Noise training instead of the clean reference images used
+by the original implementation. This process involved generating
+randomized scenes for training, rendering these scenes to noisy
+image pairs with additional feature data, training SBMC models for
+various combinations of loss functions and tone mapping functions,
+and evaluating their denoising performance.
+Scene generation. The training scenes are randomly generated
+to include a wide variety of objects, materials, and light transport
+scenarios. This variety ensures that the resulting denoising models
+can handle a diverse range of scenes. We used the scene generator
+from SBMC [Gharbi et al. 2019], which generates both indoor and
+outdoor scenes. For indoor scenes, it uses a dataset of room models
+called SunCG [Song et al. 2017], which is no longer available [Rob-
+itzski 2019], so our dataset consists of only outdoor scenes. We did
+not substitute another dataset for indoor scenes to avoid any factors
+that could artificially improve our performance relative to SBMC.
+This difference could affect the ability of our models to generalize to
+indoor scenes, and should be taken into account when comparing
+the performance of our models to SBMC.
+Rendering. We used the PBRT v2 renderer [Pharr et al. 2023]
+with the patch provided by SBMC to save the Monte Carlo samples
+separately and to gather additional feature data [Gharbi et al. 2019].
+We implemented Noise2Noise training by rendering two different
+noisy images for each scene, each with different random seeds.
+One pair of noisy images is rendered for each generated scene to
+maximize the diversity of the training dataset.
+Dataset. Our goal in generating a training dataset was to match
+the dataset used by SBMC, to allow for testing our method with-
+out changing any other variables. To match SBMC, we generated a
+training dataset of around 300,000 example pairs at 128 × 128 reso-
+lution [Gharbi et al. 2019]. The exact number was 283,831 example
+pairs due to the rejection sampling of the SBMC scene generator. For
+SBMC, the noisy inputs were rendered at 8 spp and the references
+were rendered at 4096 spp [Gharbi et al. 2019]. For our training
+set, the noisy images were both rendered at 8 spp. We also gener-
+ated a second training set by repeating this process with a different
+starting seed, resulting in an additional 284,016 example pairs. To
+monitor progress during training, we also generated a validation set.
+To match SBMC, our validation set contained around 1000 exam-
+ple pairs with references rendered at 4096 spp [Gharbi et al. 2019],
+resulting in 937 example pairs after rejection sampling.
+Training. We trained our models in the same way as SBMC, with
+one small modification to improve performance. As with SBMC, the
+number of input spp was selected randomly from 2 to 8 during train-
+ing as a form of data augmentation, so that the models can handle
+different numbers of input spp [Gharbi et al. 2019]. With SBMC this
+choice is made per training example, while in our implementation
+the choice is made per training batch. This change allows for greater
+parallelism, and therefore improved training performance. SBMC
+has a fixed batch size of one because of this limitation, whereas
+with our implementation the batch size can be larger and split over
+multiple graphics processing units (GPUs). Convergence should not
+be affected since the model is still exposed to a variety of spp. In
+particular, we use a batch size of 16 split over four Nvidia Tesla T4
+GPUs with 16 GB of memory each.
+5.2
+Model Selection
+For some applications of nonlinear Noise2Noise, it might be nec-
+essary to apply our theoretical analysis to design new nonlinear
+functions. However, this is not needed for Monte Carlo denoising,
+since certain combinations of existing loss functions and tone map-
+ping functions meet our theoretical criteria and perform well in
+practice. Note that there is no universally optimal combination of
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+Nonlinear Noise2Noise for Efficient Monte Carlo Denoiser Training
+•
+7
+0
+10 k
+20 k
+30 k
+40 k
+50 k
+Iterations
+10−2
+10−1
+100
+101
+Training Loss
+(a)
+0
+10 k
+20 k
+30 k
+40 k
+50 k
+Iterations
+0
+10−2
+10−1
+100
+101
+102
+103
+Gradient Norm
+(b)
+0
+10 k
+20 k
+30 k
+40 k
+50 k
+Iterations
+10−2
+10−1
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+1010
+1011
+1012
+1013
+1014
+Validation rMSE
+(c)
+No Tone Mapping:
+퐿2( ˜푦, ˆ푦)
+퐿rMSE( ˜푦, ˆ푦)
+퐿HDR( ˜푦, ˆ푦)
+퐿∗
+HDR( ˜푦, ˆ푦)
+Ours (Target Only):
+퐿2( ˜푦,푇R( ˆ푦))
+퐿rMSE( ˜푦,푇R( ˆ푦))
+퐿HDR( ˜푦,푇R( ˆ푦))
+퐿2( ˜푦,푇G( ˆ푦))
+퐿rMSE( ˜푦,푇G( ˆ푦))
+퐿HDR( ˜푦,푇G( ˆ푦))
+퐿2( ˜푦,푇RG( ˆ푦))
+퐿rMSE( ˜푦,푇RG( ˆ푦))
+퐿HDR( ˜푦,푇RG( ˆ푦))
+Ours (Output and Target):
+퐿2(푇R( ˜푦),푇R( ˆ푦))
+퐿rMSE(푇R( ˜푦),푇R( ˆ푦))
+퐿HDR(푇R( ˜푦),푇R( ˆ푦))
+퐿2(푇G( ˜푦),푇G( ˆ푦))
+퐿rMSE(푇G( ˜푦),푇G( ˆ푦))
+퐿HDR(푇G( ˜푦),푇G( ˆ푦))
+퐿2(푇RG( ˜푦),푇RG( ˆ푦))
+퐿rMSE(푇RG( ˜푦),푇RG( ˆ푦))
+퐿HDR(푇RG( ˜푦),푇RG( ˆ푦))
+Fig. 3. (a) Training losses, (b) Gradient norms, and (c) Validation rMSE for all combinations of loss functions, tone mapping functions, and tone mapping
+placement. For the training losses, the units differ for the different loss functions, so comparisons in terms of loss value are not meaningful, and instead we are
+interested in the numerical stability of the loss landscapes. The training losses and gradient norms are smoothed with a centered median filter with a width of
+2,000 iterations. The gradient norms were clipped at a value of 103 during training, and so will not exceed this value. Training runs that end before 40,000
+iterations were terminated due to numerical errors.
+loss function and tone mapping function, because the performance
+depends on the denoising model and data distribution. Therefore,
+we choose the combination with the best experimental performance
+on our model and dataset.
+We consider the loss functions introduced in Section 4.1, which
+correspond to the losses used by SBMC and Noise2Noise [Gharbi
+et al. 2019; Lehtinen et al. 2018]. The plain 𝐿2 loss without tone
+mapping is unbiased, but is easily affected by outliers, so we do not
+expect it to perform well in practice. The 𝐿rMSE and 𝐿HDR losses are
+normalized to reduce the impact of outliers. However, our theoretical
+results show that the plain 𝐿rMSE and 𝐿HDR losses have relatively
+high Jensen gap bounds (see Figure 2(b); 𝐿HDR has a constant 𝐽(𝑦) =
+1), so we do not expect strong performance from these losses. 𝐿∗
+HDR,
+on the other hand, is both normalized and unbiased, and could
+therefore perform well if the normalization is effective.
+We consider several common tone mapping functions, includ-
+ing Reinhard’s function, 𝑇R(𝑣) = 𝑣/(1 + 𝑣) [Reinhard et al. 2010],
+which is used by SBMC [Gharbi et al. 2019], and a variant used
+by Noise2Noise that adds gamma compression, 𝑇RG(𝑣) = (𝑣/(1 +
+𝑣))1/2.2 [Lehtinen et al. 2018]. Gamma compression alone, 𝑇G(𝑣) =
+𝑣1/2.2, is also a common tone mapping function, so we have included
+it in our comparisons. These tone mapping functions, when com-
+bined with the 𝐿2 or 𝐿HDR losses, match the theoretical requirements
+described in Section 4.4 (again see Figure 2(b)), and so would be
+expected to perform well. The tone mapping functions combined
+with the 𝐿rMSE loss have relatively high Jensen gap bounds, and so
+would not be expected to perform well.
+We consider three options of where to apply tone mapping: to
+both the model output and the target image, to only the target image,
+or to neither. Tone mapping only the target image is an alternative
+version of our method that can be interpreted as asking the model
+to generate outputs in the tone mapped scale. We convert these
+tone mapped outputs back to the linear scale with the inverse tone
+mapping function for evaluation. We do not consider applying tone
+mapping to only the model output as this would be nonsensical.
+This scenario would require the model to generate huge values
+that would then be tone mapped down to reach the already large
+HDR values in the target images. SBMC and Noise2Noise both find
+that tone mapping the model input ˆ𝑥is beneficial as well [Gharbi
+et al. 2019; Lehtinen et al. 2018], so we follow that practice. SBMC
+uses a separate tone mapping function for the model input, 𝑇𝑖(𝑣) =
+1
+10 ln(1 + 𝑣), which we keep in place for all of our experiments.
+Evaluating all of the possible combinations of three loss functions,
+three tone mapping functions, and three options of where to apply
+them, would require a grid search with 27 entries. However, some of
+the entries are redundant: there is no need to try the different tone
+mapping functions when tone mapping is not used. This reduces
+the number of trials to 21. We also add a trial for the 𝐿∗
+HDR( ˜𝑦, ˆ𝑦)
+variant, bringing the total number of trials to 22. It is not necessary
+to combine 𝐿∗
+HDR with tone mapping, since the bias in that case
+would be the same as that of 𝐿2 with tone mapping, which we
+already evaluate. We trained an SBMC model using each of these
+configurations, with all other parameters remaining the same. The
+non-tone mapped rMSE loss was calculated for validation regardless
+of which loss function and tone mapping function were used for
+training. The training losses, gradient norms, and validation losses
+for each model are shown in Figure 3. The output of each model
+on a single validation image is shown in Figure 4, with additional
+validation images shown in Section A.3.
+As predicted, the plain 𝐿2, 𝐿rMSE, and 𝐿HDR loss functions do not
+perform well. 𝐿∗
+HDR also performs poorly, indicating that it does not
+have sufficient outlier rejection. In Figure 3(a), these loss functions
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+8
+•
+Andrew Tinits and Stephen Mann
+No Tone Mapping:
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿( ˜𝑦, ˆ𝑦)
+𝐿∗
+HDR
+Ours (Target Only):
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿( ˜𝑦,𝑇R ( ˆ𝑦))
+𝐿( ˜𝑦,𝑇G ( ˆ𝑦))
+𝐿( ˜𝑦,𝑇RG ( ˆ𝑦))
+Ours (Output and Target):
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿(𝑇R ( ˜𝑦),𝑇R ( ˆ𝑦))
+𝐿(𝑇G ( ˜𝑦),𝑇G ( ˆ𝑦))
+𝐿(𝑇RG ( ˜𝑦),𝑇RG ( ˆ𝑦))
+Input (8 spp)
+Reference (4096 spp)
+Fig. 4. Model outputs for a single validation image for all combinations of loss functions, tone mapping functions, and tone mapping placement
+all show large and noisy training loss values. Note that since the
+training losses have different units, we cannot compare the loss
+values directly. Instead, we are interested in the numerical stability
+of the loss landscapes. In Figure 3(b), we can see that these unstable
+loss functions lead to exploding and vanishing gradients in the case
+of 𝐿2( ˜𝑦, ˆ𝑦) and 𝐿HDR( ˜𝑦, ˆ𝑦), causing the training process to stall. This
+stalled training can be seen in Figure 3(c), where the validation losses
+fail to converge. 𝐿rMSE( ˜𝑦, ˆ𝑦) and 𝐿∗
+HDR( ˜𝑦, ˆ𝑦) show better stability in
+Figure 3(b), but have large validation loss values in Figure 3(c). The
+plain loss functions also perform poorly in Figure 4, where the
+validation images are either overly noisy or blurry.
+Turning to our method, the loss functions with tone mapping
+of the model output and target image mostly perform well, as pre-
+dicted. 𝐿2(𝑇( ˜𝑦),𝑇( ˆ𝑦)) and 𝐿HDR(𝑇( ˜𝑦),𝑇( ˆ𝑦)) have low and smooth
+training losses and gradient norms in Figures 3(a) and 3(b) for all
+of the tone mapping functions. These losses also show good de-
+noising performance in Figures 3(c) and 4, with the exception of
+the 𝑇G tone mapping function. 𝑇R and 𝑇RG both perform well here,
+which indicates that their differing 𝐽(𝑦) values for low values of 𝑦
+(see Figure 2(b)) are not important. This observation supports the
+idea that the variance bound (see Figure 2(c)) is dominant for low
+𝑦. The poor performance of 𝑇G here, despite having similar 𝐽(𝑦)
+curves to the other tone mapping functions, could be because of the
+difference shown in Figure 2(a), where 𝑇G has unbounded output
+values. The 𝐿rMSE(𝑇( ˜𝑦),𝑇( ˆ𝑦)) losses perform poorly, as predicted
+by their large 𝐽(𝑦) values. The loss functions with tone mapping
+applied to only the target image also perform poorly, with large and
+noisy training losses and gradients, and poor denoising results. The
+lowest validation loss overall is achieved by 𝐿HDR(𝑇RG( ˜𝑦),𝑇RG( ˆ𝑦)).
+This loss function also has the best qualitative denoising result, with
+more detail preserved in the background objects.
+5.3
+Comparing to Clean References
+We now compare our nonlinear Noise2Noise method to training
+with clean reference images. Training with clean references is rep-
+resented by the original SBMC implementation [Gharbi et al. 2019],
+and our method is represented by the best performing combination
+of loss function and tone mapping function from Section 5.2. We did
+not include the models with plain loss functions or tone mapping
+of only the target image in this comparison, because none of these
+models produced acceptable denoising results. We trained our model
+again for seven days to allow for any performance improvements
+that could occur over longer training times. We also trained another
+model with the same configuration for seven days on a dataset of
+twice the size composed of our original training set combined with
+our additional training set. The two datasets were shuffled together
+so that the model was exposed to examples from both datasets
+at random. Extending the training time to seven days resulted in
+slightly lower validation loss values for both models. Training with
+the larger dataset did not result in a significant improvement in
+validation loss compared with training on the original dataset.
+We performed our comparisons using the SBMC test set, which
+consists of 55 scenes collected from publicly available sources [Gharbi
+et al. 2019]. The SBMC authors provide reference images for each
+scene rendered at 1024 × 1024 resolution with 8192 spp [Gharbi
+et al. 2019]. The low-sample count input images with additional
+feature data are not provided, so we rendered these using the pro-
+vided scene files. The SBMC authors compare their work against
+five other denoisers [Bako et al. 2017; Bitterli et al. 2016; Kalan-
+tari et al. 2015; Rousselle et al. 2012; Sen and Darabi 2012]. We
+include error numbers for SBMC and the other denoisers using the
+data from Table 1 of the SBMC paper [Gharbi et al. 2019]. Com-
+paring our models to the other denoisers in this way is fair, since
+our only changes to the SBMC training set are the lack of indoor
+scenes, and rendering the references at 8 spp instead of 4096 spp
+(see Section 5.1). These changes would only serve to disadvantage
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+Nonlinear Noise2Noise for Efficient Monte Carlo Denoiser Training
+•
+9
+Table 1. Error metrics for each denoiser averaged over the SBMC test set ( bold indicates best result, italics indicates second best result)
+Input
+Ours (Orig.)
+Ours (Large)
+SBMC
+Bako
+Bako (f.t.)
+Bitterli
+Kalantari
+Rousselle
+Sen
+4 spp
+rMSE
+17.3054
+0.8619
+0.6130
+0.0482
+1.0867
+0.4932
+1.0847
+1.5814
+2.0416
+1.0352
+DSSIM
+0.4648
+0.0815
+0.0819
+0.0685
+0.1294
+0.1173
+0.1014
+0.0869
+0.1575
+0.1009
+8 spp
+rMSE
+7.4732
+0.3193
+0.2940
+0.0382
+8.1238
+0.8471
+0.9149
+1.6684
+2.0721
+0.5670
+DSSIM
+0.3995
+0.0707
+0.0700
+0.0599
+0.1190
+0.0940
+0.0818
+0.0708
+0.1175
+0.0987
+16 spp
+rMSE
+11.0416
+0.1393
+0.1052
+0.0315
+21.3297
+0.2934
+0.9488
+1.8151
+2.0481
+0.3348
+DSSIM
+0.3373
+0.0623
+0.0606
+0.0542
+0.1128
+0.0762
+0.0700
+0.0600
+0.0898
+0.0986
+32 spp
+rMSE
+16.5478
+0.0841
+0.0588
+0.0274
+31.4400
+0.1427
+1.1344
+1.7398
+1.6447
+0.2731
+DSSIM
+0.2775
+0.0572
+0.0545
+0.0510
+0.1106
+0.0619
+0.0630
+0.0516
+0.0685
+0.1005
+64 spp
+rMSE
+12.0608
+0.0601
+0.0437
+0.0261
+0.1359
+0.1553
+0.8747
+1.6228
+1.6974
+–
+DSSIM
+0.2223
+0.0547
+0.0514
+0.0494
+0.0407
+0.0536
+0.0566
+0.0393
+0.0547
+–
+128 spp
+rMSE
+1.7717
+0.0497
+0.0377
+0.0254
+0.0757
+0.1229
+0.9039
+1.7394
+1.8176
+–
+DSSIM
+0.0488
+0.0539
+0.0505
+0.0488
+0.0353
+0.0432
+0.0565
+0.0414
+0.0466
+–
+4
+8
+16
+32
+64
+128
+spp
+10−1
+100
+101
+rMSE
+(a)
+4
+8
+16
+32
+64
+128
+spp
+10−1
+DSSIM
+(b)
+Input
+Ours (Orig.)
+Ours (Large)
+SBMC
+Bako
+Bako (f.t.)
+Biterli
+Kalantari
+Rousselle
+Sen
+Fig. 5. (a) rMSE and (b) DSSIM error metrics for each denoiser at various input samples per pixel (spp), averaged over the SBMC test set
+our models relative to SBMC and the other denoisers. Two error
+metrics are used for comparison: rMSE, and structural dissimilarity
+index DSSIM = 1 −SSIM [Wang et al. 2004]. Both of these metrics
+are used without tone mapping, and are computed so that lower
+values are better. The results are shown in Table 1 and Figure 5.
+Some example outputs from our models and SBMC are shown in
+Figure 1 and Section A.3. Outputs from the other denoisers are in
+the SBMC supplemental data [Gharbi et al. 2019].
+Table 1 and Figure 5 show that the original SBMC implementation
+achieved the best rMSE results for each of the input sample counts.
+SBMC also achieved the best DSSIM results for the lower sample
+counts, with some of the other denoisers taking the lead at higher
+sample counts. Both of our models produced results that are close
+to SBMC for all sample counts in terms of DSSIM. The results are
+close for rMSE at higher sample counts, and about an order of
+magnitude larger at lower sample counts. Our model trained on
+the larger dataset performed better than our original model in all
+cases but one. This difference from the validation results can be
+explained by the validation and test sets coming from different
+distributions. Training with even more noisy data is a promising
+direction for future work. In fact, the Noise2Noise authors were able
+to surpass the performance of training with clean references for
+a different denoising task [Lehtinen et al. 2018]. Compared to the
+other denoising methods, our models came in second after SBMC in
+the majority of cases where SBMC had the best performance. This
+performance was achieved despite our models being trained only
+on outdoor scenes (see Section 5.1) while being evaluated on a test
+set that includes many indoor scenes. Figure 1 shows outputs from
+our models and SBMC on a single test scene. Our models compare
+well to SBMC, with all three models reducing the rMSE of the noisy
+input to a single-digit percentage of its original value. In this case,
+our model trained on the original dataset slightly outperforms our
+model trained on the larger dataset.
+6
+Limitations and Conclusions
+In this work, we showed that nonlinear functions can be effectively
+applied to the noisy target images in Noise2Noise training. We
+presented a theoretical framework for deriving bounds on the bias
+introduced by this method, and demonstrated that the bias can
+be negligible compared to the practical benefits. To summarize:
+choose nonlinear functions with low curvature near the clean target
+locations. For bounded distributions, some curvature is allowable
+near the minimum and maximum values. The main limitation of our
+theoretical approach is that characterizing the Jensen gap bound
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+10
+•
+Andrew Tinits and Stephen Mann
+analytically is only possible for simple loss functions and nonlinear
+functions. However, if the bound is not tractable analytically, it may
+still be possible to evaluate numerically or experimentally. We look
+forward to future works that demonstrate more applications of our
+nonlinear Noise2Noise method.
+We demonstrated our method on the denoising of Monte Carlo
+rendered images. We applied our theoretical framework to show that
+certain combinations of loss functions and tone mapping functions
+can reduce the effect of outliers while introducing minimal bias to
+the results. Our nonlinear Noise2Noise method makes it possible to
+train complex Monte Carlo denoising models for varied scenes from
+only noisy training data. Our denoising results approach those of
+the original implementation trained with clean reference images,
+but our models are trained on 512× fewer reference samples. We
+hope that future works will further improve the performance of our
+nonlinear method by training with even more noisy data, possibly
+even exceeding the performance of training with clean references.
+Acknowledgments
+Thank you to Morgan McGuire, Yuri Boykov, and the anonymous
+reviewers for their helpful comments.
+This research was funded in part by NSERC (the Natural Sciences
+and Engineering Research Council of Canada), the University of
+Waterloo, and David R. Cheriton. Computing resources for this
+research were provided in part by Compute Ontario and the Digital
+Research Alliance of Canada.
+References
+Jonghee Back, Binh-Son Hua, Toshiya Hachisuka, and Bochang Moon. 2020. Deep
+combiner for independent and correlated pixel estimates. ACM Transactions on
+Graphics 39, 6 (Nov. 2020), 242:1–242:12. doi:10.1145/3414685.3417847
+Jonghee Back, Binh-Son Hua, Toshiya Hachisuka, and Bochang Moon. 2022. Self-
+Supervised Post-Correction for Monte Carlo Denoising. In ACM SIGGRAPH 2022
+Conference Proceedings (SIGGRAPH ’22). Association for Computing Machinery, New
+York, NY, USA, 1–8. doi:10.1145/3528233.3530730
+Steve Bako, Thijs Vogels, Brian McWilliams, Mark Meyer, Jan Novák, Alex Harvill,
+Pradeep Sen, Tony DeRose, and Fabrice Rousselle. 2017. Kernel-Predicting Convolu-
+tional Networks for Denoising Monte Carlo Renderings. ACM Transactions on Graph-
+ics (Proceedings of SIGGRAPH 2017) 36, 4 (July 2017). doi:10.1145/3072959.3073708
+Joshua D. Batson and Loic A. Royer. 2019.
+Noise2Self: Blind Denoising by Self-
+Supervision. ICML (2019). http://proceedings.mlr.press/v97/batson19a.html
+Rajendra Bhatia and Chandler Davis. 2000. A Better Bound on the Variance. The
+American Mathematical Monthly 107, 4 (April 2000), 353–357. doi:10.1080/00029890.
+2000.12005203 Publisher: Taylor & Francis.
+Benedikt Bitterli, Fabrice Rousselle, Bochang Moon, José A. Iglesias-Guitián, David
+Adler, Kenny Mitchell, Wojciech Jarosz, and Jan Novák. 2016. Nonlinearly Weighted
+First-order Regression for Denoising Monte Carlo Renderings. Computer Graphics
+Forum 35, 4 (July 2016), 107–117. doi:10.1111/cgf.12954
+Ashish Bora, Eric Price, and Alexandros G. Dimakis. 2018. AmbientGAN: Generative
+models from lossy measurements. In ICLR.
+https://openreview.net/forum?id=
+Hy7fDog0b
+Antoni Buades, Bartomeu Coll, and Jean-Michel Morel. 2005. A non-local algorithm
+for image denoising. In 2005 IEEE Computer Society Conference on Computer Vision
+and Pattern Recognition (CVPR’05), Vol. 2. IEEE, 60–65. doi:10.1109/CVPR.2005.38
+Chakravarty R. Alla Chaitanya, Anton S. Kaplanyan, Christoph Schied, Marco Salvi,
+Aaron Lefohn, Derek Nowrouzezahrai, and Timo Aila. 2017. Interactive reconstruc-
+tion of Monte Carlo image sequences using a recurrent denoising autoencoder. ACM
+Transactions on Graphics (TOG) 36, 4 (2017), 98. doi:10.1145/3072959.3073601
+Bingyi Chen, Zengyu Liu, Li Yuan, Zhitao Liu, Yi Li, Guan Wang, and Ning Xie. 2023.
+Monte Carlo Denoising via Multi-scale Auxiliary Feature Fusion Guided Trans-
+former. In SIGGRAPH Asia 2023 Technical Communications (SA ’23). Association for
+Computing Machinery, New York, NY, USA, 1–4. doi:10.1145/3610543.3626179
+Chuhao Chen, Yuze He, and Tzu-Mao Li. 2024. Temporally Stable Metropolis Light
+Transport Denoising using Recurrent Transformer Blocks. ACM Trans. Graph. 43, 4
+(July 2024), 123:1–123:14. doi:10.1145/3658218
+In-Young Cho, Yuchi Huo, and Sung-Eui Yoon. 2021. Weakly-supervised contrastive
+learning in path manifold for Monte Carlo image reconstruction. ACM Transactions
+on Graphics 40, 4 (July 2021), 38:1–38:14. doi:10.1145/3450626.3459876
+Hajin Choi, Seokpyo Hong, Inwoo Ha, Nahyup Kang, and Bochang Moon. 2024. Online
+Neural Denoising with Cross-Regression for Interactive Rendering. ACM Trans.
+Graph. 43, 6 (Nov. 2024), 221:1–221:12. doi:10.1145/3687938
+Kostadin Dabov, Alessandro Foi, Vladimir Katkovnik, and Karen Egiazarian. 2007.
+Image Denoising by Sparse 3-D Transform-Domain Collaborative Filtering. IEEE
+Transactions on Image Processing 16, 8 (Aug. 2007), 2080–2095. doi:10.1109/TIP.2007.
+901238
+Michaël Gharbi, Tzu-Mao Li, Miika Aittala, Jaakko Lehtinen, and Frédo Durand. 2019.
+Sample-based Monte Carlo Denoising Using a Kernel-splatting Network. ACM
+Trans. Graph. 38, 4 (July 2019), 125:1–125:12. doi:10.1145/3306346.3322954
+Jie Guo, Mengtian Li, Quewei Li, Yuting Qiang, Bingyang Hu, Yanwen Guo, and Ling-Qi
+Yan. 2019. GradNet: unsupervised deep screened poisson reconstruction for gradient-
+domain rendering. ACM Transactions on Graphics 38, 6 (Nov. 2019), 223:1–223:13.
+doi:10.1145/3355089.3356538
+Yuchi Huo and Sung-eui Yoon. 2021. A survey on deep learning-based Monte Carlo
+denoising. Computational Visual Media 7, 2 (June 2021), 169–185. doi:10.1007/s41095-
+021-0209-9
+J. L. W. V. Jensen. 1906. Sur les fonctions convexes et les inégalités entre les valeurs
+moyennes. Acta Mathematica 30 (Jan. 1906), 175–193. doi:10.1007/BF02418571
+Publisher: Institut Mittag-Leffler.
+Nima Khademi Kalantari, Steve Bako, and Pradeep Sen. 2015. A Machine Learning
+Approach for Filtering Monte Carlo Noise. ACM Trans. Graph. 34, 4 (July 2015),
+122:1–122:12. doi:10.1145/2766977
+Alexander Krull, Tim-Oliver Buchholz, and Florian Jug. 2019. Noise2Void - Learning
+Denoising From Single Noisy Images. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR). 2129–2137. doi:10.1109/CVPR.2019.
+00223
+Samuli Laine, Tero Karras, Jaakko Lehtinen, and Timo Aila. 2019. High-Quality Self-
+Supervised Deep Image Denoising. In Advances in Neural Information Processing
+Systems 32 (NeurIPS 2019), Vol. 32. 6970–6980. https://proceedings.neurips.cc/paper/
+2019/hash/2119b8d43eafcf353e07d7cb5554170b-Abstract.html
+Sang Kyu Lee, Jae Ho Chang, and Hyoung-Moon Kim. 2021. Further sharpening of
+Jensen’s inequality. Statistics 55, 5 (Sept. 2021), 1154–1168. doi:10.1080/02331888.
+2021.1998052
+Jaakko Lehtinen, Jacob Munkberg, Jon Hasselgren, Samuli Laine, Tero Karras, Miika
+Aittala, and Timo Aila. 2018. Noise2Noise: Learning Image Restoration without
+Clean Data. In International Conference on Machine Learning. PMLR, 2965–2974.
+http://proceedings.mlr.press/v80/lehtinen18a.html
+J. G. Liao and Arthur Berg. 2019. Sharpening Jensen’s Inequality. The American
+Statistician 73, 3 (July 2019), 278–281. doi:10.1080/00031305.2017.1419145 Publisher:
+American Statistical Association.
+Weiheng Lin, Beibei Wang, Lu Wang, and Nicolas Holzschuch. 2020. A Detail Preserving
+Neural Network Model for Monte Carlo Denoising. Computational Visual Media 6
+(April 2020), 157–168. doi:10.1007/s41095-020-0167-7
+Weiheng Lin, Beibei Wang, Jian Yang, Lu Wang, and Ling-Qi Yan. 2021. Path-based
+Monte Carlo Denoising Using a Three-Scale Neural Network. Computer Graphics
+Forum 40, 1 (Feb. 2021), 369–381. doi:10.1111/cgf.14194
+Yifan Lu, Siyuan Fu, Xiao Hua Zhang, and Ning Xie. 2021. Denoising Monte Carlo
+renderings via a multi-scale featured dual-residual GAN. The Visual Computer 37, 9
+(Sept. 2021), 2513–2525. doi:10.1007/s00371-021-02204-4
+Yifan Lu, Ning Xie, and Heng Tao Shen. 2020. DMCR-GAN: Adversarial Denoising
+for Monte Carlo Renderings with Residual Attention Networks and Hierarchical
+Features Modulation of Auxiliary Buffers. In SIGGRAPH Asia 2020 Technical Commu-
+nications. Association for Computing Machinery, 1–4. doi:10.1145/3410700.3425426
+O. L. Mangasarian. 1965. Pseudo-Convex Functions. Journal of the Society for Industrial
+and Applied Mathematics Series A Control 3, 2 (Jan. 1965), 281–290. doi:10.1137/
+0303020 Publisher: Society for Industrial and Applied Mathematics.
+Xiaoxu Meng, Quan Zheng, Amitabh Varshney, Gurprit Singh, and Matthias Zwicker.
+2020. Real-time Monte Carlo Denoising with the Neural Bilateral Grid. In Euro-
+graphics Symposium on Rendering (EGSR). The Eurographics Association. doi:10.
+2312/sr.20201133
+Jacob Munkberg and Jon Hasselgren. 2020. Neural Denoising with Layer Embeddings.
+In Computer Graphics Forum, Vol. 39. 1–12. doi:10.1111/cgf.14049
+Geunwoo Oh and Bochang Moon. 2024. Joint self-attention for denoising Monte Carlo
+rendering. The Visual Computer 40, 7 (July 2024), 4623–4634. doi:10.1007/s00371-
+024-03446-8
+Matt Pharr, Wenzel Jakob, and Greg Humphreys. 2023. Physically Based Rendering,
+fourth edition: From Theory to Implementation. MIT Press. https://pbrt.org/
+Tiberiu Popoviciu. 1935. Sur les équations algébriques ayant toutes leurs racines réelles.
+Mathematica 9, 129-145 (1935), 20.
+Erik Reinhard, Wolfgang Heidrich, Paul Debevec, Sumanta Pattanaik, Greg Ward, and
+Karol Myszkowski. 2010. High Dynamic Range Imaging: Acquisition, Display, and
+Image-Based Lighting. Morgan Kaufmann.
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+Nonlinear Noise2Noise for Efficient Monte Carlo Denoiser Training
+•
+11
+Dan Robitzski. 2019. A startup is suing Facebook, Princeton for stealing its AI data.
+https://futurism.com/tech-suing-facebook-princeton-data
+Fabrice Rousselle, Claude Knaus, and Matthias Zwicker. 2011. Adaptive sampling and
+reconstruction using greedy error minimization. In ACM Transactions on Graphics
+(TOG), Vol. 30. ACM, 159. doi:10.1145/2024156.2024193
+Fabrice Rousselle, Claude Knaus, and Matthias Zwicker. 2012. Adaptive rendering
+with non-local means filtering. ACM Transactions on Graphics 31, 6 (Nov. 2012),
+195:1–195:11. doi:10.1145/2366145.2366214
+Pradeep Sen and Soheil Darabi. 2012. On filtering the noise from the random parameters
+in Monte Carlo rendering. ACM Transactions on Graphics 31, 3 (May 2012), 1–15.
+doi:10.1145/2167076.2167083
+Shuran Song, Fisher Yu, Andy Zeng, Angel X. Chang, Manolis Savva, and Thomas
+Funkhouser. 2017. Semantic Scene Completion from a Single Depth Image. In
+Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition
+(CVPR). 1746–1754. doi:10.1109/CVPR.2017.28
+Andrew Tinits. 2022. Learning Sample-Based Monte Carlo Denoising from Noisy Training
+Data. Master’s thesis. University of Waterloo, Waterloo, Ontario, Canada. http:
+//hdl.handle.net/10012/18071
+Vaibhav Vavilala, Rahul Vasanth, and David Forsyth. 2024. Denoising Monte Carlo
+Renders With Diffusion Models. doi:10.48550/arXiv.2404.00491
+Thijs Vogels, Fabrice Rousselle, Brian McWilliams, Gerhard Röthlin, Alex Harvill, David
+Adler, Mark Meyer, and Jan Novák. 2018. Denoising with Kernel Prediction and
+Asymmetric Loss Functions. ACM Transactions on Graphics 37, 4 (July 2018), 124:1–
+124:15. doi:10.1145/3197517.3201388
+Zhou Wang, Alan Conrad Bovik, Hamid Rahim Sheikh, and Eero P. Simoncelli. 2004.
+Image quality assessment: from error visibility to structural similarity. IEEE Trans-
+actions on Image Processing 13, 4 (April 2004), 600–612. doi:10.1109/TIP.2003.819861
+Kin-Ming Wong and Tien-Tsin Wong. 2019. Deep residual learning for denoising
+Monte Carlo renderings. Computational Visual Media 5, 3 (Sept. 2019), 239–255.
+doi:10.1007/s41095-019-0142-3
+Bing Xu, Junfei Zhang, Rui Wang, Kun Xu, Yong-Liang Yang, Chuan Li, and Rui
+Tang. 2019. Adversarial Monte Carlo denoising with conditioned auxiliary fea-
+ture modulation. ACM Transactions on Graphics 38, 6 (Nov. 2019), 224:1–224:12.
+doi:10.1145/3355089.3356547
+Zilin Xu, Qiang Sun, Lu Wang, Yanning Xu, and Beibei Wang. 2020. Unsupervised Image
+Reconstruction for Gradient-Domain Volumetric Rendering. Computer Graphics
+Forum 39, 7 (2020), 193–203. doi:10.1111/cgf.14137
+Xin Yang, Dawei Wang, Wenbo Hu, Lijing Zhao, Xinglin Piao, Dongsheng Zhou, Qiang
+Zhang, Baocai Yin, Qiang Cai, and Xiaopeng Wei. 2018. Fast Reconstruction for
+Monte Carlo Rendering Using Deep Convolutional Networks. IEEE Access 7 (Dec.
+2018), 21177–21187. doi:10.1109/ACCESS.2018.2886005
+Xin Yang, Dawei Wang, Wenbo Hu, Li-Jing Zhao, Bao-Cai Yin, Qiang Zhang, Xiao-Peng
+Wei, and Hongbo Fu. 2019. DEMC: A Deep Dual-Encoder Network for Denoising
+Monte Carlo Rendering. Journal of Computer Science and Technology 34 (Sept. 2019),
+1123–1135. doi:10.1007/s11390-019-1964-2
+Jiaqi Yu, Yongwei Nie, Chengjiang Long, Wenju Xu, Qing Zhang, and Guiqing Li. 2021.
+Monte Carlo denoising via auxiliary feature guided self-attention. ACM Transactions
+on Graphics (TOG) 40, 6 (Dec. 2021), 1–13. doi:10.1145/3478513.3480565
+Matthias Zwicker, Wojciech Jarosz, Jaakko Lehtinen, Bochang Moon, Ravi Ramamoorthi,
+Fabrice Rousselle, Pradeep Sen, Cyril Soler, and Sung-Eui Yoon. 2015. Recent
+Advances in Adaptive Sampling and Reconstruction for Monte Carlo Rendering.
+Computer Graphics Forum (Proceedings of Eurographics - State of the Art Reports) 34,
+2 (May 2015), 667–681. doi:10.1111/cgf.12592
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+12
+•
+Andrew Tinits and Stephen Mann
+A
+Appendix
+A.1
+𝐽(𝑦) Functions
+The 𝐽(𝑦) functions for all combinations of the loss functions intro-
+duced in Section 4.1 and the tone mapping functions introduced in
+Section 5.2 can be found in Table 2. In most cases, since 𝜑′( ˆ𝑦) was
+either convex or concave as shown by 𝜑′′′( ˆ𝑦) being either nonneg-
+ative or nonpositive, we were able to use Lemma 1 of Liao and Berg
+[2019] to easily calculate the 𝐽(𝑦) functions as limits of ℎ(𝑥,𝑦). In
+all of these cases, we had lim𝑥→∞ℎ(𝑥,𝑦) = 0, and lim𝑥→0 ℎ(𝑥,𝑦)
+gave the single 𝐽(𝑦) function. However, there were also several
+cases where 𝜑′( ˆ𝑦) was not convex or concave, and so we had to
+solve for inf𝑥∈(0,∞) ℎ(𝑥,𝑦) and sup𝑥∈(0,∞) ℎ(𝑥,𝑦) directly. In these
+cases, there was both a 𝐽−(𝑦) and a 𝐽+(𝑦) function. In each case,
+one of these functions was again found at lim𝑥→0 ℎ(𝑥,𝑦). For the
+other 𝐽(𝑦) function, we solved
+𝜕
+𝜕𝑥ℎ(𝑥,𝑦) = 0 for 𝑥to find the single
+critical point, verified that the critical point was the single global
+minimum or maximum using a first partial derivative test for pseu-
+doconvexity as in Section 4.1, and then substituted that 𝑥value into
+ℎ(𝑥,𝑦). The ∗entries in Table 2 represent instances where we were
+unable to solve
+𝜕
+𝜕𝑥ℎ(𝑥,𝑦) = 0 analytically. In these instances, we
+were still able to find the 𝐽+(𝑦) values numerically, and these results
+are included in Figure 2(b).
+A.2
+Finite Data
+We now derive a result for finite data similar to the one in Section 3
+of the Noise2Noise Supplemental Material [Lehtinen et al. 2018],
+but adapted for our nonlinear Noise2Noise method. We have 𝑁
+clean targets 𝑦𝑖, 𝑁noisy targets ˆ𝑦𝑖, and 𝑁error terms 𝑒𝑖for a finite
+number 𝑁. The ˆ𝑦𝑖are random variables defined such that each
+E[ ˆ𝑦𝑖] = 𝑦𝑖, and the 𝑒𝑖are random variables that model the error
+introduced by the nonlinearity of the loss function. The expected
+squared error between the means of the𝑦𝑖and ( ˆ𝑦𝑖+𝑒𝑖) terms is then
+E
+
+ 
+1
+𝑁
+∑︁
+𝑖
+𝑦𝑖−1
+𝑁
+∑︁
+𝑖
+( ˆ𝑦𝑖+ 𝑒𝑖)
+!2
+= 1
+𝑁2
+©­
+«
+ ∑︁
+𝑖
+𝑦𝑖
+!2
+−2
+ ∑︁
+𝑖
+𝑦𝑖
+!
+E
+"∑︁
+𝑖
+( ˆ𝑦𝑖+ 𝑒𝑖)
+#
++ E
+
+ ∑︁
+𝑖
+( ˆ𝑦𝑖+ 𝑒𝑖)
+!2
+ª®
+¬
+= 1
+𝑁2
+©­
+«
+ ∑︁
+𝑖
+𝑦𝑖
+!2
+−2
+ ∑︁
+𝑖
+𝑦𝑖
+!
+E
+"∑︁
+𝑖
+ˆ𝑦𝑖
+#
+−2
+ ∑︁
+𝑖
+𝑦𝑖
+!
+E
+"∑︁
+𝑖
+𝑒𝑖
+#
++ E
+
+ ∑︁
+𝑖
+ˆ𝑦𝑖
+!2
++ 2 E
+"∑︁
+𝑖
+ˆ𝑦𝑖
+∑︁
+𝑖
+𝑒𝑖
+#
++ E
+
+ ∑︁
+𝑖
+𝑒𝑖
+!2
+ª®
+¬
+= 1
+𝑁2
+ 
+Var
+ ∑︁
+𝑖
+ˆ𝑦𝑖
+!
++ 2 Cov
+ ∑︁
+𝑖
+ˆ𝑦𝑖,
+∑︁
+𝑖
+𝑒𝑖
+!
++ Var
+ ∑︁
+𝑖
+𝑒𝑖
+!
++ E
+"∑︁
+𝑖
+𝑒𝑖
+#2
+ª®
+¬
+= 1
+𝑁2
+©­
+«
+Var
+ ∑︁
+𝑖
+( ˆ𝑦𝑖+ 𝑒𝑖)
+!
++ E
+"∑︁
+𝑖
+𝑒𝑖
+#2
+ª®
+¬
+= 1
+𝑁
+ 
+1
+𝑁
+∑︁
+𝑖
+∑︁
+𝑗
+Cov( ˆ𝑦𝑖+ 𝑒𝑖, ˆ𝑦𝑗+ 𝑒𝑗)
+!
++
+ 
+1
+𝑁
+∑︁
+𝑖
+E[𝑒𝑖]
+!2
+= 1
+𝑁
+ 
+1
+𝑁
+∑︁
+𝑖
+Var( ˆ𝑦𝑖+ 𝑒𝑖)
+!
++
+ 
+1
+𝑁
+∑︁
+𝑖
+E[𝑒𝑖]
+!2
+,
+where the last line is a simplification that is valid when the ( ˆ𝑦𝑖+ 𝑒𝑖)
+terms are uncorrelated. We can see from the last two lines above that
+the expected error is composed of two overall terms: a variance term
+and a bias term. The error from training with noisy targets ˆ𝑦𝑖occurs
+entirely in the variance term, because the noisy targets have the
+correct mean E[ ˆ𝑦𝑖] = 𝑦𝑖. This average variance term decreases as
+the number of samples increases. The error from the nonlinearity of
+the loss function 𝑒𝑖occurs in both the variance and bias terms. The
+variance component decreases as the number of samples increases,
+while the bias component does not vary with the number of samples.
+A.3
+Additional Qualitative Results
+Figure 6 shows some additional copies of Figure 4 featuring different
+validation images. These images provide further evidence for the
+findings in Section 5.2. Figure 7 shows some additional outputs
+from our models and SBMC on example images from the SBMC
+test set. The first scene involves rotating spheres with motion blur
+hovering over a mirror. The zoomed-in portion shows one of the
+spheres with specular highlights and blurred textures, where the
+outputs from our models are similar to that of SBMC and to the
+reference image. The second scene contains a complicated metallic
+structure that is suspended over a reflective surface. The zoomed-
+in portion shows that our models again produce similar output
+to SBMC, capturing the details of the structure but missing some
+small areas of shadow. Both our models and SBMC over-blur some
+of the reflection of the structure. The third scene shows a Cornell
+box with matte, reflective, and refractive objects. The zoomed-in
+portion shows that the reference image is still quite noisy. All models
+produce outputs that are visually better than the reference image,
+with our models producing smaller caustics than SBMC. Both our
+models and SBMC over-blur the reflection of the purple sphere and
+miss a highlight on the glass sphere. The fourth scene features a
+house model in outdoor lighting conditions. The zoomed-in portion
+shows that our models over-blur the railing, producing outputs that
+are less sharp than SBMC. Our models also over-blur the window
+frame above the railing, although all of the models distort the part of
+the window frame that is visible through the railing. The fifth scene
+shows a classroom with light streaming in through the windows.
+The zoomed-in portion shows that the outputs are similar between
+our models and SBMC, although our models slightly over-blur the
+chair feet and the point of the shadow on the floor. The final scene is
+a bathroom lit by a diffuse light source on the far wall. The zoomed-
+in portion shows that our models produce similar output to SBMC,
+but miss some detail in the wood texture and in the reflection of
+the floor in the trash can. Both our models and SBMC over-blur the
+floor texture where it is in shadow.
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+Nonlinear Noise2Noise for Efficient Monte Carlo Denoiser Training
+•
+13
+Table 2. 𝐽(𝑦) functions for various combinations of tone mapping and loss functions. A blank space means that the function is 𝐽(𝑦) = 0. See Section A.1 for
+details on the ∗values.
+𝜑( ˆ𝑦)
+𝐽−(𝑦)
+𝐽+(𝑦)
+𝑇R =
+ˆ𝑦
+1+ ˆ𝑦
+−
+1
+(𝑦+1)2
+𝑇G = ˆ𝑦
+1
+2.2
+−
+6
+11𝑦
+17
+11
+𝑇RG = 𝑇G ◦𝑇R
+−
+11𝑦+6
+11𝑦
+17
+11 (𝑦+1)
+16
+11
+1
+( ˆ𝑦+𝜖)2
+3𝜖+𝑦
+𝜖2 (𝜖+𝑦)3
+ˆ𝑦
+( ˆ𝑦+𝜖)2
+−
+2
+(𝜖+𝑦)3
+(−𝜖+𝑦)2
+4𝜖(𝜖+𝑦)4
+1
+(𝑇R+𝜖)2
+2𝜖2𝑦+2𝜖2+3𝜖𝑦+3𝜖+𝑦
+𝜖2 (𝜖𝑦+𝜖+𝑦)3
+𝑇R
+(𝑇R+𝜖)2
+−𝜖𝑦+𝜖+𝑦+2
+(𝜖𝑦+𝜖+𝑦)3
+(𝜖+1)2 (𝜖𝑦+𝜖−𝑦)2
+4𝜖(𝜖𝑦+𝜖+𝑦)4
+1
+(𝑇G+𝜖)2
+12𝜖2𝑦+33𝜖𝑦
+16
+11 +11𝑦
+21
+11
+11𝜖2𝑦
+28
+11
+
+𝜖+𝑦
+5
+11
+3
+𝑇G
+(𝑇G+𝜖)2
+−
+2
+
+3𝜖𝑦+8𝑦
+16
+11
+
+11𝑦
+28
+11
+
+𝜖+𝑦
+5
+11
+3
+∗
+1
+(𝑇RG+𝜖)2
+22𝜖2𝑦2+12𝜖2𝑦+33𝜖𝑦
+16
+11 (𝑦+1)
+6
+11 +11𝑦
+21
+11 (𝑦+1)
+1
+11
+11𝜖2𝑦
+28
+11 (𝑦+1)
+1
+11
+
+𝜖(𝑦+1)
+5
+11 +𝑦
+5
+11
+3
+𝑇RG
+(𝑇RG+𝜖)2
+−11𝜖𝑦2 (𝑦+1)
+5
+11 +6𝜖𝑦(𝑦+1)
+5
+11 +11𝑦
+27
+11 +16𝑦
+16
+11
+11𝑦
+28
+11 (𝑦+1)
+6
+11
+
+𝜖(𝑦+1)
+5
+11 +𝑦
+5
+11
+3
+∗
+𝑇2
+R
+−
+𝑦2
+(𝑦+1)4
+
+
+1−𝑦
+(𝑦+1)3
+0 ≤𝑦≤1
+0
+1 ≤𝑦
+𝑇2
+G
+−
+1
+11𝑦
+12
+11
+𝑇2
+RG
+−
+11𝑦+1
+11𝑦
+12
+11 (𝑦+1)
+21
+11
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+14
+•
+Andrew Tinits and Stephen Mann
+No Tone Mapping:
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿( ˜𝑦, ˆ𝑦)
+𝐿∗
+HDR
+Ours (Target Only):
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿( ˜𝑦,𝑇R ( ˆ𝑦))
+𝐿( ˜𝑦,𝑇G ( ˆ𝑦))
+𝐿( ˜𝑦,𝑇RG ( ˆ𝑦))
+Ours (Output and Target):
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿(𝑇R ( ˜𝑦),𝑇R ( ˆ𝑦))
+𝐿(𝑇G ( ˜𝑦),𝑇G ( ˆ𝑦))
+𝐿(𝑇RG ( ˜𝑦),𝑇RG ( ˆ𝑦))
+Input (8 spp)
+Reference (4096 spp)
+No Tone Mapping:
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿( ˜𝑦, ˆ𝑦)
+𝐿∗
+HDR
+Ours (Target Only):
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿( ˜𝑦,𝑇R ( ˆ𝑦))
+𝐿( ˜𝑦,𝑇G ( ˆ𝑦))
+𝐿( ˜𝑦,𝑇RG ( ˆ𝑦))
+Ours (Output and Target):
+𝐿2
+𝐿rMSE
+𝐿HDR
+𝐿(𝑇R ( ˜𝑦),𝑇R ( ˆ𝑦))
+𝐿(𝑇G ( ˜𝑦),𝑇G ( ˆ𝑦))
+𝐿(𝑇RG ( ˜𝑦),𝑇RG ( ˆ𝑦))
+Input (8 spp)
+Reference (4096 spp)
+Fig. 6. Model outputs for a single validation image for all combinations of loss functions, tone mapping functions, and tone mapping placement
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+
+Nonlinear Noise2Noise for Efficient Monte Carlo Denoiser Training
+•
+15
+Input (8 spp)
+Ours (Orig.)
+Ours (Large)
+SBMC
+Reference (8192 spp)
+0.3894 (1.0000×)
+0.0026 (0.0066×)
+0.0036 (0.0091×)
+0.0019 (0.0048×)
+rMSE
+0.0139 (1.0000×)
+0.0009 (0.0657×)
+0.0010 (0.0699×)
+0.0011 (0.0793×)
+rMSE
+53.3817 (1.0000×)
+0.0649 (0.0012×)
+0.0566 (0.0011×)
+0.0359 (0.0007×)
+rMSE
+0.1740 (1.0000×)
+0.0181 (0.1042×)
+0.0312 (0.1792×)
+0.0121 (0.0694×)
+rMSE
+1.3526 (1.0000×)
+0.0552 (0.0408×)
+0.0420 (0.0311×)
+0.0185 (0.0137×)
+rMSE
+0.5258 (1.0000×)
+0.0071 (0.0134×)
+0.0068 (0.0129×)
+0.0037 (0.0070×)
+rMSE
+Fig. 7. Comparison between the outputs of our denoising models and SBMC on several test images. Columns from left to right: overview of the test image with
+the crop region outlined, noisy input rendered at 8 samples per pixel (spp), output of our original denoising model, output of our large denoising model, SBMC
+output, and reference image rendered at 8192 spp. (anim-bluespheres Copyright ©1998-2012, Matt Pharr and Greg Humphreys; Yeah Right by Keenan Crane,
+CC0 1.0; GITestSynthesizer_01 Copyright ©2019, Michaël Gharbi; Victorian Style House by MrChimp2313, CC0 1.0; Japanese Classroom by NovaAshbell,
+CC BY 3.0; Bathroom by nacimus, CC BY 3.0)
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.

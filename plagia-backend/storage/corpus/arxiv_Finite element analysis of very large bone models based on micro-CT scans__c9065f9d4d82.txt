@@ -1,0 +1,1073 @@
+FINITE ELEMENT ANALYSIS OF VERY LARGE BONE MODELS BASED ON
+MICRO-CT SCANS
+SHANI MARTINEZ-WEISSBERG1, WILL PAZNER2, ZOHAR YOSIBASH1
+1School of Mechanical Engineering, The Iby and Aladar Fleischman Faculty of Engineering, Tel-Aviv
+University, Ramat Aviv, Israel
+2Fariborz Maseeh Department of Mathematics and Statistics, Portland State University, Portland, OR
+Abstract. High-resolution voxel-based micro-finite element (µFE) models derived from µCT imaging en-
+able detailed investigation of bone mechanics but remain computationally challenging at anatomically rel-
+evant scales. This study presents a comprehensive µFE framework for large-scale biomechanical analysis
+of an intact New Zealand White (NZW) rabbit femur, integrating advanced segmentation, scalable finite
+element solvers, and experimental validation using predominantly open-source libraries. Bone geometries
+were segmented from µCT data using the MIA clustering algorithm and converted into voxel-based µFE
+meshes in Simpleware, which were solved using the open-source MFEM library with algorithms designed for
+extremely large linear elasticity systems.
+The numerical solutions were systematically verified through comparisons with a commercial finite ele-
+ment solver, Abaqus, and by evaluating the performance of full assembly and element-by-element formula-
+tions within MFEM. Models containing over 8 × 108 degrees of freedom were solved using moderate HPC
+resources, demonstrating the feasibility of anatomically realistic µFE simulations at this scale. Resolution
+effects were investigated by comparing models with voxel sizes of 20, 40, and 80 µm, revealing that 40 µm
+preserves boundary displacement and principal strain distributions with minimal bias while significantly
+reducing computational cost. Sensitivity analyses further showed that segmentation parameters influence
+the global mechanical response.
+Finally, µFE predictions were coupled with Digital Image Correlation measurements on an NZW rabbit
+femur under compression to calibrate effective bone material properties at the micron scale. The results
+demonstrate that large-scale, experimentally informed µFE modeling can be achieved using predominantly
+open-source tools, providing a robust foundation for preclinical assessment of bone mechanics and treatment-
+related risks.
+1. Introduction
+The increasing use of small-animal bone models for investigating newly developed treatments requires
+very large finite element (FE) simulations. For example, laser interstitial thermal therapy (LITT) [40, 52],
+used for the ablation of metastatic bone tumors, requires preclinical testing in animal models. The New
+Zealand White (NZW) rabbit is one of the most widely used models in orthopedic research [6, 28, 29, 31,
+36]. To predict the influence of LITT on bone strength, validated animal-specific FE models based on micro-
+computed tomography (µCT) are required [21, 56]. Due to the small size of rabbit bones, µCT imaging
+is necessary to accurately capture bone architecture [8, 13]. The mechanical response of rabbit bone is of
+particular interest because it is the smallest laboratory animal exhibiting cortical bone remodeling behavior
+comparable to humans [28, 29, 44, 45]. However, the microscale material properties of rabbit bone remain
+insufficiently characterized.
+To reliably evaluate the biomechanical response of the NZW rabbit’s femur given a µCT scan, a micro-
+finite element (µFE) analysis is performed [57], that requires a segmentation process to extract bone tissue
+from µCT scans.
+The choice of segmentation can significantly influence the resulting µFE model and,
+consequently, the predicted mechanical response [8]. Furthermore, the conversion of voxels into hexahedral
+elements leads to models containing hundreds of millions of elements, which precludes the use of conventional
+FE solvers.
+µFE models have been investigated extensively in the literature. Oliviero et al. [39], for example, gener-
+ated linear µFE models of the entire mouse tibia based on µCT scans using a single-threshold segmentation
+1
+arXiv:2512.24401v1 [physics.med-ph] 30 Dec 2025
+
+2
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+approach. Their models consisted of 8–9 million 8-noded hexahedral elements with homogeneous, isotropic
+elastic material properties (Young’s modulus 14.8 GPa, Poisson’s ratio 0.3) and were validated against uni-
+axial compression experiments. To address memory limitations, a voxel-based µFE solver was introduced
+within ParFE [24]. Using this approach, linear elastic problems with up to 1.6 × 1010 degrees of freedom
+(DOFs) were solved on 8000 CPU cores, requiring approximately 1–1.5 TB of distributed memory and achiev-
+ing solution times of about 12 minutes per linear solve. These large-scale benchmarks were non-anatomical
+and generated for weak-scaling evaluation by 3D mirroring a single trabecular bone sample embedded in
+a cubic voxel grid. Stipsitz and Pahr [54] demonstrated the feasibility of large-scale nonlinear voxel-based
+µFE analysis by extending the ParOSol framework [24] and applying it to a µCT-derived middle section of
+the human radius comprising approximately 688 million DOFs. The authors demonstrated excellent solver
+scalability and low memory usage. The analysis, however, was limited to a localized anatomical segment with
+few details of the model-generation process, and no validation was considered. Recently, Chafia et al. [10]
+presented a massively parallel finite-element framework for phase-field fracture simulations on distributed-
+memory supercomputers. Linear systems with up to 1010 DOFs were solved in a few seconds for idealized
+structured meshes, while a realistic µCT-based concrete model comprising 375 million DOFs was simulated
+using 6000 processes in approximately 69 minutes. The authors reported that simulations with more than
+12 × 106 elements required less than 190 GB of distributed memory, although total memory usage for the
+largest models was not explicitly reported. Despite these impressive computational achievements, the largest
+multi-billion-DOF results were limited to simplified geometries, and no experimental mechanical validation
+was provided.
+To the best of our knowledge, no µFE models with nearly 1 billion DOFs on complex geometries such
+as a bone have been solved using open-source software. Methods for generating and solving such huge µFE
+models of an entire organ have not been thoroughly addressed nor validated by experimental observations.
+We herein present a comprehensive methodology for generating very large µFE models of small animals’
+long bones, including the segmentation process from µCT scans, and validating the results by experimental
+observations. Novel numerical methods to expedite the computational times of the µFE models, implemented
+in MFEM [2], are presented. Sensitivity studies aimed at investigating the segmentation outcome and µCT
+resolution on the rabbit’s femur mechanical response are addressed.
+The research’s ultimate goal is to
+determine the Young modulus of the NZW rabbit femurs at the microscale, which could offer valuable
+insights into bone integrity following cancer treatments.
+This paper is structured as follows. In Section 2 we present the generation of a FE model from a µCT
+scan, including the segmentation algorithm. Two methods are presented in Section 3 to cope with the huge
+µFE model solution. Their advantages and disadvantages are discussed. We present the methodology for
+calibrating bone material properties at the micron scale by experimental observation using digital image
+correlation (DIC) in Section 4 and we conclude with a summary and insights in Section 5.
+2. Generating and Solving the µFE Model
+The workflow for generating a µFE model of a rabbit femur from µCT scans is presented. It consists of
+three main steps: scanning, segmentation and µFE model creation.
+2.1. Bone Sample. The overall algorithm is demonstrated on two NZW rabbbit samples: one from the
+Roswell Park Comprehensive Cancer Center, PDT Center, Buffalo, NY (denoted L40) and one from the
+Tel-Aviv School of Medicine (denoted L20), with institutional and legislative approvals. Soft tissue was
+carefully removed using a scalpel, and the distal end was embedded in a steel base with PMMA for gripping
+in the loading machine. See Figure 1. When not in preparation, samples were kept frozen at −20 ◦C, to
+preserve natural hydration and material properties. The L40 femur had a hole drilled in the lateral shaft for
+LITT treatment.
+2.2. µCT Imaging. Since the resolution of clinical quantitative computed tomography (QCT) is not suffi-
+cient to properly identify the thin cortical layer of the rabbit femur, these had to be µCT scanned. Figure
+2 shows the blurred boundaries of the rabbit’s femur as obtained by a clinical CT scan. Mitigating partial-
+volume effects requires at least two voxels across the thickness of the structure [8].
+To obtain a sufficient resolution of the cortical region and trabecular structure, a µCT was used, allowing
+identification of fine bone geometry [5, 7] and minimizing numerical errors in µFE models [27, 37].
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+3
+Figure 1. NZW rabbit femur sam-
+ple preparation. The samples were
+carefully separated from the rest
+of
+the
+rabbit’s
+leg,
+soft
+tissue
+was cleaned, and the samples were
+mounted into a steel block using
+PMMA.
+Figure 2. QCT scan of a NZW rab-
+bit femur with slice thickness of 0.67
+mm, spacing between slices of 0.33
+mm and pixel size of 0.11 × 0.11
+mm2.
+The same slice of CT scan
+is presented: top - as received, bot-
+tom - after HU thresholding to 750 to
+match the actual dimensions of the
+bone.
+Figure by G. Degabli, 2019
+[18].
+Prior to µCT scanning, each sample was defrosted and wrapped in a plastic film (e.g., Parafilm) [55] to
+prevent bone dehydration during the scan [47]. The femur samples were scanned using a Nikon XT H 225
+ST (Nikon Metrology, NV) with a peak voltage of 185 kV and a current of 88 µA. The first sample was
+scanned at 40 µm resolution, denoted as L40; the second was scanned at 20 µm resolution, denoted L20.
+Both scans were reconstructed in Simpleware ScanIP (Version T-2022.03; Synopsys, Inc., Mountain View,
+USA) from raw TIFF image files exported using the manufacturer’s software (Nikon CT Pro 3D), without
+filtering. As part of the reconstruction, non-relevant background voxels were removed to reduce the output
+size for downstream processing.
+The L40 scan produced 2000 cross-sectional images, capturing the entire bone structure. Image resolution
+directly affects the number of slices and scan time; consequently, increasing the resolution for the L20 sample
+reduced the detector’s field of view. To capture the full L20 sample, two overlapping scanning windows were
+used, each producing 2000 cross-sectional images. Reconstruction of the complete L20 volume in Simpleware
+involved spatial alignment of the two scans based on the known positions of the scanning stage during
+acquisition and removing irrelevant background areas. This enabled accurate 3D reconstruction of the entire
+bone at 20 µm resolution and file size minimization. Both reconstructed scans were saved in DICOM format
+for the following segmentation process.
+2.3. Segmentation and Creation of the Geometric Bone Model. Segmentation of µCT scans is
+required to create the 3D bone microgeometry by isolating bone tissue voxels from background, soft tissue and
+air. Its accuracy directly impacts the resulting geometric bone models; therefore, errors can systematically
+bias subsequent results [11, 49]. Despite its importance, a uniform segmentation standard is lacking, and the
+selection method remains subjective [8]. A commonly used segmentation approach, valued for its simplicity,
+applies a global threshold to extract bone voxels exceeding a set value from the µCT data. However, there is
+no consistent method for selecting this threshold—some studies rely on visual assessment of the scans, while
+others use histogram-based techniques [3, 12, 15, 16, 17, 19, 22, 23, 34, 35, 38, 48, 50, 51, 53]. Despite its
+popularity, using a single value to segment the whole bone structure can lead to inaccurate representation
+of structural details.
+To improve segmentation accuracy and reproducibility with minimal user input, we employed the open-
+source Medical Image Analysis (MIA) clustering algorithm developed by Wollny et al. [58]. This method
+classifies each voxel based on the gray values of its local neighborhood and is robust to background noise and
+
+4
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+(a) L40 µFE model.
+(b) L20 µFE model.
+Figure 3. Mesh and boundary conditions of the L40 and L20 µFE femur models. The
+dashed lines at the distal end represent fully constrained boundary conditions, while the
+arrows (Fz) indicate the applied compressive traction at the femoral head. Insets illustrate
+the internal trabecular architecture and voxel-based mesh resolution.
+gray value inhomogeneity, requiring minimal manual intervention [20]. The µCT DICOM files underwent
+an automated bone segmentation by MIA1 Segmentation parameters were set to 3 clusters (colors) that are
+locally refined by a 15-voxel grid for L40 and a 25-voxel grid for L20 (after manually evaluating the average
+trabecular size of 0.4 mm in Simpleware [55]). The grid size was defined to be slightly larger than the largest
+trabecular thickness to be considered. The resulting raw files were imported into Simpleware, revealing clear
+bone voxel segmentation by adjusting the wide range of gray values (GV) to distinguish only three GV levels:
+bone tissue, soft tissue, and air (background). A binary mask was created that isolates bone voxels, and
+disconnected voxels were removed.
+2.4. µFE Model. µFE models were generated from the segmented µCT images using Simpleware. Each
+bone voxel was converted into a linear 8-node hexahedral element, and boundary surfaces were identified.
+This voxel-based meshing approach produced models with a huge number of degrees of freedom (DOFs),
+requiring significant computational resources and dedicated solvers (see Fig. 3).
+The MFEM library [2, 4], designed for high-performance computing (HPC), was used to solve the µFE
+models.
+A custom script converted the Simpleware mesh output to the supported MFEM .mesh v1.x
+format. MFEM’s parallel linear elasticity solver solved the µFE model. The bone was considered as an
+isotropic linear elastic material with an assumed Young modulus of 10 GPa and a Poisson ratio of 0.3. The
+boundary conditions replicated the experimental setup with a vertical load applied to the femoral head, and
+the distal end of the shaft clamped (zero displacements). A special µFE solution technique (detailed in the
+sequel) was developed for the FE solution. Due to the extensive size of the µFE model, the visualization
+of the model results had to be specifically addressed. A custom post-processing algorithm was generated
+to compute the principal strains and extract the results only on the bone external boundary surface so
+1MIA command: mia-3dsegment-local-cmeans -i input.type -o output.type -g XX --cmeans kmeans:nc=Y where -i and
+-o specify input/output file types, nc sets the number of clusters Y, -g defines the local grid size in voxels, and -t sets the local
+threshold (default value of 0.02).
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+5
+Figure 4. Schematic flow-chart describing the generation of the µFE model from µCT
+scans of a bone.
+as to allow comparison with experimental observations, see 3.2.
+This post-processing step enables local
+visualization of the entire domain, facilitating validation by experimental data.
+Overall, the schematic workflow for generating the µFE model from µCT scans is presented in Fig. 4.
+2.5. MFEM Algorithms for the Linear Elastic Solution of Extreme-Scale µFE Models. The
+solution of such large-scale problems presents algorithmic and discretization-related challenges that have
+to be addressed. At the same time, the special structure of voxel-based models presents opportunities for
+optimization and improvement. The main challenge concerned the solution of the large sparse linear system
+of equations
+Ax = b,
+where A is the symmetric positive-definite finite element linear elasticity stiffness matrix. The size of A is
+equal to the number of degrees of freedom of the finite element space, and, on voxel-structured meshes, each
+row of A has, on average, 81 nonzeros (given a 27 point stencil and 3 solution components).
+At scale, the solution of this system by means of direct methods such as matrix factorizations is infea-
+sible. Instead, iterative methods such as conjugate gradient (CG) are typically used. To achieve scalable
+performance with the CG method, efficient application of the linear operator A is required, together with a
+preconditioner B, spectrally equivalent to A−1, to ensure convergence of the solver in a number of iterations
+that is independent of the problem size.
+In the cases considered presently, there are on the order of 109 degrees of freedom, and so the number of
+nonzeros in the system matrix is roughly 1011, requiring approximately 1 TB of memory. Furthermore, many
+finite element implementations are memory-bound, meaning that the cost of accessing memory outweighs
+the cost of performing arithmetic operations [30]. Consequently, matrix-free methods, which compute the
+action of A without explicitly forming the matrix, promise greater efficiency and better performance [32].
+However, without access to the assembled stiffness matrix, matrix-based preconditioners such as algebraic
+multigrid cannot be readily used. This has prompted the development of matrix-free preconditioners, which
+provide the action of an operator equivalent to A−1 without access to the matrix A [25, 41, 42, 43].
+To address these challenges, we describe a matrix-free algorithm for applying the elasticity operator and
+a semi-structured voxel-based coarsening algorithm for constructing a multigrid preconditioner that ensures
+fast convergence of the iterative solver.
+
+6
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+2.5.1. Matrix-free operator evaluation. To compute the action of A matrix-free, we decompose A into a
+nested product of operators (cf. partial assembly [4, 9]),
+(1)
+A = P T GT bAGP,
+where P is a parallel prolongation matrix, that represents parallel communication between mesh partitions
+distributed across MPI ranks, and G represents finite element assembly, encoding the mapping between
+element-local degrees of freedom and global degrees of freedom; the matrix bA is block-diagonal, where each
+diagonal block is the element-local stiffness matrix. The action of P and G (and their transposes) can be
+computed matrix-free using connectivity tables. In the case of voxel-structured meshes considered presently
+(with constant or piecewise-constant coefficients), all blocks of bA are identical (or multiples of each other),
+and so the storage requirements are greatly reduced. Furthermore, the action of bA can be computed very
+efficiently using batched linear algebra routines.
+2.5.2. Voxel-structured multigrid hierarchy. We consider the use of multigrid as a preconditioner for the con-
+jugate gradient method. Multigrid methods have the important property that, for a large class of problems,
+the condition number of the resulting preconditioned system remains bounded, independent of the problem
+size. Furthermore, the cost of applying the multigrid preconditioner scales linearly with the problem size,
+resulting in a solver with optimal complexity (O(N), where N is the number of degrees of freedom). Stan-
+dard multigrid methods assume that there exists a nested hierarchy of meshes T0, T1, . . . , TJ := T , resulting
+in a nested sequence of finite element spaces,
+V0
+V1
+· · ·
+VJ := Vh
+P1
+P2
+PJ
+where the prolongation operators Pi : Vi−1 →Vi are given by the natural inclusion. In this context, each
+mesh Ti is usually obtained from the coarser mesh Ti−1 through a refinement procedure.
+On large-scale voxel meshes obtained from µCT scans, a hierarchy of nested meshes is not available. The
+voxel mesh T is not obtained from coarser meshes through refinement, and T possess complicated topological
+features and small-scale geometries that make coarsening or derefinement challenging. To address this issue,
+we consider the generation of a sequence of coarse meshes Ti, starting from the original mesh T through a
+semi-structured voxel coarsening algorithm. In contrast to standard multigrid methods, the domain Ωi of
+the coarsened mesh Ti may not coincide with the problem domain Ω. Instead, we require that Ωi+1 ⊆Ωi.
+The simple voxel-structured coarsening algorithm is described in Algorithm 1.
+Algorithm 1: Semi-structured voxel coarsening
+Input: Fine mesh Tfine
+Output: Coarse mesh Tcoarse
+Let mx, my, mz denote the grid dimensions of Tfine
+nx ←⌈mx/2⌉,
+ny ←⌈my/2⌉,
+nz ←⌈mz/2⌉
+Tcoarse ←EmptyGrid(nx, ny, nz)
+for (i, j, k) in [0, mx) × [0, my) × [0, mz) do
+if IsMarked(Tfine, i, j, k) then
+i′ ←⌊i/2⌋,
+j′ ←⌊j/2⌋,
+k′ ←⌊k/2⌋
+Mark(Tcoarse, i, j, k)
+end
+end
+return Tcoarse
+The result of this coarsening procedure is a sequence of meshes T0, T1, . . . , TJ = T , which are not strictly
+nested through refinements.
+Therefore, the associated finite element spaces V0, V1, . . . , VJ = Vh are not
+nested. However, it is still possible to define natural prolongation operators Pi : Vi−1 →Vi as follows. Given
+vi−1 ∈Vi−1, Pvi−1 ∈Vi is defined by first mapping vi−1 7→˜vi, in a uniformly refined space on the potentially
+enlarged domain Ωi−1. Then, vi ∈Vi is obtained from ˜vi by restricting to Ωi and applying essential boundary
+conditions at Dirichlet boundaries.
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+7
+2.5.3. Smoothers and Chebyshev acceleration. At each level of the multigrid hierarchy, we applied a smoother.
+The voxel hierarchy allows for matrix-free computation of the action of the operator; Consequently, matrix-
+based smoothers such as Gauss–Seidel and incomplete factorizations are infeasible. Presently, we considered
+the use of block Jacobi smoothers, and their variants accelerated using Chebyshev polynomials [1, 26].
+The block Jacobi smoother is given by the action of D−1, where D is the block-diagonal part of the
+matrix A (with blocks of size d × d). Each block corresponds to all the degrees of freedom belonging to a
+given physical node in the finite element space. Note that the block-diagonal part of A can be computed
+matrix-free as follows. Let bA denote the elementwise broken operator in the decomposition (1). As noted
+previously, in the case of voxel meshes, all blocks of bA are identical, and only one element matrix needs to be
+formed. Let bD correspond to the d × d diagonal blocks of bA. Then, D = P T GT bD gives the block-diagonal
+part of A, as can be seen as follows.
+Let Λ = GP. This is a boolean matrix, mapping global unique degrees of freedom to elementwise broken
+degrees of freedom. Each broken DOF corresponds to one global DOF, and hence each row of Λ has exactly
+one nonzero entry.
+The nonzeros of each column are the broken (duplicated DOFs) corresponding to a
+global DOF. All nonzeros in a given column correspond to the broken DOFs lying in distinct elements,
+which implies that, for any i, if ΛkiΛℓi ̸= 0, then k and ℓcorrespond to distinct elements, and so bAkℓ= 0,
+since bA is elementwise block-diagonal.
+We then compute the (block-) diagonal entries of A = ΛT bAΛ,
+Aii = (ΛT bAΛ)ii =
+X
+ℓ
+Λℓi
+X
+k
+bAℓkΛki =
+X
+ℓk
+Λℓi bAℓkΛki
+=
+X
+k
+Λki bAkk
+since ΛkiΛℓi ̸= 0 for k ̸= ℓimplies bAℓk = 0,
+= (ΛT bD)ii = Dii.
+The block Jacobi smoother can be improved through the use of Chebyshev acceleration. In this context,
+a sequence of block Jacobi iterates are generated through the recurrence,
+x(0) = 0,
+x(i+1) = x(i) + D−1(b −Ax(i)).
+The mth fixed-point iterate is given by
+x(m) =
+m
+X
+j=0
+(I −D−1A)jD−1b
+= p(D−1A)D−1b,
+where the degree-m polynomial p is defined by p(t) = Pm
+j=0(1−t)j. The error associated with this fixed-point
+iteration is given by
+e(m) = x −x(m)
+= x −p(D−1A)D−1b
+= x −p(D−1A)D−1Ax
+= (I −p(D−1A)D−1A)e(0)
+= q(D−1A)e(0).
+The error reduction is characterized by the polynomial q(t) := 1 −p(t)t = (1 −t)m+1. A more effective
+smoother can be obtained by choosing a different polynomial ˜q(t) (which will correspond to a different
+iteration polynomial ˜p) to damp the high-frequency errors. If the high-frequency part of the spectrum of
+D−1A is denoted [λ∗, λmax], then ˜q(t) can be chosen such that maxt∈[λ∗,λmax] |q(t)| is minimized, under the
+constraint that ˜q(0) = 1; the solution to the minimax problem is given by (shifted) Chebyshev polynomials
+of the first kind, i.e.
+˜q(t) := Tm ((t −θ)/δ)
+Tm (−θ/δ)
+,
+θ = λmax + λ∗
+2
+,
+δ = λmax −λ∗
+2
+.
+
+8
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+→
+→
+→
+→
+Figure 5. Reduced femur model with 72,070 hexahedral elements and associated coarsened
+voxel hierarchy.
+The corresponding Chebyshev iteration is given by
+x(m)
+C
+= ˜p(D−1A)D−1b,
+where ˜p(t) = t−1(1 −˜q(t)).
+2.5.4. Performance comparison. In this section, we compare the performance, in terms of runtime, number
+of iterations, and memory usage, of the matrix-free voxel-based multigrid solver, compared with black-box
+algebraic multigrid.
+As a test problem, we consider a reduced femur voxel model, consisting of 72,070
+hexahedral elements. This mesh and voxel-coarsened versions of it are shown in Figure 5. We then perform
+ℓlevels of uniform refinement to obtain a finer mesh. A constant-coefficient linear elasticity problem was
+then solved. For this test case, we used pure displacement boundary conditions. In the case of mixed or
+traction boundary conditions, the matrix-free voxel-based coarsening algorithm exhibits somewhat degraded
+convergence; addressing this difficulty is the subject of future work.
+A comparison of memory usage and runtime for the voxel-based multigrid (VMG) algorithm and algebraic
+multigrid (AMG) is shown in Table 1. The number of conjugate gradient iterations is roughly comparable
+between the two methods. The matrix-free voxel multigrid demonstrated slightly better robustness under
+uniform mesh refinement. The most significant difference between the two methods is in the assembly time.
+Since the matrix-free method requires assembly of only a single element matrix, the assembly time on the
+finest mesh (ℓ= 3) was reduced from approximately 300 seconds to 3 × 10−4 seconds. The multigrid setup
+time was consistently faster for the voxel multigrid than algebraic multigrid; the speed-up ranges from 2.5×
+for ℓ= 1 to 4.5× for ℓ= 3. The CG solve time was roughly comparable for most cases, though with increasing
+refinement, VMG performed more favorably than AMG. For ℓ= 3, the CG solve with the voxel method was
+about 1.7× faster than with AMG. Finally, for large problems, the memory requirements are significantly
+reduced using the matrix-free method. This is because, as discussed above, the memory cost associated with
+storing the finest-level system matrix is quite large. In contrast, the matrix-free method requires storing only
+a single element matrix together with the mesh topology information required to construct the finite element
+space. At the finest level, the matrix-free method required about 3.4× less memory than the matrix-based
+method.
+3. µFE Solutions and their Verification
+As a starting point, we verified the successful implementation of MFEM for the solution of the bone
+model by comparison with the commercial FEA product Abaqus/CAE (v2022, Dassault Syst`emes Simulia
+Corp., Providence, RI, USA). For this purpose, a coarse FE model has been considered. The L20 µCT was
+resampled by merging 4×4×4 original µCT voxels (203 µm3 each) into elements of 803 µm3 each. Abaqus
+and MFEM were used to solve the same coarsened µFE model, which contained 3,593,570 linear hexahedral
+elements (4,646,535 nodes). A vertical surface traction was applied to the top surface of the femur head to
+mimic a total vertical force of 91.4 N, with the bottom surface clamped. Linear isotropic material properties
+were assigned with a E = 10 GPa and ν=0.3. Figure 6 illustrates the FE mesh with boundary conditions.
+The resampled model contains almost 14M DOFs and 12 processors were used to solve the model by both
+applications.
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+9
+Table 1. Solver performance for matrix-free voxel multigrid (VMG) and algebraic multigrid
+(AMG) on the reduced femur test case.
+ℓ
+# DOFs
+Method
+CG It.
+Assembly (s)
+Setup (s)
+Solve (s)
+Memory (GB)
+0
+3.34 × 105
+AMG
+6
+1.73 × 10−1
+4.68 × 10−2
+6.15 × 10−2
+23.9
+VMG
+6
+1.07 × 10−4
+3.39 × 10−2
+6.52 × 10−2
+23.4
+1
+2.22 × 106
+AMG
+7
+1.56 × 100
+4.54 × 10−1
+8.29 × 10−1
+29.0
+VMG
+6
+2.09 × 10−4
+1.82 × 10−1
+6.29 × 10−1
+24.7
+2
+1.58 × 107
+AMG
+7
+1.66 × 101
+4.54 × 100
+8.24 × 100
+66.0
+VMG
+6
+1.14 × 10−4
+1.55 × 100
+6.91 × 100
+33.9
+3
+1.19 × 108
+AMG
+8
+2.98 × 102
+5.91 × 101
+9.62 × 101
+354.6
+VMG
+6
+3.48 × 10−4
+1.31 × 101
+5.58 × 101
+105.4
+Figure 6. FE L20 coarse model (generated from the L20 µCT scan and boundary condi-
+tions having 3.6M linear hexahedral elements).
+The displacements and principal strains at all nodes (4,646,535 points) were compared. Fig. 7 shows the
+graphical representation of the maximum principal strains obtained by the two codes. A perfect agreement
+between the solutions was observed, as shown in the linear correlation between the two displacement mag-
+nitudes (Umag) in Fig. 8a. Because of the different algorithms for evaluating the discontinuous strain fields
+at the nodes in the two FE codes, there are minor discrepancies between the principal strains as shown in
+Fig. 8b.
+The verification outcome demonstrates the proper usage of MFEM code, allowing us to proceed to the
+huge FE model.
+3.1. Solution of Very Large-Scale µFE Models. The two huge µFE femur models, L40 and L20, are
+solved by the two MFEM algorithms presented in Section 2.5. The first uses the global stiffness matrix
+stored in memory, denoted as “Full Assembly (FA)”. The second is denoted “Element by Element (EBE)”,
+without forming the global stiffness matrix. Both algorithms are applied to the two µFE models, the L20
+and L40. The total memory usage (the sum of the peak memory used by the process on each node), total
+run time, and number of linear solver iterations are presented in Table 2. Both algorithms used 5 nodes with
+
+10
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+(a) Abaqus E1
+(b) MFEM E1
+Figure 7. Comparison between Abaqus and MFEM maximum principal strain field, E1,
+of the L20 coarsened FE model.
+(a) Displacement magnitude
+(b) Principal strains E1 and E3
+Figure 8. Comparison between Abaqus and MFEM results of the L20 coarsened FE model.
+4,646,535 neighbor data points were compared.
+a total of 192 MPI ranks (CPU cores). For the L20 model the EBE method allocated 75% less memory but
+63% more time than the FA method.
+3.2. Post-Processing. A custom post-processing algorithm was developed to compute the principal strains
+and extract the boundary data (mesh, displacements, and principal strains) from the large output files of
+the µFE models. The MFEM SubMesh interface allows efficient extraction of flagged boundary surfaces
+and robust transfer of grid functions (displacements and principal strains) between the parent mesh and its
+boundary submesh [4]. The post-processing step presented in algorithm 2 enables local visualization of the
+entire domain, facilitating validation against experimental data.
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+11
+Table 2. Memory usage, time, and residuals for the different algorithms.
+Mesh
+# of
+DOFs
+Algorithm
+Memory
+Time
+# of
+Residual
+Elements
+[GB]
+[min]
+iterations
+L20
+251,302,209
+811,375,038
+FA
+2818
+245.4
+840
+r = 9.70 × 10−9
+EBE
+692
+399.0
+2218
+r2 = 4.00 × 10−17
+L40
+39,325,803
+132,619,929
+FA
+499
+11.4
+302
+r = 9.87 × 10−9
+EBE
+159
+17.5
+709
+r2 = 1.4 × 10−18
+Algorithm 2: Post-processing
+Input: The µFE model partitioned mesh and displacement results in MFEM format
+Output: The µFE model boundary partitioned mesh and displacement and strain results in
+ParaVeiw format
+Initialize MPI;
+Load partitioned mesh and displacement data;
+Define finite element spaces;
+Compute strain tensor and principal strains;
+for each IP do
+Compute gradient of displacement;
+Symmetrize to obtain strain tensor;
+Calculate eigenvalues (principal strains);
+Extract boundary submesh;
+Interpolate displacement and strain data onto submesh;
+To compare the results between the FA and EBE solvers, the boundary surfaces from the two solutions
+were rigidly registered in CloudCompare (version 2.13.2) [14]. A custom nearest-neighbor search (fixed-
+radius pairing) ensured that only spatially corresponding points present in both models were included in
+the correlation analysis. For the L20 µFE model, all boundary nodes (∼40 M paired points) were analyzed.
+The linear correlations between the results of the FA and EBE exhibit unity slopes 1.000) and negligible
+intercepts (≈10−10), with coefficients of determination R2 = 1.00 for Umag, E1, and E3, indicating perfect
+numerical agreement between the two algorithms.
+To further verify equivalence, the L40 µFE model was also solved using both FA and EBE. All boundary
+nodes (∼10 M paired points) were included. The displacement and strain fields are visually indistinguishable
+between methods (Figure 10).
+The corresponding correlation plots showed again a slope of 1.000 with
+intercepts on the order of 10−16–10−14 and R2 = 1.00 across all quantities.
+These results confirm that FA and EBE methods produce mathematically identical boundary-level dis-
+placements and principal strains for both voxel resolutions (20µm and 40µm). No systematic bias or numer-
+ical deviation were detected.
+3.2.1. Comparison of 20 µm, 40 µm, and 80 µm Models Based on the L20 Femur. To assess the effect of
+voxel-size coarsening on the predicted displacement and strain fields, we compared the original 20 µm voxel
+model (L20) with two downsampled models of 40 µm and 80 µm voxel sizes. The raw µCT volume was
+downsampled in Simpleware, so that 2×2×2 native voxels were merged into a single 40 µm voxel, and each
+block of 4×4×4 voxels into a single 80 µm voxel. The downsampled datasets were segmented using the MIA
+clustering algorithm and converted into µFE models in Simpleware. All models were solved by MFEM under
+identical boundary conditions: a 91 N compressive load applied to the femoral head, and the shaft distal
+surface was fully clamped. Following the FE solution, only the outer-boundary nodes were retained, and
+the resulting surfaces were rigidly aligned in CloudCompare for point-wise comparison. Strain fields were
+smoothed using a Gaussian filter (radius r = 0.1 mm, σ = r/2) to obtain a continuous boundary strain field.
+Correspondence between models was established by a nearest-neighbour search: a radius of 0.04 mm yielded
+8,927,923 / 9,115,760 matched points for the 20 µm vs. 40 µm comparison, and 0.08 mm yielded 1,969,503 /
+
+12
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+Figure 9. MFEM’s L20 model results using the FE and EBE methods. Left: Displacement
+magnitude (Umag) in mm. Middle: Maximum principal strain (E1), and Right: Minimum
+principal strain (E3).
+Figure 10. MFEM’s L40 model results using the FE and EBE methods. Left: Displace-
+ment magnitude (Umag) in mm.
+Middle: Maximum principal strain (E1), and Right:
+Minimum principal strain (E3).
+1,972,701 matched points for the 20 µm vs. 80 µm comparison. Figure 11 summarizes the displacement and
+principal strain correlations for all models. Both the 40 µm and 80 µm models reproduced the displacement
+magnitude of the 20 µm reference almost perfectly. Linear regression for the 40 µm model yielded
+U40
+mag = 1.004 U 20
+mag + 6.7 × 10−4
+(R2 = 1.000),
+corresponding to a negligible slope bias of +0.4% (Fig. 12a). The 80 µm model showed similarly excellent
+agreement
+U80
+mag = 1.005 U 20
+mag −1.66 × 10−4
+(R2 = 1.000),
+indicating a slop bias of +0.5% (Fig. 12b). Thus, global displacement predictions were essentially invariant
+across the 20–80 µm range. For the Gaussian-smoothed principal strains, the 40 µm model exhibited excellent
+agreement with the 20 µm reference for both strain components (see Fig. 13a)
+E140 = 0.998 E120 + 4.6 × 10−6
+(R2 = 0.963),
+E340 = 0.999 E320 −5.9 × 10−6
+(R2 = 0.970).
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+13
+These slopes correspond to biases of -0.2% for E1 and -0.1% for E3, indicating that strain predictions at
+40 µm are close to those at 20 µm. The 80 µm model showed a slightly larger deviation (see Fig. 13b)
+E180 = 0.985 E120 + 1.75 × 10−5
+(R2 = 0.910),
+E380 = 0.999 E320 −1.67 × 10−5
+(R2 = 0.932).
+corresponding to a modest slope bias of -1.5% for E1 and -0.1% for E3, however a much larger spread in
+strains.
+In general, coarsening the µCT-derived µFE model from 20 µm to 40 µm preserved boundary displace-
+ments but had some influence (although not dramatic) on principal strain predictions with < 1% slope bias.
+Coarsening to 80 µm increased the variability between corresponding points, as reflected by the much lower
+R2 values. These results indicate that a voxel size of 40 µm is sufficient for good prediction of boundary-level
+displacements and principal strains in the NZW rabbit femur, while 80 µm remains suitable for capturing
+global behavior, but shows reduced fidelity in reproducing finer spatial variations of the strain field.
+(a) Umag, Displacement magnitude [mm].
+(b) E1, Maximum principal strains.
+(c) E3, Minimum principal strains.
+Figure 11. Visual comparison of the displacement magnitude (Umag) and principal strain
+fields (E1 and E3) for the high-resolution 20 µm, coarsened 40 µm, and 80 µm MFEM
+models. After applying identical post-processing, the tree resolutions exhibit nearly identical
+global displacement patterns and Gaussian-smoothed strain distributions.
+
+14
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+(a) 20 µm vs. 40 µm, 8,927,923 / 9,115,760 neighbor data
+points were compared.
+(b) 20 µm vs. 80 µm, 1,969,503 / 1,972,701 neighbor data
+points were compared.
+Figure 12. Displacement magnitude [mm] comparison between the MFEM’s L20 models
+at three resolutions.
+(a) 20 µm vs. 40 µm, 8,927,923 / 9,115,760 neighbor data
+points were compared.
+(b) 20 µm vs. 80 µm, 1,969,503 / 1,972,701 neighbor data
+points were compared.
+Figure 13. Principal strains E1 and E3 comparison between the MFEM’s L20 models at
+three resolutions.
+4. Sensitivity Analyses and Validation by Experimental Observations
+4.1. Comparison of L40 µFE Models Generated with Different MIA Grid Sizes. The MIA clus-
+tering algorithm [20] is a machine learning-based approach that combines two clustering algorithms with
+minimal user input. Initially, K-means clustering [33] segments µCT scans based on voxel gray values, fol-
+lowed by a fuzzy c-means algorithm [46], which iteratively estimates membership probabilities, and each
+voxel is assigned to the structure corresponding to its highest membership probability. In cases of gray value
+inhomogeneity, global clustering may lose fine details. To address this, a secondary clustering step, local
+fuzzy c-means is applied. The volume is subdivided into overlapping cubes using a user-defined grid size
+parameter (in voxel units). For each cube, local cluster membership probabilities are summed, and clusters
+falling below a threshold (default: 0.02) are ignored [20]. The final segmentation is obtained by merging
+overlapping cluster probabilities and assigning each voxel based on its highest membership probability. To
+balance fine detail segmentation and larger structures, the grid size parameter should be slightly larger than
+the largest dimension of the region of interest, such as the thickest trabecula [20]. Variations in grid size
+value affect the µFE results, thus we investigate the sensitivity of the value on the FE results.
+The L40 µCT scan with a resolution of 40 µm was used as the basis of the sensitivity investigation. The
+thickest trabecula in the neck region, representing the region of interest, measures approximately 0.4 mm.
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+15
+This corresponds to a standard grid size of 15 voxels, with 0.4 mm covering a central region of 10 voxels,
+plus an additional margin of 2.5 voxels on each side. To investigate the impact of grid size, three distinct
+sizes were applied to MIA segmentation process: 5, 15, and 25 voxels. Fig.14 shows the output for the
+three segmentations, illustrating grid size influences on detail level. Smaller grid sizes capture more details
+within the proximal section of the femur, containing trabecular structure, while fewer details are resolved
+in the dense cortical bone of the shaft distal area. Simpleware was used to create the µFE models from the
+segmented scans by removing floating voxels from the main bone body, defining the boundary surface, and
+generating the mesh. The applied traction force was carefully calibrated to each µFE mesh file, ensuring
+a 100 N vertical load applied to the femoral head, while the distal femur surface was constrained. Table 3
+presents the number of bone elements for each µFE model, referred to as L40g5, L40g15, and L40g25.
+Mesh
+# of Elements
+DOFs
+L40g5
+36,717,664
+126,004,782
+L40g15
+36,994,360
+125,246,766
+L40g25
+37,555,013
+126,149,589
+Table 3. Number of elements for each µFE model constructed by MIA segmentation with
+different grid size input after removal of unconnected islands in Simpleware.
+Figure 14. MIA’s clustering algorithm raw segmented output with various grid sizes of 5,
+15, and 25 voxels for L40 µCT scans. Left: 2D slices. Right: 3D geometry.
+The resulting µFE models were solved using MFEM. Outer-boundary nodes were extracted, and the
+principal strains were smoothed using a Gaussian filter with radius r = 0.16 mm (≈4 voxels, σ = r/2).
+Figure 15 shows the displacement magnitude and principal strain distributions for all models. The boundary
+surfaces were rigidly registered in CloudCompare and paired using a nearest-neighbor search with a 0.065 mm
+radius, yielding 8,142,302 / 11,094,022 matched points for L40g15 vs. L40g5 and 8,213,770 / 9,238,825
+matched points for L40g15 vs. L40g25. The displacement magnitude (Umag) was highly consistent across all
+three models, with negligible global differences. Linear regression between L40g5 and L40g15 produced
+Ug5
+mag = 0.974 U g15
+mag −4.5 × 10−3
+(R2 = 1.000),
+and between L40g25 and L40g15
+Ug25
+mag = 0.984 U g15
+mag −1.6 × 10−3
+(R2 = 1.000).
+
+16
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+Both slopes indicate a bias of less than −4% (Fig. 16), confirming that the global stiffness and overall
+displacement response are essentially insensitive to the segmentation grid size. In contrast, the principal
+strains exhibited higher sensitivity to the grid size parameter. After Gaussian smoothing (r = 0.16 mm),
+the linear relationships for L40g5 relative to L40g15 (Fig. 17a) were
+E1g5 = 0.943 E1g15 + 3.7 × 10−5
+(R2 = 0.924),
+E3g5 = 0.960 E3g15 −2.98 × 10−5
+(R2 = 0.949),
+corresponding to biases of −6% for E1 and −4% for E3. For L40g25 relative to L40g15 (Fig. 17b)
+E1g25 = 0.960 E1g15 + 9.97 × 10−6
+(R2 = 0.953),
+E3g25 = 0.966 E3g15 −8.29 × 10−6
+(R2 = 0.965),
+corresponding to biases of −4% for E1 and −3% for E3. Varying the MIA grid size between 5–25 voxels had
+negligible influence on the global mechanical response (displacements) and produced a modest, systematic
+deviations in the principal strains. The larger strain scatter observed for L40g5 reflects increased trabecular
+detail, whereas L40g25 yields slightly smoother and slightly higher strain amplitudes. Overall, a grid size of
+15 voxels offers a good balance: it preserves mechanically relevant strain patterns while avoiding unnecessary
+segmentation noise, and alternative grid sizes remain within a predictable bias band.
+(a) Umag, Displacement magnitude [mm].
+(b) E1, Maximum principal strains.
+(c) E3, Minimum principal strains.
+Figure 15. Visual comparison of the displacement magnitude (Umag) and principal strain
+fields (E1 and E3) for L40 model (40 µm) with different segmentation grid size: 5 (L40g5),
+15 (L40g15), and 25 (L40g25) voxels. After applying identical post-processing, the three
+segmentations exhibit nearly identical global displacement patterns and Gaussian-smoothed
+strain distributions.
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+17
+(a) L40g5 vs.
+L40g15, 8,142,302 / 11,094,022 neighbor
+data points were compared.
+(b) L40g25 vs.
+L40g15, 8,213,770 / 9,238,825 neighbor
+data points were compared.
+Figure 16. Displacement magnitude [mm] comparison between the MFEM’s L40 models
+at three MIA grid sizes.
+(a) L40g5 vs.
+L40g15, 8,142,302 / 11,094,022 neighbor
+data points were compared.
+(b) L40g25 vs.
+L40g15, 8,213,770 / 9,238,825 neighbor
+data points were compared.
+Figure 17. Principal strains E1 and E3 comparison between the MFEM’s L40 models at
+three MIA grid sizes.
+4.2. Determining NZW Rabbit’s Bone Properties. Finally, we conclude by presenting the method-
+ology for calibrating bone material properties at the micron scale by comparing experimental observation
+using DIC with the L40 µFE model. A detailed description of the experimental campaign and biomechanical
+analysis is discussed in a different publication under review.
+Two independent Digital Image Correlation (DIC) systems were employed to monitor the mechanical
+response of the rabbit femur at two regions of interest (ROIs), as illustrated in Fig. 18. The displacement
+magnitude field was computed for both ROIs, exhibiting the expected linear-elastic behavior (see Fig. 19-
+20). To isolate the deformation field from rigid-body motion, two arbitrary loading steps were selected and
+their displacement-magnitude fields were subtracted, yielding a corrected field corresponding to a 39 N load.
+The processed DIC point cloud was registered to the L40 µFE model in CloudCompare for optimal spatial
+alignment. We compared displacement magnitudes of ROI1 3,478 matched points (out of 4,280 DIC points;
+matching radius = 0.05 mm, k = 8) and ROI2 2,428 matched points (out of 2,602 DIC points; matching
+radius = 0.05 mm, k = 8) using linear regression and the root-mean-square error (RMSE). Both comparisons
+showed an almost perfect linear correlation between the L40 µFE model and the DIC fields (slope = 0.47,
+R2 ≈1.0), indicating that the DIC magnitudes are approximately 47% of the model predictions. After scaling
+the model displacements by 0.47 (Fig. 21), the agreement becomes nearly one-to-one. This implies that the
+estimated Young’s modulus is 2.1× larger than the 10 GPa value assigned in the L40 µFE simulation.
+
+18
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+(a) L40 DIC ROI1.
+(b) L40 DIC ROI2.
+Figure 18. The L40 NZW Rabbit femur, two ROI’s monitored by the DIC technique.
+Figure 19. L40 DIC ROI1: Left: Displacement magnitude versus force (Fz) at two se-
+lected points in the DIC-measured field, showing the raw displacement noise over time.
+Center: The same data after applying a time filter using a linear spline fit, which effec-
+tively smooths the random displacement fluctuations. Right: The full-field displacement
+magnitude map obtained from the DIC measurement at a certain time.
+
+FEA OF LARGE-SCALE MICRO-CT BONE MODELS
+19
+Figure 20. L40 DIC ROI2: Left: Displacement magnitude versus force (Fz) at two se-
+lected points in the DIC-measured field, showing the raw displacement noise over time.
+Center: The same data after applying a time filter using a linear spline fit, which effec-
+tively smooths the random displacement fluctuations. Right: The full-field displacement
+magnitude map obtained from the DIC measurement at a certain time.
+(a) ROI1 linear correlation.
+(b) ROI2 linear correlation.
+Figure 21. Comparison between DIC and L40 µFE model displacement magnitudes after
+rigid-body correction and registration in CloudCompare. The µFE model displacements
+were scaled by 0.47 to match the experimental response at both ROI’s, equivalent to a
+corrected Young’s modulus ∼2.1 times the assumed 10 GPa.
+A total of 3,478 in ROI1
+and 2,428 in ROI2 matched points show an almost perfect correlation (R2 ≈1.0, RMSE=
+0.00125).
+5. Summary and Conclusions
+This work presented a comprehensive voxel-based µFE framework for large-scale biomechanical analysis
+of bone, combining high-resolution imaging, advanced segmentation, scalable finite element solvers, and
+experimental validation. First, a complete pipeline for generating and solving µFE models from µCT data
+was established. Following specimen preparation and scanning, bone segmentation was performed using the
+MIA clustering algorithm, enabling robust separation of bone and non-bone phases at the voxel level. The
+segmented volumes were converted into voxel-based µFE meshes using Simpleware and solved using MFEM,
+employing algorithms specifically designed for extremely large linear elastic systems. A novel matrix-free
+voxel-based multigrid solver was developed for the solution of very large FE models without reduced storage
+requirements. The performance of the newly developed solver was compared with the black-box algebraic
+
+20
+MARTINEZ-WEISSBERG, PAZNER, YOSIBASH
+multigrid. The results demonstrate that MFEM provides a flexible and scalable platform capable of handling
+hundreds of millions of degrees of freedom while maintaining numerical robustness and solver efficiency on
+HPC systems.
+Second, the accuracy and consistency of the µFE solutions were systematically verified. A comparison
+between MFEM and the commercial finite element solver Abaqus/CAE v2022 for a largely coarsen model
+showed perfect agreement in displacement field and a minor discrepancy of approximately 2% in principal
+strain fields, validating the MFEM formulation for large-scale µFE bone models. In addition, the efficiency
+of two MFEM’s numerical approaches: full assembly and element-by-element was assessed, highlighting the
+trade-offs between memory footprint and computational time for voxel-based models. A µFE bone model
+with 811 million DOFs was solved using 192 MPI processes and 700 GB of memory in less than 5 hours,
+demonstrating the feasibility of solving anatomically realistic models at this scale. The influence of spatial
+resolution was investigated by comparing µFE models generated from the same bone sample at voxel sizes of
+20 µm, 40 µm, and 80 µm. Coarsening from 20 µm to 40 µm preserved boundary displacement and principal
+strain distributions with minimal bias (< 1%), while substantially reducing computational cost. Although
+the 80 µm model captured the global mechanical response, it exhibited increased scatter in local principal
+strain fields. Complementary sensitivity analyses examined the impact of MIA segmentation grid size (5,
+15, and 25 voxels), demonstrating that this user-defined parameter can influence the global mechanical re-
+sponse by approximately 4% and should therefore be carefully selected in resolution-dependent studies. For
+all numerical comparisons, a dedicated post-processing procedure was introduced, enabling consistent local
+comparison of displacement magnitudes and principal strains across different numerical formulations, mesh
+resolutions, and solvers by focusing on boundary-level quantities. Finally, a methodology for determining
+effective bone material properties at the micro scale was presented by coupling µFE simulations with ex-
+perimental measurements. Two independent DIC systems were used to measure displacement fields at two
+regions of interest on an NZW rabbit femur. After registering the experimental point clouds to the µFE
+models, a strong linear correlation was observed between experimentally measured and simulated displace-
+ment magnitudes, implying an effective Young’s modulus of approximately 21 GPa. A detailed description
+of the experimental campaign and biomechanical analysis is provided in a companion publication currently
+under review.
+In conclusion, this study demonstrates that MFEM is a powerful and reliable tool for large-scale biome-
+chanical µFE modeling of bone.
+When combined with robust segmentation as MIA, efficient numerical
+formulations, and carefully designed experimental validation, MFEM enables scalable, reproducible, and
+quantitatively validated simulations. The proposed framework provides a solid foundation for future inves-
+tigations of preclinical treatment-related risks, with the potential to reduce reliance on animal testing.
+Acknowledgements
+SMW and ZY thank Prof. Gal Shafistein from Roswell Park Cancer Center in Buffalo, NY, USA and
+Dr. Roni Kolerman at School of Medicine at Tel-Aviv University for providing the NZW femurs.
+WP
+acknowledges the support of NSF RTG DMS-2136228 and the computational resources provided by the
+Oregon Regional Computing Accelerator (Orca), funded by NSF CC*-2346732. ZY acknowledges the support
+of ISF-DFG (grant No. 626/25).
+References
+[1]
+M. Adams et al. “Parallel multigrid smoothing: polynomial versus Gauss–Seidel”. In: Journal of Com-
+putational Physics 188.2 (2003), pp. 593–610.
+[2]
+R. Anderson et al. “MFEM: A modular finite element methods library”. In: Computers and Mathe-
+matics with Applications 81 (2021), pp. 42–74.
+[3]
+M. Andjelkovi´c, L. Tomovi´c, and A. Ivanovi´c. “Variation in skull size and shape of two snake species
+(Natrix natrix and Natrix tessellata)”. In: Zoomorphology 135.2 (2016), pp. 243–253.
+[4]
+J. Andrej et al. “High-performance finite elements with MFEM”. In: The International Journal of High
+Performance Computing Applications (2024).
+[5]
+C. T. Badea et al. “In vivo small-animal imaging using micro-CT and digital subtraction angiography”.
+In: Physics in Medicine and Biology 53.19 (2008), R319–R350.
+
+REFERENCES
+21
+[6]
+C. Bakici et al. “Three dimensional modeling and quantitative analysis of long bone parameters of
+rabbit using micro-computed tomography”. In: Iranian Journal of Veterinary Research 22.2 (2021),
+pp. 140–145.
+[7]
+S. J. Blocker et al. “The impact of respiratory gating on improving volume measurement of murine
+lung tumors in micro-CT imaging”. In: PLoS ONE 15.2 (2020).
+[8]
+M. L. Bouxsein et al. “Guidelines for assessment of bone microstructure in rodents using micro-
+computed tomography”. In: Journal of Bone and Mineral Research 25.7 (2010), pp. 1468–1486.
+[9]
+J. Brown et al. “libCEED: Fast algebra for high-order element-based discretizations”. In: Journal of
+Open Source Software 6.63 (2021), p. 2945.
+[10]
+Z. Chafia et al. “Massively parallel phase field fracture simulations on supercomputers: towards multi-
+billion degree-of-freedom computations”. In: Advanced Modeling and Simulation in Engineering Sci-
+ences 11.1 (2024).
+[11]
+Y. Chevalier et al. “Validation of a voxel-based FE method for prediction of the uniaxial apparent
+modulus of human trabecular bone using macroscopic mechanical tests and nanoindentation”. In:
+Journal of Biomechanics 40.15 (2007), pp. 3333–3340.
+[12]
+B. A. Christiansen. “Effect of micro-computed tomography voxel size and segmentation method on
+trabecular bone microstructure measures in mice”. In: Bone Reports 5 (2016), pp. 136–140.
+[13]
+D. P. Clark and C. T. Badea. “Micro-CT of rodents: State-of-the-art and future perspectives”. In:
+Physica Medica 30.6 (2014), pp. 619–634.
+[14]
+CloudCompare. Version 2.13.2. 2024. url: http://www.cloudcompare.org/.
+[15]
+M. N. Coleman and M. W. Colbert. “Technical note: CT thresholding protocols for taking measure-
+ments on three-dimensional models”. In: American Journal of Physical Anthropology 133.1 (2007),
+pp. 723–725.
+[16]
+R. Cornette et al. “Does shape co-variation between the skull and the mandible have functional con-
+sequences? A 3D approach for a 3D problem”. In: Journal of Anatomy 223.4 (2013), pp. 329–336.
+[17]
+E. Dall’Ara et al. “A calibration methodology of QCT BMD for human vertebral body with registered
+micro-CT images”. In: Medical Physics 38.5 (2011), pp. 2602–2608.
+[18]
+Degabli Gal, Yosibash Zohar, and Lachman-Senesh N. Mechanical properties characterization of rabbit
+bones. Final project. Tel Aviv University, 2019.
+[19]
+T. Dufresne. “Segmentation techniques for analysis of bone by three-dimensional computed tomo-
+graphic imaging”. In: Technology and Health Care 6 (1998), pp. 351–359.
+[20]
+C. J. Dunmore, G. Wollny, and M. M. Skinner. “MIA-clustering: A novel method for segmentation of
+paleontological material”. In: PeerJ 6 (2018), e4374.
+[21]
+K. Engelke, B. van Rietbergen, and P. Zysset. “FEA to measure bone strength: a review”. In: Clinical
+Reviews in Bone and Mineral Metabolism 14.1 (2016), pp. 26–37.
+[22]
+R. J. Fajardo et al. “Nonhuman anthropoid primate femoral neck trabecular architecture and its
+relationship to locomotor mode”. In: Anatomical Record 290.4 (2007), pp. 422–436.
+[23]
+R. J. Fajardo, T. M. Ryan, and J. Kappelman. “Assessing the accuracy of high-resolution X-ray com-
+puted tomography of primate trabecular bone by comparisons with histological sections”. In: American
+Journal of Physical Anthropology 118.1 (2002), pp. 1–10.
+[24]
+C. Flaig and P. Arbenz. “A scalable memory efficient multigrid solver for micro-finite element analyses
+based on CT images”. In: Parallel Computing. Vol. 37. 12. 2011, pp. 846–854.
+[25]
+M. Franco et al. “High-Order Matrix-Free Incompressible Flow Solvers with GPU Acceleration and
+Low-Order Refined Preconditioners”. In: Computers & Fluids 203 (2020), p. 104541.
+[26]
+G. H. Golub and R. S. Varga. “Chebyshev semi-iterative methods, successive overrelaxation iterative
+methods, and second order Richardson iterative methods”. In: Numerische Mathematik 3.1 (1961),
+pp. 147–156.
+[27]
+R. E. Guldberg, G. T. Charras, and S. J. Hollister. “The accuracy of digital image-based finite element
+models”. In: Journal of Biomechanical Engineering 120.2 (1998), pp. 289–295.
+[28]
+K. D. Harrison et al. “Cortical bone porosity in rabbit models of osteoporosis”. In: Journal of Bone
+and Mineral Research 35.11 (2020), pp. 2211–2228.
+[29]
+K. D. Harrison et al. “Direct assessment of rabbit cortical bone basic multicellular unit longitudinal
+erosion rate: A 4D synchrotron-based approach”. In: Journal of Bone and Mineral Research 37.11
+(2022), pp. 2244–2258.
+
+22
+REFERENCES
+[30]
+T. Kolev et al. “Efficient exascale discretizations: high-order finite element methods”. In: The Inter-
+national Journal of High Performance Computing Applications (2021), pp. 527–552.
+[31]
+Y. Li et al. “Bone defect animal models for testing efficacy of bone substitute biomaterials”. In: Journal
+of Orthopaedic Translation 3.3 (2015), pp. 95–104.
+[32]
+K. Ljungkvist. “Matrix-free finite-element operator application on graphics processing units”. In: Euro-
+Par 2014: Parallel Processing Workshops. Vol. 8806. Lecture Notes in Computer Science. Springer
+International Publishin, 2014, pp. 450–461.
+[33]
+S. Lloyd. “Least squares quantization in PCM”. In: IEEE Transactions on Information Theory 28.2
+(1982), pp. 129–137.
+[34]
+M. Maga et al. “Preliminary observations on the calcaneal trabecular microarchitecture of extant
+large-bodied hominoids”. In: American Journal of Physical Anthropology 129.3 (2006), pp. 410–417.
+[35]
+L. Meinel et al. “Silk implants for the healing of critical size bone defects”. In: Bone 37.5 (2005),
+pp. 688–698.
+[36]
+J. G. Neyt, J. A. Buckwalter, and N. C. Carroll. “Use of animal models in musculoskeletal research”.
+In: The Iowa Orthopaedic Journal 18 (1998), pp. 118–123.
+[37]
+G. L. Niebur et al. “Convergence behavior of high-resolution finite element models of trabecular bone”.
+In: Journal of Biomechanical Engineering 121.6 (1999), pp. 629–635.
+[38]
+S. Oliviero et al. “Effect of integration time on the morphometric, densitometric and mechanical prop-
+erties of the mouse tibia”. In: Journal of Biomechanics 65 (2017), pp. 203–211.
+[39]
+S. Oliviero et al. “Optimization of the failure criterion in micro-finite element models of the mouse
+tibia for the non-invasive prediction of its failure load in preclinical applications”. In: Journal of the
+Mechanical Behavior of Biomedical Materials 113 (2021), p. 104190.
+[40]
+B. Patel and A. H. Kim. “Laser Interstitial Thermal Therapy”. In: Missouri Medicine 117.1 (2020),
+pp. 50–55.
+[41]
+W. Pazner. “Efficient low-order refined preconditioners for high-order matrix-free continuous and dis-
+continuous Galerkin methods”. In: SIAM Journal on Scientific Computing 42.5 (2020), A3055–A3083.
+[42]
+W. Pazner, T. Kolev, and J.-S. Camier. “End-to-end GPU acceleration of low-order-refined precon-
+ditioning for high-order finite element discretizations”. In: The International Journal of High Perfor-
+mance Computing Applications 37.5 (2023), pp. 578–599.
+[43]
+W. Pazner, T. Kolev, and P. S. Vassilevski. “Matrix-free high-performance saddle-point solvers for
+high-order problems in H(div)”. In: SIAM Journal on Scientific Computing 46.3 (2024), B179–B204.
+[44]
+U. E. Pazzaglia et al. “Anatomy of the intracortical canal system: Scanning electron microscopy study
+in rabbit femur”. In: Clinical Orthopaedics and Related Research 467.9 (2009), pp. 2446–2456.
+[45]
+U. E. Pazzaglia et al. “Design, morphometry and development of the secondary osteonal system in the
+femoral shaft of the rabbit”. In: Journal of Anatomy 211.3 (2007), pp. 303–312.
+[46]
+D. L. Pham and J. L. Prince. “An adaptive fuzzy C-means algorithm for image segmentation in the
+presence of intensity inhomogeneities”. In: Pattern Recognition Letters 20.1 (1999), pp. 57–68.
+[47]
+A. du Plessis et al. “Laboratory X-ray Micro-Computed Tomography: A User Guideline for Biological
+Samples”. In: GigaScience 6.6 (2017), pp. 1–11.
+[48]
+S. Rajagopalan et al. “Optimal segmentation of microcomputed tomographic images of porous tissue-
+engineering scaffolds”. In: Journal of Biomedical Materials Research - Part A 75.4 (2005), pp. 877–
+887.
+[49]
+K. Rathnayaka et al. “Effects of CT image segmentation methods on the accuracy of long bone 3D
+reconstructions”. In: Medical Engineering and Physics 33.2 (2011), pp. 226–233.
+[50]
+T. W. Ridler and S. Calvard. “Picture thresholding using an iterative selection method”. In: IEEE
+Transactions on Systems, Man, and Cybernetics 8.8 (1978), pp. 630–632.
+[51]
+T. M. Ryan and R. A. Ketcham. “Femoral head trabecular bone structure in two omomyid primates”.
+In: Journal of Human Evolution 43.2 (2002), pp. 241–263.
+[52]
+U. Salem et al. “Neurosurgical Applications of MRI-Guided Laser Interstitial Thermal Therapy (LITT)”.
+In: Cancer Imaging 19.65 (2019).
+[53]
+C. F. Spoor, F. W. Zonneveld, and G. A. Macho. “Linear measurements of cortical bone and den-
+tal enamel by computed tomography: Applications and problems”. In: American Journal of Physical
+Anthropology 91.4 (1993), pp. 469–484.
+
+REFERENCES
+23
+[54]
+M. Stipsitz and D. H. Pahr. “An efficient solver for large-scale simulations of voxel-based structures
+using a nonlinear damage material model”. In: Proceedings of the 6th European Conference on Com-
+putational Mechanics (ECCM 6) and 7th European Conference on Computational Fluid Dynamics
+(ECFD 7). Glasgow, UK, 2018.
+[55]
+I. Synopsys. Simpleware 3D Image Processing and Model Generation Software. 2025. url: https:
+//www.synopsys.com/simpleware.html.
+[56]
+N. Trabelsi et al. “Patient-specific finite element analysis of the human femur-A double-blinded biome-
+chanical validation”. In: Journal of Biomechanics 44.9 (2011), pp. 1666–1672.
+[57]
+B. Van Rietbergen et al. “A new method to determine trabecular bone elastic properties and loading
+using micromechanical finite-element models”. In: Journal of Biomechanics 28.1 (1995), pp. 69–81.
+[58]
+G. Wollny et al. “MIA - A free and open source software for gray scale medical image analysis”. In:
+Source Code for Biology and Medicine 8.1 (2013).

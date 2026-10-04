@@ -1,0 +1,1042 @@
+HaluNet: Multi-Granular Uncertainty Modeling
+for Efficient Hallucination Detection in LLM
+Question Answering
+Chaodong Tong1,2, Qi Zhang3, Jiayang Gao4, Lei Jiang1, Yanbing Liu1,2, and
+Nannan Sun1∗,2
+1Institute of Information Engineering, Chinese Academy of Sciences, Beijing, China
+2School of Cyber Security, University of Chinese Academy of Sciences, Beijing, China
+{tongchaodong, jianglei, liuyanbing, sunnannan}@iie.ac.cn
+3China Industrial Control Systems Cyber Emergency Response Team, Beijing, China
+bonniezhangqi@126.com
+4Beijing Institute of Computer Technology and Application, Beijing, China
+nemo830218@gmail.com
+Abstract. Large Language Models (LLMs) excel at question answer-
+ing (QA) but often generate hallucinations, including factual errors or
+fabricated content. Detecting hallucinations from internal uncertainty
+signals is attractive due to its scalability and independence from exter-
+nal resources. Existing methods often aim to accurately capture a single
+type of uncertainty while overlooking the complementarity among dif-
+ferent sources, particularly between token-level probability uncertainty
+and the uncertainty conveyed by internal semantic representations, which
+provide complementary views on model reliability. We present HaluNet,
+a lightweight and trainable neural framework that integrates multi gran-
+ular token level uncertainties by combining semantic embeddings with
+probabilistic confidence and distributional uncertainty. Its multi branch
+architecture adaptively fuses what the model knows with the uncertainty
+expressed in its outputs, enabling efficient one pass hallucination detec-
+tion. Experiments on SQuAD, TriviaQA, and Natural Questions show
+that HaluNet delivers strong detection performance and favorable com-
+putational efficiency, with or without access to context, highlighting its
+potential for real time hallucination detection in LLM based QA systems.
+Keywords: Large Language Models · Question Answering · Hallucina-
+tion Detection · Token-Level Signals · Multi-Granular Uncertainty
+1
+Introduction
+Question answering (QA) is a core capability of modern large language models
+(LLMs), powering applications from search engines to conversational assistants
+and autonomous LLM agents. While LLMs achieve strong performance on open-
+domain QA [12,24,30], they often produce hallucinations in the form of factual
+errors or fabricated content, which compromise reliability [4,12]. Traditional de-
+tection methods relying on external knowledge bases or multi-step verification
+arXiv:2512.24562v1 [cs.CL] 31 Dec 2025
+
+2
+C. Tong et al.
+Question:
+What is the capital of Australia? 
+Correct Answer:
+Canberra is the capital of Australia. 
+LLM Answer:
+Sydney is the capital of Australia. 
+likehood of "Sydney"
+Model
+Confidence
+Model
+Uncertainty
+entropy of tokens
+Hallucination in QA
+Simplified learning space
+Hallucination Detection with Model’s Internal Uncertainty
+Token-level
+Uncertainty
+Sydney is the capital of Australia.
+Integrated into learning
+Learning detection with embeddings
+Token-level features
+Embeddings
+Fig. 1: Integrating token-level uncertainty signals simplifies and enhances the
+learning process for hallucination detection.
+are computationally costly, difficult to deploy in real time, and limited by knowl-
+edge coverage [3,5,26].
+Recent studies have explored detecting hallucinations via internal model un-
+certainty, broadly categorized as epistemic uncertainty, reflecting gaps in model
+knowledge, and aleatoric uncertainty, arising from ambiguous or underspeci-
+fied contexts [11,25]. These uncertainties manifest in token probabilities, hidden
+states, and output variability [6,13]. Probability-based methods estimate token-
+level confidence using likelihoods or entropy, effectively capturing aleatoric uncer-
+tainty [18,29,1]. Representation-based methods analyze embeddings to capture
+epistemic uncertainty [6,28,8]. Complementarily, semantic-consistency methods,
+which can partially reflect both types of uncertainty, evaluate agreement across
+multiple generated outputs [15,19,4]. However, they incur substantial computa-
+tional cost and often struggle to provide accurate uncertainty estimates [25].
+Some studies attempt to combine multiple features [2,17,27], but these ap-
+proaches typically cover only part of the uncertainty spectrum and often treat
+signals independently, limiting robust hallucination detection.
+Even when multiple features are combined, obtaining effective supervision
+to fully leverage them remains challenging. Human-annotated hallucination la-
+bels can provide high-quality supervision, but they are costly and difficult to
+scale [18,12]. To mitigate this issue, some methods explore model-driven or au-
+tomated supervision signals [19,20,4,7]. For example, approaches such as seman-
+tic entropy and SelfCheckGPT [4,19] employ an LLM-as-a-Judge paradigm to
+generate model-driven supervision signals; however, these methods typically use
+the resulting signals, i.e., pseudo-gold labels, only for evaluation. Research has
+shown that, despite their simple and low-cost generation, these pseudo-gold la-
+bels often exhibit high consistency across multiple generations, making them a
+useful proxy in certain evaluation scenarios [25].
+To address these limitations, we propose HaluNet, a lightweight framework
+that unifies multiple token-level uncertainty signals (Fig. 1). HaluNet employs a
+multi-branch design to jointly model semantic embeddings, token log-likelihoods,
+and predictive entropy, and fuses these signals via attention or an MLP to cap-
+ture cross-signal interactions efficiently. Training is supervised by LLM-as-a-
+Judge signals, providing scalable supervision without manual annotation and
+
+HaluNet: Multi-Granular Uncertainty Modeling for Hallucination Detection
+3
+enabling accurate hallucination detection in both context-rich and context-free
+settings.
+Our contributions are summarized as follows:
+– We present HaluNet, a unified uncertainty fusion framework that integrates
+semantic, probabilistic, and distributional signals from a single LLM gener-
+ation.
+– We develop a lightweight training paradigm that enables robust hallucination
+detection with or without external context, eliminating the need for costly
+human annotations.
+– We demonstrate state-of-the-art (SOTA) performance across diverse QA
+benchmarks, highlighting both strong generalization and high computational
+efficiency.
+2
+Related Work
+Recent work leverages internal model uncertainty signals to detect hallucinations
+in LLM outputs. Probability-based methods estimate aleatoric uncertainty
+using token likelihoods or entropy, with low-probability tokens often indicating
+errors [1,18,29,21]. While efficient, these methods may fail to capture dependen-
+cies reflected in semantic or epistemic signals.
+Representation-based approaches analyze hidden states, attention, or
+embeddings to capture epistemic uncertainty, revealing how confidently a model
+encodes factual information [6,8,28]. They capture global semantic reliability but
+often require heuristic layer choices or task-specific probes [13,23].
+Semantic consistency methods assess output stability under sampling
+or perturbation [4,15,19]. These methods partially reflect both aleatoric and
+epistemic uncertainty, but repeated sampling is costly and limits scalability.
+Hybrid or supervised approaches integrate multiple features such as
+attention dynamics, embeddings, and token probabilities [2,17,27,28]. They im-
+prove detection accuracy but often rely on large annotated datasets or loosely
+coupled feature fusion, limiting scalability.
+In contrast, HaluNet unifies probabilistic, distributional, and semantic sig-
+nals in a single framework, enabling efficient cross-signal fusion and reduced
+supervision requirements.
+3
+Methodology
+3.1
+Problem Definition
+We study answer-level hallucination detection, predicting whether an an-
+swer a to a question q (optionally with context c) is hallucinatory. Given a
+language model Mθ generating a = (x1, . . . , xL), the goal is to learn a detector
+fϕ mapping (q, c, a; Mθ) 7→[0, 1], where higher scores indicate higher hallucina-
+tion likelihood. The model is trained on D = {(qi, ci, ai, yi)}N
+i=1 with yi ∈{0, 1},
+
+4
+C. Tong et al.
+Hidden States
+Prediction
+Entropy
+Log-likelihood
+a) Training Data Construction
+QA Dataset 
+(Training)
+LLM-as-a-Judge
+Hallucination label
+Decoding with token-level features 
+prompt
+...
+Log-likehoods
+Entropy
+Hidden States
+b) HaluNet Training
+Drop (p=0.5)
+Log-likelihood
+Feature sequences of 
+Prediction
+Entropy 
+Hidden States
+Feature-specific Branch Encoders
+Avg Pooling
+MLP
+CNN
+Conv1D 
+Conv1D 
+Avg Pooling
+Attention-based Fusion
+Linear
+tanh
+softmax
+Linear
+Linear
+c) Inference and Generalization Analysis
+...
+HaluNet
+Input:
+Features of answer 
+Answer 
+Feat. Corr.
+Logistic Regression
+HaluNet
+OOD Eval.
+1. Training on Squad
+2. TriviaQA evaluation
+  (10.1% hallucination)
+3. HaluNet ＞ Logistic
+1: Hallucinated
+0
+1
+1. loglikehood_mean
+2. entropy_mean
+3. emb_norm_mean
+4. emb_sim_mean
+5. is_hallucination
+Fig. 2: HaluNet workflow: (a) training data construction, (b) multi-branch fea-
+ture extraction and fusion, (c) inference and generalization analysis for robust
+hallucination detection.
+where yi = 1 indicates a hallucinatory answer and yi = 0 a factual one. Following
+prior work [4,25], labels are obtained by sampling low-temperature answers per
+question and evaluating them via an LLM-as-a-Judge framework [4,6,7,25].
+3.2
+Training Data Construction
+Starting from QA datasets with tuples (c, q, a∗), where c is optional context,
+q the question, and a∗the reference answer, we construct training instances
+(c, q, a, f, y) (Fig. 2a). Here, a is a low-temperature (T = 0.1) model-generated
+answer, f contains token-level features including log-likelihoods, entropies, and
+embeddings (Section 3.3), and y is the hallucination label from an LLM-as-a-
+Judge. To capture context-dependent uncertainty, each question is paired with its
+full context c with probability 0.5, balancing hallucinated and faithful examples
+for stable training.
+3.3
+Feature Extraction
+HaluNet captures token-level generation uncertainty from Mθ via three comple-
+mentary signals: log-likelihoods, entropies, and hidden states, jointly modeling
+
+HaluNet: Multi-Granular Uncertainty Modeling for Hallucination Detection
+5
+predictions and uncertainty. For token xt with preceding tokens x< t, probabilis-
+tic confidence is ℓt = log pMθ(xt | x< t, q, c), while distributional uncertainty is
+Ht = −P
+v∈V pMθ(v | x< t, q, c) log pMθ(v | x< t, q, c). Semantic trajectory is
+encoded as ht = HiddenState(l)
+Mθ(xt | x<t) ∈Rd. Each instance is represented
+as (c, q, L, H, E, y), where L, H ∈RL are log-likelihood and entropy vectors,
+and E ∈RL×d contains hidden embeddings (zero-padded to L = 50), enabling
+cross-signal interaction learning.
+3.4
+HaluNet: Unified Hallucination Detection Network
+We propose HaluNet, a lightweight network for hallucination detection oper-
+ating on token-level features extracted from generated sequences (Fig. 2b). Let
+F = 3 denote feature types: log-likelihoods, entropies, and hidden-state embed-
+dings, with inputs X(f) ∈RL×df , f = 1, . . . , F (X(1) = X(ll), X(2) = X(ent),
+X(3) = X(emb)). Each branch Bf produces a latent vector h(f) ∈Rdh.
+For scalar features (df = 1), we apply mean pooling followed by a two-layer
+MLP:
+h(f) = MLP
+ 1
+L
+L
+X
+t=1
+X(f)
+t
+
+.
+(1)
+For embedding features (df = demb), a two-layer 1D convolution with kernel
+size 3 and padding 1 is applied, followed by ReLU activations and adaptive
+average pooling:
+h(f) = AvgPool1d
+
+ReLU(Conv2(ReLU(Conv1(X(f))))))
+
+.
+(2)
+Branch outputs are stacked:
+H = [h(1), . . . , h(F )] ∈RF ×dh,
+(3)
+and fused either via attention:
+α(f) =
+exp(w⊤tanh(Wah(f)))
+P
+f ′ exp(w⊤tanh(Wah(f ′))),
+hfused =
+X
+f
+α(f)h(f),
+(4)
+or by concatenation:
+hfused = MLP([h(1); . . . ; h(F )]).
+(5)
+The fused vector is projected to a logit:
+ˆs = w⊤
+o hfused + bo,
+(6)
+and trained with binary cross-entropy:
+LBCE = −[y log σ(ˆs) + (1 −y) log(1 −σ(ˆs))].
+(7)
+
+6
+C. Tong et al.
+At inference, the hallucination probability is
+p = σ(ˆs),
+ˆy = 1{p ≥0.5},
+(8)
+while p or ˆs can be used as a continuous score for ranking metrics.
+HaluNet captures complementary aspects of generation uncertainty. Log-
+likelihoods and entropies measure probabilistic confidence and local uncertainty,
+while embeddings encode the semantic trajectory of the sequence. Multi-branch
+encoders allow each feature type to leverage the most appropriate architecture,
+with adaptive fusion balancing efficiency and expressiveness. The effectiveness
+of the features and the rationale of the HaluNet architecture are preliminarily
+validated in Fig. 2c.
+4
+Experiments
+4.1
+Setup
+Datasets. We evaluate HaluNet on three QA benchmarks: SQuAD [22], Triv-
+iaQA [14], and NQ-Open (NQ) [16]. Each training set contains 10K answer-
+able samples (TriviaQA split 8:2 for training and test), with SQuAD and Trivi-
+aQA containing equal proportions of context-present and context-free instances,
+while NQ is fully context-free (statistics shown in Table 1). The context ra-
+tio (CR) controls the proportion of contextual inputs (CR=1: context-present,
+CR=0: context-free). All samples are labeled using the LLM-as-a-Judge frame-
+work [4,6,7]. We assess both in-distribution (ID) performance under varying
+CRs and out-of-distribution (OOD) transfer across datasets.
+Table 1: Dataset sizes and hallucination rates (%) for sampled QA datasets under
+different context ratios.
+Dataset
+Ori. (train/test) Sampl. (train/test) Hallu. (train / CR0 / CR1)
+SQuAD
+Llama3-8B
+130k / 11.9k
+10k / 5.9k
+41.7 / 82.4 / 17.1
+Qwen3-14B
+130k / 11.9k
+10k / 5.9k
+43.4 / 74.7 / 8.6
+TriviaQA
+Llama3-8B
+12.3k / 3.1k
+10k / 3.1k
+19.6 / 29.8 / 10.1
+Qwen3-14B
+12.3k / 3.1k
+10k / 3.1k
+41.8 / 42.4 / 15.6
+NQ
+Llama3-8B
+87.9k / 3.6k
+10k / 3.6k
+57.8 / 61.4 / -
+Qwen3-14B
+87.9k / 3.6k
+10k / 3.6k
+71.1 / 71.6 / -
+
+HaluNet: Multi-Granular Uncertainty Modeling for Hallucination Detection
+7
+Implementation Details and Baselines. In all experiments except for the
+architectural ablation study, we use a unified HaluNet configuration where all
+feature types are enabled, each branch is encoded with a CNN, and an MLP-
+based fusion module produces the final prediction. For Llama3-8B and Qwen3-
+14B, we extract token-level features including log likelihood, entropy, and hidden
+states from layer l = 20 (Section 4.4). Each branch uses a CNN with dconv = 64
+channels, kernel size 3, and padding 1, generating a dh = 64 representation. The
+fusion module is a two-layer MLP with a hidden size of dmlp = 64. Models are
+trained with AdamW (learning rate 1 × 10−4, batch size 32) for up to 20 epochs
+with early stopping based on validation AUROC.
+Table 2: ID results under CR=1. Best and second-best scores are shown in bold
+and underlined. Latency denotes average inference time per 100 samples (s). Cell
+colors: green (sub-sec), yellow (sec-level), red (slow).
+SQuAD
+TriviaQA
+Latency /100 (s)
+ROC
+RAC F1@B RA@50 ROC
+RAC
+F1@B RA@50 Sample
+Infer
+PE
+0.732 0.898 0.427
+0.934
+0.723 0.913
+0.394
+0.952
+105.435
+0.001
+T-NLL
+0.628 0.854 0.347
+0.868
+0.578 0.908
+0.214
+0.924
+80.780
+0.001
+EmbVar
+0.757 0.887 0.468
+0.939
+0.781 0.945
+0.378
+0.973
+727.163
+0.109
+SE
+0.619 0.849 0.346
+0.859
+0.766 0.948
+0.409
+0.967
+743.258
+29.927
+SEU
+0.763 0.079 0.457
+0.061
+0.827 0.030
+0.457
+0.023
+731.105
+2.068
+SelfCheckGPT
+0.772 0.878 0.466
+0.944
+0.779 0.934
+0.356
+0.978
+760.002
+87.161
+P (True)
+0.692 0.878 0.398
+0.903
+0.819 0.962
+0.415
+0.978
+81.557
+30.413
+Logistic
+0.735 0.885 0.488
+0.904
+0.848 0.930
+0.577
+0.955
+98.849
+0.028
+Llama3-8B
+HaluNet (Ours) 0.839 0.941 0.532 0.965 0.893 0.977 0.601
+0.984
+97.663
+0.124
+PE
+0.705 0.938 0.274
+0.961
+0.719 0.900
+0.361
+0.920
+127.035
+0.001
+T-NLL
+0.577 0.947 0.130
+0.956
+0.589 0.176
+0.332
+0.173
+131.44
+0.001
+EmbVar
+0.726 0.957 0.308
+0.976
+0.744 0.863
+0.490
+0.912
+1289.101
+0.126
+SE
+0.665 0.956 0.278
+0.968
+0.750 0.880
+0.542
+0.904
+1253.741
+24.100
+SEU
+0.748 0.024 0.356
+0.023
+0.763 0.107
+0.536
+0.087
+1302.565
+1.948
+SelfCheckGPT
+0.652 0.956 0.371
+0.966
+0.774 0.884
+0.588
+0.907
+1267.408
+74.015
+P (True)
+0.748 0.970 0.292
+0.985 0.891 0.937
+0.727 0.961
+118.871
+53.593
+Logistic
+0.699 0.924 0.322
+0.943
+0.794 0.926
+0.558
+0.937
+121.403
+0.042
+Qwen3-14B
+HaluNet (Ours) 0.781 0.961 0.393
+0.971
+0.856 0.948 0.665
+0.960
+128.006
+0.119
+HaluNet is compared with several representative uncertainty-based baselines.
+Probability-based baselines include Predictive Entropy (PE) [10] and Token
+Negative Log-Likelihood (T-NLL) [29]. Latent-space baselines measure em-
+bedding stability, e.g., Embedding Variance (EmbVar) and Semantic Em-
+bedding Uncertainty (SEU) [6]. Semantic-level baselines assess output con-
+sistency, including Semantic Entropy (SE) [4], SelfCheckGPT [19], and
+prediction-based P(True) [4]. A Logistic Regression [9] classifier trained on
+our dataset serves as a supervised reference.
+Evaluation Metrics. We evaluate hallucination detection using four metrics:
+ROC (AUROC), RAC (AURAC), RA@50, and F1@B. AUROC measures the
+ability to rank hallucinated versus non-hallucinated samples. RA@50 reports ac-
+
+8
+C. Tong et al.
+curacy on the top 50% most certain predictions, while AURAC integrates accu-
+racy across all rejection thresholds. F1@B gives the maximum F1 over thresholds.
+For supervised methods, a fixed threshold of 0.5 is used, with predictions near
+0.5 considered more uncertain. For unsupervised methods, scores are normal-
+ized so that higher values indicate higher uncertainty. Together, these metrics
+provide a comprehensive assessment of ranking, selective reliability, and overall
+hallucination detection performance.
+4.2
+In-Distribution Evaluation
+Most prior work evaluates hallucination detection without context [4,6,29]. We
+additionally consider full-context inputs, summarized alongside no-context re-
+sults in Tables 2 and 3.
+Table 3: ID results under CR = 0.
+SQuAD
+TriviaQA
+NQ
+ROC
+RAC F1@B RA@50 ROC
+RAC
+F1@B RA@50 ROC
+RAC F1@B RA@50
+PE
+0.710 0.694 0.898
+0.746
+0.711 0.805
+0.512
+0.841
+0.663 0.480 0.765
+0.521
+T-NLL
+0.640 0.762 0.901
+0.752
+0.618 0.758
+0.437
+0.772
+0.606 0.562 0.781
+0.562
+EmbVar
+0.724 0.730 0.903
+0.750
+0.833 0.857
+0.628
+0.924
+0.681 0.653 0.792
+0.633
+SE
+0.731 0.697 0.901
+0.731
+0.843 0.892
+0.660
+0.941
+0.712 0.615 0.808
+0.566
+SEU
+0.742 0.681 0.907
+0.732
+0.873 0.092
+0.688
+0.056
+0.734 0.466 0.799
+0.492
+SelfCheckGPT
+0.797 0.752 0.917
+0.782
+0.816 0.888
+0.619
+0.950
+0.659 0.674 0.812
+0.667
+P (True)
+0.921 0.749 0.932
+0.745
+0.952 0.951 0.836
+0.979
+0.677 0.560 0.792
+0.542
+Logistic
+0.795 0.914 0.905
+0.934
+0.901 0.906
+0.744
+0.932
+0.767 0.780 0.791
+0.795
+Llama3-8B
+HaluNet (Ours) 0.810 0.933 0.909
+0.952
+0.922 0.951 0.777
+0.960
+0.779 0.826 0.793
+0.814
+PE
+0.787 0.601 0.855
+0.636
+0.787 0.225
+0.611
+0.200
+0.700 0.578 0.828
+0.601
+T-NLL
+0.652 0.649 0.851
+0.636
+0.604 0.363
+0.598
+0.359
+0.624 0.639 0.822
+0.634
+EmbVar
+0.729 0.663 0.853
+0.665
+0.796 0.768
+0.728
+0.812
+0.707 0.569 0.822
+0.585
+SE
+0.766 0.569 0.851
+0.584
+0.792 0.772
+0.750
+0.807
+0.760 0.599 0.826
+0.577
+SEU
+0.780 0.557 0.866
+0.588
+0.820 0.229
+0.760
+0.172
+0.751 0.550 0.837
+0.547
+SelfCheckGPT
+0.825 0.551 0.851
+0.547
+0.863 0.810
+0.809
+0.849
+0.771 0.541 0.822
+0.524
+P (True)
+0.781 0.550 0.851
+0.594
+0.904 0.863
+0.812
+0.877
+0.808 0.502 0.822
+0.527
+Logistic
+0.757 0.866 0.857
+0.882
+0.844 0.885
+0.741
+0.899
+0.803 0.863 0.846
+0.875
+Qwen3-14B
+HaluNet (Ours) 0.755 0.822 0.860
+0.810
+0.894 0.927 0.803
+0.933 0.810 0.892 0.855 0.894
+On Llama3-8B, HaluNet achieves AUROC 0.839, F1@B 0.532, RA@50
+0.965 on SQuAD (full context), improving F1@B by 0.066 and AUROC by
+0.067 over the strongest non-trained baseline. On TriviaQA, it attains AUROC
+0.893, F1@B 0.601, corresponding to gains of 0.066 and 0.144. HaluNet also
+performs strongly in no-context settings, demonstrating robust hallucination de-
+tection regardless of external knowledge. On Qwen3-14B, it achieves state-of-the-
+art or near-SOTA results across datasets and context conditions.
+Regarding efficiency, sampling-based estimators (SE, EmbVar, SEU, Self-
+CheckGPT) are orders of magnitude slower than single-pass methods such as
+PE and T-NLL, which are sub-second. However, single-pass methods exhibit
+lower predictive quality. HaluNet strikes a balance, providing strong detection
+while maintaining low computational cost, reducing the typical accuracy–cost
+trade-off in uncertainty-based approaches.
+
+HaluNet: Multi-Granular Uncertainty Modeling for Hallucination Detection
+9
+4.3
+Out-of-Distribution Evaluation
+We evaluate HaluNet under OOD settings, with AUROC and RA@50 across
+train-test splits shown in Fig. 3. As expected, OOD evaluation leads to perfor-
+mance drops: on SQuAD, Llama3-8B decreases by up to 0.037 (CR=0) and 0.113
+(CR=1), while Qwen3-14B drops by 0.047 and 0.058. When trained on TriviaQA
+rather than NQ, Llama3-8B generalizes relatively better on OOD SQuAD. In
+contrast, Qwen3-14B shows a preference for NQ. Several OOD configurations
+still exceed the SOTA lines in the figure, highlighting HaluNet’s competitive
+performance and motivating future work on improving OOD generalization.
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Llama3-8B
+(a) SQuAD CR=0
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+(b) SQuAD CR=1
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+(c) TriviaQA CR=0
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+(d) TriviaQA CR=1
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+(e) NQ CR=0
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Qwen3-14B
+(f) SQuAD CR=0
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+(g) SQuAD CR=1
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+(h) TriviaQA CR=0
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+(i) TriviaQA CR=1
+SQuAD TriviaQA
+NQ
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+(j) NQ CR=0
+Train=SQuAD
+Train=TriviaQA
+Train=NQ
+RA@50
+SOTA AUROC
+SOTA RA@50
+Fig. 3: HaluNet AUROC and RA@50 across training and test sets. Solid and
+dashed lines indicate AUROC and RA@50 SOTA (P(True)), respectively. X-
+axis: training datasets; Y-axis: metric values; shaded bars mark ID cases.
+4.4
+Ablation Studies
+Impact of Architectural Variants. We performed an ablation study on
+HaluNet to assess the contributions of input features, branch encoders, and fu-
+sion strategies. Input features included token-level log-likelihood (ll), predictive
+entropy (ent), and hidden embeddings (emb). Branch encoders were tested in
+three representative settings: (i) all branches using CNNs, (ii) scalar features
+(ll, ent) with global average pooling + MLP and emb with CNN (Fig. 2), and
+(iii) all branches with global average pooling + MLP. Fusion strategies included
+attention-based fusion and simple concatenation with MLP. Results under CR=0
+are shown in Fig. 4, with similar trends observed under CR=1.
+Using all features consistently yields the most robust performance. CNN en-
+coders for all branches with MLP-based fusion often achieve the best or near-best
+
+10
+C. Tong et al.
+Llama3-8B
+(a) SQuAD (CR = 0)
+(b) TriviaQA (CR = 0)
+(c) NQ (CR = 0)
+Qwen3-14B
+(d) SQuAD (CR = 0)
+(e) TriviaQA (CR = 0)
+(f) NQ (CR = 0)
+Fig. 4: Heatmap visualization of AUROC achieved by HaluNet under CR = 0
+for different backbone models on SQuAD, TriviaQA, and NQ.
+Layer
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Score
+0.899
+0.882
+AUROC: vs Mean=0.064
+AURAC: vs Mean=0.094
+SQuAD (Llama3-8B)
+AUROC
+AURAC
+Layer
+0.921
+0.948
+AUROC: vs Mean=0.123
+AURAC: vs Mean=0.097
+TriviaQA (Llama3-8B)
+AUROC
+AURAC
+Layer
+0.812
+0.833
+AUROC: vs Mean=0.103
+AURAC: vs Mean=0.118
+NQ (Llama3-8B)
+AUROC
+AURAC
+0
+10
+20
+30
+40
+Layer
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Score
+0.920
+0.920
+AUROC: vs Mean=0.056
+AURAC: vs Mean=0.082
+SQuAD (Qwen3-14B)
+AUROC
+AURAC
+0
+10
+20
+30
+40
+Layer
+0.970
+0.965
+AUROC: vs Mean=0.075
+AURAC: vs Mean=0.075
+TriviaQA (Qwen3-14B)
+AUROC
+AURAC
+0
+10
+20
+30
+40
+Layer
+0.873
+0.925
+AUROC: vs Mean=0.100
+AURAC: vs Mean=0.077
+NQ (Qwen3-14B)
+AUROC
+AURAC
+Fig. 5: Layer-wise contribution analysis of hallucination detection performance.
+The best-performing layer is highlighted, and ∆vs Mean denotes the relative
+improvement of the optimal layer over the average performance.
+
+HaluNet: Multi-Granular Uncertainty Modeling for Hallucination Detection
+11
+results. Ablations show that multiple features outperform any single one, with
+emb contributing the largest improvement, while ll and ent provide partially re-
+dundant signals. CNNs are particularly effective at capturing local anomalies in
+emb, reflecting both semantic and uncertainty cues, which supports their key role
+in hallucination detection and suggests potential for disentangling uncertainty
+signals from embeddings.
+Layer Contribution Analysis. To evaluate the contribution of hidden rep-
+resentations, we conduct a layer-wise ablation study across backbone models.
+HaluNet is trained using features from individual transformer layers, and per-
+formance is measured in AUROC and AURAC. As shown in Fig. 5, middle lay-
+ers (typically 8–21) achieve the highest detection accuracy, while bottom layers
+underperform due to limited semantic abstraction. Higher layers show a slight
+decline, likely because they specialize in the primary QA task, reducing sensitiv-
+ity to hallucination-related signals. Although layer 20 is not always the absolute
+best, it provides stable and reliable performance across models and datasets, so
+we select it for other experiments.
+5
+Conclusion
+We present HaluNet, a lightweight framework integrating probabilistic, distri-
+butional, and semantic uncertainty signals from single-pass LLM generations.
+Multi-branch encoders with an adaptive fusion module capture cross-signal in-
+teractions, enabling robust and efficient hallucination detection in QA, including
+out-of-distribution settings. Ablation studies highlight the complementary value
+of multi-granular features and intermediate-layer embeddings. HaluNet provides
+a practical, scalable solution for reliable QA hallucination detection, with future
+work extending to multi-turn and long-form QA scenarios.
+References
+1. Aryal, S., Akomoize, M.: Howard university-ai4pc at semeval-2025 task 3: Logit-
+based supervised token classification for multilingual hallucination span identifica-
+tion using xgbod. In: SemEval. pp. 1790–1794 (2025)
+2. Binkowski, J., Janiak, D., Sawczyn, A., Gabrys, B., Kajdanowicz, T.: Hallucina-
+tion detection in llms using spectral features of attention maps. arXiv preprint
+arXiv:2502.17598 (2025)
+3. Cheung, T.H., Lam, K.M.: Factllama: Optimizing instruction-following language
+models with external knowledge for automated fact-checking. In: APSIPA ASC.
+pp. 846–853 (2023)
+4. Farquhar, S., Kossen, J., Kuhn, L., Gal, Y.: Detecting hallucinations in large lan-
+guage models using semantic entropy. Nature 630(8017), 625–630 (2024)
+5. Ge, Z., Wu, Y., Chin, D.W.K., Lee, R.K.W., Cao, R.: Resolving conflicting evidence
+in automated fact-checking: A study on retrieval-augmented llms. arXiv preprint
+arXiv:2505.17762 (2025)
+
+12
+C. Tong et al.
+6. Grewal, Y.S., Bonilla, E.V., Bui, T.D.: Improving uncertainty quantification in
+large language models via semantic embeddings. arXiv preprint arXiv:2410.22685
+(2024)
+7. Gu, J., Jiang, X., Shi, Z., Tan, H., Zhai, X., Xu, C., Li, W., Shen, Y., Ma, S., Liu,
+H., et al.: A survey on llm-as-a-judge. arXiv preprint arXiv:2411.15594 (2024)
+8. Guo, J., Wu, Z., Yu, P.S.: Reward inside the model: A lightweight hidden-state
+reward model for LLM’s best-of-n sampling. In: ICML (2025)
+9. Hastie, T., Tibshirani, R., Friedman, J., et al.: The elements of statistical learning
+(2009)
+10. Holtzman, A., Buys, J., Du, L., Forbes, M., Choi, Y.: The curious case of neural
+text degeneration. In: ICLR (2020)
+11. Hüllermeier, E., Waegeman, W.: Aleatoric and epistemic uncertainty in machine
+learning: an introduction to concepts and methods. Mach. Learn. 110, 457 – 506
+(2019)
+12. Ji, Z., Lee, N., Frieske, R., Yu, T., Su, D., Xu, Y., Ishii, E., Bang, Y.J., Madotto, A.,
+Fung, P.: Survey of hallucination in natural language generation. ACM Comput.
+Surv. 55(12), 1–38 (2023)
+13. Jiang, Z., Araki, J., Ding, H., Neubig, G.: How can we know when language models
+know? on the calibration of language models for question answering. TACL 9, 962–
+977 (2021)
+14. Joshi, M., Choi, E., Weld, D., Zettlemoyer, L.: TriviaQA: A large scale distantly
+supervised challenge dataset for reading comprehension. In: Barzilay, R., Kan,
+M.Y. (eds.) ACL. pp. 1601–1611 (2017)
+15. Kossen, J., Han, J., Razzak, M., Schut, L., Malik, S., Gal, Y.: Semantic en-
+tropy probes: Robust and cheap hallucination detection in llms. arXiv preprint
+arXiv:2406.15927 (2024)
+16. Kwiatkowski, T., Palomaki, J., Redfield, O., Collins, M., Parikh, A., Alberti, C.,
+Epstein, D., Polosukhin, I., Devlin, J., Lee, K., Toutanova, K., Jones, L., Kelcey,
+M., Chang, M.W., Dai, A.M., Uszkoreit, J., Le, Q., Petrov, S.: Natural questions:
+A benchmark for question answering research. TACL 7, 452–466 (2019)
+17. Liu, L., Pan, Y., Li, X., Chen, G.: Uncertainty estimation and quantification for
+llms: A simple supervised approach. arXiv preprint arXiv:2404.15993 (2024)
+18. Liu, T., Zhang, Y., Brockett, C., Mao, Y., Sui, Z., Chen, W., Dolan, B.: A token-
+level reference-free hallucination detection benchmark for free-form text genera-
+tion. In: ACL. pp. 6723–6737 (2022)
+19. Manakul, P., Liusie, A., Gales, M.: SelfcheckGPT: Zero-resource black-box hallu-
+cination detection for generative large language models. In: EMNLP (2023)
+20. Moslonka, C., Randrianarivo, H., Garnier, A., Malherbe, E.: Learned hallucina-
+tion detection in black-box llms using token-level entropy production rate. arXiv
+preprint arXiv:2509.04492 (2025)
+21. Quevedo, E., Salazar, J.Y., Koerner, R., Rivas, P., Cerny, T.: Detecting hallucina-
+tions in large language model generation: A token probability approach. In: CSCE.
+pp. 154–173 (2024)
+22. Rajpurkar, P., Jia, R., Liang, P.: Know what you don’t know: Unanswerable ques-
+tions for SQuAD. In: ACL. pp. 784–789 (2018)
+23. Reimers, N., Gurevych, I.: Sentence-bert: Sentence embeddings using siamese bert-
+networks. In: EMNLP (2019)
+24. Tan, Y., Min, D., Li, Y., Li, W., Hu, N., Chen, Y., Qi, G.: Can chatgpt replace tra-
+ditional kbqa models? an in-depth analysis of the question answering performance
+of the gpt llm family. In: ISWC. p. 348–367 (2023)
+
+HaluNet: Multi-Granular Uncertainty Modeling for Hallucination Detection
+13
+25. Tong, C., Zhang, Q., Jiang, L., Liu, Y., Sun, N., Li, W.: Semantic reformu-
+lation entropy for robust hallucination detection in qa tasks. arXiv preprint
+arXiv:2509.17445 (2025)
+26. Wang, K., Duan, F., Wang, S., Li, P., Xian, Y., Yin, C., Rong, W., Xiong, Z.:
+Knowledge-driven cot: Exploring faithful reasoning in llms for knowledge-intensive
+question answering. arXiv preprint arXiv:2308.13259 (2023)
+27. Yaldiz, D.N., Bakman, Y.F., Buyukates, B., Tao, C., Ramakrishna, A., Dimitriadis,
+D., Zhao, J., Avestimehr, S.: Do not design, learn: A trainable scoring function for
+uncertainty estimation in generative LLMs. In: NAACL. pp. 691–713 (2025)
+28. Zhang, L., Song, D., Wu, Z., Tian, Y., Zhou, C., Xu, J., Yang, Z., Zhang, S.: De-
+tecting hallucination in large language models through deep internal representation
+analysis. In: IJCAI. pp. 8357–8365 (8 2025)
+29. Zhang, T., Qiu, L., Guo, Q., Deng, C., Zhang, Y., Zhang, Z., Zhou, C., Wang, X.,
+Fu, L.: Enhancing uncertainty-based hallucination detection with stronger focus.
+In: EMNLP. pp. 915–932 (2023)
+30. Zhou, H., Hu, C., Yuan, Y., Cui, Y., Jin, Y., Chen, C., Wu, H., Yuan, D., Jiang,
+L., Wu, D., et al.: Large language model (llm) for telecommunications: A compre-
+hensive survey on principles, key techniques, and opportunities. IEEE Commun.
+Surv. Tutor. (2024)

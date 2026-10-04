@@ -1,0 +1,2001 @@
+SliceLens: Fine-Grained and Grounded Error Slice Discovery for Multi-Instance
+Vision Tasks
+Wei Zhang*, Chaoqun Wang*, Zixuan Guan, Sam Kao, Pengfei Zhao, Peng Wu, Sifeng He†
+Apple
+{wzhang52, chaoqun wang, he sifeng}@apple.com
+Abstract
+Systematic failures of computer vision models on subsets
+with coherent visual patterns, known as error slices, pose
+a critical challenge for robust model evaluation. Existing
+slice discovery methods are primarily developed for image
+classification, limiting their applicability to multi-instance
+tasks such as detection, segmentation, and pose estimation.
+In real-world scenarios, error slices often arise from cor-
+ner cases involving complex visual relationships, where ex-
+isting instance-level approaches lacking fine-grained rea-
+soning struggle to yield meaningful insights.
+Moreover,
+current benchmarks are typically tailored to specific algo-
+rithms or biased toward image classification, with artificial
+ground truth that fails to reflect real model failures. To ad-
+dress these limitations, we propose SliceLens, a hypothesis-
+driven framework that leverages LLMs and VLMs to gener-
+ate and verify diverse failure hypotheses through grounded
+visual reasoning, enabling reliable identification of fine-
+grained and interpretable error slices. We further intro-
+duce FeSD (Fine-grained Slice Discovery), the first bench-
+mark specifically designed for evaluating fine-grained error
+slice discovery across instance-level vision tasks, featuring
+expert-annotated and carefully refined ground-truth slices
+with precise grounding to local error regions. Extensive ex-
+periments on both existing benchmarks and FeSD demon-
+strate that SliceLens achieves state-of-the-art performance,
+improving Precision@10 by 0.42 (0.73 vs. 0.31) on FeSD,
+and identifies interpretable slices that facilitate actionable
+model improvements, as validated through model repair ex-
+periments.
+1. Introduction
+Despite the impressive performance of deep vision models,
+their reliability in real-world applications remains a concern
+due to systematic failures on specific subsets of data, known
+*These authors contributed equally to this research.
+†Corresponding Author, Project Lead
+Figure 1. Error slice discovery illustrated on multi-instance tasks
+(e.g., detection).
+as error slices [6]. These slices are characterized by co-
+herent visual patterns that cause consistent mispredictions,
+revealing limitations in model robustness and generaliza-
+tion. Identifying and understanding these underperforming
+slices is crucial for building more trustworthy AI systems,
+particularly in high-stakes domains such as medical diagno-
+sis [28, 32], autonomous driving [3], and robotics [39].
+However, many existing slice discovery methods are pri-
+marily designed for image-level tasks such as classifica-
+tion [5, 9, 10, 12, 13, 37].
+These approaches typically
+rely on clustering whole-image features [37], using image-
+level metadata [5, 10], or applying Large Language Model
+(LLM) reasoning to get image attributes [12].
+Conse-
+quently, they are less effective for complex, multi-instance
+tasks like object detection or segmentation, where errors are
+often tied to fine-grained, instance-level attributes and their
+contextual relationships , as shown in Figure 1. Such cru-
+cial details can be obscured or lost when using whole-image
+representations.
+Recent work has begun to address instance-level slice
+discovery [6, 36]. One method [36] clusters embeddings
+arXiv:2512.24592v1 [cs.CV] 31 Dec 2025
+
+Figure 2. Comparison of error slice benchmark datasets.
+from object patches and then uses an LLM to summarize
+the errors within each cluster. This bottom-up approach can
+be unreliable, as the initial visual clusters may lack a coher-
+ent semantic basis related to the errors. Another method [6],
+uses a Vision-Language Model (VLM) to generate descrip-
+tive tags for each object instance, making the identifica-
+tion of coherent slices from large quantity of tag combi-
+nations difficult. The complex failure modes with compo-
+sitional and relational concepts are not easily captured by
+local patch embeddings or represented by a conjunction of
+atomized tags, highlighting the need for a more direct rea-
+soning with both grounding and context information.
+Progress in error slice discovery is further hindered by
+the absence of adequate benchmarks. Current benchmarks
+are often limited to image classification and rely on spurious
+correlations [30, 38] which fails to represent the complexity
+of errors in tasks like object detection, as shown in the left
+column of Figure 2. Consequently, there is no standard-
+ized way to evaluate a method’s ability to find fine-grained,
+grounded error slices, making it difficult to quantitatively
+compare approaches and measure progress.
+To address these gaps, we propose SliceLens, a method
+for discovering error slices through a hypothesis-driven
+framework that integrates fine-grained, grounded visual rea-
+soning. It directly formulates and tests hypotheses about
+complex failure modes as holistic natural language descrip-
+tions, bypassing the limitations of tag-based approaches.
+To enable standardized evaluation, we present FeSD (Fine-
+grained Slice Discovery), a comprehensive benchmark with
+expert-annotated ground-truth slices that embody the fine-
+grained and compositional challenges of real-world model
+failures. Our main contributions are:
+1. We propose SliceLens, a novel method that employs
+a hypothesis generate-and-verify paradigm for fine-
+grained and grounded error slice discovery. It uses both
+LLM and VLM to generate diverse hypotheses, which
+are then validated using the grounded reasoning capabil-
+ities of VLM. A final trend analysis, linking slice defini-
+tion confidence to model error rates, ensures the discov-
+ery of highly reliable error slices.
+2. We establish FeSD (Fine-grained Slice Discovery), the
+first benchmark specifically designed for evaluating fine-
+grained error slice discovery across instance-level vision
+tasks. The slices are created by experts and each data
+sample is labeled and refined by annotators, which con-
+tain fine-grained contextual interference, semantic con-
+fusion, and intrinsic visual difficulties with grounding in-
+formation to local error regions.
+3. Extensive experiments demonstrate the strong effective-
+ness and generalizability of SliceLens, achieving state-
+of-the-art performance for fine-grained slice discovery
+on FeSD, improving Precision@10 by an absolute 0.42
+(0.73 vs. 0.31). Model repair experiments validate its
+practicality, showing model performance improvement
+across both classification and detection tasks.
+2. Related Work
+2.1. Slice Discovery Methods
+Existing error slice discovery methods can be broadly clas-
+sified by their operational granularity into two main cate-
+gories: image-level approaches, which typically focus on
+classification tasks, and instance-level approaches, which
+address fine-grained challenges in tasks like object detec-
+tion.
+Image level slice discovery methods. Early automated
+methods depend on clustering or fitting models on ex-
+tracted embeddings [7, 9, 34, 37]. For example, FD (Fea-
+ture Discovery) [16] discovers error slices by analyzing and
+clustering feature representations.
+Domino [9] leverages
+cross-modal embeddings to discover systematic errors by
+projecting visual features into a shared multimodal space
+and identifying failure modes through mixture modeling.
+FACTS [37] employs a two-stage approach: first amplify-
+ing spurious correlations through strongly regularized train-
+ing, then performing correlation-aware slicing via mixture
+modeling in bias-aligned feature space. A key limitation of
+this paradigm is interpretability, as the discovered slices in
+embedding spaces are often hard to understand. To improve
+interpretability, recent work has shifted to a “tag-then-slice”
+approach. These methods first generate a discrete set of se-
+mantic attributes and then search for data matching these
+attributes or their combinations associated with poor model
+performance [5, 6, 13, 25].HiBug [5] using LLMs to pro-
+pose attributes or tags, followed by algorithms to navigate
+the combinatorial space. B2T (Bias-to-Text) [17] extracts
+keywords from captions of misclassified samples and vali-
+dates them with VLM similarity, enabling the discovery and
+naming of contextual biases such as background bias in Wa-
+terbirds. LADDER [12] leverages LLMs to induce system-
+atic biases from model activations and metadata, producing
+
+Figure 3. Overview of SliceLens. Illustrated with the “bicycle detection” example.
+testable hypotheses and pseudo-labels for error correction.
+ViG-Bias [27] extends FACTS to ViG-FACTS with vision-
+language grounding, incorporating textual descriptions to
+improve slice discovery accuracy and interpretability, the
+same with B2T extended to ViG-B2T.
+Instance level slice discovery methods. VISLIX [36] is
+an interactive platform for object detection failure analysis,
+employing a bottom-up “cluster-then-explain” strategy. It
+first clusters embeddings from object patches, uses an LLM
+to describe errors for each data by predefined questions and
+then summarize the errors. These text descriptions are for
+human verification interactively. An alternative direction,
+proposed by HiBug2 [6], uses a VLM to generate descrip-
+tive tags for each object instance. However, the underly-
+ing “bag-of-tags” mechanism struggles to scale to complex
+scenarios . The combinatorial explosion of tags makes the
+search for meaningful error patterns computationally chal-
+lenging and prone to discovering spurious correlations.
+Our SliceLens method complements prior approaches
+by explicitly introducing fine-grained, grounded visual pat-
+terns as the hypothesis space, and by performing a gener-
+ate–verify step based on visual reasoning to discover inter-
+pretable slices across tasks.
+2.2. Benchmark Datasets for Error Slice Discovery
+Slice-oriented benchmark for classification task. While
+widely used for fairness and bias research, prominent
+datasets like [24, 30, 38] have limitations for capturing
+real-world failure modes.
+For instance, Waterbirds [30]
+is known for its artificial cut-and-paste construction which
+induces overly strong background correlations [23, 35].
+CelebA [24] suffers from severe attribute imbalances and
+hidden correlations that complicate fairness evaluations [1,
+31]. Similarly, NICO++ [38] has been noted for its narrow
+and ambiguous contextual domains [15]. Collectively, these
+benchmarks rely on simplified spurious correlations and ar-
+tificial contexts, restricting them to classification tasks and
+failing to represent complex real-world challenges such as
+occlusion, scale variation, and cluttered backgrounds.
+OOD(Out Of Distribution) benchmark for complex
+task.
+Benchmarks targeting OOD have also emerged in
+detection and segmentation. In object detection, COCO-
+O [26] introduces natural distribution shifts. In segmenta-
+tion, benchmarks such as Fishyscapes [3] focus on synthetic
+anomalies, while medical segmentation benchmark [19]
+emphasizing failure detection under distribution shift with
+risk–coverage analysis. However, their goal is to evaluate
+OOD generalization, not to provide the interpretable, fine-
+grained ground-truth slices required for root cause analysis
+of failures.
+Existing slice benchmarks [24, 30, 38] lack support for
+instance-level tasks. OOD benchmarks reveal systematic
+errors but do not provide slice-level interpretability or fine-
+grained ground truth. Our FeSD benchmark is designed to
+fill this gap, providing fine-grained and interpretable slice
+annotations across detection and segmentation tasks.
+
+3. SliceLens for Fine-grained Slice Discovery
+The proposed SliceLens method consists of two key mod-
+ules:
+hypothesis generation and hypothesis verification.
+The generation module leverages both world knowledge
+and data-driven analysis to formulate hypotheses, while the
+verification module uses grounded VLM reasoning to sta-
+tistically validate them as systematic errors. To explain the
+workflow more clearly, an example of discovering the error
+slice “bicycle obscured by a person” for bicycle detection is
+illustrated in Figure 3.
+3.1. Error Slice Hypothesis Generation
+To comprehensively cover different types of model failures,
+our hypothesis generation module operates in two comple-
+mentary modes, inspired by the categorization of errors into
+inherent task difficulties and data distribution issues [6].
+1. Knowledge-Driven Hypothesis Generation. To cap-
+ture inherent task difficulties, SliceLens leverages LLM us-
+ing a brief task context in a top-down way (prompt in Ap-
+pendix Figure 8). Leveraging broad world knowledge on
+the task, the LLM proposes reasonable failure cases that of-
+ten align closely with real error modes, such as “background
+objects similar to bicycles” or “very small objects” for ob-
+ject detection tasks.
+2.
+Data-Driven Hypothesis Generation.
+To un-
+cover errors arising from distributional issues specific to
+the dataset, SliceLens performs a data-driven analysis in
+a bottom-up way. Based on semantic attributes observed
+in the data, the hypotheses are generated in three steps
+(prompt templates in Appendix Figure 9, Figure 10 and Fig-
+ure 11): (a) Grounded Attribute-aware Caption Extraction:
+The knowledge-driven hypotheses also consist of attributes
+associated with task failures. For each image from a sam-
+pled subset, a VLM is employed to generate attribute-aware
+textual captions that are explicitly grounded to specific ob-
+jects or regions. (b) Attribute Inference: An LLM then pro-
+cesses these captions to infer a diverse set of potential se-
+mantic attribute values. This is similar to text-conditional
+clustering methods like TCIC [20], but it differs by not
+relying on image-level captions. (c) Hypothesis Genera-
+tion: Finally, the attributes and values are optimized by an
+LLM into well-formed query phrases in natural language
+that serve as concrete, data-driven hypotheses to be tested
+in the verification stage.
+Given the task “bicycle detection”, SliceLens generates:
+(1) knowledge-driven hypotheses, which capture inherent
+difficulties such as detecting “bicycle lying on the ground”
+or “bicycle at night”; and (2) data-driven hypotheses with
+LLM-generated abstract attributes like “bicycle occlusion”,
+which are then inferred by a VLM into fine-grained, visu-
+ally grounded values such as “by a car” or “by a person”.
+Finally, the attributes and values are optimized into natural
+language as “bicycle obscured by a car” and “bicycle ob-
+scured by a person”.
+3.2. Error Slices Verification
+Given a set of hypotheses, SliceLens retrieves the data in-
+stances that satisfy each hypothesis, thereby discovering
+candidate slices. It then performs error verification to deter-
+mine whether these slices correspond to systematic model
+failures.
+3.2.1. Grounded Candidate Slices Discovery
+Metadata or tags can hardly describe visual slices specific to
+an instance or object with complex object relationships and
+multiple composed logic conditions, which are likely ap-
+pear in real model deployment scenarios. To support com-
+plex hypothesis as query, we leverage the grounding and vi-
+sual reasoning capabilities of VLM. Given an image I and
+a query phrase q, our goal is to determine whether an er-
+ror region r ⊂I in I satisfies the query. The error regions
+are from false negatives or false positives of detection and
+segmentation tasks. We ground error regions with bounding
+boxes for detection, whereas for segmentation, we can use
+bounding boxes of masks or points in regions.
+Point-based prompt template:
+"If the region
+pointed to by point 2d:
+(x, y) matches
+the description q, please answer yes
+else no." where (x, y) denotes the 2D coordinate
+within the error region.
+Bounding box-based prompt template:
+"If the
+region [xmin, ymin, xmax, ymax] matches the
+description q, please answer yes else
+no."
+During inference, a VLM (e.g., Qwen2.5-VL [2]) com-
+pute the logits of the output “yes” token and the “no” to-
+ken, based on a prompt that incorporates the hypothesis and
+grounding signals. Formally, the logit for token t is denoted
+as z(t | P(q, r)). Applying softmax over the candidate to-
+kens, we obtain:
+P(yes | q, r) =
+exp(z(yes | P(q, r)))
+exp(z(yes | P(q, r))) + exp(z(no | P(q, r))) .
+(1)
+The slice confidence for error region r is defined as
+P(yes | q, r).
+For the selected hypothesis “bicycle obscured by a per-
+son”, SliceLens retrieves relevant instances by ranking the
+slice confidence of all instances. The retrieved examples
+form a slice that illustrates various scenarios where bicycles
+are partially occluded by a person.
+3.2.2. Automated Error Slice Identification
+Existing approaches often ignore the accuracy of metadata
+or tag and identify error slices by thresholding slice error
+rates [6, 12], overlooking the reliability of slice data. Slice-
+Lens addresses this limitation by performing a dynamic
+slope trend analysis. It quantifies the statistical relation-
+ship between slice confidence and error rates: a slice is con-
+
+sidered a systematic error region if the error likelihood in-
+creases monotonically with slice confidence.Specifically, a
+sliding threshold defines overlapping windows where con-
+fidence exceeds a given value, which selects relatively high
+confidence data. Within each window, a local linear fit is
+computed between selected data confidence and error rate,
+and the maximum positive slope is recorded.
+A slice is
+classified as a systematic error if this slope indicates a con-
+sistently increasing error trend. The method is robust to
+parameter settings, leading to more reliable and defensible
+model diagnosis.
+For the “bicycle obscured by a person” slice, the trend
+analysis reveals a strong positive trend between slice con-
+fidence and actual error rates. As shown in Figure 3, in-
+stances with higher similarity to the “bicycle at night” hy-
+pothesis exhibit lower error rates, confirming this not a gen-
+uine error slice.
+4. FeSD(Fine-grained Slice Discovery)Dataset
+4.1. FeSD Dataset Construction
+To address the limitations of existing benchmarks (see Sec-
+tion 2.2 and Figure 2), we constructed FeSD, a new bench-
+mark dataset designed to capture realistic, fine-grained, and
+instance-level error slices. The FeSD dataset is built upon
+a combination of over 12,000 images from three widely
+used public validation sets: COCO (5k images)[21], KITTI
+(3,769 images)[11], and a public face detection set (3,347
+images)[8]. We followed a four-step pipeline to identify
+and annotate error slices:
+1. Model Errors Collection: We ran five representative
+object detectors (YOLO [33], Faster R-CNN [29], Reti-
+naNet [22] and DETR [4]) and a segmentation model
+(Mask R-CNN [14]) on the combined validation im-
+ages to gather a diverse set of predictions. With origi-
+nal ground truth annotations and model predictions, the
+model errors are computed and aggregated as insights
+for realistic failure patterns.
+2. Expert-Driven Slice Definition: Based on failure pat-
+terns observed, domain experts defined and validated a
+comprehensive set of error slices, comprising 21 for de-
+tection and another 21 for segmentation, for a total of 42
+distinct slices.
+3. Slice Discovery by Human Annotation: This was the
+most labor-intensive step, requiring 1500 person-hours
+of annotation effort. For each of the error slices, anno-
+tators thoroughly reviewed every relevant instance to (a)
+verify that it belonged to the slice definition and exhib-
+ited the correct failure type, and (b) correct its bounding
+box and/or segmentation mask to ensure geometric ac-
+curacy.
+4. Dataset Refinement: For all instances not belonging to
+any defined error slice, model predictions were overwrit-
+ten by ground truth. This crucial step eliminates poten-
+tial noise and ensures that the final dataset contains only
+clean, unambiguous annotations for non-slice instances.
+4.2. FeSD Dataset Categories
+The error slices in FeSD contain location and category er-
+rors, including both false negatives (FN) and false positives
+(FP). We provide error regions (FN or FP) with bounding
+boxes or segmentation masks, along with slice descriptions
+in the dataset. The error slices are organized into three pri-
+mary categories: (1) Semantic Confusion, covering errors
+arising from the model’s conceptual understanding, includ-
+ing confusion where visually similar classes are mistaken
+for one another and errors on abstract or symbolic represen-
+tations; (2) Contextual Interference, encompassing errors
+caused by an object’s surroundings or relationships, such
+as inter-object occlusion, spurious contextual biases, and
+part–whole confusion; and (3) Intrinsic Visual Difficulty,
+referring to failures caused by the inherent visual proper-
+ties of the object instance itself, including degraded views,
+non-canonical viewpoints, and significant self-occlusion or
+partial views.
+The error slices are derived from realistic instance-level
+inference errors and subsequently annotated by human ex-
+perts to ensure quality. The complete set of error slices is
+provided in Appendix Table 8 and Table 7.
+5. Experiments
+We conduct comprehensive experiments to evaluate Slice-
+Lens against state-of-the-art error slice discovery methods.
+Our evaluation encompasses widely-used bias discovery
+benchmarks and our newly constructed fine-grained dataset,
+demonstrating the effectiveness and generalizability of our
+approach across diverse scenarios.
+5.1. Evaluation on Bias Discovery Datasets
+5.1.1. Experimental Setup
+We
+compare
+SliceLens
+against
+seven
+state-of-the-art
+error
+slice
+discovery
+methods,
+including:(1)
+embed-
+ding based FD (Feature Discovery) [16], Domino [9],
+and
+FACTS
+[37](2)
+interpretability
+based
+LAD-
+DER
+[12],ViG-FACTS
+[27],B2T
+(Bias-to-Text)
+[17]
+and ViG-B2T [27](See Section 2.1 for more details).
+We evaluate our method on three bias discovery bench-
+marks:
+(1) Waterbirds [30], which contains two error-
+prone slices used for bias evaluation: waterbirds on land
+and landbirds on water; (2) CelebA [24], where, follow-
+ing [37], we focus on the blonde hair classification task
+that exhibits a spurious correlation between gender and hair
+color (males with non-blonde hair, females with blonde
+hair); and(3)NICO++ [38], where we simulate controlled
+spurious-correlation settings following FACTS [37] and
+
+evaluate under three correlation strengths—75%, 90%, and
+95%—representing increasing levels of spurious associa-
+tion between concepts and contexts.
+We employ Preci-
+sion@k as our primary evaluation metric following [9, 37].
+This metric measures the precision of the top-k retrieved
+samples for each ground-truth error slice.
+Formally, for
+a ground truth slice Sgt and predicted slice Spred, Preci-
+sion@k is defined as:
+Precision@k =
+|Sgt ∩S(k)
+pred|
+k
+(2)
+where S(k)
+pred represents the top-k samples in the candi-
+date slice ranked by confidence scores.
+Following prior
+work, we set k = 10 for all experiments, or the actual size
+if the slice has fewer than 10 samples.
+5.1.2. Implementation Details
+To get predictions for model errors, for Waterbirds and
+CelebA experiments we utilize pre-trained model check-
+points provided by LADDER [12], which were trained with
+standard empirical risk minimization (ERM). For NICO++
+experiments, we train models following the FACTS codes
+[37] , using ResNet-50 with learning rate 10−5 and weight
+decay sweeping over [10−3, 10−2, 10−1, 1.0, 2.0] to am-
+plify spurious correlations. We report the performance met-
+rics directly from the original papers for all compared meth-
+ods. For Ladder on NICO++, where results were not avail-
+able, we generated them by running the FACTS training
+codes [37] and Ladder’s slice finding codes.
+Our SliceLens implementation employs Gemini-2.5-Pro
+as LLM and Qwen-2.5-VL-7B as VLM, selected for a trade-
+off between performance and efficiency (ablation in Ap-
+pendix B.1).Prompts of SliceLens are in Appendix A.1.
+5.1.3. Results
+Table 1. Precision@10 results on bias discovery datasets. Best
+results are shown in bold, second-best are underlined.
+Method
+Waterbirds
+CelebA
+NICO++(75/90/95)
+FD
+0.90
+0.70
+0.19/0.19/0.19
+Domino
+1.00
+0.90
+0.24/0.25/0.27
+FACTS
+1.00
+0.90
+0.56/0.60/0.62
+LADDER
+0.86
+0.85
+0.32/0.52/0.54
+ViG-FACTS
+1.00
+1.00
+0.60/ 0.67/0.65
+B2T
+0.92
+0.64
+-
+ViG-B2T
+0.97
+0.70
+-
+SliceLens (Ours)
+1.00
+1.00
+0.64/0.66/0.69
+Table 1 presents the results across three classification
+benchmark datasets. On Waterbirds and CelebA, SliceLens
+achieves perfect Precision@10 scores of 1.0, matching the
+best performance of existing methods. The two datasets
+contain relatively simple spurious correlations that can be
+effectively captured by various approaches.
+The most significant improvements are observed on
+NICO++, which presents more complex spurious correla-
+tions.
+SliceLens achieves the best performance on two
+out of three correlation settings (75% and 95%), with rel-
+ative improvements of 6.7% and 6.2% (over the previous
+best method ViG-FACTS, improving from 0.60 to 0.64 and
+0.65 to 0.69, respectively).
+On the 90% setting, Slice-
+Lens achieves competitive second-best performance (0.66
+vs. 0.67). This demonstrates the effectiveness of our ap-
+proach in handling complex biases.
+5.2. Evaluation on the FeSD Dataset
+To evaluate performance on our FeSD dataset, we compare
+SliceLens against two recent open-source methods, FACTS
+and HiBug. As FACTS is an image-level method, we adapt
+it by aggregating instance errors to an image-level error rate.
+We adapt HiBug’s tagging mechanism from the image level
+to the object level to enable instance-based comparison.
+The following evaluations focus on detection-based error
+slices in FeSD. Results on segmentation-based error slices
+are further reported in Appendix B.4.2. Detailed results are
+presented in Appendix Table 7 and Table 8, serving as base-
+line references for future studies.
+Table 2.
+Precision@10 results on FeSD dataset.
+*Method
+adapted from image-level to instance-level evaluation.
+Method
+FACTS*
+HiBug*
+SliceLens
+Precision@10
+0.28
+0.31
+0.73
+As shown in Table
+2, SliceLens consistently outper-
+forms both baseline methods across all error categories,
+achieving an average precision@10 of 0.73 compared to
+HiBug* (0.31) and FACTS* (0.28). This substantial im-
+provement of 0.42 over the 0.31 baseline demonstrates the
+critical importance of spatial grounding and reasoning for
+fine-grained error slice discovery in detection tasks.
+To demonstrate the robustness of SliceLens across di-
+verse error slices, Figure 4 shows the precision@10 per-
+formance comparison broken down by categories from our
+slice taxonomy(Section 4.2). SliceLens demonstrates par-
+ticularly strong performance on Intrinsic Visual Difficulty
+errors (0.76), while both baseline methods struggle with this
+challenging category, with HiBug* achieving only 0.19 and
+FACTS* achieving 0.16. The method also shows robust per-
+formance on Semantic confusion (0.71) and Contextual in-
+terference (0.70), highlighting the advantage of our adaptive
+hypothesis generation approach for comprehensive model
+debugging across diverse detection scenarios.
+
+Figure 4.
+Performance comparison across different error cate-
+gories.
+5.3. Ablation Studies of SliceLens
+5.3.1. Hypothesis Generation
+We compare the proposed language-based hypotheses with
+attribute-based tags (HiBug*) in terms of their semantic
+alignment with the ground-truth failure slices, using results
+from Section 5.2. Specifically, an LLM-based (Gemini-2.5-
+pro) evaluator determines whether a discovered slice is se-
+mantically related to any ground-truth slice(prompt in Ap-
+pendix A.3). A slice is considered correct if the evalua-
+tor judges it as relevant. Recall measures the proportion
+of ground-truth slices that are successfully retrieved, while
+precision measures the proportion of discovered slices
+that are semantically aligned with the ground truth. The
+language-based hypotheses containing 102 slices achieve a
+recall of 0.90 and precision of 0.74 when evaluated for
+semantic relevance to ground-truth error slices.
+In con-
+trast, the attribute-based tagging method exhaustively enu-
+merates 70 single-attribute, 2,083 dual-attribute, and 36,486
+triple-attribute combinations, yielding 0.57 recall and 0.54
+precision under a loose matching criterion. Figure 5 illus-
+trates that language-based hypotheses capture the seman-
+tic structure of real-world failure patterns more coherently
+and compactly than attribute-based tags with better inter-
+pretability.
+Figure 5. Comparison between tags and our hypotheses on seman-
+tic relevance with ground truth error slices.
+5.3.2. Grounded Slice Discovery
+A key innovation of SliceLens is instance-level analysis
+through spatial grounding, crucial for multi-object detec-
+tion tasks. We compare this against image-level analysis on
+the “faces partially hidden by objects” slice from FeSD.
+Figure 6. Why grounded (instance-level) retrieval reveals fail-
+ure slices while image-level retrieval dilutes them. Instance-
+level retrieval produces stronger alignment between VLM similar-
+ity and model errors.
+Figure 6 illustrates how instance-level analysis produces
+stronger alignment between VLM similarity and model
+errors compared to image-level analysis.
+Quantitatively,
+instance-level analysis achieves precision@10 of 0.80 ver-
+sus 0.60 for image-level analysis. Our slope trend analysis
+reveals that the VLM score-accuracy curve has a slope of
+1.32 for instance-level versus 0.84 for image-level. This su-
+perior performance stems from avoiding the dilution effect
+where failures of challenging instances are masked by cor-
+rect predictions on other instances within the same image.
+5.3.3. Automated Error Slice Identification
+We evaluate how well the automatically identified error
+slices preserve the hypotheses that are semantically con-
+sistent with the ground-truth (GT)while filtering out incon-
+sistent ones. Existing methods classify a slice as an error
+if its error rate exceeds average by a predefined threshold
+error threshold [6, 12]. In contrast, our slope trend anal-
+ysis method determines errors based on the slope of the lo-
+cal confidence–error relationship, where slices with slope
+greater than slope threshold are identified as error. For all
+discovered slices, we compute the recall of GT-consistent
+hypotheses, the precision of identified error slices against
+GT and the F1 score. As shown in Figure 7, the slope trend
+analysis method not only achieves a higher (3.7% on aver-
+age) F1 score compared to the error-rate thresholding base-
+
+line, but also demonstrates greater robustness to threshold
+selection. This also indicates that our approach can effec-
+tively mitigate the confidence thresholding sensitivity com-
+monly observed in slice discovery methods.
+Figure 7. Comparison between error rate thresholding and slope
+trend analysis for error slice identification.
+5.4. Model Improvement and Practical Impact
+5.4.1. Model Improvement on Image Classification
+We evaluate the actionability of discovered slices via a
+model repair experiment on the CelebA and Waterbirds
+datasets, following the setup from [12]. To ensure a fair
+comparison across methods with fundamentally different
+slice definition strategies, we employ two distinct repair
+protocols. For Ladder, which generates global slice defi-
+nitions, we use its native procedure of fine-tuning a sep-
+arate classifier per slice and ensembling their predictions.
+However, this approach is not applicable to Facts, Domino,
+and SliceLens, as they identify slices only within data sub-
+sets, making their outputs incompatible with Ladder’s en-
+sembling logic. Therefore, for these methods, we adopt the
+unified Discriminative Fine-tuning for Repair (DFR) frame-
+work [18]. We compute a single failure score for each sam-
+ple by taking the maximum similarity across all discovered
+slices and then fine-tune the classifier head on the subsets
+with the highest and lowest scores. Details can be found in
+Appendix B.3.1.
+Table 3 shows that our method achieves comparable or
+slightly better results than all other slice discovery base-
+lines, demonstrating the effectiveness of the discovered er-
+ror slices in mitigating errors caused by spurious correla-
+tions in image classification.
+5.4.2. Object Detection Model Improvement on Fine-
+Grained Patterns
+In this experiment, we showed that SliceLens enables
+grounded model repair for object detection (e.g., bicycles).
+After identifying the error slice “bicycle partially occluded
+by a person” on FeSD, we obtain instance-level slice confi-
+dence scores using SliceLens slice discovery on the COCO
+Table 3. Worst Group Accuracy (WGA) results. Best results
+are shown in bold, second-best are underlined. All results are av-
+eraged over 10 independent runs to account for the stochasticity of
+SGD during fine-tuning.
+Method
+Waterbirds
+CelebA
+Ladder
+0.896 ± 0.014
+0.878 ± 0.015
+Domino
+0.898 ± 0.022
+0.827 ± 0.002
+FACTS
+0.889 ± 0.028
+0.6 ± 0.011
+SliceLens (Ours)
+0.904 ± 0.017
+0.882 ± 0.004
+Table 4. Model repair performance on bicycle detection. Results
+are averaged over 3 repetitions.
+Method
+mAP-bicycle
+mAR-bicycle
+No model repair
+27.2
+39.33
+Baseline model repair
+28.58 ± 0.016
+41.14 ± 0.031
+GroupDRO + Slicelens
+33.59 ± 0.028
+47.09 ± 0.23
+training dataset. As a baseline for the Faster R-CNN pre-
+trained model, we fine-tune it on all COCO training im-
+ages containing at least one bicycle instance. For repair,
+we adapt the online GroupDRO framework [30] to instance
+level: each object class is treated as a group, and an image-
+level binary attribute is defined by thresholding the max-
+imum instance-level slice confidence score at 0.9.
+This
+setup allows GroupDRO’s reweighting to focus specifically
+on images likely exhibiting the failure pattern, applied only
+to detection head losses (classification and box regression)
+during fine-tuning. Details can be found in Appendix B.3.2.
+Table 4 shows that our model repair strategy substan-
+tially improves both the bicycle-class mAP and mAR. Our
+method leverages instance-level slice data for more tar-
+geted model adaptation, outperforming baseline repair ap-
+proaches. This validates that the grounded discovery strat-
+egy in SliceLens is effective for repairing instance-level
+failure patterns in object detection.
+6. Conclusion
+We present SliceLens, a fine-grained error slice discov-
+ery method for multi-instance vision tasks.
+It adopts
+a hypothesis-driven approach that combines LLM- and
+VLM-based reasoning to generate and verify grounded
+hypotheses about model failures.
+We also introduce
+FeSD, a benchmark with expert-annotated, fine-grained
+slices and precise grounding.
+Experiments show that
+SliceLens effectively identifies complex,
+interpretable
+error patterns,
+offering actionable insights for model
+debugging. Despite its promise, assessing the completeness
+of hypothesis generation remains challenging in open-
+world settings. Future work will explore principled metrics
+for evaluating slice completeness in real-world applications.
+
+References
+[1] Mohsan Alvi, Andrew Zisserman, and Christoffer Nell˚aker.
+Turning a blind eye: Explicit removal of biases and variation
+from deep neural network embeddings. In ECCV Workshop,
+pages 0–0, 2018. 3
+[2] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin
+Ge, Sibo Song, Kai Dang, Peng Wang, Shijie Wang, Jun
+Tang, Humen Zhong, Yuanzhi Zhu, Mingkun Yang, Zhao-
+hai Li, Jianqiang Wan, Pengfei Wang, Wei Ding, Zheren
+Fu, Yiheng Xu, Jiabo Ye, Xi Zhang, Tianbao Xie, Zesen
+Cheng, Hang Zhang, Zhibo Yang, Haiyang Xu, and Jun-
+yang Lin.
+Qwen2.5-vl technical report.
+arXiv preprint
+arXiv:2502.13923, 2025. 4
+[3] Hermann Blum, Paul-Edouard Sarlin, Juan Nieto, Roland
+Siegwart, and Cesar Cadena. The fishyscapes benchmark:
+Measuring blind spots in semantic segmentation. IJCV, 129
+(12):3119–3135, 2021. 1, 3
+[4] Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas
+Usunier, Alexander Kirillov, and Sergey Zagoruyko. End-
+to-end object detection with transformers. In ECCV, pages
+213–229, 2020. 5
+[5] Muxi Chen, Yu Li, and Qiang Xu.
+Hibug: On human-
+interpretable model debug. In NeurIPS, pages 4753–4766,
+2023. 1, 2
+[6] Muxi Chen, Chenchen Zhao, and Qiang Xu. Hibug2: Effi-
+cient and interpretable error slice discovery for comprehen-
+sive model debugging. In ICLR, 2025. 1, 2, 3, 4, 7
+[7] Greg d’Eon, Jason d’Eon, James R. Wright, and Kevin
+Leyton-Brown.
+The spotlight: A general method for dis-
+covering systematic errors in deep learning models. In Pro-
+ceedings of the 2022 ACM Conference on Fairness, Account-
+ability, and Transparency (FAccT), pages 1962–1981, 2022.
+2
+[8] Fares Elmenshawii. Face detection dataset. Kaggle dataset,
+2025. Accessed: Aug. 22, 2025. 5
+[9] Sabri Eyuboglu, Maya Varma, Khaled Saab, Jean-Benoit
+Delbrouck, Christopher Lee-Messer, Jared Dunnmon, James
+Zou, and Christopher R´e. Domino: Discovering systematic
+errors with cross-modal embeddings. ICLR, 2022. 1, 2, 5, 6
+[10] Sujan Sai Gannamaneni, Rohil Prakash Rao, Michael Mock,
+Maram Akila, and Stefan Wrobel.
+Detecting system-
+atic weaknesses in vision models along predefined human-
+understandable dimensions.
+Transactions on Machine
+Learning Research (TMLR), 2025. 1
+[11] Andreas Geiger, Philip Lenz, and Raquel Urtasun. Are we
+ready for autonomous driving? the KITTI vision benchmark
+suite. In CVPR, pages 3354–3361, 2012. 5
+[12] Shantanu Ghosh,
+Rayan Syed,
+Chenyu Wang,
+Vaib-
+hav Choudhary, Binxu Li, Clare B. Poynton, Shyam
+Visweswaran, and Kayhan Batmanghelich.
+LADDER:
+Language-driven slice discovery and error rectification in vi-
+sion classifiers. In Findings of the Association for Computa-
+tional Linguistics: ACL, pages 22935–22970, 2025. 1, 2, 4,
+5, 6, 7, 8
+[13] Quentin Guimard, Moreno D’Inc`a, Massimiliano Mancini,
+and Elisa Ricci. Classifier-to-bias: Toward unsupervised au-
+tomatic bias detection for visual classifiers. In CVPR, pages
+15151–15161, 2025. 1, 2
+[14] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir-
+shick. Mask R-CNN. In ICCV, pages 2961–2969, 2017.
+arXiv:1703.06870. 5
+[15] Yiyou He, Yaojie Shen, Hongxin Zhang, Pingyu Chen, Lei
+Ren, and Pin-Yu Liu. Towards non-iid image classification:
+A dataset and baselines. In NeurIPS Datasets and Bench-
+marks Track, 2021. 3
+[16] Saachi Jain, Hannah Lawrence, Ankur Moitra, and Alek-
+sander Madry. Distilling model failures as directions in latent
+space. In ArXiv preprint arXiv:2206.14754, 2022. 2, 5
+[17] Younghyun Kim, Sangwoo Mo, Minkyu Kim, Kyungmin
+Lee, Jaeho Lee, and Jinwoo Shin. Discovering and mitigat-
+ing visual biases through keyword explanation (bias-to-text).
+In CVPR, 2024. 2, 5
+[18] Polina Kirichenko, Pavel Izmailov, and Andrew Gordon Wil-
+son. Last layer re-training is sufficient for robustness to spu-
+rious correlations. In ICLR, 2023. 8
+[19] Zeynep Kus¸ and Mustafa Aydin. Medsegbench: A compre-
+hensive benchmark for medical image segmentation in di-
+verse data modalities. Scientific Data, 11(1):1283, 2024. 3
+[20] Sehyun Kwon, Jaeseung Park, Minkyu Kim, Jaewoong Cho,
+Ernest K. Ryu, and Kangwook Lee. Image clustering condi-
+tioned on text criteria. In ICLR, 2024. 4
+[21] Tsung-Yi Lin, Michael Maire, Serge Belongie, Lubomir
+Bourdev, Ross Girshick, James Hays, Pietro Perona, Deva
+Ramanan, C. Lawrence Zitnick, and Piotr Doll´ar. Microsoft
+coco: Common objects in context. In ECCV, pages 740–755,
+2014. 5
+[22] Tsung-Yi Lin, Priya Goyal, Ross Girshick, Kaiming He, and
+Piotr Doll´ar. Focal loss for dense object detection. IEEE
+TPAMI, 42(2):318–327, 2020. Originally in ICCV 2017 ver-
+sion. 5
+[23] Evan Zheran Liu, Aditi Raghunathan, Pang Wei Koh, and
+Percy Liang. Just train twice: Improving group robustness
+without training group information. In Proceedings of the In-
+ternational Conference on Machine Learning (ICML), pages
+6781–6792, 2021. 3
+[24] Ziwei Liu, Ping Luo, Xiaogang Wang, and Xiaoou Tang.
+Deep learning face attributes in the wild. In ICCV, 2015.
+3, 5
+[25] Yulin Luo, Ruichuan An, Bocheng Zou, Yiming Tang, Ji-
+aming Liu, and Shanghang Zhang.
+Llm as dataset ana-
+lyst: Subpopulation structure discovery with large language
+model. In ECCV, pages 235–252. Springer, 2024. 2
+[26] Xiaofeng Mao, Yuefeng Chen, Yao Zhu, Da Chen, et al.
+Coco-o: A benchmark for object detectors under natural dis-
+tribution shifts. In ICCV, 2023. 3
+[27] Badr-Eddine Marani, Mohamed Hanini, Nihitha Mala-
+yarukil, Stergios Christodoulidis, Maria Vakalopoulou, and
+Enzo Ferrante. Vig-bias: Visually grounded bias discovery
+and mitigation. In ECCV, pages 414–429. Springer, 2024. 3,
+5
+
+[28] Luke Oakden-Rayner, Jared Dunnmon, Gustavo Carneiro,
+and Christopher R´e. Hidden stratification causes clinically
+meaningful failures in machine learning for medical imag-
+ing. In Proceedings of the ACM Conference on Health, In-
+ference, and Learning (CHIL), pages 151–159, 2020. 1
+[29] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.
+Faster R-CNN: Towards real-time object detection with re-
+gion proposal networks.
+IEEE TPAMI, 39(6):1137–1149,
+2017. Originally in arXiv:1506.01497 / NIPS 2015 version.
+5
+[30] Shiori Sagawa, Pang Wei Koh, Tatsunori B. Hashimoto, and
+Percy Liang.
+Distributionally robust neural networks.
+In
+ICLR, 2020. 2, 3, 5, 8
+[31] Ignacio Serna, Aythami Morales, Julian Fierrez, and Javier
+Ortega-Garcia. Sensitiveloss: Improving accuracy and fair-
+ness of face representations with discrimination-aware deep
+learning. In CVPRW, pages 0–0, 2020. 3
+[32] Laleh Seyyed-Kalantari, Haoran Zhang, Matthew B. A. Mc-
+Dermott, Irene Y. Chen, and Marzyeh Ghassemi.
+Under-
+diagnosis bias of artificial intelligence algorithms applied to
+chest radiographs in under-served patient populations. Na-
+ture Medicine, 27(12):2176–2182, 2021. 1
+[33] Chien-Yao
+Wang,
+Alexey
+Bochkovskiy,
+and
+Hong-
+Yuan Mark Liao. YOLOv7: Trainable bag-of-freebies sets
+new state-of-the-art for real-time object detectors. In CVPR,
+2023. 5
+[34] Fulton Wang, Julius Adebayo, Sarah Tan, Diego Garcia-
+Olano, and Narine Kokhlikyan. Error discovery by cluster-
+ing influence embeddings. In NeurIPS, pages 41765–41777,
+2023. 2
+[35] Michelle Wang and Jia Deng.
+Towards fairness in visual
+recognition:
+Effective strategies for bias mitigation.
+In
+CVPR, pages 8919–8928, 2020. 3
+[36] Xinyuan Yan, Xiwei Xuan, Jorge Piazentin Ono, Jiajing
+Guo, Vikram Mohanty, Shekar Arvind Kumar, Liang Gou,
+Bei Wang, and Liu Ren. Vislix: An XAI framework for val-
+idating vision models with slice discovery and analysis. In
+Computer Graphics Forum (CGF), page e70125, 2025. 1, 3
+[37] S. Yenamandra et al. First amplify correlations and then slice
+to discover bias (facts). In ICCV, 2023. 1, 2, 5, 6
+[38] Xingxuan Zhang, Yue He, Renzhe Xu, Han Yu, Zheyan
+Shen, and Peng Cui. Nico++: Towards better benchmarking
+for domain generalization. In CVPR, pages 16036–16047,
+2023. 2, 3, 5
+[39] Enshen Zhou,
+Qi Su,
+Cheng Chi,
+Zhizheng Zhang,
+Zhongyuan Wang, Tiejun Huang, Lu Sheng, and He Wang.
+Code-as-monitor: Constraint-aware visual programming for
+reactive and proactive robotic failure detection. In CVPR,
+pages 6919–6929, 2025. 1
+
+SliceLens: Fine-Grained and Grounded Error Slice Discovery for Multi-Instance
+Vision Tasks
+Supplementary Material
+A. Prompts
+A.1. Prompt Templates Used in SliceLens
+This section presents detailed prompt templates used in
+SliceLens hypothesis generation module.
+A.1.1.
+Knowledge-driven
+Hypothesis
+Generation
+Prompt
+The system prompt guides the model to consider various
+factors, such as object attributes and image quality, and to
+structure its output in a specific JSON format. This struc-
+tured output contains task-specific difficulties and attributes
+that affect model performance. The task-specific difficulties
+serve as query phrases for slice discovery (the ‘search’ type
+in the prompt), while the attributes are used for data-driven
+hypothesis generation (the ‘cluster’ type in the prompt).
+For specific tasks, task descriptions are provided in user
+prompts, as detailed in Section A.2. See Figure 8 for de-
+tails.
+A.1.2. Data-driven Hypothesis Generation Prompt
+• Grounded
+Attribute-aware
+Caption
+Extraction
+Prompt. This prompt directs the model to focus on a
+specific image region defined by bounding box coordi-
+nates and to generate a descriptive caption that highlights
+potential reasons for failure related to a given attribute.
+The attribute originates from the “cluster’ type prompts
+discussed in the preceding section. This process is crucial
+for generating fine-grained, instance-level descriptions
+from datasets. (See Figure 9 for details).
+• Attribute Inference Prompt.
+This section outlines a
+two-step process for inferring attribute values from cap-
+tions. In the first step, a prompt instructs a Large Lan-
+guage Model (LLM) to extract values or keywords from
+captions based on given attributes. The second step in-
+volves processing the raw list of extracted values or key-
+words by removing duplicates and irrelevant terms and
+organizing the remainder into semantically coherent cat-
+egories. This structured process transforms unstructured
+outputs from the Vision-Language Model (VLM) into a
+clean, hierarchical set of attributes and values for subse-
+quent data-driven hypothesis generation. (See Figure 10
+for details).
+• Refinement Prompt for Grounded Query Phrases .
+This prompt instructs the model to convert a structured
+list of semantic attributes and values into natural language
+sentences suitable for text-to-image retrieval. The strict
+constraint to preserve semantics ensures that the resulting
+queries accurately reflect the discovered error attributes
+and values, forming our data-driven hypothesis. ( See
+Figure 11 for details).
+A.2. User Prompts for Hypothesis Generation on
+Specific Datasets
+The following user prompts are used as task context to gen-
+erate hypotheses for the specific tasks or datasets in Slice-
+Lens. Each prompt is tailored to the specific characteristics
+and challenges of its respective dataset.
+A.2.1. User Prompt for Waterbirds Dataset
+The user prompt for Waterbirds Dataset is as follows:
+A model that classifies whether a bird is a water bird
+or a land bird. The dataset is constructed by cropping out
+birds from photos and transferring them onto different back-
+grounds.
+A.2.2. User Prompt for CelebA Dataset
+The user prompt for CelebA Dataset is as follows:
+A model that detects whether a person in an image has
+blonde hair, considering various attributes of the person.
+A.2.3. User Prompt for NICO++ Dataset
+The user prompt for NICO++ Dataset is as follows:
+A model is used for multi-label classification, classifying
+images into one of six categories: mammals, birds, plants,
+airways, waterways, and landways. The dataset consists of
+real-world images of these categories appearing in six dif-
+ferent contexts (dim lighting, outdoor, grass, rock, autumn,
+and water).
+A.2.4. User Prompts for FeSD Dataset
+For the FeSD (Fine-grained Error Slice Dataset) experi-
+ments, we use two separate prompts: one for detection-
+related error slices and another for segmentation-related er-
+ror slices. The user prompt used for object detection hy-
+pothesis generation is shown in Figure 12, which focuses
+on three main error types: false positives, false negatives,
+and misclassification. Figure 13 shows the comprehensive
+prompt for instance segmentation tasks, addressing failure
+modes such as boundary errors, incomplete masks, over-
+segmentation, and under-segmentation.
+These task-specific user prompts enable SliceLens to
+generate comprehensive failure hypotheses that cover all
+relevant aspects of detection and instance segmentation
+models, ensuring thorough coverage of potential error pat-
+terns in fine-grained computer vision tasks.
+
+System Prompt for knowledge-driven Hypothesis Generation
+You are an expert in computer vision failure analysis. A user will provide a task description (e.g., ”a cat body detection”). Your
+goal is to identify and list all possible reasons why a computer vision model might fail on this task. In your analysis, consider a
+comprehensive set of factors, including but NOT LIMITED TO:
+• Object Attributes
+• Background Descriptions
+• Image Qualities
+• Environmental Conditions
+• Limitations in handling edge cases or extreme conditions
+• Camera capturing conditions
+• Any additional domain-specific challenges
+For the given task description, generate a structured and detailed list of failure hypotheses. Your output must include:
+• Comprehensive different factors (e.g., Object Attributes, Image Qualities, etc.).
+• Under each factor, list comprehensive failure patterns.
+• For each failure pattern, include:
+– A title that summarizes the potential failure reason.
+– A description that explains in detail why this might be an issue.
+– A list of prompts to further explore the hypothesis. Each prompt must include:
+* A prompt field with a specific query or cluster description.
+* A type field, where the value is either “cluster” or “search”. Use “cluster” if the prompt provides a broad description with
+many possible attributes for further investigation (e.g., “cat colors” or “cat types”). Use “search” if the prompt can be
+directly used to retrieve relevant images (e.g., “a white cat”).
+• IMPORTANT: Ensure that your final output does not contain any duplicate failure patterns or prompts. Every entry must be
+unique and directly relevant to image retrieval or image clustering.
+Please think through at least three iterations internally to ensure completeness, accuracy, and uniqueness. Then, output your final
+results in a valid JSON object formatted exactly as follows:
+1
+{
+2
+"title": "Possible failure reasons for [task description] model",
+3
+"hypothesis": {
+4
+"Object Attributes": [
+5
+{
+6
+"title": "[Short title for failure pattern 1]",
+7
+"description": "[Detailed explanation]",
+8
+"prompts": [
+9
+{
+10
+"prompt": "[related query or cluster description term]",
+11
+"type": "[cluster or search]"
+12
+},
+13
+...
+14
+]
+15
+},
+16
+...
+17
+],
+18
+"Background Descriptions": [ ... ],
+19
+... (other categories as comprehensively as possible)
+20
+}
+21
+}
+Figure 8. The detailed system prompt for generating a comprehensive set of knowledge-driven hypotheses.
+A.3. Semantic Relevance Evaluator Prompt
+Each algorithm output is processed individually using the
+following prompt for semantic relevance evaluation:
+I have a description of an error pattern from a computer vision model,
+and a list of ground truth error patterns.
+Please identify which of the following ground truth patterns is same
+with the algorithm output in semantic. For example, Non-upright face
+(nonvertical pose) is similar to faces with extreme head tilt, but not
+similar to bicycle lying on ground or bicycle upside down. The ground
+truth patterns are provided below as a numbered list.
+Please respond with ONLY the number of the matching ground truth
+pattern. If none of the ground truth patterns are a good semantic match,
+respond with “-1”. NOTE:The ground truth patterns and algorithm pat-
+terns should indicate the same objects, context, conditions and actions.
+
+Grounded Attribute-aware Caption Extraction
+You are an AI model designed to analyze images and provide detailed captions for a specific region relevant to the {Attribute}.
+The specified region is defined by bounding box coordinates in the format [xmin, ymin, xmax, ymax].
+Figure 9.
+The prompt used to instruct the Vision-Language Model (VLM) for grounded attribute-aware caption extraction.
+The
+{Attribute} placeholder is replaced with the specific attribute being analyzed.
+Two-Step Prompt for Attribute Inference
+Step 1: Attribute Value or Keyword Extraction
+You will be given a description of the {Attribute}. Your job is to determine the most relevant {Attribute} based on the
+provided description. Don’t return anything except the result.
+Example Input:
+Attribute: activity
+Caption: The image depicts a person performing a handstand on a purple mat in a spacious,
+well-lit room with white walls and a high ceiling.
+Expected Output:
+handstand
+If the description is irrelevant to {Attribute}, please output ’none’.
+Now, process the provided list:
+Step 2: Keyword Refinement and Clustering
+You are a helpful text clustering assistant. You will be given a list of keyword text. Your job is to refine and categorize the list to
+clusters. Your goal is to process the provided keyword list to:
+– Eliminate Duplicate Semantics: Identify and remove keywords that represent similar meaning, even if expressed differently
+(e.g., ’car’ and ’automobile’).
+– Eliminate irrelevant keywords: Identify and remove keywords that are not related to {Attribute}.
+– Group into Categories: Organize keywords into distinct, non-overlapping categories based on their meaning and context.
+– Ensure Clarity: Avoid overly broad or overly narrow categories. Each keyword should fit logically within its assigned category.
+Example Input:
+[’car’, ’automobile’, ’vehicle’, ’bike’, ’bicycle’, ’motorcycle’, ’transport’]
+Expected Output (JSON format):
+{"transport":["car", "bike", "motorcycle"]}
+Please think and improve your results at least four turns. And then eliminate duplicate semantics in one more turn. Now, process
+the provided keyword list and output the final results in JSON format at the end with unique, non-overlapping semantics.
+Figure 10. The prompts used for attribute inference via text clustering. Step 1 extracts relevant values from attributes and captions, and
+Step 2 clusters them into semantic categories. The {Attribute} placeholders are replaced with the specific task context and attribute
+being analyzed.
+B. More Detailed Experimental Results
+B.1. LLMs and VLMs Selection in SliceLens
+We compare different LLMs for generating slice hypothe-
+ses: Gemini-2.5-Pro (our choice), GPT-4o, and Claude-3.5-
+Sonnet. Performance variations are minimal (0.69 vs. 0.68
+vs. 0.67 on NICO++ (95%)), suggesting that the hypothesis
+generation method is robust to LLM choice. This robust-
+ness also indicates that the world knowledge of powerful
+LLM in vision tasks is sufficient for analyzing task-intrinsic
+difficulties and data distribution attributes.
+We evaluated three different Vision-Language Models
+(VLMs) for slice confidence estimation to analyze the trade-
+off between effectiveness and computational efficiency. As
+shown in Table 5, our evaluation on the NICO++ (95%)
+dataset reveals a clear distinction between model families.
+Embedding-based models like SigLIP are exceptionally
+fast due to their use of pre-computed embeddings, but
+they achieve lower precision as their global representa-
+tions struggle with fine-grained discrimination. In contrast,
+
+Refinement Prompt for Grounded Query Phrases
+You will be given a JSON list of attributes with values or cluster names with categories. These cluster names are summarized from
+descriptions related to the {Attribute}. Your job is to compose a text to image retrieval prompt from each category and item
+in the list. The prompt should be phrases or sentences not keywords and only contain the given information.
+You can start or end with general descriptions, for example “a photo of” etc. Please DO NOT add or modify the context and
+semantics. The output JSON format is:
+1
+{"results": [prompt1, prompt2, ...]}
+Now process the list and generate prompts one by one for each items.
+Figure 11. The prompt used for refining attributes and values into grounded query phrases. The {Attribute} placeholder is replaced
+with the specific task context and attribute being analyzed.
+User Prompt for FeSD Object Detection Hypothesis Generation
+An object detection model designed to detect {label}. Specifically, consider and describe possible scenarios for the following
+types of errors:
+False Positive: In what situations might other objects be mistakenly detected as {label}?
+False Negative: In what situations might {label} fail to be detected by the model?
+Misclassification: In what situations might {label} be incorrectly detected as another object class?
+Figure 12. The specialized user prompt used for object detection hypothesis generation on the FeSD dataset. The prompt focuses on the
+three main types of detection errors: false positives, false negatives, and misclassification. The {label} placeholder is replaced with the
+specific object class being analyzed.
+Table 5. Comparison of different VLMs for slice confidence es-
+timation on NICO++ (95%). GPT-4o tested with 10 concurrent
+requests. CLIP/SigLIP times exclude embedding extraction over-
+head.
+VLM
+Precision@10
+Speed
+SigLIP
+0.51
+0.1 s /1000 images
+GPT-4o
+0.71
+5 min /1000 images
+Qwen-2.5-VL-7B
+0.69
+10 s /1000 images
+reasoning-based models demonstrate superior performance.
+While GPT-4o achieves the highest precision@10 (0.71), its
+API latency is prohibitive at 5 minutes per 1,000 images.
+Qwen-2.5-VL-7B, deployed locally with the VLLM
+framework, offers the best practical balance. To optimize
+its performance, we structure the prompts to share the same
+system prompt and image prefix.
+Leveraging prefilling
+technology, only the text in the user prompts requires pro-
+cessing after the initial slice confidence computation. Fur-
+thermore, the model’s output is restricted to “yes” or “no”,
+which makes the decoding process highly efficient. As a
+result, it delivers competitive precision (0.69) with a signif-
+icantly lower latency of 10 seconds per 1,000 images on one
+A100 GPU. This makes it our choice for SliceLens.
+B.2. HiBug Baseline Implementation Details
+For a fair comparison with HiBugon our FeSD dataset, we
+generated a comprehensive attribute corpus following the
+HiBug methodology.
+We generated visual attributes rel-
+evant to object detection failures by interactively chatting
+with ChatGPT. Table 6 presents the complete set of at-
+tributes used for HiBug’s instance-level analysis on detec-
+tion tasks.
+This comprehensive attribute set demonstrates HiBug’s
+systematic approach to instance-level analysis through pre-
+defined visual attributes. Each attribute is designed to cap-
+ture specific visual characteristics that may contribute to
+model failures.
+B.3. Model Improvement Experiment Setup Details
+B.3.1. Model Improvement on Image Classification
+We evaluate the actionability of discovered slices via model
+repair experiments on CelebA and Waterbirds, follow-
+ing the official Ladder implementation. We use the pre-
+trained ResNet weights and the author-released discovered
+slices provided by Ladder, and modify only the final error-
+mitigation stage in the official training scripts for CelebA
+
+User Prompt for FeSD Instance Segmentation Hypothesis Generation
+An Instance Segmentation model designed to detect and segment {label}. Think systematically from the following perspectives,
+and describe possible scenarios for each type of error below:
+False Positive: In what situations might other objects be mistakenly segmented as {label}?
+False Negative: In what situations might {label} fail to be segmented?
+Misclassification: In what situations might {label} be incorrectly segmented as another object class?
+Boundary Error: When might the segmentation mask boundary deviate from the true object contour (e.g., occlusion, uneven
+lighting, blurry edges)?
+Incomplete Mask: When might the model segment only part of the {label} instead of the entire object?
+Over-segmentation: When might the model mistakenly split one {label} instance into multiple segments?
+Under-segmentation: When might the model merge multiple nearby {label} instances into a single mask?
+Figure 13. The specialized user prompt used for instance segmentation hypothesis generation on the FeSD dataset. This prompt addresses
+comprehensive errors (false positives, false negatives, misclassification, boundary errors, incomplete masks, over-segmentation, under-
+segmentation) to cover potential failure patterns thoroughly in instance segmentation tasks. The {label} placeholder is replaced with the
+specific object class being analyzed.
+and Waterbirds. For Ladder, we follow its original repair
+procedure: each discovered slice defines a similarity score
+over validation samples. For every slice, we fine-tune a sep-
+arate classifier using the top and bottom n samples by sim-
+ilarity and aggregate predictions via Ladder’s ensemble.
+For Facts, Domino, and SliceLens, the discovered slices
+exist only within local subsets, often containing fewer sam-
+ples than required by Ladder’s per-slice training.
+Thus,
+we adopt the unified Discriminative Fine-tuning for Repair
+(DFR) framework, which serves as the underlying proce-
+dure used in Ladder. For each sample, we compute a single
+confidence score by taking the maximum across all discov-
+ered slices, representing the likelihood of any failure pat-
+tern.
+Fine-tuning is applied only to the classifier head on the
+top and bottom subsets ranked by this score, producing a
+single repaired classifier without ensemble aggregation. All
+hyperparameters match the official Ladder scripts except
+that we randomize the random seed for each run to compute
+standard deviations while the original Ladder implementa-
+tion uses a fixed seed.
+B.3.2. Object Detection Model Improvement on Fine-
+Grained Patterns
+We use the COCO bicycle subset (3,252 images, 7,113 bi-
+cycle instances) and a pretrained Faster R-CNN (ResNet-
+50-FPN) model. The baseline repair method is fine-tuning
+on all COCO images containing at least one bicycle in-
+stance. Optimization uses SGD (momentum 0.9), weight
+decay 5×10−4, batch size 16, initial learning rate 1×10−5,
+and a MultiStepLR scheduler with milestones at epochs 8
+and 11 (γ=0.1) for a total of 10 epochs.
+Confidence scores of instances for the validated error
+slice “bicycle partially occluded by a person” are computed
+by SliceLens slice discovery method. The image-level bi-
+nary attribute is defined as 1{maxinstances si ≥0.9}, where
+si is the instance confidence score. Each object class defines
+a group (e.g., person, bicycle). For example, a pair
+(person, True) denotes a person instance co-occurring
+with a likely “bicycle partially occluded by a person” case,
+whereas (bicycle, False) represents a bicycle instance
+with no such occlusion in the same image. We initialize
+weights uniformly across all (group, attribute) pairs. Only
+detection-head losses (classification and box regression) are
+reweighted; RPN losses (objectness, RPN box) remain un-
+weighted and are added directly to the total loss.
+For the grounded repair, we adapt the online GroupDRO
+frameworkto instance-level objectives.
+Per-group losses
+are computed by aggregating proposal-level classification
+and regression losses within each group.
+The weighted
+detection-head loss is then
+˜Lhead =
+P
+u quLu
+P
+u qu
+,
+where Lu is the mean detection loss for group u and qu is its
+current weight. The total loss adds unweighted RPN terms:
+Ltotal = ˜Lhead + LRPN,obj + LRPN,box,
+where LRPN,obj and LRPN,box are the RPN objectness and
+bounding box regression losses, respectively.
+After each iteration, group weights are updated online as
+qu ←qu exp(ηLu),
+qu ←qu/
+X
+v
+qv,
+with η=10−5. The GroupDRO variant uses batch size 16,
+learning rate 5×10−5, and the same optimizer settings and
+scheduler as the baseline.
+In summary, each iteration aggregates instance losses
+by group, computes a reweighted detection-head loss, adds
+
+RPN losses, and updates the group weights using the expo-
+nential rule above. Uniform weight initialization is applied
+at the start of fine-tuning, and all other architectural details
+follow the main text.
+B.4. SliceLens Results on FeSD Dataset
+B.4.1. Detailed Object Detection Results on FeSD Dataset
+Table 7 provides comprehensive Precision@10 results for
+all 21 ground truth error slices in the object detection set-
+ting, complementing the summary results presented in the
+main paper. SliceLens achieves an overall average Preci-
+sion@10 of 0.729, with 5 perfect matches and valid predic-
+tions for all ground truth slices.
+The detailed results reveal SliceLens’ effectiveness
+across both false positive and false negative error types.
+The method demonstrates particularly strong performance
+on systematic failure patterns such as “Red traffic sign is
+mistakenly detected as stop sign” and “Artistic face is mis-
+takenly detected as face” achieving perfect Precision@10
+scores. Even for challenging cases like “Nonvertical face in
+the image missed”, SliceLens maintains competitive perfor-
+mance with Precision@10 scores of 0.8.
+B.4.2. Instance Segmentation Results on FeSD Dataset
+To demonstrate the generalizability of SliceLens beyond
+object detection, we evaluate our method on instance seg-
+mentation tasks using the FeSD dataset.
+Table 8 presents the detailed Precision@10 results for
+all 21 ground truth error slices in the instance segmenta-
+tion setting.
+SliceLens achieves an overall average Pre-
+cision@10 of 0.805, demonstrating strong performance
+across diverse segmentation failure patterns. The method
+successfully identifies 8 perfect matches (Precision@10 =
+1.0) and achieves valid matches for 20 out of 21 ground
+truth slices.
+The results demonstrate that SliceLens effectively trans-
+fers to instance segmentation tasks, maintaining high preci-
+sion across various failure modes including occlusion pat-
+terns, object state variations, and contextual confusion sce-
+narios.
+Notably, the method achieves perfect precision
+on challenging slices such as “laptop keyboard merged
+with laptop body” (fine-grained object parts), “Tie bound-
+ary unclear due to color blending” (visual similarity chal-
+lenges), and shape-related patterns like “Sliced orange
+under-segmented due to shape change”. The method shows
+robust performance across different object categories in-
+cluding fruits, furniture, and everyday objects, with only
+one slice: “Surfboard on land missed (expected water con-
+text)” receiving zero precision, indicating the challenge of
+detecting surfboards in land-based contexts.
+C. Error Slice Discovery Tool based on Slice-
+Lens
+To demonstrate the practical utility of SliceLens, we devel-
+oped a production-ready tool for error slice discovery in
+computer vision systems. While the SliceLens described
+in our paper is an automated pipeline given a task context
+for evaluation purposes, the deployed tool is designed for
+an interactive workflow. It provides a user interface that al-
+lows human expertise to be incorporated into each stage of
+the discovery process. The following screenshots illustrate
+the key components of our implementation across different
+steps.
+C.1. Interactive Chat Interface for Hypothesis Gen-
+eration
+Figure 14 shows the main interface of the tool, featuring a
+dual-panel design with a data gallery on the left for dataset
+visualization and an interactive chatbox on the right for con-
+versational hypothesis generation and data retrieval.
+C.2. Hypothesis Selection and Submission
+Figure 15 demonstrates the hypothesis selection interface,
+where users can review LLM-generated failure pattern hy-
+potheses and select the most promising candidates for val-
+idation. The interface allows users to submit selected hy-
+potheses for automated slice discovery and trend analysis.
+C.3. Hypothesis Verification Task Management
+Figure 16 presents the task management interface, which
+displays all submitted hypotheses along with their vali-
+dation status. Each hypothesis-validation task runs asyn-
+chronously, allowing users to monitor progress and ac-
+cess results upon completion.
+These tasks are executed
+in batches to improve performance through prefilling and
+batched request optimization in the VLLM framework.
+C.4. Error Slice Identification Results
+Figure 17 shows an example of the slope trend analysis re-
+sults for a validated hypothesis. The interface presents the
+statistical relationship between slice confidence scores and
+accuracy. Unlike SliceLens in the paper, which reports er-
+ror rates, the tool supports analysis using either accuracy
+or error rate, and the slope trend analysis adapts automati-
+cally to the selected metric. This provides robust evidence
+supporting the validity of the discovered error slices across
+multiple metrics.
+
+Figure 14. SliceLens main interface with interactive chat functionality. The left panel displays the data gallery for dataset visualization,
+while the right panel provides a conversational interface for users to interact with the LLM for hypothesis generation and error slice
+discovery tasks.
+Figure 15. Hypothesis selection and submission interface. Users can review automatically generated failure pattern hypotheses, assess
+their plausibility, and submit selected candidates for validation.
+
+Table 6. HiBug attribute corpus generated for instance-level error slice discovery on FeSD dataset. Attributes are generated using
+ChatGPT following HiBug methodology. Each attribute includes categorical values, prompt templates, and evaluation questions for sys-
+tematic analysis.
+Attribute
+Type
+Values
+Prompt Template
+Evaluation Question
+Object Reality
+Description
+real object,
+image in image,
+artistic rendering,
+reflec-
+tion mirror, screen display
+A detected object in object reality
+What is the object in the photo, and is it a true rep-
+resentation of reality?
+Image Sharpness
+Description
+very sharp,
+sharp,
+slightly blurry,
+blurry,
+very blurry
+A
+detected
+object
+with
+sharp
+im-
+age sharpness
+How would you rate the sharpness of the detected
+object in the photo?
+Object Visibility
+Description
+100 percent,
+80 percent,
+50 percent,
+30 percent,
+less than 20
+A detected object with 90% object visi-
+bility
+What is the object visibility percentage of the de-
+tected object in the photo?
+Vehicle Subtype
+Description
+car, truck, bus, trailer, van,
+motorcycle, bicycle, stroller,
+cart, dumpster
+A detected car with a SUV subtype
+What is the vehicle subtype of the detected object
+in the photo?
+Person Activity
+Description
+standing, walking, sitting, rid-
+ing bicycle, in vehicle, run-
+ning, lying
+A #DETECTED OBJECT doing #1
+What is the activity of the person in the photo?
+Face Age Group
+Description
+infant,
+child,
+teenager,
+young adult, adult, elderly
+A #LABEL in the youth #1
+What age group does the detected object’s face be-
+long to in the photo?
+Face Orientation
+Description
+upright frontal,
+upright side,
+tilted, horizontal, upside down
+A #LABEL with #1 face orientation
+What is the orientation of the face in the detected
+object in the photo?
+Object State
+Description
+closed,
+partially open,
+fully open, in use, idle
+A #LABEL in motion
+What is the object state of the detected object in the
+photo?
+Object Material
+Description
+solid, paper, metal, glass, plas-
+tic, fabric
+A #1 ball with metal material
+What material is the detected object in the photo
+made of?
+Object Scale
+Description
+fills frame,
+dominates,
+medium, small, tiny
+A detected object with a small object
+scale in the frame
+What is the object scale in frame of the detected
+object in this photo?
+Object Size
+Description
+small, medium, large
+A #LABEL with small object size
+What is the size of the detected object in the photo?
+Occlusion Level
+Description
+not occluded,
+par-
+tially occluded,
+heav-
+ily occluded
+A detected object with low occlusion
+level
+What is the occlusion level of the detected object
+in the photo?
+Motion Blur
+Binary
+yes, no
+-
+Is the detected object in the photo showing signs of
+motion blur?
+Lighting Condition
+Description
+bright, normal, dark
+An #LABEL in #1 lighting condition
+What is the lighting condition of the detected object
+in the photo?
+View Angle
+Description
+frontal, side, back, top
+A #LABEL from a #1 view angle
+What is the view angle of the detected object in the
+photo?
+Object Truncation
+Description
+complete, partially truncated,
+heavily truncated
+A truncated detected object
+What is the object truncation value of the detected
+object in the photo?
+Color Contrast
+Description
+low contrast,
+medium contrast,
+high contrast
+A #LABEL with high color contrast
+What is the color contrast of the detected object in
+the photo?
+Background Clutter
+Description
+simple background,
+moder-
+ate clutter, heavy clutter
+A
+#LABEL
+with
+busy
+back-
+ground clutter
+What is the background clutter of the detected ob-
+ject in the photo?
+Object Distance
+Description
+close, medium, far
+A detected object at close distance
+What is the distance of the detected object in the
+photo?
+Object Pose
+Description
+upright, tilted, horizontal, in-
+verted
+An #LABEL in a #1 pose
+What is the pose of the detected object in the
+photo?
+Mirror/Glass Presence
+Binary
+yes, no
+-
+Is there a mirror or glass present in the photo?
+Color Similarity
+Description
+distinct,
+simi-
+lar to background,
+blends with background
+A
+#LABEL
+with
+#1
+ob-
+ject color similarity
+What is the similarity between the detected object
+and the color of the photo?
+Object Reflection
+Description
+no reflection,
+slight reflection,
+strong reflection
+A detected object with a shiny reflection
+What does the detected object in the photo reflect?
+Time of Day
+Description
+morning,
+noon,
+afternoon,
+evening, night
+A sky with morning light
+What is the time of day of the detected object in the
+photo?
+Texture Pattern
+Description
+smooth, textured, patterned
+A #LABEL with #1 texture pattern
+What is the texture pattern of the detected object in
+the photo?
+Partial Visibility
+Binary
+yes, no
+-
+Is the detected object in the photo partially visible?
+
+Table 7. Detailed Object Detection Results on FeSD Dataset. Complete Precision@10 scores for each ground truth error slice, showing
+the breakdown of SliceLens performance across different failure types (FP: False Positive, FN: False Negative).
+GT ID
+GT Slice Name
+GT Size
+Best Predicted Slice
+P@10
+0
+Stroller trolley is mistak-
+enly detected as a bicycle
+31
+folding bicycle
+0.2
+1
+Blurry face missed
+825
+faces with motion blur
+0.5
+2
+Cars that are partially ob-
+scured missed.
+1003
+Car that are more than 30% obscured
+0.8
+3
+Nonphysical face(e.g., face
+reflected in a mirror) is mis-
+takenly detected as face
+457
+Faces on screens: a face appearing on a TV,
+computer monitor, or phone within the image.
+0.7
+4
+Paper
+is
+mistakenly
+de-
+tected as book
+151
+Notebooks, journals, or planners that look like
+a book
+0.5
+5
+Red traffic sign is mistak-
+enly detected as stop sign
+1611
+red octagonal object near stop sign
+1.0
+6
+Person in the car missed
+162
+out of focus person
+0.9
+7
+Closed umbrella missed
+24
+Closed umbrella
+0.6
+8
+Artistic face is mistakenly
+detected as face
+501
+Statues, busts, or sculptures
+1.0
+9
+Partial face missed
+1058
+faces partially hidden by objects
+0.8
+10
+Vase with no flower or
+plants inside missed
+46
+Vase with no flower or plants inside
+0.5
+11
+Baby face missed
+101
+baby faces
+1.0
+12
+Trailer is mistakenly de-
+tected as truck
+230
+Trailers that look like a truck
+0.7
+13
+Dumpster is mistakenly de-
+tected as truck
+275
+Dumpsters or large bins that look like a truck
+1.0
+14
+Artificial face is mistakenly
+detected as face
+182
+objects resembling faces
+0.4
+15
+Open book missed
+26
+an open book
+0.9
+16
+Watch missed when detect-
+ing clock
+22
+watch that looks like a clock
+1.0
+17
+Open suitcase missed
+11
+suitcase that will not close
+0.8
+18
+Bicycles
+seen
+from
+the
+front/back that being rid-
+den/pushed by people
+303
+bicycle partially occluded by a person
+0.8
+19
+Cars with open doors are
+mistakenly
+detected
+as
+truck
+125
+Freight cars that look like a truck
+0.4
+20
+Nonvertical face in the im-
+age missed
+35
+faces with extreme head tilt
+0.8
+Average Precision@10
+0.729
+Perfect Matches (P@10 = 1.0)
+6/21
+Valid Matches (P@10 > 0)
+21/21
+
+Table 8. Detailed Instance Segmentation Results on FeSD Dataset. Precision@10 scores for each ground truth error slice, showing
+SliceLens’ performance across diverse segmentation failure patterns.
+GT ID
+GT Slice Name
+GT Size
+Best Predicted Slice
+P@10
+0
+Clustered
+bananaes
+merged, boundaries unclear
+183
+banana bunch
+0.8
+1
+Airplane
+boundary
+ex-
+panded under occlusion
+25
+airplanes with custom paint jobs
+0.9
+2
+Bed over-segmented with
+pet
+36
+pet lying on bed
+0.9
+3
+Laptop keyboard merged
+with laptop body
+136
+laptop keyboard
+1.0
+4
+Paper
+mis-segmented
+as
+book
+334
+Notebooks, journals, or planners that look like
+a book
+0.7
+5
+Apple logo mis-segmented
+as apple
+34
+partially occluded apple
+0.7
+6
+Tie boundary unclear due to
+color blending
+82
+ties similar to other clothing
+1.0
+7
+Sliced
+carrot
+under-
+segmented due to shape
+change
+432
+bunches of carrots
+0.9
+8
+Adjacent toys merged with
+teddy bear
+81
+teddy bear with accessories
+1.0
+9
+Clustered oranges merged,
+boundaries unclear
+37
+pile of oranges
+0.7
+10
+Open suitcase missed (non-
+canonical form)
+12
+overstuffed and bulging suitcase
+0.6
+11
+Open book missed due to
+shape variation
+29
+open book
+0.6
+12
+Clustered applees merged,
+boundaries unclear
+45
+apple in fruit stand
+1.0
+13
+Sliced
+banana
+under-
+segmented due to shape
+change
+90
+Banana slice
+0.7
+14
+Closed
+umbrella
+missed
+(non-typical pose)
+78
+Closed umbrella
+1.0
+15
+Vase
+without
+flowers
+missed due to context prior
+136
+Vase with no flowers or plants inside
+0.6
+16
+Sliced
+orange
+under-
+segmented due to shape
+change
+97
+orange slice
+1.0
+17
+Bed
+over-segmented
+to-
+gether with person
+44
+person lying on bed
+1.0
+18
+Surfboard on land missed
+(expected water context)
+36
+-
+0.0
+19
+Watch missed when seg-
+menting clock
+25
+watch that looks like a clock
+1.0
+20
+Sliced
+apple
+under-
+segmented due to shape
+change
+82
+apple slice
+0.8
+Average Precision@10
+0.805
+Perfect Matches (P@10 = 1.0)
+8/21
+Valid Matches (P@10 > 0)
+20/21
+
+Figure 16. Error slice verification task management interface. The interface displays all submitted validation tasks with their current
+status, allowing users to track progress and access completed results including discovered slice data and trend analysis.
+
+Figure 17. Trend analysis results interface. Example showing the statistical validation of a hypothesis through slope trend analysis
+between slice confidence scores and model performance, demonstrating robust evidence for discovered error slices. Note that the Y-axis in
+this example is model accuracy, not model error rate; therefore, a downward trend(rather than a upward trend) of the curve suggests it is a
+failure pattern.

@@ -1,0 +1,3172 @@
+QAOA-MaxCut has barren plateaus for almost all graphs
+Rui Mao ∗1,2, Pei Yuan †1, Jonathan Allcock ‡1, and Shengyu Zhang §1
+1Tencent Quantum Laboratory
+2School of Computer Science and Technology, University of Chinese Academy of
+Sciences, Beijing 100049, China
+January 1, 2026
+Abstract
+The Quantum Approximate Optimization Algorithm (QAOA) has been the subject of intense
+study over recent years, yet the corresponding Dynamical Lie Algebra (DLA)—a key indicator of the
+expressivity and trainability of variational quantum algorithms—remains poorly understood beyond
+highly symmetric instances. An exponentially scaling DLA dimension is associated with the presence
+of so-called barren plateaus in the optimization landscape, which renders training intractable.
+In this work, we investigate the DLA of QAOA applied to the canonical MaxCut problem, for
+both weighted and unweighted graphs. For weighted graphs, we show that when the weights are
+drawn from a continuous distribution, the DLA dimension grows as Θ(4n) almost surely for all
+connected graphs except paths and cycles. In the more common unweighted setting, we show that
+asymptotically all but an exponentially vanishing fraction of graphs have Θ(4n) large DLA dimension.
+The entire simple Lie algebra decomposition of the corresponding DLAs is also identified, from which
+we prove that the variance of the loss function is O(1/2n), implying that QAOA on these weighted
+and unweighted graphs all suffers from barren plateaus. Moreover, we give explicit constructions for
+families of graphs whose DLAs have exponential dimension, including cases whose MaxCut is in P.
+Our proof of the unweighted case is based on a number of splitting lemmas and DLA-freeness
+conditions that allow one to convert prohibitively complicated Lie algebraic problems into amenable
+graph theoretic problems. These form the basis for a new algorithm that computes such DLAs orders
+of magnitude faster than previous methods, reducing runtimes from days to seconds on standard
+hardware. We apply this algorithm to MQLib, a classical MaxCut benchmark suite covering over
+3,500 instances with up to 53,130 vertices, and find that, ignoring edge weights, at least 75% of the
+instances possess a DLA of dimension at least 2128.
+Contents
+1
+Introduction
+2
+1.1
+Main results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+1.2
+Techniques
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2
+Preliminaries
+5
+3
+DLAs of QAOA-MaxCut on weighted graphs
+9
+∗maorui21b@ict.ac.cn
+†peiyuan@tencent.com
+‡jonallcock@tencent.com
+§shengyzhang@tencent.com
+1
+arXiv:2512.24577v1 [quant-ph] 31 Dec 2025
+
+4
+DLAs of QAOA-MaxCut on unweighted graphs
+12
+4.1
+Three splitting lemmas . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+4.2
+Algorithm for splitting DLA generators
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+4.3
+All splitting procedures lead to the same partition
+. . . . . . . . . . . . . . . . . . . . . .
+15
+4.4
+DLAs for random graphs . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+4.4.1
+Properties of Erdős-Rényi graphs . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+4.4.2
+Proof of Theorem 3
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+4.5
+DLAs for asymmetrically subdivided odd graphs
+. . . . . . . . . . . . . . . . . . . . . . .
+21
+4.6
+Other applications of the splitting lemmas . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.7
+Numerical results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+5
+Generalization to other DLAs
+31
+6
+Discussion
+33
+A An alternative proof of Theorem 3
+38
+1
+Introduction
+Variational quantum algorithms (VQAs) constitute one of the main computational paradigms in quantum
+computing. Originally proposed to take advantage of noisy, intermediate scale (NISQ) quantum devices,
+variational algorithms are based on a hybrid quantum-classical framework, where an initial quantum
+state ρ is processed by a parameterized quantum circuit (PQC), and an observable O is measured on
+the output. The parameters θ are iteratively tuned via a classical optimizer, with the aim of minimizing
+a loss function ℓ(ρ, O; θ). The flexibility afforded by this approach – with freedom to tailor the circuit
+structure according to both problem requirements as well as hardware constraints – has led to proposed
+applications in a wide variety of areas including optimization [BBC+24, LZ16], quantum chemistry
+[KMW+18, WZdS+20], and machine learning [MNKF18, SBSW20, BGPP+19, Alt01].
+However, the efficacy and efficiency of VQAs, in both the near and long term, is still under investi-
+gation. In particular, the trainability of such algorithms can be affected by the presence or absence of
+so-called barren plateaus (BPs) [MBS+18], a phenomenon where the optimization landscape becomes
+exponentially flatter and featureless with increasing problem size. More specifically, BPs are said to
+occur when the variance of the loss function or its gradient decays exponentially with the system size,
+i.e., Varθ(ℓ(ρ, O; θ)) or Varθ(∇ℓ(ρ, O; θ)) ∈O(1/bn) for some b > 1. If this occurs, this presents a huge
+challenge in updating the circuit parameters by either gradient-based or gradient-free methods.
+Barren plateaus have been shown to have many causes, including the expressiveness of the PQC
+[MBS+18, HSCC22, MKW21, PNGY21, LCS+22, FM23, SCCC22, KCW21, PCW+21, LMRA21, MPL23,
+GBB+23, SMM+22], the randomness of the initial state [MBS+18, CSV+21, TWN+23, SW22, ASZ+21,
+LOCC24, HAY+21], the locality of measurements [CSV+21, UB21, KAK23, KLP+19, UBY20, LSCB21,
+CSAC22] and hardware noise [WFC+21, FGP21, GMLC24]. Intriguingly, in two recent works [RBS+24,
+FHC+24], these seemingly different causes were all shown to have the same underlying mathematical
+explanation in terms of the Dynamical Lie algebra (DLA) [EW06, Hal13], a vector space generated by the
+set of operators corresponding to the parameterized gates in the circuit. For an n-qubit PQC, the DLA
+g is a subalgebra of the Lie algebra u(2n), and decomposes into a direct sum of an abelian center and a
+number of simple Lie algebras gj. The variance of the loss function can be precisely characterized by the
+projections of ρ and O onto the simple components gj, along with the dimensions of these components,
+provided that either ρ ∈ig or O ∈ig. Consequently, by identifying the DLA of a VQA and determining
+its algebraic structure, one can ascertain whether BPs will be present or not. In particular, if the DLA
+decomposes into at most a polynomial number of simple components and all of them have exponential
+dimensions, then it will lead to BPs [RBS+24, FHC+24].
+In addition to their connection to BPs, DLAs can be used in the analysis of several other important
+aspects of quantum systems: the overparametrization phenomenon in quantum neural networks (QNN)
+[LJGM+23]; the controllability of the unitary propagator [Alt02] and spin, fermionic and bosonic systems
+[ZSH11]; and the design of algorithms for Hamiltonian time evolution unitary synthesis [KSW+22].
+While the mathematical relationship between DLAs and BPs is enlightening, the practical application
+of this connection requires the explicit computation of various DLA properties, such as the dimension
+2
+
+and basis of a DLA, its decomposition into a center and simple components, and a set of basis vectors for
+each simple component. A basis for a DLA can be computed algorithmically, although the time required
+can be exponential in the number of qubits. However, determining the decomposition and component
+bases presents a significantly greater challenge. When the generators of the DLA are Pauli strings, an
+efficient method for determining the decomposition of the DLA was proposed [ACEB24]. However, in
+the more general case that the DLA generators are linear combinations of Pauli strings, much less is
+known.
+In this work, we focus on the DLA of one of the most studied variational quantum algorithms,
+namely the Quantum Approximate Optimization Algorithm (QAOA) [FGG14] for the MaxCut problem
+on graphs.
+Given an unweighted graph G = (V, E), the QAOA-MaxCut circuit corresponds to the
+layered variational circuit
+U(γ, β) = e−iβLHme−iγLHp . . . e−iβ1Hme−iγ1Hp
+where L is a positive integer, γ = (γ1, . . . , γL) and β = (β1, . . . , βL) with βj, γj ∈R, and the mixer and
+problem Hamiltonians are
+Hm ≜
+X
+u∈V
+Xu,
+Hp ≜
+X
+(u,v)∈E
+ZuZv,
+respectively, where Xu, Zu denote the Pauli X and Z operators acting on qubit u. The corresponding
+DLA g is generated by the set {Hm, Hp}. The initial state of the circuit is usually taken to be ρ =
+(|+⟩⟨+|)⊗n, the measurement at the end of the circuit is O =
+1
+√
+|E|Hp, and the loss function is ℓ(ρ, O; θ) =
+tr
+ U(θ)ρU(θ)†O
+
+with θ = (γ, β).
+A variant of QAOA called multi-angle QAOA [HLO+22] was developed to enhance the approximation
+ratio for the MaxCut problem while reducing circuit depth. The key difference between multi-angle
+QAOA and standard QAOA lies in their parameterizations. While the standard algorithm assigns a
+single parameter (βj) to each Hm, and another (γj) to each Hp, in multi-angle QAOA each Xu and
+ZuZv term is tunable by its own independent parameter (See Figure 1). In terms of DLA, the multi-
+angle DLA gma is generated by the set {Xu : u ∈V } ∪{ZuZv : (u, v) ∈E}. It is always the case that
+g ⊆gma. If equality holds then we say that the standard DLA g is free. In contrast to the standard
+DLA case, where the DLA generators are linear combinations of Pauli strings, each generator of the
+multi-angle DLA is an individual Pauli string. This facilitates the analysis, and a full characterization
+of multi-angle DLAs on general connected graphs has been obtained [KLF+24, KWKB24], building on
+a broader classifications of DLAs generated by Pauli strings [ACEB24].
+The standard QAOA-MaxCut DLAs have proven more challenging to analyze, and to-date are well-
+understood only for some symmetric cases, such as paths, cycles, and complete graphs. For path graphs,
+the DLA has been shown to be isomorphic to u(n) [KLF+24]; for cycle graphs, the DLA is isomorphic
+to u(1) ⊕u(1) ⊕Ln−1
+j=1 su(2) [DI25, ASYZ24], and an explicit basis for each simple component has been
+given [ASYZ24]; for complete graphs, an explicit basis for the DLA was constructed [ASYZ24]. The
+QAOA-MaxCut complete graph case is an instance of an Sn-equivariant quantum neural network, whose
+corresponding DLAs have been shown not to exhibit BPs [SLN+24, AD18].
+However, the situation for general graphs is not well understood. Numerical investigations on Erdős-
+Rényi random graphs [LCS+22] suggest that typical instances exhibit large-dimensional DLAs and are
+prone to barren plateaus.
+1.1
+Main results
+In this work, we investigate the standard QAOA-MaxCut DLA for both unweighted graphs, as described
+above, as well as weighted graphs G = (V, E, r), where r = {ruv ∈R : (u, v) ∈E} denotes the set of
+weights on edges. For weighted graphs, the mixer term Hm is the same as for the unweighted case, while
+the problem Hamiltonian now carries the weights, viz Hp ≜P
+(u,v)∈E ruvZuZv.
+We first give a sufficient condition for the DLA of any weighted graph to be free.
+Theorem 1. Let G = (V, E, r) be a weighted graph such that
+1. ruv ̸= 0 for any (u, v) ∈E, and
+3
+
+(1)
+1
+2
+3
+4
+(2)
+×L
+ZZ
+ZZ
+ZZ
+X
+X
+X
+X
+(3)
+×L
+ZZ
+ZZ
+ZZ
+X
+X
+X
+X
+Figure 1: (1) The MaxCut problem seeks to find a bipartition of the vertices of a graph such that the
+number of edges (or sum of edge weights in the weighted MaxCut problem) across the two partitions is
+maximized. (2) and (3) The parameterized quantum circuits of QAOA-MaxCut and multi-angle QAOA-
+MaxCut, respectively. ZZ and X indicate a 2-qubit gate eiβZiZj on qubits i, j and a single-qubit gate
+eiγXj on qubit j for some real parameters β, γ. Gates with the same color share the same parameter.
+The circuits are repeated L times, with different parameters in each repetition.
+2. for any family of sign functions
+
+sx : N(x) →{±1}
+ 
+x∈V , and any two vertices u, v ∈V ,
+X
+w∈N(u)
+su(w)ruw ̸=
+X
+w′∈N (v)
+sv(w′)rvw′.
+(1)
+Then g = gma.
+The conditions on the edge weights ruw in the above theorem are satisfied with probability one for
+connected graphs on n ≥3 vertices with weights randomly sampled from continuous distributions. By
+combining this with a known classification of all multi-angle QAOA-MaxCut DLAs [KLF+24, KWKB24],
+it follows that g has exponentially large components for all connected graphs G, unless G is a path or
+cycle, and that the corresponding QAOA-MaxCut algorithms will suffer from barren plateaus.
+Theorem 2. Let G = (V, E, r) be a connected graph, and not a path or cycle. If the weights are drawn
+from a continuous distribution, then, with probability 1, the following statements hold for QAOA-MaxCut.
+1. g = gma.
+2. g is the direct sum of either one or two simple Lie algebras, each of dimension Θ(4n).
+3. Varθ[ℓ(ρ, O; θ)] = O(1/2n), and barren plateaus are therefore present.
+For unweighted graphs — corresponding to the standard QAOA-MaxCut setting — we prove that,
+asymptotically, all but an exponentially small fraction of graphs have exponentially large DLA dimension,
+confirming the numerical observations of [LCS+22]. Combined with the fact that such random graphs
+are connected with high probability, this again implies that g has exponentially large components, and
+the corresponding QAOA-MaxCut algorithms will be susceptible to barren plateaus. More precisely, we
+consider Erdős-Rényi random graphs G ∼G(n, p), where graphs on n vertices are constructed by adding
+each possible edge between pairs of vertices independently with probability p. When p = 1/2 we obtain
+the following result.
+Theorem 3. Let G ∼G(n, 1
+2) be an Erdős-Rényi random graph. Then with probability at least 1 −
+exp(−Ω(n)), the following statements hold for QAOA-MaxCut.
+1. g = gma.
+2. g is the direct sum of either one or two simple Lie algebras, each of dimension Θ(4n).
+3. Varθ[ℓ(ρ, O; θ)] = O(1/2n), and barren plateaus are therefore present.
+The same statements hold if we draw G uniformly at random from all non-isomorphic graphs on n
+vertices.
+4
+
+In addition, we give explicit constructions for families of graphs whose DLAs are free, as well as
+constructive methods for embedding graphs with free DLAs in larger graphs such that the DLAs of
+the larger graphs are also free.
+In particular, we consider so-called asymmetric subdivisions of odd
+graphs, extended ladder graphs, and grid+1 graphs (precise definitions given later) and show that their
+corresponding DLAs are all free.
+Theorem 4 (Theorem 23, Proposition 33 and Proposition 37, restated). If G = (V, E) is (i) an asym-
+metrically subdivided odd graph, (ii) an extended ladder graph, or (iii) a grid+1 graph, then g = gma.
+As a consequence, it follows that for every n ≥7, there exists at least one n-vertex graph whose DLA
+is free.
+We further give a polynomial-time reduction from any connected unweighted graph to an asymmet-
+rically subdivided odd graph which is an equivalent MaxCut instance. The freeness of the corresponding
+DLA shows that MaxCut instances with exponentially large DLAs are ubiquitous, and include those
+that are efficiently solvable by classical computers.
+Theorem 5. For any connected graph G = (V, E), there is an asymmetrically subdivided odd graph
+G′ = (V ′, E′), with |V ′|, |E′| ∈O(|E|2), such that
+1. MaxCut(G′)−MaxCut(G) = |V ′|−|V |, and there is an efficient transformation between the MaxCut
+solutions of G and G′.
+2. g′ = g′
+ma, where g′ is the DLA corresponding to G′.
+The proof of Theorem 3 is based on a new practical algorithm (Algorithm 4) we propose that computes
+DLA dimensions orders of magnitude faster than prior methods, reducing computation times from days
+to seconds on standard hardware.
+Applying our algorithm to the MQLib benchmark suite [DGS18]
+reveals that 75% of instances (ignoring edge weights) have DLA dimension exceeding 2128, showing that
+our algorithm is a powerful tool for filtering out intractable instances for QAOA.
+1.2
+Techniques
+Our approach is based on analyzing the spectral properties of the operator f(·) = 1
+4[Hp, [Hp, ·]], where
+[·, ·] is the Lie bracket associated with the DLA (see Section 2), and Hp = P
+(u,v)∈E ruvZuZv for a graph
+G = (V, E, r). In particular, we show that polynomials in f, when acting on Hm = P
+u∈V Xu, project out
+various disjoint linear combinations of the Xu, with the linear combinations depending on the spectrum
+of f.
+When G is a weighted graph satisfying the conditions in Theorem 1, then the spectrum of f is such
+that a projector can be formed for each Xu separately, and thus Xu ∈ig for all u ∈V . This is a necessary
+and sufficient condition for g = gma.
+When G is unweighted, projectors can be constructed onto the even-degree and odd-degree vertices
+in G, i.e., P
+u∈V :deg(u) even Xu ∈ig and P
+u∈V :deg(u) odd Xu ∈ig.
+Furthermore, we show that this
+construction can be applied recursively to subgraphs induced by the even- or odd-degree vertices of G,
+to successively split linear combinations of Xu operators into smaller linear combinations which are also
+in ig. When no further splittings by this ‘internal’ parity (i.e., considering the degree of vertices within
+a subgraph) argument are possible, we show that further splitting may be possible by comparing the
+‘external’ degree parity of vertices in one subset S with another subset T. These splitting arguments
+form the basis for an algorithm (Algorithm 4) which, given an unweighted graph G as input, outputs a
+list of linear combinations of the Xu that lie in ig. If the algorithm returns Xu ∈ig for all u ∈V then
+this is sufficient for g = gma. Our proof that random graphs are free, except with exponentially small
+probability, follows from analyzing the probability that the algorithm terminates with all the Xu split.
+2
+Preliminaries
+Notation
+Let [n] ≜{1, 2, . . . , n}. For any two sets T1 and T2, define T1\T2 ≜{v : v ∈T1, v /∈T2}. If
+a set S is partitioned into S1, . . . , Sk, we denote this by S = S1 ⊎· · · ⊎Sk. We adopt the common row
+vector concatenation notation (x, y) for two row vectors x and y, and column concatenation notation
+5
+
+(x; y) for two column vectors x and y. For any m-bit string x = x1x2 . . . xm ∈Fm
+2 , its Hamming weight
+|x| is the number of 1’s in x, and xi is the ith bit of x. We use 0 to denote the all-zero bit-string. For
+any S ⊆V , 1S ∈F|V |
+2
+is a bit string where the i-th bit is 1 if i ∈S and 0 otherwise. For any set T,
+|T| denotes its cardinality. For a set T and a map f, f(T) ≜{f(x) : x ∈T}. For a vector space V ,
+V ∗denotes the corresponding dual vector space consisting of all linear forms on V . For a linear form
+f : D →Y , the kernel of f is denoted by Ker(f) ≜{v ∈D : f(v) = 0}, and the image of f is denoted
+by Im(f) ≜{f(v) ∈Y : v ∈D}.
+Let P = P1P2 · · · Pn ≜P1 ⊗P2 ⊗· · · ⊗Pn denote the n-qubit Pauli strings, where Pj ∈{I, X, Y, Z}.
+Here I is the 2 × 2 identity operator, and
+X =
+ 0
+1
+1
+0
+
+,
+Y =
+ 0
+−i
+i
+0
+
+,
+Z =
+ 1
+0
+0
+−1
+
+are the single-qubit Pauli operators. The subscript indicates the qubit that a Pauli or identity operator
+acts on. The identity operators in a Pauli string are sometimes omitted, e.g, we write Z1I2I3Z4 as Z1Z4.
+Graphs
+We consider simple and undirected graphs in this paper. Denote by G = (V, E) an unweighted
+graph, and by G = (V, E, r) a weighted graph where r : E →R assigns a real-valued weight ruv to each
+edge (u, v) ∈E. Unweighted graphs can be viewed as weighted graphs with all weights being 1. For any
+graph G = (V, E), let |G| denote the number of vertices in G, N(u) ≜{v ∈V : (u, v) ∈E} denote the
+neighbors of u and deg(u) the degree of vertex u. For clarity, we shall sometimes denote by V (G) and
+E(G) the sets of vertices and edges in G, respectively.
+For a subgraph H = (VH, EH) of G, NH(u) and degH(u) denote the neighbors and degree of u ∈VH
+in subgraph H respectively. For a set T ⊆V and a vertex v ∈V , define NT (v) ≜NG(v) ∩T. The
+automorphism group Aut(G) of G = (V, E) is defined as Aut(G) ≜{π ∈SV : (u, v) ∈E iff (π(u), π(v)) ∈
+E}, where SV is the permutation group on V . If Aut(G) consists of only the identity permutation, we
+say that Aut(G) is trivial. For any S, T ⊆V , let
+E(S, T) ≜{(u, v) ∈E : u ∈S, v ∈T}
+and
+E(S) ≜{(u, v) ∈E : u, v ∈S},
+and define the induced subgraphs
+G[S, T] ≜(S ∪T, E(S, T))
+and
+G[S] ≜(S, E(S)).
+Note that G[S, T] is a bipartite graph.
+A path graph on n vertices (or n-path) is denoted by Pn = (Vn, En), where Vn ≜{vi : 1 ≤i ≤n} and
+En ≜{(vi, vi+1) : 1 ≤i < n}. The length of a path graph is defined by the number of edges, i.e., Pn has
+length n −1. We also define an empty path to be a null graph, i.e., n = 0.
+A fundamental model in the study of random graphs is the Erdős-Rényi model, defined as follows.
+Definition 1 (Erdős-Rényi (ER) model).
+• In the ER model G(n, p), a graph G = (V, E) is constructed by connecting n labeled vertices with
+each possible edge included independently with probability p, denoted by G ∼G(n, p).
+• In the bipartite ER model G(n1, n2, p), a graph G = (V, E) is constructed by connecting edges
+between two sets of labeled vertices with sizes n1 and n2, and each possible edge is included
+independently with probability p, denoted by G ∼G(n1, n2, p).
+Lie Algebras and Dynamical Lie Algebras
+A Lie algebra g is a vector space V over a field F,
+together with a bilinear map [·, ·] : g × g →g, called the Lie bracket, satisfying (1) [A, A] = 0 for all
+A ∈g, and (2) the Jacobi identity
+[A, [B, C]] + [B, [C, A]] + [C, [A, B]] = 0,
+∀A, B, C ∈g.
+In this paper, we focus on matrix Lie algebras, for which the Lie bracket is defined as the matrix
+commutator [A, B] ≜AB −BA.
+6
+
+A Lie subalgebra h ⊆g of a Lie algebra g is a linear subspace of g which is closed under the Lie
+bracket, i.e. [H1, H2] ∈h for all H1, H2 ∈h. A Lie algebra g is said to be the direct sum of subalgebras
+g1, g2, . . . , gk, denoted
+g = g1 ⊕g2 ⊕. . . ⊕gk,
+if it is the direct sum of g1, . . . , gk as vector spaces, and [gi, gj] = 0 for all i ̸= j. An ideal of a Lie algebra
+g is a Lie subalgebra i of g satisfying the further requirement that [A, B] ∈i for all A ∈g and B ∈i. An
+ideal i of g is trivial if i = g or i = {0}. A Lie algebra g is abelian if [A, B] = 0 for all A, B ∈g. A simple
+Lie algebra is a Lie algebra that is non-abelian and contains no nontrivial ideals. The center c of g is
+defined as c ≜{x ∈g : [x, y] = 0, ∀y ∈g}. For Lie algebras g1 and g2, if there exists a bijective linear
+map ϕ : g1 →g2 such that ϕ([X, Y ]) = [ϕ(X), ϕ(Y )] for any X, Y ∈g1, then g1 and g2 are isomorphic,
+denoted by g1 ∼= g2.
+A Lie algebra g is semisimple if it decomposes as a direct sum of simple components, i.e., g =
+g1 ⊕. . . ⊕gk, where the gi are simple. If g is semisimple then g = [g, g], where the commutator ideal
+[g, g] ≜spanF{[A, B] : A, B ∈g}.
+We list some matrix Lie algebras over R used in this paper.
+1. so(n) ≜{H ∈Rn×n : H⊤= −H}, which has dimension n(n −1)/2.
+2. sp(n) ≜{H ∈C2n×2n : ΩH + H⊤Ω= 0} for Ω≜
+
+0
+In
+−In
+0
+
+, which has dimension n(2n + 1).
+3. su(n) ≜{H ∈Cn×n : H† = −H, tr(H) = 0}, which has dimension n2 −1.
+Note that su(n) (n ≥2), so(n) (n = 3, 5, ≥7) and sp(n) (n ≥1) are simple Lie algebras.
+An L-layer parameterized quantum circuit (PQC) of a variational quantum algorithm (VQA) acting
+on n qubits corresponds to a unitary operator
+U(θ) =
+L
+Y
+l=1
+K
+Y
+k=1
+eiθl,kHk,
+(2)
+where θ = (θl,k) ∈RLK and H1, H2, . . . , HK are Hermitian operators. The corresponding dynamical Lie
+algebra is defined as follows.
+Definition 2 (Dynamical Lie Algebra). Let U be a layered parameterized quantum circuit with a set
+A = {H1, . . . , HK} of Hermitian operators as in Eq. (2). The circuit is associated with a Lie algebra
+generated by A as follows,
+g = ⟨iA⟩Lie,R = spanR{[iHjt, [· · · , [iHj3, [iHj2, iHj1]] · · · ]] : j1, . . . , jt ∈[K], t ≥1},
+(3)
+namely the linear space spanned by all possible nested commutators of elements in iA. This Lie algebra
+is called the dynamical Lie algebra of the circuit U, and H1, . . . , HK are called the generators of g.
+DLAs of QAOA-MaxCut
+QAOA [FGG14] is a quantum algorithm for solving combinatorial opti-
+mization problems. A widely studied version of QAOA solves the MaxCut problem on a weighted graph
+G = (V, E, r), and begins by initializing an n-qubit state ρ = (|+⟩⟨+|)⊗n and alternatively applying the
+mixer and problem operators Um and Up
+Um(β) = e−iβ P
+u∈V Xu,
+Up(γ) = e−iγ P
+(u,v)∈E ruvZuZv.
+After the circuit execution, one measures the output state in the computational basis and computes
+the MaxCut value based on the measurement results.
+The measurement operator O is taken to be
+O =
+1
+√P
+(u,v)∈E r2
+uv Hp, normalized so that, as in [RBS+24], ∥O∥2
+2 ≤2n. For unweighted graphs, the
+measurement is O =
+1
+√
+|E|Hp. Note that, in both cases, O ∈ig.
+7
+
+Definition 3 (DLA of QAOA-MaxCut). Let G = (V, E, r) be a weighted graph. The QAOA generators
+for this graph are
+Hp ≜
+X
+(u,v)∈E
+ruvZuZv,
+Hm ≜
+X
+u∈V
+Xu.
+The DLA (also called standard DLA) is defined by
+g = ⟨{iHp, iHm}⟩Lie,R .
+(4)
+The DLAs for the QAOA on unweighted graphs are defined in the same way, with all ruv set to 1,
+denoted by r ≡1.
+A variant of QAOA, called multi-angle QAOA, enhances flexibility by assigning distinct parameters to
+each term in the problem and mixer Hamiltonians, rather than using a single angle for the entire problem
+Hamiltonian and a single angle for the mixer Hamiltonian. For an unweighted graph G = (V, E), the
+mixer and problem operators Um, Up of the multi-angle QAOA for the MaxCut problem are defined as
+Um(β) = e−i P
+u∈V βuXu,
+Up(γ) = e−i P
+(u,v)∈E γuvZuZv,
+where β = (βv)v∈V ∈R|V | and γ = (γuv)(u,v)∈E ∈R|E|.
+Definition 4 (DLA of multi-angle QAOA-MaxCut). Let G = (V, E) be a simple and unweighted graph.
+The multi-angle QAOA generators for this graph are
+{iXu, iZuZv : ∀u ∈V, ∀(u, v) ∈E}.
+The corresponding DLA (also called free DLA) is defined as:
+gma ≜⟨{iXu : u ∈V } ∪{iZuZv : (u, v) ∈E}⟩Lie,R.
+(5)
+For clarity, we may sometimes denote the graph corresponding to a DLA with a subscript, i.e., we may
+write gG and gG,ma instead of simply g and gma. Dynamical Lie algebras for multi-angle QAOA-MaxCut
+on unweighted graphs have been fully classified:
+Theorem 6 (DLAs of multi-angle QAOA-MaxCut, [KLF+24, KWKB24]). For any unweighted and
+connected graph G = (V, E) with n vertices, the following statements hold.
+• If G is a path, then gma ∼= so(2n) with dimension 2n2 −n.
+• If G is a cycle, then gma ∼= so(2n) ⊕so(2n) with dimension 4n2 −2n.
+• If G is a non-bipartite graph and not a cycle, then gma ∼= su(2n−1) ⊕su(2n−1) with dimension
+22n−1 −2.
+• If G = (V1 ⊎V2, E) is a bipartite graph and not a path and a cycle, then
+– gma ∼= sp(2n−2) ⊕sp(2n−2) with dimension 22n−2 + 2n−1 if n is even and |V1| is odd;
+– gma ∼= so(2n−1) ⊕so(2n−1) with dimension 22n−2 −2n−1 if n is even and |V1| is even;
+– gma ∼= su(2n−1) with dimension 22n−1 −1 if n is odd.
+An explicit basis for gma is given in [KLF+24].
+Note that, for any unweighted graph G = (V, E) or weighted graph G = (V, E, r), we have g ⊆gma.
+If g = gma for a given G, then we will say that the DLA of G is free.
+Lemma 7. If the DLA of G is free, then g is semisimple when G has no isolated vertices.
+Proof. Every graph G is a disjoint union of connected components G = G1 ⊕G2 ⊕. . . ⊕Gk. If g = gma,
+then g is generated by {iXu, iZuZv : u, v ∈V }. Note that the Xu and ZuZv operators corresponding to
+different connected components commute. Thus, if G has no isolated vertices, g = g1 ⊕. . .⊕gk, where gj
+is the DLA generated by the Xu and ZuZv operators in the j-th connected component. From Theorem 6
+each of these is semisimple.
+For an n-qubit Pauli string P = P1 . . . Pn and permutation π ∈Sn, define π(iP) ≜iPπ(1) . . . Pπ(n),
+and extend this action by linearity to linear combinations of Pauli strings. As shown in [ASYZ24], for
+any π ∈Aut(G), π(H) = H for all H ∈g. This gives the following corollary.
+Corollary 8. If the DLA of G is free, then Aut(G) is trivial.
+8
+
+VQAs and DLAs
+Since dynamical Lie algebras are subalgebras of u(2n), they can be decomposed
+as g = g1 ⊕g2 ⊕· · · ⊕gk ⊕c, where g1, . . . , gk are simple Lie algebras and c is the center. If O ∈ig or
+ρ ∈ig, and the circuit is deep enough to form a unitary 2-design, then the variance of the loss function
+is related to the DLA g [RBS+24]:
+Varθ[ℓ(ρ, O; θ)] =
+k
+X
+j=1
+Pgj(ρ)Pgj(O)
+dim(gj)
+.
+(6)
+Here the s-purity of a Hermitian operator H ∈iu(2n) (with respect to a subalgebra s of u(2n)) is
+Ps(H) ≜tr
+ H2
+s
+
+=
+dim(s)
+X
+j=1
+tr
+
+E†
+jH
+
+2
+,
+where Hs is the orthogonal projection of operator H onto sC ≜spanC{Ej : j = 1, 2, . . . , dim(s)} and
+{Ej : j = 1, 2, . . . , dim(s)} is an orthonormal basis for s.
+3
+DLAs of QAOA-MaxCut on weighted graphs
+In this section, we study the DLAs of QAOA-MaxCut on weighted graphs, and prove the following
+sufficient condition on the edge weights under which a DLA is free.
+Theorem 1. Let G = (V, E, r) be a weighted graph such that
+1. ruv ̸= 0 for any (u, v) ∈E, and
+2. for any family of sign functions
+
+sx : N(x) →{±1}
+ 
+x∈V , and any two vertices u, v ∈V ,
+X
+w∈N(u)
+su(w)ruw ̸=
+X
+w′∈N (v)
+sv(w′)rvw′.
+(1)
+Then g = gma.
+The condition in Eq. (1) on the edge weights ruw holds almost surely for connected graphs on n ≥3
+vertices, with weights randomly sampled from continuous distributions, such as the uniform distribution
+U(0, 1) or exponential distribution Exp(λ). This leads to the following result.
+Theorem 2. Let G = (V, E, r) be a connected graph, and not a path or cycle. If the weights are drawn
+from a continuous distribution, then, with probability 1, the following statements hold for QAOA-MaxCut.
+1. g = gma.
+2. g is the direct sum of either one or two simple Lie algebras, each of dimension Θ(4n).
+3. Varθ[ℓ(ρ, O; θ)] = O(1/2n), and barren plateaus are therefore present.
+Proof. Point 1: By assumption, G is not a 2-path and thus, for any vertices u, v, the set of edges incident
+to u does not equal to that of v. For any fixed pair of vertices (u, v) and any fixed sign functions {sx}x∈V ,
+the set of weights {ruv : (u, v) ∈E} making the equality to hold in Eq. (1) is a subspace of dimension
+strictly lower than |E|, making this set to have 0 measure in R|E|. Therefore, Eq. (1) is satisfied with
+probability 1 when the weights ruv are sampled from any continuous distribution. Similarly, ruv ̸= 0 with
+probability 1 for any edges (u, v) ∈E. There are only a finite number of pairs u, v ∈V , edges (u, v) ∈E,
+and sign functions {ruv : (u, v) ∈E}, so the conditions of Theorem 1 are satisfied with probability 1 by
+a union bound over bad events.
+Point 2: Follows from Point 1 and Theorem 6, noting the assumption that G is not a path or cycle.
+Point 3: Follows from Point 2 and Eq. (6), taking k = 1 or 2, Pgj(ρ) ≤1 and Pgj(O) ≤2n, and
+dim(gj) = Θ(4n).
+9
+
+Note that when G is a path or a cycle on n ≥3 vertices, and the weights are sampled from a
+continous distribution, then we still have g = gma with probability 1. However, dim(gma) = O(n2) so
+barren plateaus do not necessarily occur.
+To prove Theorem 1, our approach will be to prove that iXu ∈ig for all u ∈V . As the following
+lemma shows, this is a sufficient condition for g = gma.
+Lemma 9. If {iXu : u ∈V } ⊆g and ruv ̸= 0 for (u, v) ∈E, then g = gma.
+Proof. For any (u, v) ∈E,
+iZuZv =
+1
+16ruv
+[iXu, [iXu, [iXv, [iXv, iHp]]]] ∈g.
+Hence,
+gma = ⟨{iZuZv : (u, v) ∈E} ∪{iXu : u ∈V }⟩Lie,R ⊆g.
+The converse is true by the definitions of g and gma.
+We now introduce a class of Pauli strings called XZ even stars, which plays a central role in our
+analysis.
+Definition 5 (XZ even star). For a vertex u ∈V , define the set of even-parity binary vectors:
+Eu ≜
+n
+x ∈Fdeg(u)
+2
+: |x| ≡0 mod 2
+o
+.
+Denote the neighbors of u by v1, . . . , vdeg(u). An XZ even star centered at u is a Pauli string of the form
+Su
+x ≜Xu
+deg(u)
+Y
+i=1
+(Zvi)xi,
+for x ∈Eu.
+(7)
+The set of XZ even stars centered at u and the set of all XZ even stars are denoted by
+Su ≜{Su
+x : x ∈Eu}
+and
+S ≜
+[
+u∈V
+Su.
+The vector spaces spanned by these sets are denoted by
+Hu ≜span Su
+and
+H ≜span S.
+(8)
+Another important object is a linear map over H defined as
+f(·) ≜−1
+4[iHp, [iHp, ·]] = 1
+4[Hp, [Hp, ·]],
+(9)
+which is proportional to the squared adjoint map of iHp. The following lemma gives the properties of f.
+We defer the proof to the end of this section.
+Lemma 10. The function f defined in Eq. (9) has the following properties.
+1. f(Hu) ⊆Hu and f(H) ⊆H.
+2. f is diagonalizable. Moreover, for a vertex u ∈V , the spectrum of f|Hu is
+spec(f|Hu) =
+
+
+
+ d−1
+X
+i=1
+(−1)xiruvi + ruvd
+!2
+: x ∈Eu
+
+
+,
+(10)
+where d ≜deg(u).
+3. f t(Hm) ∈ig for t ≥0.
+The next lemma will be used to show that Xu ∈span{f t(Hm) : t ≥0} ⊆ig for any u ∈V .
+10
+
+Lemma 11. Let A be a diagonalizable linear operator on a vector space V . Assume V decomposes into
+a direct sum of A-invariant subspaces V = V1 ⊕· · · ⊕Vk such that the spectra of the restrictions A|Vi are
+pairwise disjoint:
+spec(A|Vi) ∩spec(A|Vj) = ∅,
+for all 1 ≤i < j ≤k.
+Then for every vector v ∈V , the projections onto the subspaces Vi satisfy
+ΠViv ∈span{Atv : t ≥0},
+for all 1 ≤i ≤k.
+(11)
+Proof. Let the spectrum of A be {λ1, λ2, . . . }. By the Lagrange interpolation formula, the projection to
+the λi-eigenspace can be written as
+Y
+j:j̸=i
+A −λjI
+λi −λj
+,
+which is a polynomial of A. By assumption, each Vi decomposes into a direct sum of eigenspaces. Hence,
+the projection onto Vi can also be expressed as a polynomial of A. This proves Eq. (11).
+We now prove Theorem 1.
+Proof of Theorem 1. By Lemma 10, f is a diagonalizable linear operator on vector space H, and H
+decomposes into a direct sum of f-invariant subspaces H = L
+u∈V Hu. From Eq. (10) and the conditions
+on the edge weights in Theorem 1, spec(f|Hu) ∩spec(f|Hv) = ∅for two different vertices u, v ∈V .
+That is, f and H satisfy all the assumptions of Lemma 11. Based on Eqs. (7) and (8), Xu ∈Hu and
+Hm = P
+u∈V Xu ∈H. By Lemma 10 (Point 3) and Lemma 11, we have Xu = ΠHuHm ∈span{f t(Hm) :
+t ≥0} ∈ig for any u ∈V . Hence, {iXu : u ∈V } ⊆g. By assumption, the weights are non-zero
+(Theorem 1), and thus by Lemma 9 we have g = gma.
+We now present the proof of Lemma 10.
+Proof of Lemma 10.
+Point 1: For u ∈V and x ∈Eu, direct computation shows that
+f(Su
+x) = cxxSu
+x + 2
+X
+y:|x⊕y|=2
+cxySu
+y ,
+(12)
+where
+cxx ≜
+deg(u)
+X
+i=1
+r2
+uvi
+and
+cxy ≜
+deg(u)
+Y
+i=1
+(ruvi)xi⊕yi.
+(13)
+Since f is a linear and Su
+y ∈Hu for y with |x ⊕y| = 2, it follows that f(Hu) ⊆Hu and f(H) ⊆H.
+Point 2: For u ∈V and ℓ∈E∗
+u, define
+W u
+ℓ≜
+X
+x∈Eu
+(−1)ℓ(x)Su
+x,
+(14)
+λu
+ℓ≜
+X
+v∈N(u)
+r2
+uv + 2
+X
+x:|x|=2
+(−1)ℓ(x)
+Y
+v∈N (u)
+(ruv)xi.
+(15)
+We will show that f(W u
+ℓ) = λu
+ℓW u
+ℓ. In fact, by Eqs. (12) and (13),
+f(W u
+ℓ) =
+X
+x∈Eu
+(−1)ℓ(x)f(Su
+x) = A + B,
+where
+A =
+X
+x∈Eu
+(−1)ℓ(x)cxxSu
+x = cxx
+X
+x∈Eu
+(−1)ℓ(x)Su
+x =
+
+X
+v∈N (u)
+r2
+uv
+
+W u
+ℓ,
+11
+
+and
+B = 2
+X
+x∈Eu
+(−1)ℓ(x)
+X
+y:|x⊕y|=2
+cxySu
+y = 2
+X
+z:|z|=2
+X
+y∈Eu
+(−1)ℓ(y⊕z)cy⊕z,ySu
+y
+=
+
+2
+X
+z:|z|=2
+(−1)ℓ(z)
+Y
+v∈N (u)
+(ruv)zi
+
+
+
+X
+y∈Eu
+(−1)ℓ(y)Su
+y
+
+
+=
+
+2
+X
+z:|z|=2
+(−1)ℓ(z)
+Y
+v∈N (u)
+(ruv)zi
+
+W u
+ℓ.
+Hence,
+f(W u
+ℓ) = λu
+ℓW u
+ℓ.
+Let d ≜deg(u). Notice that E∗
+u ∼= Eu: an explicit isomorphism sends a binary vector b ∈Eu to the
+linear functional ℓ(x) ≜Pd−1
+i=1 bixi ∈E∗
+u. With this identification, the eigenvalues λu
+ℓin Eq. (15) take
+the compact form
+λu
+ℓ=
+ d−1
+X
+i=1
+(−1)biruvi + ruvd
+!2
+.
+This proves Eq. (10).
+Point 3: By Eq. (9), f is proportional to the squared adjoint map of iHp. Since iHm, iHp ∈g, we have
+f t(iHm) ∈g. By linearity of f, ft(Hm) ∈ig.
+4
+DLAs of QAOA-MaxCut on unweighted graphs
+In this section, we investigate the DLAs of QAOA-MaxCut on unweighted graphs.
+4.1
+Three splitting lemmas
+We first prove three lemmas that show how the generators of a standard QAOA-MaxCut DLA can be
+‘split’ to give new elements that lie in the Lie algebra. Taken together, these lemmas allow one to convert
+the algebraic problem (e.g., by computing commutators) of determining which elements lie in the DLA
+for a graph G = (V, E) into a problem of coloring the even- and odd-degree vertices of G and subgraphs
+of G recursively induced by those colorings.
+For V ′ ⊆V and E′ ⊆E, define
+XV ′ ≜
+X
+u∈V ′
+Xu
+and
+ZZE′ ≜
+X
+(u,v)∈E′
+ZuZv.
+Note that XV = Hm and ZZE = Hp.
+Lemma 12 (Edge splitting). For any S, T ⊆V with S ∩T = ∅, if XS, XT ∈ig, then ZZE(S,T ) ∈ig.
+Proof. It can be verified by direct computation that
+ZZE(S,T ) = 1
+16[XS, [XS, [XT , [XT , Hp]]]].
+Since XS, XT , Hp ∈ig, so is ZZE(S,T ).
+Given S ⊆V , denote by So and Se the set of vertices in S with odd and even degrees in the induced
+subgraph G[S], respectively.
+Lemma 13 (Internal vertex splitting). For any S ⊆V , if XS ∈ig, then XSo, XSe ∈ig.
+12
+
+Proof. We first prove the case when S = V . Recall the definition of f in Eq. (9), and its properties
+(Lemma 10). For unweighted graphs, ruv ≡1 and hence for vertex u ∈V , we have
+spec(f|Hu) =
+
+
+
+ d−1
+X
+i=1
+(−1)xi + 1
+!2
+: x ∈Eu
+
+
+=
+
+(d −2k)2 : 0 ≤k ≤d −1
+ 
+,
+where d = deg(u) and, in the second equality, k is the number of 1’s in x1 · · · xd−1, which can take any
+integer value from 0 to d −1. This implies that if d is even, then all the eigenvalues in spec(f|Hu) are
+even numbers; if d is odd, then spec(f|Hu) comprises odd numbers. It follows that
+spec(f|He) ∩spec(f|Ho) = ∅,
+where He ≜L
+u∈Se Hu and Ho ≜L
+u∈So Hu. Observe that
+XSe = ΠHeHm
+and
+XSo = ΠHoHm,
+both of which are in span{f k(Hm) : k ≥0} ⊆ig by Lemma 11.
+Now consider the case when S ⊊V . Let ¯S = V \S, then we have X ¯S = Hm −XS ∈ig since XS ∈ig.
+By Lemma 12, ZZE(S, ¯S) ∈ig. Hence, ZZE(S) + ZZE( ¯S) = Hp −ZZE(S, ¯S) ∈ig. Consider the subgraph
+G′ = (V, E(S) ∪E( ¯S)) and define
+f ′(·) ≜1
+4
+
+ZZE(S) + ZZE( ¯S), [ZZE(S) + ZZE( ¯S), ·]
+
+.
+By the same argument, we can show that
+XSe = ΠH′eXS, XSo = ΠH′oXS ∈span{(f ′)k(XS) : k ≥0} ⊆ig.
+Here, H′
+e ≜L
+u∈Se H′
+u and H′
+o ≜L
+u∈So H′
+u, and H′
+u is the space spanned by XZ even stars centered at
+u defined with respect to the subgraph G′.
+Given two disjoint subsets S, T ⊆V , denote by So(T) and Se(T) the sets of vertices in S with odd
+and even degrees in the induced subgraph G[S, T], respectively.
+Lemma 14 (External vertex splitting). For any S, T ⊆V with S ∩T = ∅, if XS, XT ∈ig, then
+XSe(T ), XSo(T ) ∈ig.
+Proof. By Lemma 12, ZZE(S,T ) ∈ig. Consider the subgraph G′ = (V, E(S, T)) and define
+f ′(·) = 1
+4[ZZE(S,T ), [ZZE(S,T ), ·]].
+By the same argument as the proof of Lemma 13, we can show that
+XSe(T ) = ΠH′eXS, XSo(T ) = ΠH′oXS ∈span{(f ′)k(XS) : k ≥0} ⊆ig.
+Here, H′
+e ≜L
+u∈Se(T ) H′
+u and H′
+o ≜L
+u∈So(T ) H′
+u, and H′
+u is the space spanned by XZ even stars
+centered at u defined with respect to the subgraph G′.
+4.2
+Algorithm for splitting DLA generators
+Here we use the splitting lemmas of the previous section as the basis for an algorithm (Algorithm 4) for
+splitting up the generators of DLA g for QAOA-MaxCut efficiently, and ensuring that they remain within
+ig after splitting. As will be shown later, this splitting procedure greatly simplifies the computation of
+DLAs for almost all graphs and, when applicable, it splits the generators into individual Pauli strings,
+indicating that the corresponding DLA is free, and making further computation unnecessary.
+Algorithm 4 is itself based on two algorithms (Algorithms 1 and 2) for splitting Hm, and one algorithm
+(Algorithm 3) for splitting Hp. The idea is to use these three algorithms to partition the DLA generators
+13
+
+Algorithm 1: SplitVerticesInternal(G)
+Data: A graph G = (V, E)
+Result: A vertex partition P = {V1, V2, . . . }
+1 Ve ←{u ∈V : deg(u) is even};
+2 Vo ←{u ∈V : deg(u) is odd};
+3 if Ve = ∅then return {Vo};
+4 if Vo = ∅then return {Ve};
+5 Pe ←SplitVerticesInternal(G[Ve]);
+6 Po ←SplitVerticesInternal(G[Vo]);
+7 return Pe ∪Po
+Algorithm 2: SplitVerticesExternal(G, P)
+Data: A graph G = (V, E), and a vertex partition P
+Result: A finer vertex partition
+1 loop
+2
+flag ←false;
+3
+foreach S ̸= T ∈P do
+4
+Se ←{u ∈S : |NT (u)| is even};
+5
+So ←{u ∈S : |NT (u)| is odd};
+6
+if Se ̸= ∅and So ̸= ∅then
+7
+P ←(P\{S}) ∪{Se, So};
+8
+flag ←true;
+9
+break;
+10
+end
+11
+end
+12
+if flag is false then break;
+13 end
+14 return P
+Algorithm 3: SplitEdges(G, P)
+Data: A graph G = (V, E) and a vertex partition P
+Result: An edge partition
+1 E′ ←S
+S∈P E(S);
+2 Q ←{E′};
+3 foreach S ̸= T ∈P do
+4
+E′ ←E(S, T);
+5
+Q ←Q ∪{E′};
+6 end
+7 return Q
+into as many small components as possible. If the output partition P of the vertex set V is such that
+|P| = |V |, then every operator iXu for u ∈V is in the DLA, and the output of the algorithm is a basis
+for gma. If |P| < |V | then the procedure fails to completely split the DLA, and the algorithm resorts to
+a standard brute force approach (e.g. GenerateDLA(B) from [ASYZ24]) to compute a basis of g from
+the set of generators produced by Algorithms 1 to 3.
+An example of Algorithms 1 and 2 is shown in Figure 2. It is worth noting that our algorithm is
+faithful but not complete. That is, if Algorithm 2 on input G = (V, E) returns a vertex partition P such
+that |P| = |V |, then the QAOA-MaxCut DLA of G must be free. Unfortunately, the converse does not
+14
+
+Algorithm 4: GraphDLA(G)
+Data: A graph G = (V, E)
+Result: A basis for the QAOA-MaxCut DLA g of G
+1 P ←SplitVerticesInternal(G);
+2 P ←SplitVerticesExternal(G, P);
+3 if |P| = |V | then
+4
+B ←a known basis of gma;
+// See [KLF+24]
+5 else
+6
+Q ←SplitEdges(G, P);
+7
+G ←{iXS : S ∈P} ∪{iZZE′ : E′ ∈Q};
+8
+(B, _) ←GenerateDLA(G);
+// Algorithm 1 in [ASYZ24]
+9 end
+10 return B;
+hold — see Figure 3 for a counter-example.
+Proposition 15 (Correctness of Algorithm 4). Algorithm 4 outputs a basis of g.
+Proof. Regarding Algorithm 1, since XV = Hp ∈ig, it follows from Lemma 13 that XVo, XVe ∈ig. For
+the induced subgraphs G[Vo] and G[Ve], a recursive argument combined with Lemma 13 implies that
+XT ∈ig for any T ∈Pe ∪Po. Now, consider Algorithm 2. Let P be the output of Algorithm 1. For
+any distinct S, T ∈P, they are disjoint since P is a partition of V , therefore Lemma 14 guarantees that
+XSe(T ), XSo(T ) ∈ig. The set S in P is then replaced by Se(T) and So(T). By iterating this step, the
+final output P of Algorithm 2 satisfies XS ∈ig for all S ∈P. Finally, for Algorithm 3, let P now denote
+the output of Algorithm 2. Since XS, XT ∈ig for any S, T ∈P and S ∩T = ∅, Lemma 12 implies
+that ZZE(S,T ) ∈ig. Furthermore, the term ZZE′ = ZZE −P
+S,T ∈P,S̸=T ZZE(S,T ) also lies in ig, where
+E′ = S
+S∈P E(S). As the output Q of Algorithm 3 consists precisely of the sets E(S, T) (for S ̸= T ∈P)
+and E′ = S
+S∈P E(S), it follows that ZZE′′ ∈ig for every E′′ ∈Q, the returned partition.
+4.3
+All splitting procedures lead to the same partition
+One may naturally wonder whether different choices of sets S and T in different steps of Algorithm 2 lead
+to different ending partitions. In this section, we show that this is not the case: Any partition procedure
+that applies the splitting lemmas Lemma 13 and 14 – for any choice of S in internal splitting, any choice
+of S and T in external splitting, and in any order – leads to the same result. For ease of presentation, we
+identify the internal splitting of S as a special case of external splitting with S = T in this subsection.
+Suppose that P and Q are two partitions of V . We say that partition P refines partition Q by a
+function p on V if, for any set S ∈Q and two elements u, v ∈S, these two elements belong to the
+same set in P iff p(u) = p(v). In this case, we also say that P is a finer partition of Q. Based on these
+concepts, in Algorithm 5 we define a breadth-first search (BFS) splitting algorithm.
+We call the ending partition of the BFS splitting algorithm the BFS partition.
+Theorem 16. Any partition procedure ends with the BFS partition, regardless of the choice of S and T
+in each step applying the splitting lemmas, as long as no further refined partition is possible.
+Proof. First, we show that the BFS partition P is the finest partition of any partition procedure Q.
+Suppose the procedure Q gives partitions Q(t) for t = 1, 2, . . . In each time step t the procedure Q
+chooses a pair S, T ∈Q(t) and applies Lemma 13 (if S = T) or Lemma 14 (if S ̸= T) to split S, and
+then increases t by 1. We claim that P(t) in BFS splitting algorithm is a finer partition of Q(t) for all
+t. This can be seen by induction. The base P(0) = Q(0) = {V } holds. Now suppose P(t) is a finer
+partition of Q(t), and the procedure Q chooses a pair S, T ∈Q(t) and applies the splitting lemma to get
+to Q(t+1). Any two vertices u, v ∈S that are separated by T, i.e. |NT (u)| ̸= |NT (v)| (mod 2), is also
+separated in P(t+1). Indeed, since P(t) is a finer partition of Q(t), there are sets T1, . . . , Tℓ∈P(t) whose
+union equals T ∈Q(t). Note that at least one Tj has |NTj(u)| ̸= |NTj(v)| (mod 2)—otherwise summing
+them up would give |NT (u)| = |NT (v)| (mod 2), contradiction. Therefore, P(t+1) is a finer partition of
+15
+
+1
+2
+3
+4
+5
+2
+4
+5
+2
+5
+6
+7
+1
+3
+6
+7
+G = (V, E), V = [7]
+Ve = {2, 4, 5}
+Vee = {4}
+odd-degree vertices
+even-degree vertices
+Algorithm 1: SplitVerticesInternal
+Vo = {1, 3, 6, 7}
+4
+3
+7
+1
+6
+odd-degree vertices
+even-degree vertices
+odd-degree vertices
+even-degree vertices
+Veo = {2, 5}
+split Veo into {2}, {5}
+split Voe into {6}, {7}
+Voe = {6, 7}
+Voo = {1, 3}
+Algorithm 2: SplitVerticesExternal
+split Voo into {1}, {3}
+6
+7
+Output: partition of V
+{{1}, {2}, {3}, {4}, {5}, {6}, {7}}
+2
+5
+3
+1
+4
+Figure 2: An example of vertex-partition on a 7-vertex graph (Algorithms 1 and 2).
+Q(t+1) as well. Continuing this process, we conclude that the BFS partition P is a refined partition of
+the ending partition of Q.
+Second, we show that any partition procedure Q does not end until it reaches the BFS partition.
+Note that the BFS partition procedure naturally corresponds to a tree TBF S, where the root is labeled
+V , and each node with label S has children with labels S1, . . . , Sℓif S is partitioned into S1, . . . , Sℓ. If
+S is not further partitioned from P(t) to P(t+1), then it has a single child also of label S. The ending
+partition is the collection of all the leaves, which are all at the last level. Now consider any partition
+procedure Q; suppose that it ends with partition Q. It is also associated with a tree TQ.
+The nodes in TBF S with distance t to the root is said to be at level t. For any level t, the associated
+16
+
+4
+3
+2
+1
+6
+5
+7
+Algorithms 1 and 2
+P = {{1}, {2, 6}, {3, 5}, {4, 7}}
+̸= {{u} : u ∈[7]}
+Figure 3: A 7-vertex graph with a free QAOA-MaxCut DLA but Algorithms 1 and 2 fail to split the
+vertices completely.
+Algorithm 5: BFS-Splitting(G)
+Data: A graph G = (V, E)
+Result: A vertex partition P
+1 P(0) ←{V };
+2 for t ←0 to n −2 do
+3
+Suppose P(t) = {S1, . . . , Sk};
+4
+Compute the parity function p : V →{0, 1}k defined by
+p(v) =
+ |NS1(v)|
+(mod 2), . . . , |NSk(v)|
+(mod 2)
+
+;
+5
+P(t+1) ←P(t) refined by p;
+6
+if P(t+1) = P(t) then return P(t);
+7 end
+8 return P(n−1);
+sets of the nodes at level t are exactly those in partition P(t) in Algorithm. We will show that the
+partition Q is a refined partition of P(t) for all t, which implies that Q also refines the BFS partition
+PBF S. The proof is by induction on t. For t = 0, the root set P(0) = {V } is clearly refined by any
+partition Q of V . Now suppose that Q refines P(t) and we will show that Q refines P(t+1). We call a
+set S ⊆V compatible with partition Q if either S ∈Q or S is partitioned into S1, . . . , Sℓ, all of which
+are in Q. The partition Q refines P(t+1) if and only if all nodes at level t + 1 have their associated sets
+compatible with Q.
+Take any node v in level t in tree TBF S; suppose its associated set is S. If v has only one child v′,
+then v′ is also associated with S, which is compatible with Q by induction hypothesis. If v has more
+than one child, then the children are obtained from splitting S by sets in P(t). Since Q refines P(t), any
+two points u, v ∈S that are separated by sets in P(t) will also be separated by sets in Q. (If u and v have
+different parity of size of their neighbor set in T = T1 ⊎· · ·⊎Tk, so do they for at least one Ti.) Therefore
+u and v belong to different sets in Q—otherwise Q could not be the ending partition of procedure Q as
+u and v can still be separated by sets in Q. In other words, when P(t) is refined to P(t+1), points in any
+set S′ ∈Q remains in one set in P(t+1). Therefore Q refines P(t+1).
+4.4
+DLAs for random graphs
+Here we study the DLAs of QAOA-MaxCut on n-vertex random graphs in the Erdős-Rényi (ER) model
+G(n, 1
+2). Our main result of this section is the following theorem.
+Theorem 3. Let G ∼G(n, 1
+2) be an Erdős-Rényi random graph. Then with probability at least 1 −
+exp(−Ω(n)), the following statements hold for QAOA-MaxCut.
+1. g = gma.
+2. g is the direct sum of either one or two simple Lie algebras, each of dimension Θ(4n).
+3. Varθ[ℓ(ρ, O; θ)] = O(1/2n), and barren plateaus are therefore present.
+The same statements hold if we draw G uniformly at random from all non-isomorphic graphs on n
+vertices.
+17
+
+In Sections 4.4.1 and 4.4.2, we will prove the first statement. Here we show how the second and third
+statements, and the claim regarding non-isomorphic graphs, follow from the first one.
+For the second statement, note that the probability that G ∼G(n, 1
+2) is disconnected is O(n ·
+(1/2)n−1) = e−Ω(n) [Gil59] (this probability is dominated by the event that a single vertex is discon-
+nected), and it is straightforward to see that the probability that G is a path or cycle is e−Ω(n2). Thus,
+by Theorem 6 and a union bound over the bad events (i) the graph is disconnected; (ii) the graph is a
+cycle or path (iii) the DLA is not free, we obtain the second statement.
+For the third statement, note that in Eq. (6), k = 1 or 2, Pgj(ρ) ≤1 and Pgj(O) ≤2n, and
+dim(gj) = Θ(4n), thus the conclusion follows.
+For the non-isomorphic graph statement, note that with probability 1 −2−Ω(n) a random graph
+G ∼G(n, 1
+2) has no nontrivial automorphisms [ER63]. Furthermore, each such graph appears the same
+number of times (actually just n!) in all 2(
+n
+2) graphs.
+Therefore, sampling from G(n, 1
+2) under the
+condition that G has no nontrivial automorphisms is the same as uniform sampling from non-isomorphic
+graphs. Combined with the fact that this condition holds with probability 1 −2−Ω(n), the statement
+follows.
+4.4.1
+Properties of Erdős-Rényi graphs
+We first prove a number of properties of Erdős-Rényi graphs, which will be utilized later in the proof of
+Theorem 3.
+A graph G = (V, E) can be identified with an edge-indicator vector x = (x(u,v))u̸=v∈V ∈F(
+n
+2)
+2
+, where
+x(u,v) = 1 if and only if (u, v) ∈E. The degree-parity map on V is a linear map A : F(
+n
+2)
+2
+→Fn
+2, sending an
+edge-indicator vector x to a corresponding degree-parity vector y = (yu)u∈V , where yu = L
+v∈V \{u} x(u,v).
+Lemma 17. Let A be the degree-parity map on a vertex set V with size n. The following properties hold:
+• Fix a tree T on V , and denote xT = (x(u,v))(u,v)∈E(T ), x ¯T = (x(u,v))u̸=v∈V,(u,v)/∈E(T ). For any
+x∗
+¯T ∈F(
+n
+2)−n+1
+2
+and y∗∈Fn
+2 where y∗has an even Hamming weight, the following linear system on
+x = (xT ; x ¯T ) has a unique solution:
+Ax = y∗
+and
+x ¯T = x∗
+¯T .
+• Im(A) = {1S : S ⊆V, |S| = 0 (mod 2)}, and dim(Ker(A) =
+ n
+2
+
+−n + 1.
+Proof. Point 1: We will prove that a solution xT exists and is unique by repeatedly trimming leaves on
+the tree T. Let x∗
+¯T = (x∗
+(u,v))u̸=v∈V,(u,v)/∈E(T ). Fix a root r ∈V for the tree T. For each leaf u of T, let
+v be its parent. x(u,v) is uniquely determined by the equation:
+y∗
+u = (Ax)u = x(u,v) ⊕
+M
+w∈V \{u,v}
+x∗
+(u,w).
+Remove the leaves from T to get a new tree T ′. Repeating this process until there is only one vertex r
+left shows that xT (and hence x) is uniquely determined. Finally, for the existence, one verifies that
+y∗
+r =
+M
+u∈V :u̸=r
+y∗
+u =
+M
+u∈V :u̸=r
+(Ax)u = (Ax)r,
+where the first equality holds since y∗has an even Hamming weight, and the last equality holds due to
+the handshaking lemma.
+Point 2: Let E = {1S : S ⊆V, |S| = 0 mod 2}. Point 1 implies that E ⊆Im(A), while the handshaking
+lemma gives Im(A) ⊆E. Therefore, Im(A) = E. Since A is a linear map, dim(Ker(A)) = dim(dom(A))−
+dim(Im(A)) =
+ n
+2
+
+−n + 1.
+Lemma 18. For any random graph G = (V, E) ∼G(n, 1
+2), the degree parities (deg(v) mod 2) of any
+n −1 vertices are i.i.d.
+Bernoulli( 1
+2).
+For any S ⊆V with even size, Pr[Vo = S] = 21−n, where
+Vo = {v ∈V : deg(v) is odd}.
+18
+
+Proof. Since G ∼G(n, 1
+2), each edge-indicator vector appears with probability 2−(
+n
+2). By the fact that
+the degree-parity map A is linear and that dim(Ker(A)) =
+ n
+2
+
+−n + 1 (Lemma 17 point 2), each degree-
+parity vector y ∈Im(A) appears with probability |Ker(A)| · 2−(
+n
+2) = 21−n. By Lemma 17 (point 2),
+Im(A) comprises all vectors in Fn
+2 with an even Hamming weight. Hence, for any y∗
+≤n−1 ∈Fn−1
+2
+, let
+y∗
+n = |y∗
+≤n−1| (mod 2),
+Pr
+ y1 = y∗
+1, . . . , yn−1 = y∗
+n−1
+
+= Pr
+ y = (y∗
+≤n−1, y∗
+n)
+
+= 21−n.
+Therefore, the degree parities the first n −1 vertices are i.i.d. Bernoulli( 1
+2). The same argument holds
+for any n −1 vertices.
+For the second statement, note that for S of even size, whether S contains the last vertex depends
+on the parity of S ∩[n −1]. Similarly, the degree parity of the last vertex also depends on the number of
+odd-degree vertices in the first n−1 vertices. Therefore Vo = S is equivalent to Vo ∩[n−1] = S ∩[n−1].
+Now that the degree parity of the first n −1 vertices are i.i.d. Bernoulli( 1
+2), the conclusion follows.
+As a corollary, with high probability, |Vo| cannot be too small or too large.
+Corollary 19. For any random graph G = (V, E) ∼G(n, 1
+2) with n ≥2, for the odd-degree vertex set
+Vo of G,
+Pr
+|Vo| −n
+2
+ ≥n
+4
+
+≤2 exp
+
+−n
+24
+
+.
+(16)
+Proof. Let |Vo| and X denote the number of odd-degree vertices in the entire vertex set and in the first
+n −1 vertices, respectively. According to Lemma 18, the degree parities of the first n −1 vertices are
+i.i.d. Bernoulli( 1
+2), which implies X ∼Binomial(n −1, 1
+2). Notice that either |Vo| = X or |Vo| = X + 1,
+hence
+Pr
+|Vo| −n
+2
+ ≥n
+4
+
+≤Pr
+
+|X −E(X)| ≥n
+4 −1
+2
+
+.
+Applying the Chernoff bound with δ =
+n−2
+2(n−1) ∈[0, 1], we have
+RHS = Pr(|X −E(X)| ≥δ E(X)) ≤2 exp
+ −δ2 E(X)/3
+
+= 2 exp
+
+−n
+24 −1
+8 +
+1
+24(n −1)
+
+≤2 exp
+
+−n
+24
+
+.
+The following lemma shows that the subgraphs induced by odd- and even-degree vertices of an ER
+graph are also ER graphs.
+Lemma 20. Suppose G = (V, E) ∼G(n, 1
+2). Let Vo be the odd-degree vertex set of G. Fix an arbitrary
+S ⊆V with size 0 < k < n an even number, and let ¯S = V \S. Further fix arbitrary s ∈S and t ∈¯S.
+We have
+ G[S], G[ ¯S], G[S\{s}, ¯S\{t}]
+
+| (Vo = S) ∼
+ G(k, 1
+2), G(n −k, 1
+2), G(k −1, n −k −1, 1
+2)
+
+.
+(17)
+Proof. Consider the tree constructed by all possible crossing edges incident to s and t, i.e. T = (V, E(T))
+where E(T) = {(s, u) : u ∈¯S} ∪{(v, t) : v ∈S}. By Lemma 17, for any x∗
+¯T ∈F(
+n
+2)−n+1
+2
+, there is a unique
+solution x = (xT ; x ¯T ) ∈F(
+n
+2)
+2
+to the following linear system:
+Ax = 1S,
+x ¯T = x∗
+¯T ,
+where A is the degree-parity map on V . Since G ∼G(n, 1
+2), each edge-indicator vector x appears with
+equal probability 2−(
+n
+2). Note that Ax = 1S is equivalent to Vo = S. Hence,
+Pr
+ x ¯T = x∗
+¯T | Ax = 1S
+
+= Pr
+ x ¯T = x∗
+¯T , Ax = 1S
+
+Pr(Ax = 1S)
+=
+2−(
+n
+2)
+Pr(Ax = 1S) = 2−(
+n
+2)+n−1,
+(18)
+where the last equality follows from the fact that the degree parities of any n −1 vertices are i.i.d.
+Bernoulli( 1
+2) (Lemma 18). We have proved Eq. (17) since it is equivalent to Eq. (18).
+19
+
+4.4.2
+Proof of Theorem 3
+In this section, we prove the first statement of Theorem 3, which implies the remaining statements in
+the theorem (as shown at the beginning of Section 4.4). For G = (V, E) and any S ⊆V , let So and
+Se denote the odd-degree and even-degree vertex sets of graph G[S], respectively. We first show that
+Algorithm 1 splits the vertices of G into many sets with high probability.
+Lemma 21. Let P be a vertex partition returned by Algorithm 1 on input G ∼G(n, 1
+2). Conditioned on
+both Vo and Ve being of size at least n/4, the probability that both Vo and Ve are partitioned into more
+than k sets in P is at least 1 −24k−n/4.
+Proof. The internal parity splitting procedure (Lemma 13) is naturally associated with a binary tree T:
+the root is labeled V , and for each internal node with label S (which we will call node S), its two children
+are labeled So and Se respectively. Lemma 20 implies that, for each node S, whether and how it further
+splits into So and Se is independent of the splitting of all other nodes. That is, for any two nodes in the
+tree with sets S and T, either these two sets are disjoint or one contains the other, but in either case,
+for any subsets S′ ⊆S and T ′ ⊆T, the events So = S′ and To = T ′ are independent.
+We say that a tree T ∗is bad if it contains at most k leaves. The internal parity splitting procedure
+has at most k sets if the associated tree is one of the bad trees and it stops growing. More precisely,
+define the event “Tpre = T ∗” if the splitting procedure indeed splits at each internal node of T ∗. The
+splitting procedure stops at T ∗if and only if Tpre = T ∗and further splitting does not happen at any leaf
+of T ∗. Thus the probability that the splitting partitions V into at most k sets is
+X
+T ∗: bad
+Pr(Tpre = T ∗) Pr(T stops at all leaves | Tpre = T ∗)
+(19)
+Note that for each fixed T ∗, suppose it has ℓ≤k leaves. Denote by V1, . . . , Vℓthe associated sets of the
+splitting procedure at these leaves. Note that each set S does not further split if and only if So = ∅
+or So = S. By Lemmas 18 and 20, So = ∅occurs with probability 1/2|S|−1, and So = S occurs with
+probability 1/2|S|−1 if |S| is even and 0 if |S| is odd. Thus, the probability that S cannot be further split
+is at most 2/2|S|−1 = 1/2|S|−2. Since whether V1, . . . , Vℓsplit are all independent events (Lemma 20), the
+probability that all these sets do not split happens with probability 22−|V1| · · · 22−|Vℓ| = 22ℓ−n ≤22k−n.
+With this, and the trivial bound that Pr(Tpre = T ∗) ≤1, we can further bound the probability in Eq. (19)
+(from above) by 22k−n times the number Ck−1 of distinct full binary trees of k leaves [Rom15, p.26].
+This number Ck−1 (Catalan number) is known to be 1
+k
+ 2k−2
+k−1
+
+< 22k/k3/2. Thus the probability that the
+splitting procedure partitions V into only k sets is at most 22k/k3/2 · 22k−n = 24k−n/k3/2. Applying this
+to Vo and Ve and using the condition of |Vo| ≥n/4 and |Ve| ≥n/4 gives the overall failure bound of
+21+4k−n/4/k3/2 < 24k−n/4, as claimed.
+We now consider applying Algorithm 2 to the partition P returned by Algorithm 1. We will show
+that Algorithm 2 splits all vertices with high probability.
+Lemma 22. Conditioned on |Vo| ≥n/4, |Ve| ≥n/4, and that partition P has more than m sets inside Vo
+and Ve, Algorithm 2 completely splits all sets into individual vertices with probability at least 1 −n2/2m.
+Proof. Suppose that the sets in P are S0, . . . , Sp, T0, . . . , Tm, where the sets Si are inside Vo and the sets
+Tj are inside Ve. Again remove S0 and T0 to obtain i.i.d. Bernoulli( 1
+2) crossing edges between S1∪. . .∪Sp
+and T1 ∪. . . ∪Tm (Lemma 20). Consider any Si ∈P and any two vertices u, v ∈Si. If these two vertices
+cannot be split by Algorithm 2, then they cannot be split by any Tj. The latter happens if and only if
+they have the same neighborhood parity for all Tj, i.e. |NTj(u)| = |NTj(v)| (mod 2) for all j ∈[m].
+For each j ∈[m], we know that |NTj(u)| = |NTj(v)| (mod 2) with probability 1
+2. Since this equality
+for different j are independent, the probability that it holds for all j is 2−m. By the union bound over
+Si and v, u ∈Si, the probability that there exist u, v ∈Si for some Si that are not split is at most
+P
+Si∈P
+ |Si|
+2
+
+2−m ≤n22−m.
+Remark.
+The statement of Lemma 22 actually holds even if, in Algorithm 2, we do not update the
+partition P and execute only one iteration of the outer loop. The same proof goes through.
+We now prove the first statement in Theorem 3, which we restate below.
+20
+
+Theorem 3. Let G ∼G(n, 1
+2) be an Erdős-Rényi random graph. Then with probability at least 1 −
+exp(−Ω(n)), the following statements hold for QAOA-MaxCut.
+1. g = gma.
+2. g is the direct sum of either one or two simple Lie algebras, each of dimension Θ(4n).
+3. Varθ[ℓ(ρ, O; θ)] = O(1/2n), and barren plateaus are therefore present.
+The same statements hold if we draw G uniformly at random from all non-isomorphic graphs on n
+vertices.
+Proof. By Corollary 19, we have |Vo| ≥n/4 and |Ve| ≥n/4 with probability 1 −2Ω(n). By Lemma 21
+(setting k = n/20), with probability 1 −2Ω(n), both Vo and Ve are partitioned by Algorithm 1 into more
+than n/20 sets. Now by Lemma 22, we know that Algorithm 2 completely splits all sets with probability
+1−n22−Ω(n) = 1−2−Ω(n). Putting these together, we see that Algorithm 1 plus Algorithm 2 completely
+split V into individual vertices with probability 1 −2−Ω(n).
+An alternative proof of Theorem 3 (first statement) is given in Appendix A.
+4.5
+DLAs for asymmetrically subdivided odd graphs
+In this section, we will use the splitting lemmas (Lemmas 13 and 14) to show that the QAOA-MaxCut
+DLAs of asymmetrically subdivided odd graphs are free.
+Such graphs can be viewed as unweighted
+analogues of randomly edge-weighted graphs, constructed by subdividing the edges of any unweighted
+graph with odd-degree vertices into paths of distinct lengths.
+Definition 6 ((Asymmetric) graph subdivision). For any graph G = (V, E), G′ = (V ′, E′) is called a
+graph subdivision of G if
+V ′ = V ∪
+[
+(u,v)∈ˆ
+E
+Vuv and E′ = (E\ ˆE) ∪
+[
+(u,v)∈ˆ
+E
+Euv
+where ˆE ⊆E is the set of edges being removed, and the added vertices and edges are
+Vuv ≜{wj
+uv : j ∈[ℓuv], ℓuv ≥1},
+Euv ≜{(u, w1
+uv), (wj
+uv, wj+1
+uv ), (wℓuv
+uv , v) : j ∈[ℓuv −1]}.
+If |E\ ˆE| = 0 or 1 and all Vuv have different sizes, then G′ is called an asymmetric graph subdivision of
+G.
+Note that we allow at most one edge to remain un-subdivided (i.e., |E\ ˆE| = 0 or 1) in an asymmetric
+subdivision. Figure 4 illustrates the subdivision of a triangle graph, and the comparison with the edge-
+weighted analogue.
+1
+2
+3
+(1)
+(2)
+Figure 4: Edge weights vs. graph subdivision
+Definition 7 (odd graph). An unweighted, connected graph with at least 3 vertices is called an odd
+graph, if the degrees of its vertices are all odd.
+We will show that the DLA of QAOA-MaxCut for an asymmetrically subdivided odd graph is free.
+Theorem 23. If G = (V, E) is an asymmetric subdivision of an odd graph, then the DLA of G is free,
+i.e., g = gma.
+21
+
+The proof of Theorem 23 relies on the following two lemmas. For a path P, we denote by |P| the
+number of vertices on the path.
+Lemma 24. Suppose G = (V, E) contains a disjoint union of paths P1 ∪· · · ∪Pk as a subgraph, and 1 ≤
+|P1| < · · · < |Pk|. Label the vertices in Pi by u(i, 1), . . . , u(i, |Pi|), such that (u(i, j), u(i, j + 1)) ∈E(Pi)
+for all 1 ≤j < |Pi|. Partition V (P1) ∪· · · ∪V (Pk) into k + 1 sets V0 ∪V1 ∪· · · ∪Vk where
+Vi ≜
+(
+{u(j, ⌈|Pi|/2⌉) : 1 ≤j ≤k, |Pj| is odd},
+if i = 0,
+V (Pi)\V0,
+otherwise.
+(20)
+If XV (P1) + · · · + XV (Pk) ∈ig, then XV0, XV1, . . . , XVk ∈ig.
+Proof. We will prove a stronger version: the same result holds if the paths are either trivial or distinct,
+in the sense that there exists a number 0 ≤k′ ≤k such that
+1 = |P1| = · · · = |Pk′| < |Pk′+1| < · · · < |Pk|,
+(21)
+We prove the stronger version by induction on the total number of vertices T ≜Pk
+i=1 |Pi| in the paths,
+while fixing the number of odd-length paths to some number m. Notice that T ≥m and |V0| = m.
+For the base case T = m, we have k = m and |Pi| = 1 for all 1 ≤i ≤k. In such case, XV0 =
+XV (P1) + · · · + XV (Pk) ∈ig, and XVi = X∅= 0 ∈ig for all 1 ≤i ≤k.
+For T > m, assume the claim holds for all cases with a total number of vertices < T. Let k′ be
+defined as in Eq. (21).
+Since T > m it must be that k′ < k.
+The only odd-degree vertices in the
+subgraph P1 ∪· · · ∪Pk are the ends of Pk′+1, . . . , Pk:
+Vo ≜{u(i, 1), u(i, |Pi|) : k′ < i ≤k}.
+Removing these vertices from P1 ∪· · ·∪Pk we get another disjoint union of paths that is also a subgraph
+of G:
+P ′
+i ≜
+(
+Pi,
+if 1 ≤i ≤k′,
+Pi[V (Pi)\{u(i, 1), u(i, |Pi|)}],
+if k′ < i ≤k.
+Note the if |Pk′+1| = 2, the P ′
+k′+1 is an empty path. The new subgraph H satisfies the following:
+• it contains m odd paths, since the length of each path decreases by 0 or 2,
+• ignoring empty paths (if any), paths in H are still either trivial or distinct, since the trivial paths
+remain unchanged, while the lengths of nontrivial paths all decrease by 2 and so are still distinct,
+• |G| −|H| = 2(k −k′) > 0.
+By Lemma 13, XVo, XV (P ′
+1) + · · · + XV (P ′
+k) ∈ig since XV (P1) + · · · + XV (Pk) ∈ig. Hence, by hypothesis,
+we have XV ′
+0 , XV ′
+1 , . . . , XV ′
+k ∈ig, where
+V ′
+i ≜
+(
+{u(j, ⌈|P ′
+i|/2⌉) : 1 ≤j ≤k,
+P ′
+j
+ is odd},
+if i = 0,
+V (P ′
+i)\V ′
+0,
+otherwise.
+Notice that
+• V ′
+0 = V0 since |Pi| ≡|P ′
+i| mod 2 for all 1 ≤i ≤k,
+• V ′
+i = Vi = ∅for 1 ≤i ≤k′ since |Pi| = |P ′
+i| = 1,
+• Vi is the disjoint union of V ′
+i and {u(i, 1), u(i, |Pi|)} for k′ < i ≤k since |Pi| > 1.
+So XVi = XV ′
+i ∈ig for 0 ≤i ≤k′. It remains to prove that XVi ∈ig for k′ < i ≤k. Equivalently, we
+have to prove that Xu(i,1) + Xu(i,|Pi|) = XVi −XV ′
+i ∈ig for k′ < i ≤k. There are 3 cases:
+• Case 1: If |Pi| ≥4, then |V ′
+i | ≥2. The only vertices in Vo adjacent to V ′
+i are u(i, 1) and u(i, |Pi|),
+each having exactly one neighbor in V ′
+i . By Lemma 14, we have Xu(i,1) + Xu(i,|Pi|) ∈ig since
+XVo, XV ′
+i ∈ig.
+22
+
+• Case 2: If |Pi| = 3, then i = k′ + 1 or i = k′ + 2. For i < j ≤k, then |Pj| ≥4. We have
+already shown that Xu(j,1) + Xu(j,|Pj|) ∈ig for i < j ≤k (Case 1) and XVo ∈ig. If i = k′ + 1,
+then Xu(i,1) + Xu(i,|Pi|) = XVo −Pk
+j=i+1(Xu(j,1) + Xu(j,|Pj|)) ∈ig. If i = k′ + 2, then Xu(i−1,1) +
+Xu(i−1,|Pi−1|) + Xu(i,1) + Xu(i,|Pi|) = XVo −Pk
+j=i+1(Xu(j,1) + Xu(j,|Pj|)) ∈ig. The only vertices in
+{u(i −1, 1), u(i −1, |Pi−1|), u(i, 1), u(i, |Pi|)} adjacent to V0 are u(i, 1) and u(i, |Pi|), each having
+exactly one neighbor in V0. By Lemma 14, we have Xu(i,1) + Xu(i,|Pi|) ∈ig since XV0 ∈ig.
+• Case 3: If |Pi| = 2, it must be i = k′ + 1. We have already shown that Xu(j,1) + Xu(j,|Pj|) ∈ig
+for i < j ≤k (Case 1 and 2) and XVo ∈ig. Hence, Xu(i,1) + Xu(i,|Pi|) = XVo −Pk
+j=i+1(Xu(j,1) +
+Xu(j,|Pj|)) ∈ig.
+The next lemma gives a necessary and sufficient condition for Theorem 23.
+Lemma 25. Suppose G = (V, E) is an asymmetric subdivision of a connected odd graph G′.
+If
+Xu, ZuZv ∈ig for all u ∈V (G′) and v ∈NG(u)\V (G′), then g = gma.
+Proof. For any (u, u′) ∈E(G′), they are connected by a path of length at least 1 in G. If the path has
+length 1, then ZuZu′ ∈ig due to Lemma 12. Otherwise, denote the vertices along the path between u, u′
+by {u(i)}m
+i=0 with m ≥2, where u(0) = u, u(1) = v, and u(m) = u′. We will prove that Xu(i) ∈ig for
+0 ≤i ≤m, and that Zu(i)Zu(i+1) ∈ig for 0 ≤i < m by induction on i. For the base case i = 0, we have
+Xu(0), Zu(0)Zu(1) ∈ig. For 1 ≤i ≤m −1, assume that Xu(i−1), Zu(i−1)Zu(i) ∈ig. It can be verified that
+Xu(i) = 1
+4[Zu(i−1)Zu(i), [Zu(i−1)Zu(i), Hm]] −Xu(i−1) ∈ig,
+Zu(i)Zu(i+1) = 1
+4[Xu(i), [Xu(i), Hp]] −Zu(i−1)Zu(i) ∈ig.
+Finally, Xu(m) ∈ig. We have proved g = gma, since Xu ∈ig for all v ∈V and ZuZv ∈ig for all
+(u, v) ∈E.
+Now we recall the main result and show the proof.
+Theorem 23. If G = (V, E) is an asymmetric subdivision of an odd graph, then the DLA of G is free,
+i.e., g = gma.
+Proof. Suppose G is an asymmetric subdivision of a connected odd G′. The odd-degree vertices are
+exactly the vertices of G′, i.e.
+Vo ≜{v ∈G : degG(v) is odd} = V (G′).
+Moreover, the induced subgraph G[Ve] on the remaining vertices Ve ≜V \Vo is a disjoint union of paths
+indexed by the edges of G′: (Pℓ)ℓ∈E(G′). There is at most one empty path (|Pℓ| = 0 for some l ∈E(G′)),
+and all other paths have distinct lengths. By Lemma 13, XVe, XVo ∈ig since XV = Hm ∈ig. Applying
+Lemma 24, we have XVℓ∈ig for all ℓ∈E(G′) if |Pℓ| ≥1, where
+Vℓ≜
+(
+V0,
+if |Pℓ| = 1,
+V (Pℓ)\V0,
+otherwise.
+and V0 is defined similar to Eq. (20).
+Now we argue that Xu, ZuZv ∈ig for all u ∈Vo, v ∈NG(u).
+This completes the proof due to
+Lemma 25. The argument splits into 4 points:
+• For any ℓ= (u, v) ∈E(G′), either |Pℓ| = 0 or |Pℓ| ≥1. If |Pℓ| = 0, then degG[Vo](u) = degG[Vo](v) =
+1 and degG[Vo](w) = 0 for w ∈Vo\{u, v}. By Lemma 13, we have Xu + Xv ∈ig since XVo ∈ig. If
+|Pℓ| ̸= 0, then Vℓ̸= ∅, and the only vertices in Vo adjacent to Vℓare u and v, each having exactly
+one neighbor in Vℓ. By Lemma 14, we have Xu + Xv ∈ig since XVℓ, XVo ∈ig.
+23
+
+• Suppose degG′(u) > 1, i.e., there exists v ̸= v′ such that ℓ= (u, v), ℓ′ = (u, v′) ∈E(G′). Assume
+W.L.O.G. that |Pℓ′| ≥1 since at least one of Pℓ, Pℓ′ is non-empty.
+The only vertex in {u, v}
+adjacent to Vℓ′ in G is u, and the number of neighbors of u in Vℓ′ is 1. Applying Lemma 14 again,
+we have Xu ∈ig since XVℓ, Xu + Xv ∈ig.
+• Since G′ is a connected odd graph, there exists at least one vertex in G′ whose degree > 1, and every
+degree-1 vertex is connected to some large degree vertex. In other words, for any (u, v) ∈E(G′),
+either degG′(u) > 1 or degG′(v) > 1. Assume W.L.O.G. that degG′(u) > 1, since Xu, Xu +Xv ∈ig,
+we also have Xv ∈ig. Hence, Xu ∈ig for all u ∈V (G′) = Vo.
+• For u ∈V (G′) and any v ∈NG(u)\V (G′), v is contained in some Vℓwith ℓ∈E(G′). The only
+edge between u and Vℓin G is (u, v). By Lemma 12, we have ZuZv ∈ig since XVℓ, Xu ∈ig.
+We now prove Theorem 5, that shows that any connected graph can be transformed to a new graph
+by subdividing the graph with O(|E|2) vertices and optionally adding O(|V |2) vertices and edges, such
+that (i) the MaxCut problems on the two graphs are equivalent, i.e., they can be reduced to each other,
+and (ii) the DLA of QAOA-MaxCut on the new graph is free.
+Theorem 5. For any connected graph G = (V, E), there is an asymmetrically subdivided odd graph
+G′ = (V ′, E′), with |V ′|, |E′| ∈O(|E|2), such that
+1. MaxCut(G′)−MaxCut(G) = |V ′|−|V |, and there is an efficient transformation between the MaxCut
+solutions of G and G′.
+2. g′ = g′
+ma, where g′ is the DLA corresponding to G′.
+Proof. For any graph H, a coloring of H is a vertex labeling function C : V (H) →{red, blue}. The
+collection of colorings of H is denoted by CH. The cut size of a coloring C ∈CH is defined by
+cutH(C) ≜
+X
+(u,v)∈E(H)
+1(C(u) ̸= C(v)).
+The maximum cut size of the graph H can be expressed as MaxCut(H) = maxC∈CH cutH(C). Let C and
+C′ denote the colorings on vertex sets V and V ′, respectively. We say C is consistent with C′, denoted
+by C ⪯C′, if V ⊆V ′ and C(u) = C′(u) for all u ∈V .
+First, we discuss the case when G is an odd graph. The corresponding graph G′ is constructed as
+follows: arbitrarily index the edges of G by e1, . . . , e|E|, and subdivide ei with 2i vertices, i.e., the edge
+ei = (ui, vi) is replaced by a path ui −wi,1 −· · ·−wi,2i −vi. In other words, we have G′ = (V ′, E′) where
+V ′ = V ∪{wi,j : 1 ≤i ≤|E|, 1 ≤j ≤2i},
+E′ = {(ui, wi,1), (wi,j, wi,j+1), (wi,2i, vi) : 1 ≤i ≤|E|, 1 ≤j < 2i}.
+It can be verified that (1) |V ′| −|V | = P|E|
+i=1 2i = O(|E|2), and (2) the DLA of G′ is free by direct
+application of Theorem 23. It remains to show that the MaxCut on G′ and G differ by |V ′| −|V |, and
+to give an efficient transformation between the MaxCut solutions of G and G′. Notice that for the path
+ui −wi,1 −· · · −wi,2i −vi and a coloring C ∈C(G):
+• If C(ui) = C(vi), then the MaxCut of the path is 2i.
+• If C(ui) ̸= C(vi), then the MaxCut of the path is 2i + 1.
+In both cases, the MaxCut of the path is achieved by coloring wi,2, wi,4, . . . , wi,2i in C(ui), and coloring
+wi,1, wi,3, . . . , wi,2i−1 in the opposite color. Therefore, for any C ∈C(G),
+max
+C′∈C(G′)
+C⪯C′
+cutG′(C′) =
+|E|
+X
+i=1
+(2i + 1(C(ui) ̸= C(vi)) = (|V ′| −|V |) + cutG(C).
+24
+
+Taking the maximum over all colorings of G, we obtain
+MaxCut(G′) = max
+C∈C(G)
+max
+C′∈C(G′)
+C⪯C′
+cutG′(C′) = (|V ′| −|V |) + max
+C∈C(G) cutG(C) = (|V ′| −|V |) + MaxCut(G).
+Moreover, given an optimal coloring C ∈C(G), an optimal coloring C′ ∈C(G′) can be obtained by
+coloring the inner vertices of each path in an alternative way as described earlier, since
+cutG′(C′) =
+max
+C′′∈C(G′)
+C⪯C′′
+cutG′(C′′) = (|V ′| −|V |) + cutG(C) = (|V ′| −|V |) + MaxCut(G) = MaxCut(G′).
+Conversely, given an optimal coloring C′ ∈C(G′), C ≜C′|V is optimal since
+cutG(C) = −(|V ′| −|V |) +
+max
+C′∈C(G′)
+C⪯C′
+cutG′(C′) ≥−(|V ′| −|V |) + cutG′(C′)
+= −(|V ′| −|V |) + MaxCut(G′) = MaxCut(G).
+We have found an efficient transformation between the MaxCut solutions of G and G′.
+Second, if G has even-degree vertices, we can add one vertex and one edge to each even-degree vertex
+to obtain an odd graph G′ = (V ′, E′). Notice that each added vertex can always be colored such that
+it contribute 1 to the cut, thus |MaxCut(G′)| = |MaxCut| + |V ′| −|V |. Moreover, it is easily seen that
+there is an efficient transformation between the MaxCut solutions of G and G′. Next, we subdivide G′
+to obtain a graph G′′ = (V ′′, E′′). More precisely, we subdivide the edges in E′\E with 2, 4, . . . , 2|E′\E|
+vertices, and the edges in E with 2|E′\E| + 2, 2|E′\E| + 4, . . . , 2|E′| vertices. Overall, G′′ is obtained
+by subdividing G using P|E′|
+i=|E′\E|+1 2i = O(|E′|2) = O((|E| + |V |)2) = O(|E|2) vertices, and adding
+O(|E′\E|2) = O(|V |2) vertices and edges. Since G′ is an odd graph, by the same discussion as the first
+case, we have |MaxCut(G′′)| = |MaxCut(G′)| + |V ′′| −|V ′| = |MaxCut(G)| + |V ′′| −|V | and the DLA of
+G′′ is free. An efficient transformation between the MaxCut solutions of G and G′′ can be obtained by
+composing those for G ↔G′ and G′ ↔G′′.
+Finally, if G is not an odd graph and has no even-degree vertices, then it must be a length-1 path.
+We can construct G′ by merging 3 paths of lengths 2, 3, and 4 at one end. It is easy to check that G′
+satisfies all the requirements.
+Before completing this section, we give an example of a family of graphs whose DLAs are free.
+Definition 8 (Spider graphs, Figure 5). Let n1, . . . , nk ≥1. The k-armed spider graph G(n1, . . . , nk) =
+(V, E) is defined to be the graph on 1+n1 +· · ·+nk vertices, with V = {c}∪{uj
+i : 1 ≤i ≤k, 1 ≤j ≤ni}
+and E = {(c, u1
+i ) : 1 ≤i ≤k} ∪{(uj
+i, uj+1
+i
+) : 1 ≤i ≤k, 1 ≤j < ni}.
+Corollary 26. If k ≥3 is odd and n1, · · · , nk ≥1 are pairwise distinct, then the QAOA-MaxCut DLA
+of a k-armed spider graph G(n1, · · · , nk) is free.
+Proof. G(n1, · · · , nk) is an asymmetric subdivision of the k-star, which is an odd graph.
+It follows that, for any n ≥7, there exists at least one n-vertex graph whose DLA is free. From
+Corollary 8, for a DLA to be free, the associated graph must have a trivial automorphism group. No
+connected graphs on n ≤5 vertices have a trivial automorphism group, and thus none of those graphs
+have free DLAs. The case n = 6 is interesting, in that there are 8 non-isomorphic graphs that have
+trivial automorphism groups, but none of these has a free DLA. We leave it as an open question as to
+why this is.
+4.6
+Other applications of the splitting lemmas
+In this section, we use the splitting lemmas (Lemmas 13 and 14) to prove that the DLAs of other
+families of graphs are free, and to extend graphs with free DLAs in such a way that freeness is preserved.
+For brevity, we will say that a graph G = (V, E) is free if its DLA of QAOA-MaxCut is free (i.e., if
+gG = gG,ma), and will say that G is splittable if Algorithm 4 on input G returns a partition P such that
+|P| = |V |. Note that if a graph is splittable, then it must be free; the converse may not hold.
+25
+
+n1
+n2
+n3
+nk
+· · · · · ·
+Figure 5: A k-armed spider graph with arm lengths n1, n2, . . . , nk for k ≥1.
+Given G = (V, E), we use the notation Ve, Vo ⊆V to denote the even- and odd-degree vertices in G,
+respectively. Similarly, Vee, Veo denote the even and odd degree vertices in the induced subgraph G[Ve],
+while Voe, Voo denote the even and odd degree vertices in G[Vo]. Applying this notation recursively, we
+get that e.g, Veeoeo denotes the odd-degree vertices in G[Veeoe], etc. Note that Lemma 13 implies that
+XVa ∈igG for any string a ≜a1a2 . . . am with ai ∈{e, o}.
+Lemma 27. Let G = (V, E) be a subgraph of G′ = (V ′, E′). Let F ⊆{(u, v) ∈E′ : u, v ∈V ′ \ V }.
+Define the DLAs
+g = ⟨{iXV , iZZE}⟩Lie,R
+g′ = ⟨{iXV , iZZE∪F }⟩Lie,R
+If g is free then g ⊆g′.
+Proof. From Lemma 7, if g is free then it is semisimple and thus g = [g, g].
+Since i P
+(u,v)∈F ZuZv
+commutes with i P
+u∈V Xu and i P
+(u,v)∈E ZuZv we thus have g = [g, g] = [g′, g′] ⊆g′.
+Definition 9 (Even and odd partitions). Let S, T be disjoint vertex sets. We call a set of edges E between
+S and T a partition of S by T if there exists a surjection f : S →T such that E = {(u, f(u)) : u ∈S}.
+If the degree of every vertex in T in G = (S ∪T, E) is odd (even), we say E is and odd (even) partition
+of S by T.
+Note that when |S| = |T|, an odd partition of S by T is a perfect matching between S and T.
+Lemma 28. Let G = (V, E) and S, T ⊆V , S ∩T = ∅. If XT ∈igG and Xu ∈igG for all u ∈S, and
+E(S, T) is a partition of S by T, then Xv ∈igG for all v ∈T.
+Proof. The partition of S by T ensures that, for any t ∈T, there is an s ∈S such that in the subgraph
+G[T, {s}], t has odd degree while all t′ ∈T \ {t} have even (zero) degree. By Lemma 14, Xt ∈igG.
+Proposition 29 (Free extensions by partitions). Let G = (V, E) and G′′ = (V ′′, E′′) be disjoint graphs,
+and let Vo,1 ∪Vo,2 and Ve,1 ∪Ve,2 be partitions of Vo and Ve, respectively. If G is free and
+1. ˜E1 is an odd partition of Ve,1 by V ′′
+o , and ˜E2 is an even partition of Ve,2 by V ′′
+e , or
+2. ˜E1 is an even partition of Vo,1 by V ′′
+o , and ˜E2 is an odd partition of Vo,3 by V ′′
+e ,
+then G′ = (V ′, E′), where V ′ = V ∪V ′′ and E′ = E ∪E′′ ∪˜E1 ∪˜E2, is free. If G is splittable, then G′
+is splittable.
+Proof. We prove Case 1. Case 2 is similar.
+The partitions ˜E1 and ˜E2 ensure that V ′
+e = V ′′
+o ∪V ′′
+e = V ′′ and V ′′
+o = V . By Lemma 13, XV , XV ′′ ∈
+igG′ and, by Lemma 12, ZZ ˜
+E ∈igG′ and hence ZE′\ ˜
+E = ZE∪E′′ ∈igG′. By Lemma 27, the DLA
+generated by iXV and iZZE∪S E′′ contains gG, which is free. Thus, Xu ∈igG′ for all u ∈V , and from
+Lemma 28, Xv ∈igG′ for all v ∈V ′′. The freeness of G′ follows from Lemma 9.
+Illustrations of Proposition 29 are given in Figure 6 and the following two corollaries.
+26
+
+Vo,2 = Vo
+G′′ = (V ′′, E′′)
+˜E2
+Graph G = (V, E)
+Graph G′ = (V ∪V ′′, E ∪E′′ ∪˜E2)
+Figure 6: Extending a free graph by Proposition 29 (Case 2). (Left) G(V, E) is free (see Proposition 33).
+(Right) G′′ (grey) is the disjoint union of a 3-cycle and a single vertex, and thus V ′′
+e = V ′′, V ′′
+o = ∅.
+Take Vo = Vo,1 ∪Vo,2 where Vo,1 = ∅and Vo,2 = Vo, ˜
+E1 = ∅, and ˜
+E2 a perfect matching between Vo,2
+and V ′′
+e . The resulting graph G′ = (V ∪V ′′, E ∪E′′ ∪˜E2) is free.
+Corollary 30. If k ≥4 is even and n1, · · · , nk−1 ≥1 are pairwise distinct then, for any m ≥1, the
+k-armed spider graph G(n1 + m, · · · , nk−1 + m, m) is free.
+Proof. Let G = (V, E) be a (k−1)-armed spider graph with pairwise distinct arm lengths n1, . . . , nk−1 ≥
+1. By Corollary 26, G is free. The odd vertex set Vo comprises the central node (call this u0) and the
+nodes (call these u1, u2, . . . , uk) at the ends of the arms, i.e., Vo = {u0, . . . , uk}. Let G′′ = (V ′′, E′′)
+with V ′′ = {w0, . . . , wk} and E′′ = ∅, and define the partition of Vo = Vo,1 ∪Vo,2 with Vo,1 = ∅and
+Vo,2 = Vo. Then apply Proposition 29, with ˜E a perfect matching between Vo,2 and V ′′. It follows that
+the new k-armed spider graph G′ = (V ∪V ′′, E ∪˜E) is free. G′ has odd vertices only at the ends of the
+k arms. The result follows by iterating this process m times.
+Corollary 31. Let G = (V, E) be free and denote Vo = {u1, . . . , u|Vo|}. Let C|Vo| = (VC, EC) be the
+cycle graph on |Vo| vertices and, for k ≥1, let H = (VH, EH) = C|Vo|□Pk be the Cartesian product of
+C|Vo| and the path graph Pk. Denote the vertices of H by Vh = {(ci, pj) : i ∈[|Vo|], j ∈[k]}. Then,
+G′ = (V ∪VH, E ∪Eh ∪{(ui, (ci, p1)) : i ∈[|Vo|]} is free.
+Proof. Applying Proposition 29 (Case 2) with Vo,1 = ∅, Vo,2 = Vo, ˜E1 = ∅and ˜E2 an odd partition
+(perfect matching) of Vo by VC, shows that ˜G = (V ∪VC, E ∪EC ∪˜E) is free. But in ˜G, the odd degree
+vertex set is precisely VC. By iterating this process we can keep adding copies of C|Vo| while ensuring
+the resulting graph is free.
+Proposition 29 requires that all of Ve (Case 1) or Vo (Case 2) be covered by partitions. We can relax
+this, so that only the odd or even components of Ve or Vo need to be covered by partitions, provided
+that the subgraphs induced by Vee, Veo, Voo or Voe have vertex degrees with particular parity.
+Proposition 32. Let G = (V, E) and G′′ = (V ′′, E′′) be disjoint graphs. If G is free and
+1. all vertices in G[Vee] have even degree, all vertices in G′′ have odd degree, and ˜E is an odd partition
+of Veo by V ′′, or
+2. all vertices in G[Veo] have odd degree, all vertices in G′′ have even degree, and ˜E is an even partition
+of Vee by V ′′, or
+3. all vertices in G[Voe] have even degree, all vertices in G′′ have odd degree, and ˜E is an even partition
+of Voo by V ′′, or
+4. all vertices in G[Voo] have odd degree, all vertices G′′ have even degree, and ˜E is an odd partition
+of Voe by V ′′.
+then G′ = (V ′, E′), where V ′ = V ∪V ′′ and E′ = E ∪E′′ ∪˜E, is free.
+27
+
+Proof. We prove Case 1. The other cases are similar.
+If all vertices in G[Vee] have even degree then every u ∈Vee must be share an edge in G with an
+even number of vertices in Veo. Then, if ˜E is an odd partition of Veo by V ′′, then (i) u ∈Veo ⇒u ∈V ′
+o;
+(ii) u ∈Vee ⇒u ∈V ′
+ee.
+Therefore, V ′
+o = Vo ∪Veo, V ′
+ee = Vee, and V ′
+eo = V ′′.
+By Lemma 13,
+XV ′o, XV ′ee, XV ′eo = XV ′′ ∈igG′. Since V = V ′
+o ∪V ′
+ee, it follows that XV ∈igG′. Since XV ′′ ∈ig, by
+Lemma 12, ZZ ˜
+E ∈igG′ and hence ZZE′\ ˜
+E = ZZE∪E′′. By Lemma 27, the DLA generated by iXV and
+iZZE∪E′′ contains gG, which is free. Thus, Xu ∈igG′ for all u ∈V . From Lemma 28, Xv ∈igG′ for all
+v ∈V ′′. The freeness of G′ follows from Lemma 9.
+As a simple application of Proposition 32, we show that extended ladder graphs with short “tails” are
+free.
+Definition 10 (Extended ladder graphs, Figure 7). The (n, k)-extended ladder graph Gn,k = (V, E)
+is defined to be the graph on 2n + k vertices, with V = {u−k, . . . , un−1} ∪{v0, . . . , vn−1} and E =
+{(ui, vi)}n−1
+i=0 ∪{(ui, ui+1)}n−2
+i=−k ∪{(vi, vi+1)}n−2
+i=0 .
+v0
+v1
+v2
+· · ·
+vn−2
+vn−1
+u0
+u1
+u2
+· · ·
+un−2 un−1
+u−1
+· · ·
+u−k
+Figure 7: An (n, k)-extended ladder graph Gn,k.
+Proposition 33. For all n ≥3, the extended ladder graphs Gn,1 and Gn,2 are free.
+Proof. The proof is by induction on n. By running Algorithm 4, it is straightforward to verify that G3,1
+and G3,2 are splittable and hence free. Now assume that G = (V, E) = Gk,j is free for j ∈{1, 2} and
+k ≥3. Note that Veo = {uk−1, vk−1} and G[Veo] is a path of length 2, with all vertex degrees odd.
+Let G′′(V ′′, E′′) where V ′′ = {uk, vk} and E′′ = {(uk, vk)} i.e., a length 2 path, and let ˜E be a perfect
+matching between V ′′ and Veo(Gk,1). By Proposition 32 (Case 1), Gk+1,j is free.
+Proposition 29 and Proposition 32 require every element in G′′ to be connected to G via a partition.
+We can relax this requirement if G′′ is acyclic (i.e., a forest).
+Lemma 34 (Forests with free leaves are free). Let G = (V, E) be acyclic, and let V1 ⊆V be the set of
+degree 1 vertices in G. Then ⟨{iXu : u ∈V1} ∪{i P
+u∈V \V1 Xu, i P
+(u,v)∈E ZuZv}⟩Lie,R = ⟨{iXu : u ∈
+V } ∪{iZuZv : (u, v) ∈E}⟩Lie,R
+Proof. Let V1 = {v ∈V : deg(v) = 1} be the set of degree 1 nodes in G.
+Consider the following
+algorithm. For any u ∈V , mark u if Xu ∈igC. Initially all v ∈V1 are marked. Successively apply
+Lemma 14 with S = V \ V1 and T = {v} for each v ∈V1 to mark all neighbours of V1. The set of
+neighbours of V1 includes all degree 1 vertices in G[V \ V1]. Iterate this process on G[V \ V1] and so on
+until eventually all vertices become marked. The result follows from Lemma 9.
+Proposition 35 (Extensions by forests). Let G = (V, E) and G′′ = (V ′′, E′′) be disjoint graphs, with G′′
+acyclic. If G is free and ˜E is an odd partition of V ′′
+o by Ve , then G′ = (V ′, E′) is free, where V ′ = V ∪V ′′
+and E′ = E ∪E′′ ∪˜E.
+Proof. As ˜E is an odd partition of Ve by V ′′
+e , then V ′
+o = V and V ′
+e = V ′′.
+Thus XV , XV ′′ ∈ig′
+G.
+Furthermore, by the same argument as in the proof of Proposition 29, we have that Xu ∈igG′ for all
+u ∈V . By Lemma 28, Xv ∈igG′ for all Xv in V ′′
+e , which include all the leaves (degree 1 vertices) in G′′.
+The result follows from Lemma 34.
+An illustration of Proposition 35 is given in Figure 8.
+28
+
+Ve
+Graph G = (V, E)
+G′′ = (V ′′, E′′)
+˜E
+Graph G′ = (V ∪V ′′, E ∪E′′ ∪˜E)
+Figure 8: Extending a free graph by Proposition 35. (Left) G = (V, E) is free (see Proposition 33).
+(Right) G′′ (grey) is taken to be a tree. The odd degree nodes in G′′ are connected to Ve by a perfect
+matching. The resulting graph G′ is free.
+Proposition 36 (Combining free graphs). Let G = (V, E) and H = (W, F) be free graphs, and ˜E be a
+set of edges between Vo and We. If every vertex in the bipartite graph B = (Vo ∪We, ˜E) has odd degree,
+then G′ = (V ∪W, E ∪F ∪˜E) is free.
+Proof. If every vertex in B has odd degree, then every vertex in G′[V ] has even degree, and every
+vertex in G′[W] has odd degree. XV , XW , ZZE∪F ∈igG′. By Lemma 27, gG ⊆⟨{iXV , iZZE∪F }⟩Lie,R
+and gH ⊆⟨{iXW , iZZE∪F }⟩Lie,R, and thus Xu ∈igG′ for all u ∈V ∪W.
+The result follows from
+Lemma 9.
+Note that the above proposition requires that the vertices in B have odd degree. This is because, by
+the handshaking lemma, |Vo| must be even. For B to have every vertex with odd degree, it is necessary
+that We also be even.
+We end this section by proving the freeness of another family of graphs that generalizes the (n, 1)-
+extended ladder graphs discussed earlier.
+Definition 11 (Grid+1 graph, Figure 9 (1)). For any w, h ≥1, the (w, h)-grid+1 graph G(w, h) = (V, E)
+is defined to be the graph with vertex set V = {u−1,0, ui,j : 0 ≤i ≤w, 0 ≤j ≤h} and edge set
+E = {(u−1,0, u0,0), (ui,j, ui+1,j), (ui,j, ui+1,j) : 0 ≤i ≤w −1, 0 ≤j ≤h −1}.
+u0,0
+u−1,0
+u0,h
+uw,h
+uw,0
+(1)
+(2)
+Figure 9: (1) The grid+1 graph G(w, h). (2) The subgraph induced by odd-degree vertices, where the
+solid (hollow) dots represent the even (odd) degree vertices in the subgraph.
+Proposition 37. For w > h ≥3, the grid+1 graph G(w, h) is free.
+Proof. Denote the grid+1 graph by G. The subgraph G[Vo] (see Figure 9 (2)) is a disjoint union of a
+3-spider graph G′ ∼= G(1, h −1, w −1), a path with length h −2, and another path of length w −2.
+Hence, G[Voe] is a disjoint union of 4 paths on 0 ≤h −3 < h −2 ≤w −3 < w −2 vertices.
+• If h −2 < w −3 then, similar to the proof of Theorem 23, we can show that Xu ∈ig for any vertex
+u of the 3-spider graph G′.
+29
+
+• If h−2 = w−3, then by slightly generalizing Lemma 24, we can again follow the proof of Theorem 23
+to show that Xu ∈ig for any vertex u of the 3-spider graph G′.
+Since X{u0,h−1}, X{u0,h−2}, XV \V (G′) ∈ig, applying the external splitting lemma (Lemma 14) with S =
+V \V (G′) and T = {u0,h−1} or T = {u0,h−2} we have X{u0,h,u1,h−1}, X{u1,h−2} ∈ig. Again apply the
+external splitting lemma with S = {u0,h, u1,h−1} and T = {u1,h−2}, we conclude that X{u0,h} ∈ig.
+Combined with the fact that Xu ∈ig for any vertex u of the 3-spider graph G′, it follows that Xu ∈ig
+for each u ∈V1 ≜{(x, y) ∈V (G) : x = −1 or 0}. Apply the external splitting lemma with S = V \V1
+and T = {u0,i} for each 0 ≤i ≤h, we have X{u1,i} ∈ig. By repeating this process, it is easy to show
+that Xu ∈ig for any u ∈V (G).
+4.7
+Numerical results
+In this section, we present the numerical results of our algorithm on (1) all connected graphs with 4 to
+7 vertices, and (2) the benchmark set for MaxCut solvers provided by MQLib [DGS18].
+Results on small connected graphs
+We executed Algorithm 4 on all connected graphs with 4-7
+vertices. To avoid redundant computations, we selected all non-isomorphic connected graphs provided
+by the Graph Atlas [Dev25a]: 6 graphs on 4 vertices, 21 on 5, 112 on 6, and 853 on 7, for a total of
+992 instances. Graphs with 8 or more vertices were not considered because they are not included in
+the Graph Atlas. Running times are reported in Figure 10 — the median is 0.3ms for 4-vertex graphs,
+5ms for 5-vertex, 278ms for 6-vertex, and 13s for 7-vertex. In contrast, PennyLane’s built-in routine
+[Dev25b] failed to complete computations on many 6-vertex instances in 28h, and returned incorrect
+results when the DLA dimension ≳500. To ensure a fair comparison, all benchmarks for our algorithm
+and PennyLane’s routine were performed on the same AMD EPYC 9754 processor with 32GB of memory.
+The performance advantage of our algorithm stems from its use of an efficient graph-theoretic subroutine
+to perform generator splitting, a task computationally intense by purely algebraic methods.
+Analysis of the results reveals an apparent linear relationship between dim g and the number of
+Aut(G)-orbits of gma. More precisely, let gma/Aut(G) denote the largest sub-algebra of gma that is fixed
+by every automorphism π ∈Aut(G) (acting on gma by permutating qubits). We observe that dim g grows
+almost proportionally to dim(gma/Aut(G)) (see Figure 11), and conjecture that this scaling persists for
+larger graphs.
+Conjecture 38. There exists a constant C > 1, such that
+dim g ≤dim(gma/Aut(G)) ≤C · dim g.
+4
+5
+6
+7
+10−4
+10−1
+102
+105
+Number of nodes
+Time (s)
+Figure 10: Running time on small connected graphs.
+30
+
+0
+1,000
+2,000
+3,000
+4,000
+5,000
+6,000
+7,000
+8,000
+9,000
+0
+2,000
+4,000
+6,000
+8,000
+dim(gma/Aut(G))
+dim g
+Data points
+y = x
+Figure 11: DLA dimension vs number of orbits of the multi-angle DLA under Aut(G).
+Results on MQLib benchmark set
+We executed Algorithm 4 on the MQLib benchmark set [DGS18],
+a library of MaxCut instances designed for evaluating classical heuristics. This library comprises 3,506
+graphs (snapshot taken 15 October 2025) ranging from random models to real-world applications, with
+up to 53,130 vertices. Although the majority of instances are edge-weighted, we deliberately discarded
+the weights to keep our algorithm applicable. This simplification is justified: many weighted instances
+carry random edge weights, which render the associated DLA free; omitting the weights therefore more
+likely yields an optimistic estimate of DLA dimension.
+In addition to checking whether the DLAs are free, we also calculated lower bounds on the DLA
+dimensions in the following way. Algorithm 2 returns a vertex partition P. Let Viso ≜{v ∈V ′ : V ′ ∈
+P, |V ′| = 1} denote the set of isolated vertices in the partition. The multi-angle DLA of the induced
+subgraph G[Viso] must be a sub-algebra of the original DLA; its dimension thus provides a lower bound.
+Our results are reported in Table 1. The efficiency of Algorithm 4 allows us to numerically analyze
+graphs of sizes (and corresponding DLA dimensions) that far surpass previous studies (e.g., [LCS+22]
+numerically studied QAOA-MaxCut DLAs for Erdős-Rényi graphs on n ≤6 vertices and DLA dimensions
+≤104).
+Description
+#Instances
+Proportion
+Total
+3 506
+100%
+Free DLA
+1 994
+57%
+dim g ≥232
+≥2 746
+≥78%
+dim g ≥264
+≥2 701
+≥77%
+dim g ≥2128
+≥2 622
+≥75%
+dim g ≥2256
+≥2 260
+≥64%
+dim g ≥2512
+≥1 956
+≥56%
+Table 1: Summary of results on the MQLib benchmark set [DGS18]. Edge weights are discarded to give
+unweighted graphs.
+5
+Generalization to other DLAs
+In this section, we show some applications of results in Sections 3 and 4 for other DLAs on graphs.
+31
+
+Results of isomorphic DLAs
+Since the DLA of QAOA-MaxCut g is a sub-algebra of u(2n), any
+algebra automorphism σ of u(2n) induces an algebra isomorphic to g:
+g′ ≜⟨σ(iHm), σ(iHp)⟩Lie,R = σ
+
+⟨iHm, iHp⟩Lie,R
+
+∼= ⟨iHm, iHp⟩Lie,R = g.
+The adjoint maps AdU(·) = U(·)U † for U ∈U(2n) are algebra automorphisms of u(2n). Based on this
+observation, we show that the X and Z in Hm and Hp can be replaced by any distinct and non-identity
+Pauli operators P and Q.
+Proposition 39. For an n-vertex graph G = (V, E, r) and Pauli operators P, Q ∈{X, Y, Z}, let HP
+m ≜
+Pn
+j=1 Pj and HQ
+p ≜P
+(j,k)∈E rjkQjQk. If P ̸= Q, then
+
+iHP
+m, iHQ
+p
+
+Lie,R ∼= ⟨iHm, iHp⟩Lie,R.
+Proof. It suffices to find a unitary U ∈U(2n), such that
+HP
+m = ±UHmU †
+and
+HQ
+p = ±UHpU †.
+(22)
+Recall that
+H(X, Y, Z)H† = (Z, −Y, X),
+S(X, Y, Z)S† = (Y, −X, Z),
+where H is the Hadamard gate and S is the phase gate. Hence, ignoring phases, the action of the single-
+qubit Clifford group on {X, Y, Z} is the full symmetric group S3. Let C be the single-qubit Clifford that
+maps (by conjugation) X to ±P, and Z to ±Q. It is easily verified that U ≜C⊗n is the desired unitary
+for Eq. (22) to hold.
+Therefore, all conclusions about g = ⟨iHm, iHp⟩Lie,R also hold for
+
+iHP
+m, iHQ
+p
+
+Lie,R.
+Results of larger DLAs
+We can extend the results to beyond QAOA-MaxCut DLAs within the
+framework of Geometric Quantum Machine Learning (GQML) [LSS+22, RBN+23, MMGF+23]. The
+key insight of GQML is that one should construct PQCs whose structure is constrained to be invari-
+ant under the relevant symmetry group Sn, such as the automorphism group Aut(G) of any graph G.
+While prior studies [SLN+24, AD18] have examined the DLAs of Sn-equivariant quantum neural net-
+works (QNN)—where Sn is the automorphism group of the unweighted complete graph—one can also
+investigate the DLAs corresponding to more general graphs.
+More specifically, suppose that the DLA of a GQML QNN defined by a weighted graph G = (V, E, r)
+is
+g′ =
+*
+i
+X
+u∈V
+Xu, i
+X
+u∈V
+Yu, i
+X
+(u,v)∈E
+ruvZuZv
++
+Lie,R
+(23)
+This generalizes the Sn-equivariant QNN where G is a complete graph and r ≡1, and we can identify
+this g′ for many cases as shown below.
+Lemma 40 ([KWKB24]). For any connected graph G = (V, E) with n ≥3 vertices, we have
+g′′ = ⟨{iXuXv, iXuYv, iXuZv : (u, v) ∈E}⟩Lie,R = su(2n).
+(24)
+Corollary 41. For a weighted connected graph G = (V, E, r), define g′ according to Eq. (23).
+• If the weights r satisfies ruv ̸= 0 for any (u, v) ∈E and Eq. (1), then g′ = su(2n) and dim g′ =
+4n −1.
+• If the weights r ≡1 and G is an asymmetric odd graph, g′ = su(2n) and dim g′ = 4n −1.
+• If the weights r ≡1, DLAs g′ on almost all graphs are su(2n) with dimension 4n −1.
+32
+
+Trivial Aut
+Trivial center
+Free DLA
+G97
+G97
+G113
+G148
+G97
+G113
+G148
+(1)
+(2)
+(3)
+(4)
+Figure 12: (1) Relationship between three properties of a graph G. Free DLA: the QAOA-MaxCut
+DLA of the graph is free. Trivial Aut(G): the automorphism group of the graph is trivial, i.e., consists
+of only the identity permutation. Trivial center: the QAOA-MaxCut DLA of the graph has trivial
+center, i.e., the center consists of only the zero element. “Free DLA” implies “Trivial Aut” (Corollary 8)
+and “Trivial center” (Lemma 7) (solid arrows), while all other directions have counter examples (red
+dashed arrows and red labels). For example, graph G97 has a trivial automorphism group, but its DLA
+is not free. (2)-(4) Counter-examples G97, G113 and G148. These graphs come from the Graph Atlas
+[Dev25a].
+Proof. Define the free DLA g′
+ma = ⟨{iXv, iYv, iZuZv : v ∈V, (u, v) ∈E}⟩Lie,R. It is easily verified that
+g′
+ma ⊆g′′ and g′′ ⊆g′
+ma (g′′ is defined in Eq. (24)) by
+1
+2[iXuXv, iXuZv] = iYv ∈g′′, 1
+4[[iXuYv, iXuXv], iYv] = iXv ∈g′′, 1
+2[iYv, iZuXv] = iZuZv ∈g′′,
+1
+2[iZuZv, iYu] = iXuZv ∈g′
+ma, 1
+2[iXv, iXuZv] = iXuYv ∈g′
+ma, 1
+2[iXuZv, iYv] = iXuXv ∈g′
+ma.
+Therefore, g′′ = g′
+ma = su(2n) with dimension 4n −1 by Lemma 40. If the subalgebra g (defined in
+Eq. (4)) of g′ is free, then iXu ∈g′ for any u ∈V . Then we have
+−1
+4[iXu, [iXu, i
+X
+u∈V
+Yu]] = iYu ∈g′,
+which implies g′ = g′
+ma = su(2n). The proof follows from Theorems 1, 3 and 23.
+6
+Discussion
+In this work we have shown that QAOA-MaxCut DLAs for most weighted and unweighted graphs
+are free. From the known classification of multi-angle QAOA DLAs, it follows that these DLAs scale
+exponentially in the number of qubits n, and hence the associated algorithms will suffer from barren
+plateaus. This aligns with the common phenomena in complexity theory that a random object usually
+has high complexity, and efficient algorithms need to identify and exploit combinatorial or algebraic
+structures inside a problem. In the case of variational quantum algorithms, note that for a DLA to be
+free, the automorphism group of the associated graph must necessarily be trivial (although the converse
+is not true, see Figure 12). While random graphs will, with high probability, have trivial automorphism
+groups, problems of practical interest often have structure and symmetry which manifest themselves in
+non-trivial automorphisms. In addition, it may be possible to alter the structure of a graph in ways that
+increase symmetry while transforming the MaxCut in a predictable way (for example, removing degree-1
+vertices), which leads to an interesting notion of DLA-engineering. This motivates further study into
+the precise relationship between the DLA dimension and graph symmetry, and the door is open for
+QAOA-MaxCut to be trainable on graphs of practical interest.
+References
+[ACEB24] Gerard Aguilar, Simon Cichy, Jens Eisert, and Lennart Bittel. Full classification of Pauli
+Lie algebras, 2024. arXiv preprint arXiv:2408.00081 [quant-ph].
+[AD18] Francesca Albertini and Domenico D’Alessandro. Controllability of symmetric spin net-
+works. Journal of Mathematical Physics, 59(5):052102, 05 2018. DOI: 10.1063/1.5004652.
+33
+
+[Alt01] M. V. Altaisky. Quantum neural network, 2001. arXiv preprint arXiv:quant-ph/0107012
+[quant-ph].
+[Alt02] Claudio Altafini. Controllability of quantum mechanical systems by root space decom-
+position of su(N).
+Journal of Mathematical Physics, 43(5):2051–2062, 05 2002.
+DOI:
+10.1063/1.1467611.
+[ASYZ24] Jonathan Allcock, Miklos Santha, Pei Yuan, and Shengyu Zhang.
+On the dynamical
+Lie algebras of quantum approximate optimization algorithms, 2024.
+arXiv preprint
+arXiv:2407.12587 [quant-ph].
+[ASZ+21] Amira Abbas, David Sutter, Christa Zoufal, Aurélien Lucchi, Alessio Figalli, and Stefan
+Woerner. The power of quantum neural networks. Nature Computational Science, 1(6):403–
+409, 2021. DOI: 10.1038/s43588-021-00084-1.
+[BBC+24] Kostas Blekos, Dean Brand, Andrea Ceschini, Chiao-Hui Chou, Rui-Hao Li, Komal Pandya,
+and Alessandro Summer. A review on quantum approximate optimization algorithm and
+its variants. Physics Reports, 1068:1–66, 2024. DOI: 10.1016/j.physrep.2024.03.002.
+[BGPP+19] Marcello Benedetti, Delfina Garcia-Pintos, Oscar Perdomo, Vicente Leyton-Ortega, Yun-
+seong Nam, and Alejandro Perdomo-Ortiz. A generative modeling approach for bench-
+marking and training shallow quantum circuits. npj Quantum Information, 5(1):45, 2019.
+DOI: 10.1038/s41534-019-0157-8.
+[CSAC22] Marco Cerezo,
+Kunal Sharma,
+Andrew Arrasmith,
+and Patrick J Coles.
+Varia-
+tional quantum state eigensolver.
+npj Quantum Information, 8(1):113, 2022.
+DOI:
+10.1038/s41534-022-00611-6.
+[CSV+21] Marco Cerezo, Akira Sone, Tyler Volkoff, Lukasz Cincio, and Patrick J Coles. Cost function
+dependent barren plateaus in shallow parametrized quantum circuits. Nature Communi-
+cations, 12(1):1791, 2021. DOI: 10.1038/s41467-021-21728-w.
+[Dev25a] NetworkX Developers. graph_atlas_g - NetworkX documentation. https://networkx.
+org/documentation/stable/reference/generated/networkx.generators.atlas.
+graph_atlas_g.html, 2025. Accessed: 2025-10-16.
+[Dev25b] PennyLane Developers.
+lie_closure - PennyLane documentation.
+https://docs.
+pennylane.ai/en/stable/code/api/pennylane.lie_closure.html, 2025.
+Accessed:
+2025-10-17.
+[DGS18] Iain Dunning, Swati Gupta, and John Silberholz.
+What works best when?
+a system-
+atic evaluation of heuristics for Max-Cut and QUBO. INFORMS Journal on Computing,
+30(3):608–624, 2018. DOI: 10.1287/ijoc.2017.0798.
+[DI25] Domenico D’Alessandro and Yasemin Isik. Controllability of the periodic quantum Ising
+spin chain and the Onsager algebra. Journal of Physics A: Mathematical and Theoretical,
+58(11):115202, March 2025. DOI: 10.1088/1751-8121/adbdb0.
+[ER63] P. Erdös and A. Rényi. Asymmetric graphs. Acta Mathematica Academiae Scientiarum
+Hungarica, 14(3-4):295–315, 1963. DOI: 10.1007/BF01895716.
+[EW06] Karin Erdmann and Mark J Wildon. Introduction to Lie algebras. Springer Undergraduate
+Mathematics Series. Springer, 2006. DOI: 10.1007/1-84628-490-2.
+[FGG14] Edward Farhi, Jeffrey Goldstone, and Sam Gutmann. A quantum approximate optimiza-
+tion algorithm, 2014. arXiv preprint arXiv:1411.4028 [quant-ph].
+[FGP21] Daniel Stilck França and Raul Garcia-Patron.
+Limitations of optimization algo-
+rithms on noisy quantum devices.
+Nature Physics, 17(11):1221–1227, 2021.
+DOI:
+10.1038/s41567-021-01356-3.
+34
+
+[FHC+24] Enrico Fontana, Dylan Herman, Shouvanik Chakrabarti, Niraj Kumar, Romina Yalovetzky,
+Jamie Heredge, Shree Hari Sureshbabu, and Marco Pistoia. Characterizing barren plateaus
+in quantum ansätze with the adjoint representation. Nature Communications, 15(1):7171,
+August 2024. DOI: 10.1038/s41467-024-49910-w.
+[FM23] Lucas Friedrich and Jonas Maziero. Quantum neural network cost function concentration
+dependency on the parametrization expressivity. Scientific Reports, 13(1):9978, 2023. DOI:
+10.1038/s41598-023-37003-5.
+[GBB+23] Harper R Grimsley, George S Barron, Edwin Barnes, Sophia E Economou, and Nicholas J
+Mayhall. Adaptive, problem-tailored variational quantum eigensolver mitigates rough pa-
+rameter landscapes and barren plateaus. npj Quantum Information, 9(1):19, 2023. DOI:
+10.1038/s41534-023-00681-0.
+[Gil59] Edgar N Gilbert. Random graphs. The Annals of Mathematical Statistics, 30(4):1141–1144,
+1959. DOI: 10.1214/aoms/1177706098.
+[GMLC24] Diego García-Martín, Martín Larocca, and Marco Cerezo. Effects of noise on the over-
+parametrization of quantum neural networks. Physical Review Research, 6:013295, March
+2024. DOI: 10.1103/PhysRevResearch.6.013295.
+[Hal13] Brian C Hall.
+Lie groups, Lie algebras, and representations.
+In Quantum Theory for
+Mathematicians, pages 333–366. Springer, 2013. DOI: 10.1007/978-3-319-13467-3.
+[HAY+21] Zoë Holmes, Andrew Arrasmith, Bin Yan, Patrick J Coles, Andreas Albrecht, and An-
+drew T Sornborger. Barren plateaus preclude learning scramblers. Physical Review Letters,
+126:190501, May 2021. DOI: 10.1103/PhysRevLett.126.190501.
+[HLO+22] Rebekah Herrman, Phillip C Lotshaw, James Ostrowski, Travis S Humble, and George
+Siopsis.
+Multi-angle quantum approximate optimization algorithm.
+Scientific Reports,
+12(1):6781, April 2022. DOI: 10.1038/s41598-022-10555-8.
+[HSCC22] Zoë Holmes, Kunal Sharma, Marco Cerezo, and Patrick J Coles. Connecting ansatz ex-
+pressibility to gradient magnitudes and barren plateaus. PRX Quantum, 3:010313, January
+2022. DOI: 10.1103/PRXQuantum.3.010313.
+[KAK23] Muhammad Kashif and Saif Al-Kuwari. The impact of cost function globality and local-
+ity in hybrid quantum neural networks on nisq devices. Machine Learning: Science and
+Technology, 4(1):015004, 2023. DOI: 10.1088/2632-2153/acb12f.
+[KCW21] Maria Kieferova, Ortiz Marrero Carlos, and Nathan Wiebe. Quantum generative training
+using Rényi divergences, 2021. arXiv preprint arXiv:2106.09567 [quant-ph].
+[KLF+24] Sujay Kazi, Martín Larocca, Marco Farinati, Patrick J. Coles, M. Cerezo, and Robert
+Zeier. Analyzing the quantum approximate optimization algorithm: ansätze, symmetries,
+and Lie algebras, 2024. arXiv preprint arXiv:2410.05187 [quant-ph].
+[KLP+19] Sumeet Khatri, Ryan LaRose, Alexander Poremba, Lukasz Cincio, Andrew T. Sornborger,
+and Patrick J. Coles. Quantum-assisted quantum compiling. Quantum, 3:140, May 2019.
+DOI: 10.22331/q-2019-05-13-140.
+[KMW+18] Ian D Kivlichan, Jarrod McClean, Nathan Wiebe, Craig Gidney, Alán Aspuru-Guzik,
+Garnet Kin-Lic Chan, and Ryan Babbush. Quantum simulation of electronic structure
+with linear depth and connectivity.
+Physical Review Letters, 120:110501, March 2018.
+DOI: 10.1103/PhysRevLett.120.110501.
+[KSW+22] Efekan
+Kökcü,
+Thomas
+Steckmann,
+Yan
+Wang,
+JK
+Freericks,
+Eugene
+F
+Du-
+mitrescu, and Alexander F Kemper.
+Fixed depth Hamiltonian simulation via Car-
+tan decomposition.
+Physical Review Letters,
+page 070501,
+August 2022.
+DOI:
+10.1103/PhysRevLett.129.070501.
+35
+
+[KWKB24] Efekan Kökcü, Roeland Wiersema, Alexander F. Kemper, and Bojko N. Bakalov. Clas-
+sification of dynamical Lie algebras generated by spin interactions on undirected graphs,
+2024. arXiv preprint arXiv:2409.19797 [quant-ph].
+[LCS+22] Martin Larocca, Piotr Czarnik, Kunal Sharma, Gopikrishnan Muraleedharan, Patrick J.
+Coles, and M. Cerezo. Diagnosing barren plateaus with tools from quantum optimal control.
+Quantum, 6:824, September 2022. DOI: 10.22331/q-2022-09-29-824.
+[LJGM+23] Martin Larocca, Nathan Ju, Diego García-Martín, Patrick J Coles, and Marco Cerezo.
+Theory of overparametrization in quantum neural networks. Nature Computational Science,
+3(6):542–551, 2023. DOI: 10.1038/s43588-023-00467-6.
+[LMRA21] Juneseo Lee, Alicia B Magann, Herschel A Rabitz, and Christian Arenz.
+Progress to-
+ward favorable landscapes in quantum combinatorial optimization.
+Physical Review A,
+104:032401, September 2021. DOI: 10.1103/PhysRevA.104.032401.
+[LOCC24] Lorenzo Leone, Salvatore F. E. Oliviero, Lukasz Cincio, and M. Cerezo. On the prac-
+tical usefulness of the hardware efficient ansatz.
+Quantum, 8:1395, July 2024.
+DOI:
+10.22331/q-2024-07-03-1395.
+[LSCB21] Chiara Leadbeater, Louis Sharrock, Brian Coyle, and Marcello Benedetti. F-divergences
+and cost function locality in generative modelling with quantum circuits.
+Entropy,
+23(10):1281, 2021. DOI: 10.3390/e23101281.
+[LSS+22] Martín Larocca, Frédéric Sauvage, Faris M Sbahi, Guillaume Verdon, Patrick J Coles,
+and Marco Cerezo. Group-invariant quantum machine learning. PRX Quantum, 3:030341,
+September 2022. DOI: 10.1103/PRXQuantum.3.030341.
+[LZ16] Cedric Yen-Yu Lin and Yechao Zhu. Performance of QAOA on typical instances of con-
+straint satisfaction problems with bounded degree, 2016. arXiv preprint arXiv:1601.01744
+[quant-ph].
+[MBS+18] Jarrod R McClean, Sergio Boixo, Vadim N Smelyanskiy, Ryan Babbush, and Hartmut
+Neven. Barren plateaus in quantum neural network training landscapes. Nature Commu-
+nications, 9(1):4812, 2018. DOI: 10.1038/s41467-018-07090-4.
+[MKW21] Carlos Ortiz Marrero, Mária Kieferová, and Nathan Wiebe. Entanglement-induced barren
+plateaus. PRX Quantum, 2:040316, October 2021. DOI: 10.1103/PRXQuantum.2.040316.
+[MMGF+23] Johannes Jakob Meyer,
+Marian Mularski,
+Elies Gil-Fuster,
+Antonio Anna Mele,
+Francesco Arzani, Alissa Wilms, and Jens Eisert.
+Exploiting symmetry in varia-
+tional quantum machine learning.
+PRX Quantum, 4:010328, March 2023.
+DOI:
+10.1103/PRXQuantum.4.010328.
+[MNKF18] Kosuke Mitarai,
+Makoto Negoro,
+Masahiro Kitagawa,
+and Keisuke Fujii.
+Quan-
+tum
+circuit
+learning.
+Physical
+Review
+A,
+98:032309,
+September
+2018.
+DOI:
+10.1103/PhysRevA.98.032309.
+[MPL23] Enrique Cervero Martín, Kirill Plekhanov, and Michael Lubasch.
+Barren plateaus
+in quantum tensor network optimization.
+Quantum,
+7:974,
+April 2023.
+DOI:
+10.22331/q-2023-04-13-974.
+[PCW+21] Arthur Pesah, Marco Cerezo, Samson Wang, Tyler Volkoff, Andrew T Sornborger, and
+Patrick J Coles. Absence of barren plateaus in quantum convolutional neural networks.
+Physical Review X, 11:041011, October 2021. DOI: 10.1103/PhysRevX.11.041011.
+[PNGY21] Taylor L Patti, Khadijeh Najafi, Xun Gao, and Susanne F Yelin.
+Entanglement de-
+vised barren plateau mitigation. Physical Review Research, 3:033090, July 2021. DOI:
+10.1103/PhysRevResearch.3.033090.
+36
+
+[RBN+23] Michael Ragone, Paolo Braccia, Quynh T Nguyen, Louis Schatzki, Patrick J Coles, Frederic
+Sauvage, Martin Larocca, and Marco Cerezo. Representation theory for geometric quantum
+machine learning, 2023. arXiv preprint arXiv:2210.07980 [quant-ph].
+[RBS+24] Michael Ragone, Bojko N. Bakalov, Frédéric Sauvage, Alexander F. Kemper, Carlos Ortiz
+Marrero, Martín Larocca, and M. Cerezo. A Lie algebraic theory of barren plateaus for
+deep parameterized quantum circuits. Nature Communications, 15(1):7172, August 2024.
+DOI: 10.1038/s41467-024-49909-3.
+[Rom15] Steven Roman.
+An introduction to Catalan numbers.
+Springer,
+2015.
+DOI:
+10.1007/978-3-319-22144-1.
+[SBSW20] Maria Schuld,
+Alex Bocharov,
+Krysta M Svore,
+and Nathan Wiebe.
+Circuit-
+centric quantum classifiers.
+Physical Review A, 101:032308,
+March 2020.
+DOI:
+10.1103/PhysRevA.101.032308.
+[SCCC22] Kunal Sharma, Marco Cerezo, Lukasz Cincio, and Patrick J Coles. Trainability of dissi-
+pative perceptron-based quantum neural networks. Physical Review Letters, 128:180505,
+May 2022. DOI: 10.1103/PhysRevLett.128.180505.
+[SLN+24] Louis Schatzki, Martín Larocca, Quynh T Nguyen, Frédéric Sauvage, and M Cerezo. The-
+oretical guarantees for permutation-equivariant quantum neural networks. npj Quantum
+Information, 10(1):12, January 2024. DOI: 10.1038/s41534-024-00804-1.
+[SMM+22] Stefan H Sack, Raimel A Medina, Alexios A Michailidis, Richard Kueng, and Maksym
+Serbyn. Avoiding barren plateaus using classical shadows. PRX Quantum, 3:020365, June
+2022. DOI: 10.1103/PRXQuantum.3.020365.
+[SW22] Ruslan Shaydulin and Stefan M Wild.
+Importance of kernel bandwidth in quan-
+tum
+machine
+learning.
+Physical Review A,
+106:042407,
+October
+2022.
+DOI:
+10.1103/PhysRevA.106.042407.
+[TWN+23] Supanut Thanasilp, Samson Wang, Nhat Anh Nghiem, Patrick Coles, and Marco Cerezo.
+Subtleties in the trainability of quantum machine learning models.
+Quantum Machine
+Intelligence, 5(1):21, 2023. DOI: 10.1007/s42484-023-00103-6.
+[UB21] AV Uvarov and Jacob D Biamonte.
+On barren plateaus and cost function locality in
+variational quantum algorithms.
+Journal of Physics A: Mathematical and Theoretical,
+54(24):245301, 2021. DOI: 10.1088/1751-8121/abfac7.
+[UBY20] Alexey Uvarov, Jacob D Biamonte, and Dmitry Yudin. Variational quantum eigensolver
+for frustrated quantum systems.
+Physical Review B, 102:075104, August 2020.
+DOI:
+10.1103/PhysRevB.102.075104.
+[WFC+21] Samson Wang, Enrico Fontana, Marco Cerezo, Kunal Sharma, Akira Sone, Lukasz Cincio,
+and Patrick J Coles. Noise-induced barren plateaus in variational quantum algorithms.
+Nature Communications, 12(1):6961, 2021. DOI: 10.1038/s41467-021-27045-6.
+[WZdS+20] Roeland
+Wiersema,
+Cunlu
+Zhou,
+Yvette
+de
+Sereville,
+Juan
+Felipe
+Carrasquilla,
+Yong Baek Kim, and Henry Yuen.
+Exploring entanglement and optimization within
+the hamiltonian variational ansatz.
+PRX Quantum, 1:020319, December 2020.
+DOI:
+10.1103/PRXQuantum.1.020319.
+[ZSH11] Robert Zeier and Thomas Schulte-Herbrüggen.
+Symmetry principles in quantum
+systems theory.
+Journal of Mathematical Physics, 52(11):113510, 11 2011.
+DOI:
+10.1063/1.3657939.
+37
+
+A
+An alternative proof of Theorem 3
+In this section, we provide an alternative proof of the first statement in Theorem 3, which we restate
+below:
+Theorem 3. Let G ∼G(n, 1
+2) be an Erdős-Rényi random graph. Then with probability at least 1 −
+exp(−Ω(n)), the following statements hold for QAOA-MaxCut.
+1. g = gma.
+2. g is the direct sum of either one or two simple Lie algebras, each of dimension Θ(4n).
+3. Varθ[ℓ(ρ, O; θ)] = O(1/2n), and barren plateaus are therefore present.
+The same statements hold if we draw G uniformly at random from all non-isomorphic graphs on n
+vertices.
+As shown in the main text, the remaining statements follow quite straightforwardly from the first.
+Our approach will be to analyze a recursive algorithm (Algorithm 6), a simpler (though weaker)
+variant of Algorithm 4. We will show that Algorithm 6 splits the generator XV of ER graphs G(n, 1
+2)
+completely with probability at least 1 −exp(−Θ(n)).
+It follows from Lemma 9 that DLAs on such
+graphs are free with at least this probability. Algorithm 6 takes a graph G = (V, E) ∼G(n, 1
+2) and a
+hyperparameter N ∈N+ as input, and does the following things:
+• It determines whether the DLA is free by brute force if |V | ≤N.
+• Otherwise, it applies the internal split (Lemma 13) once. If this divides the graph into two moderate
+sized subgraphs, it recurses on each of them.
+Algorithm 6: CheckFreeDLA(G, N)
+Data: A graph G = (V, E), N ∈N+
+Result: true indicating that the DLA on G is free, false if not sure
+1 if |V | ≤N then
+2
+Compute the DLA of G by brute force;
+3
+if The DLA is free then return true ;
+4
+else return false ;
+5 end
+6 Ve ←{u ∈V : deg(u) is even};
+7 Vo ←{u ∈V : deg(u) is odd};
+8 if |Vo| < 4 or |Ve| < 4 then return false;
+9 if CheckFreeDLA(G[Vo], N) is true then
+10
+if ∀u, v ∈Ve : N(u) ∩Vo ̸= N(v) ∩Vo then return true ;
+11 else if CheckFreeDLA(G[Ve], N) is true then
+12
+if ∀u, v ∈Vo : N(u) ∩Ve ̸= N(v) ∩Ve then return true ;
+13 end
+14 return false
+The correctness of the recursion follows from Lemmas 9, 13 and 14 — We have XVo, XVe ∈ig by
+Lemma 13, which guarantees a recursive implementation of the algorithm.
+If Line 9 returns true,
+then Xw ∈ig for any w ∈Vo.
+For any u, v ∈Ve, if N(u) ∩Vo ̸= N(v) ∩Vo, then there exists a
+w ∈(N(u)∩Vo)∆(N(v)∩Vo). Without loss of generality, assume that u ∈N(w)∩Ve and v /∈N(w)∩Ve.
+By Lemma 14 and the fact that Xw, XVe ∈ig, we deduce that XN (w)∩Ve, XVe\(N (w)∩Ve) ∈ig. Recursively
+applying this argument to XN(w)∩Ve and XVe\(N (w)∩Ve), we conclude that Xu ∈ig for every u ∈Ve.
+Finally, Lemma 9 ensures that the DLA is free, since Xu, Xw ∈ig for all u ∈Ve and w ∈Vo. This
+justifies the correctness of Line 10. A similar argument applies to Line 12.
+The main result of this section is the following, which implies Theorem 3 directly.
+38
+
+Theorem 42. For some constant N ∈N+ and all n ≥7, Algorithm 6 on input (G, N) with G ∼G(n, 1
+2)
+returns true with probability at least 1 −exp(−Θ(n)).
+The following lemma bounds the probability that Line 10 (or Line 12) of Algorithm 6 returns true.
+Lemma 43. Suppose G = (V, E) ∼G(n, 1
+2). Fix S ⊆V with size 4 ≤k ≤n −4 an even number, and
+let ¯S = V \S. Further fix s ∈S and t ∈¯S. Then for any simple graphs G1 on S and G2 on ¯S,
+Pr(A(S) | B(S, G1, G2)) ≥max
+n
+0, 1 −
+k2
+2n−k
+o
+,
+Pr
+ A( ¯S) | B(S, G1, G2)
+
+≥max
+n
+0, 1 −(n−k)2
+2k
+o
+,
+(25)
+where A(S) and B(S, G1, G2) denote the events
+A(S) : ∀u ̸= v ∈S (N(u) ∩¯S ̸= N(v) ∩¯S),
+B(S, G1, G2) : Vo = S, G[S] = G1, G[ ¯S] = G2.
+Proof. Notice that the choice of s ∈S, t ∈¯S is arbitrary. Fix a t ∈¯S. By Lemma 20, conditioned on
+B(S, G1, G2), {x(u,w), x(v,w) : w ∈¯S\{t}} are i.i.d. Bernoulli( 1
+2) for any u ̸= v ∈S since |S| = k > 2.
+Therefore, by union bound,
+Pr(A(S) | B(S, G1, G2)) = Pr
+ ∀u ̸= v ∈S, ∃w ∈¯S\{t}(x(u,w) ̸= x(v,w))
+
+≥1 −
+k
+2
+
+2−n+k+1 ≥1 −
+k2
+2n−k .
+Similarly,
+Pr
+ A( ¯S) | B(S, G1, G2)
+
+≥1 −(n −k)2
+2k
+.
+We have proved Eq. (25), since the probabilities are non-negative.
+Let pN(n) denotes the probability that Algorithm 6 returns true on input (G, N) with G ∼G(n, 1
+2)
+and N ∈N+; r(n) denotes the probability that the DLA on G ∼G(n, 1
+2) is free. Remark that r(n) ≥
+pN(n) for all n ∈N+. The following lemma characterizes pN(n).
+Lemma 44. Suppose N ≥15. If n ≤N, we have pN(n) = r(n). Otherwise,
+pN(n) ≥
+
+1 −(3n/4)2
+2n/4
+ ⌊3n/4⌋
+X
+k=⌈n/4⌉
+Pr(|Vo| = k)[1 −(1 −pN(k))(1 −pN(n −k))].
+(26)
+Proof. We will use the following events in this proof:
+• Tn: Line n of Algorithm 6 returns true;
+• Ek: The size of odd-degree vertex set |Vo| = k;
+• P(G′): Algorithm 6 returns true on input (G′, N).
+• A(S), B(S, G1, G2): Same as Lemma 43.
+Ec will denote the complement of event E.
+Based on Algorithm 6, pN(n) = r(n) for n ≤N. For n > N, we have
+pN(n) = Pr(T10) + Pr(T12)
+=
+n−4
+X
+k=4
+Pr(Ek)[Pr(T9 | Ek) Pr(T10 | Ek, T9) + Pr(T c
+9, T11 | Ek) Pr(T12 | Ek, T c
+9, T11)].
+(27)
+39
+
+According to Lemma 20 (Eq. (17)), (G[S], G[ ¯S]) | (Vo = S) ∼(G(k, 1
+2), G(n −k, 1
+2)) for any S ⊆V
+with size 0 < k < n and ¯S ≜V \S. Hence, by the definition of pN(·),
+Pr(T9|Ek) =
+X
+S⊆V,|S|=k
+Pr(Vo = S | Ek) Pr(T9 | Ek, Vo = S)
+=
+X
+S⊆V,|S|=k
+Pr(Vo = S | Ek) Pr(P(G[S]) | Vo = S)
+=
+X
+S⊆V,|S|=k
+Pr(Vo = S | Ek) · pN(k) = pN(k).
+Similarly,
+Pr(T c
+9, T11 | Ek) = (1 −pN(k))pN(n −k).
+Let X ≜{(S, G1, G2) : S ⊆V, |S| = k; G1, G2 are simple graphs on S, ¯S; P(G1)}. Since 4 ≤k ≤n−4,
+by Lemma 43 (Eq. (25)) we have
+Pr(T10|Ek, T9) =
+X
+(S,G1,G2)∈X
+Pr(B(S, G1, G2) | Ek, T9) Pr(T10|Ek, T9, B(S, G1, G2))
+=
+X
+(S,G1,G2)∈X
+Pr(B(S, G1, G2) | Ek, T9) Pr(A(S)|B(S, G1, G2))
+≥
+X
+(S,G1,G2)∈X
+Pr(B(S, G1, G2) | Ek, T9) max
+
+0, 1 −(n −k)2
+2k
+
+= max
+
+0, 1 −(n −k)2
+2k
+
+.
+Similarly,
+Pr(T12|Ek, T c
+9, T11) ≥max
+
+0, 1 −
+k2
+2n−k
+
+.
+(28)
+Combining Eqs. (27) to (28), for n > N ≥15 we have
+pN(n) ≥
+n−4
+X
+k=4
+Pr(Ek)
+
+pN(k) max
+
+0, 1 −(n −k)2
+2k
+
++ (1 −pN(k))pN(n −k) max
+
+0, 1 −
+k2
+2n−k
+
+≥
+⌊3n/4⌋
+X
+k=⌈n/4⌉
+Pr(Ek)
+
+pN(k) max
+
+0, 1 −(n −k)2
+2k
+
++ (1 −pN(k))pN(n −k) max
+
+0, 1 −
+k2
+2n−k
+
+≥
+
+1 −(3n/4)2
+2n/4
+ ⌊3n/4⌋
+X
+k=⌈n/4⌉
+Pr(Ek)[1 −(1 −pN(k))(1 −pN(n −k))].
+This proves Eq. (26) since Ek denotes the event that |Vo| = k.
+The next lemma bounds r(n) uniformly away from zero for n ≥7.
+Lemma 45. For n ≥7, there exists a constant β ∈(0, 1) such that r(n) ≥1 −β.
+Proof. We will show that there exists a constant N such that for all n ≥7, Algorithm 6 on input (G, N)
+with G ∼G(n, 1
+2) returns true with probability pN(n) ≥1 −β. It follows that r(n) ≥pN(n) ≥1 −β.
+Define δ ≜exp
+ −1
+24
+
+. Let
+N = min
+n∈N
+
+n ≥58, 1 −3δn ≥
+r(7)
+1 −(1 −r(7))2
+
+.
+(29)
+For n ≥7, there exist n-vertex graphs whose DLAs are free (see Section 4.5 Corollary 26), while the
+DLAs of n-vertex cycle graphs for n ≥3 are not free [ASYZ24]. This implies r(n) ∈(0, 1) for n ≥7.
+Since r(7) ∈(0, 1),
+r(7)
+1−(1−r(7))2 ∈( 1
+2, 1), and thus the second inequality in Eq. (29) is well-defined.
+40
+
+In the remainder of the proof, we will construct a function q(n) such that pN(n) ≥q(n) and 1−q(n) =
+exp(−Θ(√n)). This completes the proof since there exists a constant N1 ≥7 such that r(n) ≥pN(n) ≥
+q(n) ≥1
+2 for n > N1. And thus for all n ≥7,
+r(n) ≥1 −β
+where β ≜1 −min
+
+min
+7≤n≤N1 r(n), 1
+2
+
+∈(0, 1).
+Define q(n) such that
+q(n) =
+(
+min7≤k≤N r(k),
+if 7 ≤n ≤N,
+(1 −3δn)
+
+1 −(1 −q(⌊n/4⌋))2
+,
+if n > N.
+(30)
+Note that q(n) = q(7) ∈(0, 1) for 7 ≤n ≤N. For convenience, we avoid the ⌊·⌋operations in the
+following proof by defining q(x) ≜q(⌊x⌋) for all real number x ≥7.
+This is well defined since for
+x ≥N + 1
+q(x) = (1 −3δn)
+
+1 −(1 −q(x/4))2
+= (1 −3δn)
+
+1 −(1 −q(⌊x⌋/4))2
+= q(⌊x⌋)
+by the equality q(x/4) = q(⌊x/4⌋) = q(⌊⌊x⌋/4⌋) = q(⌊x⌋/4).
+Now we prove that
+Claim 1: 1 −q(n) = exp(−Θ(√n)).
+Claim 2: q(n) is non-decreasing.
+Claim 3: pN(n) ≥q(n).
+Proof of Claim 1. Let c ≜1 −q(7) ∈(0, 1) and k ≜⌊log4(n/7)⌋. We can verify that
+2k = Θ(2log4 n) = Θ(√n).
+Let f(n) ≲g(n) denote f(n) ≤g(n) for sufficiently large n. We have
+1 −q(n) = (1 −3δn)(1 −q(n/4))2 + 3δn ≥(1 −q(n/4))2 ≥c2k = exp
+ −Θ(√n)
+
+,
+which also implies 3δn ≲exp(−Θ(√n)) ≤1 −q(n). Then we can verify
+1 −q(n) = (1 −3δn)(1 −q(n/4))2 + 3δn ≤(1 −q(n/4))2 + 3δn
+≲2(1 −q(n/4))2 = 2kc2k = exp
+ −Θ(√n)
+
+.
+Proof of Claim 2. We prove that q(n) ≥q(n −1) for n ≥8 by induction on n. If 8 ≤n ≤N, then
+q(n) = q(n −1) by the definition of q(n). If n = N + 1, we have n/4 = (N + 1)/4 > 7 and n/4 ≤N,
+hence q(n/4) = min7≤k≤N r(k) ≤r(7) and q(n/4) ∈(0, 1). Thus,
+q(n) = (1 −3δn)
+
+1 −(1 −q(n/4))2
+≥
+r(7)
+1 −(1 −r(7))2
+
+1 −(1 −q(n/4))2
+(Eq. (29))
+≥
+q(n/4)
+1 −(1 −q(n/4))2
+
+1 −(1 −q(n/4))2
+(
+x
+1−(1−x)2 is increasing for x ∈(0, 1))
+= q(n/4) = q(n −1).
+(7 ≤n/4, n −1 ≤N, Eq. (30))
+If n ≥N + 2, assume that q(k) ≥q(k −1) for any k < n. Then
+q(n) = (1 −3δn)
+
+1 −(1 −q(n/4))2
+≥(1 −3δn−1)
+
+1 −(1 −q((n −1)/4))2
+= q(n −1).
+Here, the inequality uses the hypothesis that q(n/4) ≥q(n/4 −1) ≥· · · ≥q((n −1)/4).
+41
+
+Proof of Claim 3. We prove pN(n) ≥q(n) by induction on n. First, the base case holds: pN(n) =
+r(n) ≥q(n) for all 7 ≤n ≤N. Second, if n > N, assume that pN(k) ≥q(k) for all k < n. Then
+pN(n)
+≥
+
+1 −(3n/4)2
+2n/4
+ ⌊3n/4⌋
+X
+k=⌈n/4⌉
+Pr(|Vo| = k)[1 −(1 −pN(k))(1 −pN(n −k))]
+(Lemma 44)
+≥
+
+1 −(3n/4)2
+2n/4
+ 
+1 −2 exp
+
+−n
+24
+
+min
+n/4≤k≤3n/4[1 −(1 −pN(k))(1 −pN(n −k))]
+(Corollary 19)
+≥
+
+1 −(3n/4)2
+2n/4
+−2 exp
+
+−n
+24
+
+min
+n/4≤k≤3n/4[1 −(1 −pN(k))(1 −pN(n −k))]
+(Union bound)
+≥(1 −3δn)
+min
+n/4≤k≤3n/4[1 −(1 −pN(k))(1 −pN(n −k))]
+(∗)
+≥(1 −3δn)
+min
+n/4≤k≤3n/4[1 −(1 −q(k))(1 −q(n −k))]
+(Hypothesis)
+≥(1 −3δn)[1 −(1 −q(n/4))2] = q(n).
+(Claim 2)
+Here (∗) holds since (3n/4)2
+2n/4
+≤exp
+ −n
+24
+
+= δn for n > N ≥58.
+Now we recall the main result and show the proof.
+Theorem 42. For some constant N ∈N+ and all n ≥7, Algorithm 6 on input (G, N) with G ∼G(n, 1
+2)
+returns true with probability at least 1 −exp(−Θ(n)).
+Proof. We will show that there exists constants α ∈(0, 1) and N ∈N+ such that, on input (G, N) with
+G ∈G(n, 1
+2) and n ≥7, Algorithm 6 has success probability pN(n) ≥1 −β+1
+2 αn. Here, β ∈(0, 1) is the
+constant defined in Lemma 45.
+Since 0 < β+1
+2
+< 1, we have β+1
+2
+−( β+1
+2 )2 > 0. Hence, there exist constants α1 ∈(0, 1) and N1 ≥15
+such that
+ 
+β + 1
+2
+−
+β + 1
+2
+2!
+αn
+1 ≥(3n/4)2
+2n/4
++ 2 exp
+
+−n
+24
+
+,
+∀n > N1.
+Since 0 < β < β+1
+2 , one can find a minimum α2 ∈(0, 1) such that
+α2 ≥α1
+and
+β + 1
+2
+αN1
+2
+≥β.
+Let (α, N) = (α2, N1). We have α ∈(0, 1) and N ≥15, and they are constants since they only depend
+on β. Moreover,
+ 
+β + 1
+2
+−
+β + 1
+2
+2!
+αn =
+ 
+β + 1
+2
+−
+β + 1
+2
+2!
+αn
+2
+≥
+ 
+β + 1
+2
+−
+β + 1
+2
+2!
+αn
+1 ≥(3n/4)2
+2n/4
++ 2 exp
+
+−n
+24
+
+,
+∀n > N,
+(31)
+and
+β + 1
+2
+αN = β + 1
+2
+αN1
+2
+≥β.
+(32)
+Now we prove that pN(n) ≥1 −β+1
+2 αn for n ≥7 by induction on n. If 7 ≤n ≤N, we have
+pN(n) = r(n) ≥1 −β ≥1 −β + 1
+2
+αN ≥1 −β + 1
+2
+αn.
+42
+
+Here, we used pN(n) = r(n) for n ≤N (Lemma 44), r(n) ≥1 −β for n ≥7 (Lemma 45), and Eq. (32).
+For n > N, assume pN(k) ≥1 −β+1
+2 αk for all k < n. We have
+pN(n)
+≥
+
+1 −(3n/4)2
+2n/4
+ ⌊3n/4⌋
+X
+k=⌈n/4⌉
+Pr(|Vo| = k)[1 −(1 −pN(k))(1 −pN(n −k))]
+(Lemma 44)
+≥
+
+1 −(3n/4)2
+2n/4
+ 
+1 −2 exp
+
+−n
+24
+ 
+1 −
+β + 1
+2
+2
+αn
+!
+(Hypothesis & Lemma 45)
+≥1 −(3n/4)2
+2n/4
+−2 exp
+
+−n
+24
+
+−
+β + 1
+2
+2
+αn
+(Union bound)
+≥1 −β + 1
+2
+αn.
+(Eq. (31))
+43

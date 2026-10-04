@@ -1,0 +1,2017 @@
+Newton–Krylov Methods for Computing Steady States of
+Particle Timesteppers via Optimal Transport
+Hannes Vandecasteele∗1, Nicholas Karris†2, Alexander Cloninger‡3, and Ioannis G.
+Kevrekidis§1,4
+1Department of Applied Mathematics and Statistics, Johns Hopkins University
+2Department of Mathematics, University of San Diego, California
+3Department of Mathematics & Halicio˘glu Data Science Institute (HDSI),
+University of San Diego, California
+4Department of Chemical and Biomolecular Engineering, Johns Hopkins University
+January 1, 2026
+Abstract
+Timesteppers constitute a powerful tool in modern computational science and engineer-
+ing. Although they are typically used to advance the system forward in time, they can also
+be viewed as nonlinear mappings that implicitly encode steady states and stability informa-
+tion.
+In this work, we present an extension of the matrix-free framework for calculating,
+via timesteppers, steady states of deterministic systems to stochastic particle simulations,
+where intrinsic randomness prevents direct steady state extraction. By formulating stochastic
+timesteppers in the language of optimal transport, we reinterpret them as operators acting on
+probability measures rather than on individual particle trajectories. This perspective enables
+the construction of smooth cumulative- and inverse-cumulative-distribution-function ((I)CDF)
+timesteppers that evolve distributions rather than particles. Combined with matrix-free New-
+ton–Krylov solvers, these smooth timesteppers allow efficient computation of steady-state
+distributions even under high stochastic noise. We perform an error analysis quantifying how
+noise affects finite-difference Jacobian action approximations, and demonstrate that conver-
+gence can be obtained even in high noise regimes. Finally, we introduce higher-dimensional
+generalizations based on smooth CDF-related representations of particles and validate their
+performance on a non-trivial two-dimensional distribution. Together, these developments es-
+tablish a unified variational framework for computing meaningful steady states of both deter-
+ministic and stochastic timesteppers.
+1
+Introduction
+Timesteppers are a powerful tool in modern scientific computation. Given the state u(t) of our
+system at time t, i.e., a function or a collection of particles, and a time horizon h, a timestepper
+ϕh advances the state in time
+u(t + h) = ϕh (u(t)) ,
+(1)
+so that iterating the map generates a trajectory {u (nh)}∞
+n=0. For stable iteration, the limit of
+u (nh) approximates the (stable) steady-state solution of the underlying model. In the context of
+this manuscript, this model will typically be a differential equation of some kind. Traditionally,
+timesteppers are used “naively”: we apply ϕh repeatedly to obtain a numerical trajectory that is
+subsequently studied for qualitative and quantitative convergence features.
+∗hvandec@jhu.edu
+†nkarris@ucsd.edu
+‡acloninger@ucsd.edu
+§yannisk@jhu.edu
+1
+arXiv:2512.24567v1 [math.NA] 31 Dec 2025
+
+Timesteppers, however, can also be usefully exploited beyond direct simulation. They embody
+everything about the problem, namely the underlying differential equation, the model parameters,
+and the boundary conditions. Instead of treating them only as simulators, one may ask what in-
+formation about the system can be extracted directly from the timestepper mapping itself. Several
+important system-level tasks can be formulated in this way
+1. Steady States. Fixed points u∗= ϕh (u∗) of the timestepper correspond to the steady (or
+invariant) states of the underlying differential equation.
+2. Eigenvalues and Stability. The Jacobian J = Dϕh(u∗) of the timestepper at u∗contains all
+spectral information from which eigenvalues and stability properties of the underlying model
+can be inferred. There is a direct relationship between the eigenvalues of the timestepper
+and the eigenvalues of the right-hand side of the differential equation.
+3. Control and Identification. By systematically tracking the steady-state solutions across vary-
+ing parameter values, we can trace the corresponding solution branches and identify critical
+points where the system’s behavior changes drastically, such as folds, bifurcations, or Hopf
+bifurcations.
+A convenient way to unify these three tasks is through the residual mapping
+ψ(u) = u −ϕh (u) .
+(2)
+Here, u ∈Rd represents the solution of some differential equation at a given time, typically on
+a grid, and ϕh, ψ : Rd →Rd are vector functions. This formulation for calculating steady states
+allows us to apply the full machinery of iterative nonlinear solvers through matrix-free methods.
+Particularly in previous work [12, 25, 17], we used the Newton–Krylov and Arnoldi methods to
+calculate steady-state profiles and the leading eigenvalues of the Jacobian, respectively. These
+methods are matrix-free. We do not need explicit Jacobian matrices to compute the steady state
+or the leading eigenvalues. This last part is essential because codes that implement a timestepper
+rarely have their Jacobians coded as well. Even if they do so in the form of hand-coded formulas
+or automatic differentiation, evaluating the (typically large) Jacobian is too time-consuming and
+uses a lot of memory. Matrix-free methods avoid these bottlenecks by approximating the action of
+the Jacobian Dψ(u)v in a particular direction v on the fly using finite differences
+Dψ(u)v ≈ψ(u + εv) −ψ(u)
+ε
+.
+(3)
+Although this approximation induces an error, it can often be ignored in view of the speedups that
+can be obtained.
+In our previous work [17, 25], we focused on deterministic timesteppers, developing Newton–
+Krylov and other matrix-free methods to compute steady states and stability information directly
+from the residual ψ(u).
+Most recently we also applied the Newton–Krylov method to neural
+operators [13]. This line of research established how timesteppers could serve as fixed-point solvers
+for macroscopic equations, particularly in gradient systems where convergence is theoretically
+guaranteed.
+In stochastic settings, the naive formulation X −ϕh(X) = 0 for a steady state particle ensemble
+X is ill-defined. Timesteppers are no longer deterministic mappings, but rather involve random
+evolutions of particle ensembles. Individual particles do not carry steady-state information directly.
+Indeed, even in steady state, the particles typically fluctuate because of thermal noise. This does
+not mean that there is no steady state distribution of stochastic particles, but only that the
+mathematical equality X = ϕh(X) does not hold. As a consequence, solving ψ(X) = 0 for a
+particle ensemble using Newton-Krylov is useless. In this paper, we re-interpret what a steady-
+state of particles means on the level of this timestepper residual.
+The idea of computing steady-state distributions from particle timesteppers is not new. In [28],
+the authors average many independent particle simulations to obtain smooth, macroscopic quan-
+tities. They propose a smooth coarse timestepper in terms of these macroscopic variables and
+use the Newton–Krylov method to compute (macroscopic) steady states and bifurcation diagrams.
+A similar idea appears in [25], where an approximate coarse model is introduced to precondition
+2
+
+the Newton–Krylov method. The authors also used this preconditioned matrix-free framework to
+calculate the leading eigenvalues of the Jacobian and to track steady states along the bifurcation
+diagram. For self-similar systems, coarse representations based on cumulative distribution func-
+tions (CDFs) have also been used; see [10, 31, 32]. In these works, the coarse CDF description is
+repeatedly lifted to fine-scale particle ensembles – typically via inverse CDF (ICDF)–based sam-
+pling—in order to evolve the system forward in time and ultimately compute steady or self-similar
+states. Finally, we also mention the work of [29] where kernel-density estimation was applied to
+stochastic timesteppers in bacterial chemotaxis to calculate the steady-state distribution.
+In this manuscript, we go back to the original formulation (2) is steady states to understand
+what can be recovered when the timestepper is stochastic.
+As we said earlier, a steady-state
+ensemble X does not solve ψ(X) = 0, but some information must still be contained in this residual.
+Optimal Transport (OT) provides a principled way to compare ensembles in a Wasserstein space,
+enabling the construction of well-defined particle-based timesteppers. This extension allows us to
+treat both deterministic and stochastic dynamics within a unified variational framework. From an
+optimal transport perspective, we treat the evolving distribution of particles as a time dependent
+probability measure µt on Rd, rather than trying to follow each particle individually.
+If µt is
+“smooth” in the sense of having a density and evolving in a regular way, then there is a velocity
+field vt such that the continuity equation
+∂tµt + ∇· (vtµt) = 0
+(4)
+describes how mass flows. The minimal energy (and smoothest) velocity field vt can be computed
+via the optimal transport map T µt+h
+µt
+vt = lim
+h→0
+T µt+h
+µt
+−id
+h
+.
+We have previously shown that under certain assumptions on the smoothness of (µt)t≥0, forward
+Euler methods using vt are first order accurate in W2 [16].
+The key advantage over tracking particles individually (which in stochastic or chaotic systems
+can be very noisy) is that this optimal transport based method aggregates the motion of mass rather
+than individual sample paths. In many systems, especially those with fast/slow scales, individual
+particle trajectories will jitter, be non-differentiable, or otherwise provide a noisy or misleading
+picture at short time scales. By contrast, the distribution µt often changes in a much smoother
+and more coherent manner. By fitting the velocity field from optimal transport between successive
+empirical distributions, one effectively filters out the microscopic stochasticity and focuses on
+how the bulk of the particles move. This produces a cleaner signal, which will allow for a more
+accurate Newton–Krylov step. In essence, optimal transport allows us to take a “Lagrangian”
+perspective without needing to actually track each individual particle.
+The velocity fields we
+get from OT are smoother and better describe the overall distribution’s behavior, but they still
+fundamentally capture the dynamics from the perspective of individual agents (as opposed to
+looking at a particular location, as in the “Eulerian” perspective).
+These optimal transport algorithms are especially efficient in one dimension. In fact, the optimal
+transport map of a set of particles can be obtained simply by sorting the particles. This is because
+the optimal transport map from the uniform distribution on [0, 1] to any probability distribution µ
+is exactly the inverse of the cumulative density function (ICDF) of µ [27, Chapter 2]. Moreover, in
+one dimension, we can compose optimal transport maps to produce new optimal transport maps
+(i.e., T µt+2h
+µt
+= T µt+2h
+µt+h
+◦T µt+h
+µt
+), and so computing optimal transport maps is nothing more than
+computing CDFs and ICDFs. The advantage of the CDF/ICDF formulation is that inverse CDFs
+are always smooth (as long as the underlying distribution is absolutely continuous), which allows
+us to employ advanced optimization techniques for calculating steady states of particle systems.
+Indeed, a smooth macroscopic ICDF-to-ICDF timestepper can be built directly in three steps: 1)
+Sample the ICDF by evaluating it in percentiles; 2) Propagate the particles using the stochastic
+timestepper; 3) Compute the new ICDF from the particle locations.
+This scheme gives us a
+bridge between microscopic particle simulations and macroscopic evolution, and is reminiscent of
+equation-free methods [19, 18, 15].
+In multiple dimensions, while the optimal transport velocity fields are still the appropriate ob-
+jects to consider, computing them is much more challenging. Instead of simply sorting the particles
+3
+
+(or computing a CDF), one needs to solve a linear program, which is much more computationally
+expensive. Thus, in practice, one must construct an approximation in a systematic way. For ex-
+ample, while the inverse cumulative density function is not well-defined in higher dimensions, the
+regular cumulative density function does carry over to multiple dimensions. This means we can
+construct a CDF-to-CDF timestepper using the same three steps: 1) Generate samples from the
+multidimensional CDF; 2) Propagate the particles using the stochastic timestepper; 3) Compute
+the new CDF from the particles. However, the first step becomes nontrivial in multiple dimensions
+because simply inverting the CDF at ‘percentiles’ for sampling is impossible. We need to project
+the multidimensional CDF down to its one-dimensional representations to generate samples. One
+such technique is to use marginal and conditional CDFs [31, 32]. First, we construct the marginal
+CDF in the first dimension and generate x-samples from this 1D CDF by inverting it. Then, for
+every 1D sample, we construct the conditional CDF of the second dimension y and invert it. This
+procedure is analogous to the OT/ICDF method described above, except it comes from using the
+Knothe-Rosenblatt coupling instead of the true optimal coupling. Knothe-Rosenblatt maps can
+be expressed as a limit of optimal transport maps with appropriate cost functions, and so we can
+interpret them as approximations of OT maps. This Knothe–Rosenblatt formulation allows for an
+efficient extension of an OT-based timestepper in higher dimensions, though at the cost of intro-
+ducing asymmetry. Other approaches based on sliced optimal transport (i.e., the sliced Wasserstein
+distance) also offer a flexible alternative, projecting the problem onto many one-dimensional slices
+before reassembling the results [4, 22]. Both types of sampling strategies are crucial to making
+OT-based timesteppers practical for complex and higher-dimensional systems.
+Having reinterpreted stochastic timesteppers in optimal transport terms, we can now deploy
+advanced numerical solvers to compute steady-state distributions. However, there is one computa-
+tional roadblock. The (I)CDF-to-(I)CDF timestepper is itself stochastic because it is built around
+a particle timestepper. Averaging over independent runs or variance reduction might reduce this
+stochastic variability [25], but evaluations of ψ will always be non-deterministic. Indeed, if we
+evaluated ψ in u + εv and u independently, with the respective stochastic error terms ξ1 and ξ2,
+we effectively calculated ˜ψ(u) = ψ(u) + ξ1 and ˜ψ(u + εv) = ψ(u + εv) + ξ2. The Jacobian-vector
+product in equation (3) then becomes
+˜ψ(u + εv) −˜ψ(u)
+ε
+= ψ(u + εv) + ξ2 −ψ(u) −ξ1
+ε
+= ψ(u + εv) −ψ(u)
+ε
++ ξ2 −ξ1
+ε
+.
+(5)
+At first sight, the error in the finite-difference approximation of the Jacobian looks catastrophic.
+Indeed, since ξ1 and ξ2 are independent (and we can assume the same error distribution), the
+variance of ξ2 −ξ1 is double that of ξ1. We further divide it by a (typically) small step size ε! To
+keep the stochastic error within reasonable limits, we must use a large ε, which in turn induces
+a larger approximation error in (3). In this paper, we will connect the existing error analysis of
+the (stochastic-free) Newton–Krylov method, and particularly of the Jacobian-vector products,
+with this stochastic error. We will demonstrate, both theoretically and numerically, that one can
+still compute steady-state (I)CDFs of stochastic systems accurately, up to a certain noise level
+or tolerance. We will also demonstrate numerically that the ‘optimal’ finite difference step size ε
+increases from 10−8 to 10−2 – 10−1 in double precision.
+Contributions of this work
+This work extends the timestepper-based framework for steady-
+state computation from deterministic to stochastic particle systems by combining matrix-free New-
+ton–Krylov methods with Optimal Transport formulations. Our main contributions are as follows:
+1. Generalization of timestepper-based fixed-point computation to stochastic sys-
+tems. We extend the classical residual formulation ψ(u) = u −ϕh(u) to stochastic particle
+timesteppers, where individual particle mappings are ill-defined due to randomness.
+2. Formulation of stochastic timesteppers in the language of Optimal Transport. We
+reformulate timesteppers as operations acting on probability measures, and use the Wasser-
+stein distance to define a well-posed residual that is minimized at steady state.
+3. Development of smooth distribution-based timesteppers. We develop smooth (I)CDF-
+to-(I)CDF timesteppers that bridge stochastic simulations with distributional evolution, en-
+abling the use of higher-order optimization such as the Newton–Krylov method.
+4
+
+4. Error analysis of Newton–Krylov methods in the stochastic setting. We extend the
+theoretical error analysis of the Newton–Krylov method in [6] to include stochastic timestep-
+pers, providing a quantitative trade-off between directional derivative step size and the num-
+ber of stochastic particles.
+5. Efficient extensions to higher dimensions. We propose two practical multidimensional
+generalizations: a CDF-to-CDF timestepper based on marginal and conditional CDFs, and
+a sliced Wasserstein formulation relying on (random) one-dimensional projections.
+6. Numerical validation and demonstrations. We demonstrate the performance of the
+proposed methods on representative stochastic systems, including a two-dimensional distri-
+bution, highlighting accuracy and robustness of Newton–Krylov on smooth representations
+of particle distributions.
+Outline of the Manuscript
+We start this paper in Section 2 by discussing steady-state dis-
+tributions of particle systems in the language of optimal transport. We particularly focus on the
+notion of steady state through a reformulation of (2) using the Wasserstein distance. We further
+relate these as steady-states of the Euler-OT timestepper and discuss its connection to the OT
+map and the velocity field. From these fundamentals, we build a first-order optimization scheme
+by minimizing the Wasserstein distance between particles and a time-evolved copy of those par-
+ticles. We particularly derive an Adam-Wasserstein optimizer and demonstrate, theoretically and
+numerically on three examples, that this Wasserstein optimization scheme converges quickly and
+smoothly to the correct steady-state particle distribution. Next, in Section 3 we introduce the
+matrix-free Newton–Krylov method. We perform a general error analysis in the non-stochastic
+case and demonstrate convergence of Newton–Krylov on the mean-field equation associated with
+particle methods. We also discuss how the integration time horizon h can be optimally chosen
+through a spectral analysis of the timestepper. We also perform an extended error analysis of
+the Newton–Krylov method in the stochastic case (see Section 3.1) and explain how second-order
+optimizers applied to this Wasserstein formulation suffer from large statistical errors. This result
+motivates us to investigate smooth representations of particle distributions, and in particular the
+ICDF-to-ICDF timestepper in Section 4. We explain the main idea in detail and demonstrate an
+improved convergence of the Newton–Krylov method using these smooth representations. Finally,
+in Section 5, we discuss two alternative smooth representations for higher-dimensional systems:
+the CDF-to-CDF timestepper and its equivalent sliced Wasserstein formulation. We then demon-
+strate their effectiveness on a two-dimensional half-moon probability distribution. We conclude
+this paper with a summarizing discussion and outlook for further research in Section 6.
+2
+Stochastic Particle Steady States and Optimal Transport
+In previous work, we developed a Newton–Krylov method for computing steady states of deter-
+ministic timesteppers. In the deterministic setting, we wrote the fixed-point condition in residual
+form
+ψ(x) = x −ϕh(x) = 0.
+(6)
+For particle timesteppers, however, a one-step map is inherently random. That is, y = ϕh(x; ξ)
+where ξ is the collection of random numbers used in propagating the particles. Even when the
+system is “in equilibrium”, the individual particles keep moving due to the intrinsic noise ξ. An
+example is the random motion of molecules, even in thermal and statistical equilibrium. More
+generally, particles move at certain probabilities and ‘detailed balance’ must be maintained. Hence
+the point-wise condition ψ(x) = x −ϕh(x) = 0 is not well defined.
+Instead, the steady state must be understood at the level of distributions: a distribution µ⋆is
+stationary when the distribution obtained after one step from µ⋆coincides with µ⋆again. However,
+distributions are not readily available from particle codes and must be built using histograms or
+tools like kernel density estimation. These methods for approximating the underlying distribution
+are sometimes as noisy as the particles themselves, and they are resource-intense.
+To address this problem, we cast this distributional steady state as an optimization problem.
+We work in Wasserstein geometry and measure the mismatch between the current distribution
+5
+
+and its one-step image using the 2-Wasserstein distance. Writing X ∼µ and Y = ϕh(X, ξ), the
+objective
+J (µ) = 1
+2 W 2
+2
+ µ, law(Y )
+
+(7)
+is nonnegative and vanishes if and only if µ is stationary. The Wasserstein distance directly ties
+into the heart of Optimal Transport theory, and we present some relevant results here.
+2.1
+Optimal Transport Background
+Much of the background we present here is discussed in more detail in our previous work [16]. We
+highlight the major results that will be particularly important for us in this paper, but for a more
+complete presentation of the theory, we refer the reader to [16].
+Let P2(Rd) be the set of Borel probability measures on Rd with finite second moment, i.e., the
+probability measures µ such that
+R
+Rd ∥x∥2
+2 dµ(x) < ∞. For σ, µ ∈P2(Rd), we define Γσ,µ to be the
+set of all couplings between σ and µ:
+Γσ,µ := {γ ∈P2(Rd × Rd) : γ(A × Rd) = σ(A) and γ(Rd × A) = µ(A) for all Borel A ⊆Rd}. (8)
+We then define the (2-)Wasserstein distance between σ and µ to be
+W2(σ, µ) := min
+γ∈Γσ,µ
+Z
+Rd×Rd ∥x −y∥2 dγ(x, y)
+ 1
+2
+.
+(9)
+The coupling γ that satisfies (9) is called an “optimal coupling” or an “optimal plan”.
+It is well known that W2 defines a metric on P2(Rd) (see, e.g., [24]). It is also well known that
+the optimal coupling (9) can be satisfied by a proper map x 7→y = T(x) under hypotheses:
+Theorem 2.1 (Brenier [5]). Let σ, µ ∈P2(Rd). If σ has a density with respect to the Lebesgue
+measure, then the optimal coupling γ that satisfies (9) is unique, and there exists a σ-a.e. unique
+map T : Rd →Rd such that γ = (id, T)#σ. That is,
+W2(σ, µ) =
+Z
+Rd ∥x −T(x)∥2
+2 dσ(x)
+ 1
+2
+.
+(10)
+Moreover, there exists a σ-a.e. unique (up to additive constant) convex function ϕ such that T =
+∇ϕ.
+We call the map T given in Theorem 2.1 the “optimal transport map” from σ to µ, and we
+denote it T µ
+σ .
+While optimal transport on discrete measures does not generally admit optimal maps as in
+Brenier’s Theorem, there is an important case where we do get optimal maps:
+Theorem 2.2 (Proposition 2.1 in [24]). If σ =
+1
+N
+PN
+i=1 δxi and µ =
+1
+N
+PN
+i=1 δyi are uniform
+measures on the same number of distinct points, then there exists an optimal transport map T µ
+σ in
+the sense that
+W2(σ, µ) =
+ 
+1
+N
+N
+X
+i=1
+∥xi −T µ
+σ (xi)∥2
+! 1
+2
+is minimal. Moreover, if T µ
+σ is such a map, then there exists a permutation τ ∈SN (the symmetric
+group on N elements) such that T µ
+σ (xi) = yτ(i) for all i = 1, . . . , N.
+2.2
+Evolving Measures as Curves in Wasserstein Space
+Now we consider the setting where we have a probability measure evolving over time. Explicitly,
+consider a curve µ : [0, T] →P2(Rd) written as t 7→µt. If µt is absolutely continuous (as a curve)
+with respect to the Wasserstein distance, then there exists a unique “minimal energy” velocity
+field vt that satisfies the continuity equation
+∂tµt + ∇· (vtµt) = 0,
+6
+
+and if µt has a density with respect to the Lebesgue measure for all times t ∈[0, T], then this
+velocity field is computable as a derivative of optimal transport maps:
+vt = lim
+h→0
+T µt+h
+µt
+−id
+h
+in L2(µt).
+(11)
+Furthermore, the Benamou-Brenier formulation of the Wasserstein distance [2] gives
+W2(µt, µt+h) =
+ Z t+h
+t
+∥vs∥2
+L2(µs) ds
+! 1
+2
+.
+Notice that the above formulation says that an evolving distribution reaches steady state exactly
+when vt = 0.
+Moreover, when vs ≈0 (meaning ∥vs∥L2(µs) ≈0) for all s ∈[t, t + h], then
+W2(µt, µt+h) ≈0, and so the distribution has “approximately” reached steady state.
+In our setting, however, we do not have access to µt for a continuous time interval. Instead, we
+have a timestepper ϕh for some small step h, and so we only have µt for discrete times tn = hn.
+In this situation, we assume that the timestepper approximates the evolution of some continuous
+curve, and that we can approximate the velocity field vt associated with this continuous curve
+using the finite-difference approximation suggested by (11):
+vt ≈vh
+t := T µt+h
+µt
+−id
+h
+.
+Note that by (10), we have W2(µt, µt+h) = h∥vh
+t ∥L2(µt), and so computing the Wasserstein distance
+between successive time steps is equivalent to computing the norm of the approximate velocity field.
+For more details about the link between evolving measures, velocity flow fields, and finite difference
+approximations, we refer to our previous work in [16].
+2.3
+Wasserstein Formulation of Particle Steady States
+In practice, our timestepper acts on particles, not on continuous distributions. We can still use
+the ideas discussed above as a heuristic to suggest that the system’s evolution is in (approximate)
+steady state when the Wasserstein distance between successive time steps is minimized.
+That is, if we consider the initial locations of the particles X = (x1, . . . , xN) and their locations
+Y = ϕh(X) = (y1, . . . , yN) - after applying the timestepper over a time-horizon of size h - as discrete
+probability measures µ =
+1
+N
+PN
+i=1 δxi and ν =
+1
+N
+PN
+i=1 δyi respectively, then we can consider the
+objective function
+F(X; ξ) := N
+2 W 2
+2 (µ, ν) = 1
+2
+N
+X
+i=1
+∥xi −T ν
+µ(xi)∥2 = 1
+2
+N
+X
+i=1
+∥xi −yσ⋆(i)∥2,
+(12)
+where σ⋆is the optimal coupling - a permutation. Finding an approximate steady state is equivalent
+to (approximately) finding a minimizer of F over all initial particle locations X. Between changes
+of the optimal transport coupling, F is a smooth quadratic in the particle locations, and its
+(sub)gradient with respect to each xi is the transport displacement from xi to its match under the
+current optimal plan. This naturally leads us to first-order optimization methods to minimize (12)
+such as (stochastic) gradient descent or Adam [20].
+Let Π⋆denote the permutation matrix that corresponds to the optimal coupling, i.e., Π⋆Y =
+(yσ⋆(1), . . . , yσ⋆(N)). Now F reads
+F(X; ξ) = 1
+2∥X −Π⋆Y ∥2
+and so the gradient of F with respect to X is
+∇F(X) = X −Π⋆Y + Dϕh(X; ξ)T  ϕh(X, ξ) −(Π⋆)⊤X
+
+.
+(13)
+In principle, we can evaluate this gradient and plug it into any first-order optimization algorithm,
+such as the Adam optimizer.
+7
+
+From a numerical point of view, the second term of (13) poses a problem. Two subsequent
+evaluations of F(X) for the same particles X will differ due to the influence of ξ. In particular, this
+means that the Jacobian of the timestepper Dϕh(X; ξ) will be very noisy, even if we can evaluate
+it exactly by automatic differentiation. More importantly, this Jacobian will contain little actual
+information about the drift of the particles. Fortunately, by the Envelope theorem [1, 24], we can
+use only the first term of the gradient
+∂X 1
+2W 2
+2 (X, Y ) = X −Π⋆Y
+(14)
+for optimization purposes.
+Remark 1. This formulation gives a slightly different perspective on the Euler-type method we
+develop in detail in our previous work [16].
+Note that, in the language of velocity fields from
+earlier, we have
+vh
+t (xi) = T ν
+µ(xi) −xi
+h
+= 1
+h(yσ⋆(i) −xi),
+and so this partial gradient of our objective function is nothing more than (a scaled copy of) the
+negative of our approximate velocity field vh
+t . This means that our Euler-type method of taking
+steps in the direction described by the velocity field vh
+t can actually be interpreted as running
+gradient descent with the partial gradient X −Π⋆Y .
+The insight that the present functional-
+gradient formulation provides, is that it is now clear how to apply more sophisticated methods
+for minimizing the objective function (i.e., finding steady states), such as Adam, which we can
+interpret as a natural extension of our previous work.
+There remains one more computational bottleneck in this Wasserstein-minimization algorithm,
+and that is the computation of the optimal transport map Π⋆. In one dimension, sorting both
+clouds and matching in order yields Π⋆in O(N log N) time. This is the theoretically optimal
+complexity. In multiple dimensions, one may use a linear assignment solver which is typically very
+expensive, i.e., O(N 3) [7, 24]. We will showcase the Wasserstein-minimization approach on both
+one- and two-dimensional examples in the next section.
+For any initial set of particles X, we can evaluate F(X) and its gradient ∂XF(X). We can
+therefore minimize F with any first-order scheme; we use Adam because of its stability under mild
+noise. A typical iteration is as follows
+1. Given Xk and random numbers ξk, compute Yk = ϕh(Xk; ξk).
+2. Compute an optimal plan Π⋆
+k = Π⋆(Xk, Yk).
+3. Form the gradient gk = Xk −Π⋆
+kYk (optionally average over a small batch of independent
+runs for variance reduction).
+4. Apply Adam to obtain Xk+1.
+We use PyTorch’s Adam optimizer in our implementation. One advantage of PyTorch is that we
+can use its call graph to directly compute gradients of F(X). The first term of that gradient can
+then be obtained by detaching Y from the call graph.
+In summary, minimizing F(X) = 1
+2W 2
+2 (X, ϕh(X; ξ)) with Adam yields a fast O(N log N) pro-
+cedure that is robust to stochasticity and faithful to the Wasserstein fixed-point formulation, while
+avoiding the instability of second-order information at coupling changes.
+2.4
+Three Examples
+The Wasserstein particle flow is a well-defined, easy-to-implement, and reliable approach to com-
+pute steady-state distributions of particle methods.
+Combining gradient flow with the Adam
+optimizer also has significant advantages such as steady decrease of the W 2
+2 -loss. In this section,
+we demonstrate the combined method on three examples: bacterial chemotaxis (section 2.4.1),
+the nonlinear economic agents model (section 2.4.2), and a two-dimensional overdamped Langevin
+dynamics with non-trivial potential energy profile (section 2.4.3).
+8
+
+2.4.1
+Bacterial Chemotaxis
+Consider a collection of bacteria Xt that eat food from a substrate S(x) on the domain [−L, L].
+The function S(x) represents the amount of food at position x, and we assume that S remains
+unchanged over time. Furthermore, there is a chemotactic sensitivity χ(S) that indicates the level
+of activation of the bacteria, solely a function of the local food supply. Finally, we also incorporate
+a diffusion constant D to model the random motion. The bacterial positions Xt over time are then
+governed by the overdamped Langevin equation [14]
+dXt = χ(S(Xt))Sx(Xt)dt +
+√
+2DdWt,
+(15)
+where Sx is the food gradient and Wt is the standard Brownian motion. The bacteria also cannot
+leave [−L, L] so we impose reflective or no-flux (Neumann) boundary conditions.
+We discretize the overdamped Langevin dynamics in equation (15) using an Euler-Maruyama
+method with step size 10−3, and per evaluation of the timestepper ϕh(·) we integrate up to h = 1
+seconds. Reflective boundary conditions are applied after every Euler-Maruyama step. We run
+the Adam optimizer with standard parameters (β1 = 0.9, β2 = 0.99) and an initial ‘learning rate’
+of 10−1. We decrease the learning rate by a factor 10 every 100 epochs, for a total of 300 epochs.
+The initial distribution is a truncated Gaussian with a mean 5 and a standard deviation of 2.
+As we see in Figure 1, the Wasserstein-Adam optimizer reliably converges to a final loss of
+2 10−5. The loss gradient also decreased to a similar value, indicating strong convergence. The
+histogram of the optimized particles (right figure, orange) also matches well with the analytic
+invariant distribution. Finally, we see in the figure on the left that the Wasserstein-Adam optimizer
+reached this steady-state already after about 150 epochs - or a total simulation time of 150 seconds.
+This is because the objective function is evaluated only once per Adam epoch.
+Compared to
+computing the steady-state by long-time evolution of (15), which takes about 500 seconds of in-
+simulation time, the Wasserstein-Adam method is much faster.
+0
+50
+100
+150
+200
+250
+300
+Epoch
+10
+−5
+10
+−4
+10
+−3
+Loss
+Wasserstein Loss
+Wasserstein Loss Gradient
+−10.0
+−7.5
+−5.0
+−2.5
+0.0
+2.5
+5.0
+7.5
+10.0
+x
+0.000
+0.025
+0.050
+0.075
+0.100
+0.125
+0.150
+0.175
+0.200
+μ(x)
+Initial Particles
+Optimized Particles
+Steady State Density
+Figure 1: Numerical results for the Wasserstein-Adam optimizer on the chemotaxis model. Left:
+Wasserstein loss (blue) and gradient-norm (orange) per epoch. Right: Histogram of the initial
+particles in blue, the Wasserstein-Adam optimized particles in orange, and the analytic steady-
+state density (see equation (40)) in red.
+2.4.2
+Economic Agents
+The Wasserstein-Adam method also works well for nonlinear models. Let us consider an example
+of economic agents trading stocks. Each agent is represented by a value Xi(t) ∈(−1, 1) that gives
+the tendency to buy (Xi = 1) or sell (Xi = −1) a certain stock. More details on the model can
+be found in [12]. We use the timestepper available at [11] to integrate the agents up to h = 1
+seconds at a time. This timestepper is unbiased for the dynamics of the agents’ dynamics and
+uses the discretization presented in [12]. We again use an Adam optimizer with an initial learning
+rate of 10−1 and with standard parameters to find the steady-state distribution of the particles.
+9
+
+The learning rate is decreased by a factor 10 every 100 epochs for a total of 300 epochs. The
+initial distribution is a Gaussian with zero mean and a standard deviation of 0.1. The steady-state
+distribution is wider and approximately normal.
+Figure 2 displays the Wasserstein loss and gradient on the left, as well as optimized agents
+compared to the steady-state distribution on the right. The initial distribution of agents is shown
+too. We observe an excellent match between the histogram of optimized agents and the invariant
+distribution. The loss stagnates near 2 10−6, nearly four orders of magnitude lower than the initial
+loss, demonstrating a clear convergence.
+0
+50
+100
+150
+200
+250
+300
+Epoch
+10
+−6
+10
+−5
+10
+−4
+10
+−3
+10
+−2
+Wasserstein Loss
+Wasserstein Loss Gradient
+−1.00
+−0.75
+−0.50
+−0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+x
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+Initial Agents
+Optimized Agents
+Analytic Steady State
+Figure 2: Numerical results for the Wasserstein-Adam optimizer on the economic agents model.
+Left: Wasserstein loss (blue) and gradient-norm (orange) per epoch. Right: Histogram of the
+initial particles in blue, the Wasserstein-Adam optimized particles in orange, and the analytic
+steady-state density (see Figure 7) in red.
+2.4.3
+The Half-Moon Potential
+In multiple dimensions, one cannot exploit the monotone rearrangement used in 1D (sorting), so
+computing W2 requires solving a discrete assignment problem between the two point clouds. We
+use the linear assignment solver, whose worst-case complexity is O(M 3) for M paired points; ap-
+plied to the full cloud, this would be O(N3). To keep costs manageable, we adopt mini-batches
+of size B: each step propagates B particles through the timestepper and solves an O(B3) assign-
+ment problem. These batches are drawn uniformly from the original N particles, and We process
+N/B batches per iteration, yielding a total O(NB2) complexity. The smaller the batch size, the
+smaller the computational cost. The rest of the Wasserstein–Adam flow is unchanged from 1D:
+we form Yb = φh(Xb), compute an optimal match Π⋆
+b on each batch b, use the detached gradient
+∂X 1
+2W 2
+2 (Xb, Yb) = Xb −Π⋆
+bYb, and update the particles Xb with Adam.
+We note that the effective result of this is equivalent to solving a constrained optimal assignment
+problem, where we require the N × N permutation matrix Π to be block-diagonal (i.e., the N/B
+diagonal B × B blocks are the permutation matrices Π∗
+b). This permutation matrix is in general
+not the exact optimal coupling for the overall N × N assignment problem, but if each batch is
+chosen randomly, the batched coupling will be a close approximation of the optimal coupling —
+in particular, it still gives a good descent direction for use in Adam.
+For this example, we consider a two-dimensional half-moon potential. The potential energy
+function U(x, y) is given by
+U(x, y) = A (r(x, y) −R)2 + B exp (−α(y −ys))
+(16)
+with A = 2, B = 0.5, R = 2, α = 1.5, and ys = −0.5. The function r(x, y) =
+p
+x2 + y2 measures
+the distance from the origin.
+A two-dimensional color plot of the corresponding steady-state
+distribution
+µ(x, y) = Z−1 exp (−U(x, y))
+(17)
+is shown in Figure 3.
+10
+
+Figure 3: A color plot of the half-moon potential, see equation (16) for more details.
+To compute the steady-state distribution using the Wasserstein-Adam method, we construct
+an overdamped Langevin dynamics of the form
+d(X, Y ) = −∇U(X, Y )dt +
+√
+2dWt
+(18)
+where Wt is a two-dimensional Brownian motion with independent components. The steady-state
+distribution of this dynamics is precisely (17).
+We also implement reflective boundary condi-
+tions (e.g., Neumann) to keep all particles within the domain [−4, 4] × [−4, 4]. We discretize this
+overdamped Langevin dynamics using the Euler-Maruyama timestepper with step size 10−3, and
+integrate up to time h = 0.1 seconds. The initial distribution is a standard bivariate Gaussian,
+which has minimal overlap with (17).
+To compute the Wasserstein loss, we divide the N = 105 particles into batches of size 1000.
+For each batch, we propagate the particles through the timestepper and evaluate the loss using
+the OT coupling algorithm. We feed these batches to the Adam optimizer, which uses an initial
+learning rate of 10−2, decreasing by a factor of 10 every 100 epochs, up to 300 epochs.
+The optimization results are shown in Figure 4.
+The left panel reports the objective and
+gradient-norm trajectories: the initial 1
+2W 2
+2 of 0.51233 decreases monotonically to 1.54 × 10−2,
+effectively reaching the stochastic noise floor, and the loss gradient decays in tandem, indicating
+stable convergence. The right panel displays a 2D histogram (color map) of the optimized particles,
+which shows an excellent match to the analytic steady-state distribution from figure 3 with no
+visible systematic bias.
+3
+Newton–Krylov Framework
+First-order optimizers typically converge slowly to the steady state, as they take only small steps
+in the direction of the local gradient. As a result, they require (relatively) many iterations and
+repeated evaluations of the Wasserstein objective and gradient, each of which involves the costly
+computation of an optimal transport map. This makes first-order methods particularly expensive
+in Wasserstein-based formulations.
+We want to recover the second-order performance of New-
+ton–Krylov by solving
+F(X) = ∂XW 2
+2
+ X, ϕh(X)
+
+= 0
+(19)
+11
+
+0
+50
+100
+150
+200
+250
+300
+Epoch
+10
+−2
+10
+−1
+Wasserstein Loss
+Wasserstein Loss Gradient
+Figure 4: Numerical results for the Wasserstein-Adam optimizer on the half-moon potential. Left:
+Wasserstein loss (blue) and gradient-norm (orange) per epoch. Right: Colormap of the 2D his-
+togram of the optimized particles in orange.
+0
+5
+10
+15
+20
+25
+Iteration
+8
+×
+10
+−5
+9
+×
+10
+−5
+||G(X
+k
+)||
+Newton-Krylov Residual
+−10.0
+−7.5
+−5.0
+−2.5
+0.0
+2.5
+5.0
+7.5
+10.0
+x
+0.00
+0.05
+0.10
+0.15
+0.20
+μ(x)
+Initial Particles
+Ne ton-Krylov Optimized Particles
+Analytic Steady State
+Figure 5: Numerical results for the Newton–Krylov optimizer for bacterial chemotaxis. Left: Norm
+of the objective function,
+
+ ˜F(Xk)
+
+ per iteration. Right: Initial particles (blue), optimized particles
+(orange) and analytic steady-state distribution (dashed red).
+and approximating Jacobian–vector products as
+DF(X) · v ≈F(X + εv) −F(X)
+ε
+.
+(20)
+In practice this is ill-posed and noisy for particle OT. The mapping X 7→∂XW 2
+2 (X, ϕh(X, ξ) is
+only piecewise smooth: as particles move, the optimal transport coupling changes combinatorially,
+creating kinks where DF(X) does not exist. Difference quotients then mix values across distinct
+couplings, producing large, non-vanishing errors that blow up as ε →0. Stochasticity compounds
+the problem: tiny perturbations X 7→X + εv can reshuffle assignments in the empirical OT,
+injecting high-variance jumps into F(X + εv) −F(X). Krylov iterations driven by such JVPs
+become unstable, and line searches lose reliability. We perform a more detailed error analysis of
+the Newton–Krylov method for noisy objective functions in section 3.1, before moving on to using
+Newton–Krylov on smooth representations of particle codes in section 4.
+The idea of Newton’s method is to iteratively update uk+1 = uk+sk by choosing sk such that the
+first order approximation of ψ(uk+1) ≈0. Explicitly, we want sk such that ψ(uk)+Dψ(uk)sk = 0.
+The main idea behind the Newton–Krylov method is to approximate the action of the Jacobian of
+the objective function ∇ψ(uk), using finite differences with step size ε
+Dψ(uk) · v ≈ψ(uk + εv) −ψ(uk)
+ε
+.
+(21)
+12
+
+Since this matrix-free formulation can only approximate matrix-vector products, and not the full
+Jacobian directly, we must use iterative Krylov methods to solve the linear system
+Dψ(uk)sk = −ψ(uk)
+(22)
+to obtain the next Newton guess uk+1 = uk +sk. Because the Jacobian is not generally symmetric,
+we will use the GMRES method for solving (22).
+The authors of [6] performed an extensive error analysis of the Newton–Krylov method; we
+will repeat their main findings here. There are three main sources of error in the Newton–Krylov
+method: (1) approximation and rounding errors in the approximate Jacobian (21), (2) tolerance
+ηk used to solve (22), and (3) rounding errors in other calculations in addition to these. Each of
+these errors can be controlled. Indeed, one typically uses ε ∼O
+ √εmach
+
+where εmach = 2.2 10−16
+is the machine precision in double precision floating point arithmetic. This limits the first error
+contribution to the same bound of O
+ √εmach
+
+. For the second error contribution, the authors
+of [6, Theorem 2.12] proved that if the sequence of GMRES tolerances ηk, defined such that
+∥Dψ(uk)sk + ψ(uk)∥≤ηk ∥ψ(uk)∥
+(23)
+decreases to 0, then the Newton–Krylov method converges linearly to the exact root of ψ, i.e., uk →
+u∞= u∗where u∗is the exact solution. Their analysis remains true whenever the approximation
+and rounding errors in (21) remain minimal; that is, they are of order O
+ √εmach
+
+.
+Of course, in practice, the tolerances ηk do not decrease in subsequent nonlinear Newton–Krylov
+iterations; rather, they remain constant at ηk = η for all k ≥1. In this case, the Newton–Krylov
+method will always make a deterministic error of size
+∥ψ(u∞)∥≤C
+√εmach + lim sup
+k
+|ηk| + εmach
+
+.
+(24)
+This result can be proven as a consequence of Theorem 2.12 in [6]. Here, C is a constant inde-
+pendent of εmach and ηk but not of ψ and h. The final term in equation (24) of εmach is due to
+(3): general rounding errors in the remaining calculations. Finally, since the condition number of
+a simple root is
+
+Dψ(u∗)−1
+
+, we also obtain a bound for the forward error
+∥u∞−u∗∥≤C
+
+Dψ(u∗)−1
+
+√εmach + lim sup
+k
+|ηk| + εmach
+
+(25)
+in floating point arithmetic.
+3.1
+Extending the Error Analysis to Stochastic Timesteppers
+We aim for faster convergence to steady state than is attainable with first-order descent methods
+through gradient-based optimizers. A natural idea is to invoke second-order optimization, yet in
+the particle setting the underlying derivatives are not fully well defined. The basic idea would be
+to start from the Wasserstein objective function (12) and solve for a zero (truncated) gradient
+F(X) = ∂X 1
+2W 2
+2 (X, ϕh(X)) = X −Π⋆ϕh(X),
+(26)
+where Π⋆is the optimal transport map from X to Y = ϕh(X). For any finite number of particles
+N there will be a noise term for each evaluation of the Wasserstein objective function. Indeed,
+1
+2W 2
+2 (X, ϕh(X)) = 1
+2W 2
+2 (µ, law(Y )) +
+ξ
+√
+N
+,
+(27)
+where µ is the distribution of samples X. For illustrative purposes, let us suppose that the noise
+term ξ is independent of X. The gradient objective function (26) will then also include a noise
+term
+˜F(X) = F(X) +
+ζ
+√
+N
+(28)
+where the contributions per-component of ζ ∈RN add up to ξ.
+13
+
+Any second-order optimization method will require Jacobians of the objective function in equa-
+tion (26). In the Newton–Krylov method, the action of the Jacobian of F in the direction of v is
+approximated by directional finite differences. Under the assumption that subsequent evaluations
+of F introduce independent noise terms ζ1 and ζ2, approximating the action of the Jacobian DF
+on a vector v introduces an additional variance term that scales unfavorably as the step size ε →0
+D ˜F(X)v ≈
+˜F(X + εv) −˜F(X)
+ε
+= F(X + εv) −F(X)
+ε
++ ζ1 −ζ2
+ε
+√
+N
+.
+(29)
+Since ζ1 and ζ2 are independent, for example, through independent random numbers in the
+timestepper, and ε is typically small (say √εmach ≈10−8), the resulting noise term (ζ1 −ζ2)/ε
+√
+N
+will dominate the Jacobian-vector product. The estimated Jacobian therefore carries essentially
+no usable descent information, and the Newton–Krylov method will degenerate into stochastic
+oscillations rather than a systematic search direction, failing to converge toward the true steady
+state. Continuing the error analysis from Section 3, the asymptotic error of the Newton–Krylov
+method is governed by a fundamental bias–variance trade-off,
+∥X∞−X⋆∥≤C
+
+F(X⋆)−1
+
+
+ε + lim sup
+k
+|ηk| + εmach +
+2σ
+ε
+√
+N
+
+(30)
+where σ is the standard deviation of ξ. The above equation highlights the challenge of second-
+order methods on the level of particles: although they carry the potential for rapid convergence,
+the noise inherent in particle-based Jacobians fundamentally limits their accuracy. However, we
+can use equation (30) to determine ε so that the approximation and noise terms are balanced. It
+can be seen that the minimal total error is achieved when ε = O
+ N −1/4
+. As an example, for
+N = 104, we would need to use ε = 0.1 – which is much larger than √εmach in the absence of noise.
+However, even with this optimal finite-difference step size, Newton–Krylov at the particle level
+cannot discern any gradient information from (29).
+Let us consider the bacterial chemotaxis
+example again from section 2.4.1. In Figure 5 we show the Newton–Krylov optimization result
+after 100 steps with N = 105 particles and ε = 0.1. The optimized particles barely moved from
+their initial distribution. Figure 5 shows the norm of the objective function (28) in all iterations,
+revealing that the error remains essentially unchanged in expectation. The reason for this behavior
+is that although each application of the timestepper moves the particles closer to the steady state,
+the subsequent Newton–Krylov update perturbs them in essentially random directions. As a result,
+the timestepper is forced to repeatedly recover the same progress, preventing any net convergence.
+3.2
+Determining h from the Spectral Gap
+Beyond our Newton–Krylov error analysis, it is instructive to examine how information about the
+steady state u∗is encoded in timestepper ϕh and residual ψ(u) = u −ϕh(u). Linearization of the
+PDE
+∂tut = f(ut)
+(31)
+around u∗gives J = Df(u∗) with eigenvalues λi. This linearization of the flow map ϕh is then
+Dϕh(u∗) = exp (hJ) so that
+Dψ(u∗) = I −exp (hJ) .
+(32)
+Let µi be the eigenvalues of Dψ(u∗). This mapping transfers the continuous-time stability spectrum
+of f into a discrete-time residual spectrum: eigenvalues with Re λi ≈0 (slow or neutral modes)
+yield |µi| ≈0, while strongly damped modes (Re λi ≪0) are pushed toward |µi| ≈1.
+As h
+increases, a clear spectral gap typically opens between these two clusters. Choosing h too small
+leaves the modes entangled; choosing it too large pushes all µi towards 1 and degrades conditioning.
+The optimal integration window therefore balances the resolution of slow modes with numerical
+stability and cost.
+Let u be the current Newton–Krylov guess, a point assumed close to the steady-state solution
+u∗. It is safe to say that the eigenvalues and eigenvectors of Dϕh(u) will not deviate from λi
+and vi respectively too much. Also let λ1 be the eigenmode corresponding to the dominant, near
+steady-state dynamics. For a stable PDE solution, this means 0 > Re(λi) > Re(λi) for all i > 1.
+14
+
+By perturbing the current solution u in the direction of v = Pn
+i=1 aivi, the flow map ϕh(u) will
+change to first order by
+Dϕh(u)v = Dϕh(u)
+ n
+X
+i=1
+aiϕh(u)vi
+!
+=
+n
+X
+i=1
+ai exp(hλi)vi,
+(33)
+where we used the fact that vi are (approximate) eigenvectors of Dϕh(u). In this expansion, the
+factor exp(hλ1) will be larger than all other exp(hλi) in real part. Similar to the analysis of the
+power iteration, the above expansion can be rewritten as the dominant term plus high-frequency
+corrections
+Dϕh(u)v = exp(hλ1)
+ 
+a1v1 +
+n
+X
+i=2
+ai
+exp(hλi)
+exp(hλ1)vi
+!
+.
+(34)
+When the integration time h is large enough, the other terms in this expansion will be small
+compared to the first term exp(Tλ1)a1v1, which represents the steady state solution.
+To ensure that the Newton–Krylov method can discern meaningful descent information from
+the Jacobian action Dϕh(u) · v, rather than being dominated by high-frequency ‘noise’ from the
+remaining terms in (33), a high signal-to-noise ratio is required. Mathematically, we require
+
+exp(hλi)
+exp(hλ1)
+ ≪1
+(35)
+and this provides a criterion for choosing the minimal integration time h. Defining the signal-to-
+noise ratio as 1/η with η ≪1, we desire
+exp (h (Re(λi) −Re(λ1))) ≤η
+for all i > 1, and therefore
+h ≥
+ln η
+Re(λ2) −Re(λ1)
+(36)
+because Re(λi) ≤Re(λ2) < Re(λ1) < 0. In practice, we typically want a signal-to-noise ratio
+of 1/η ≥10, and the above equation gives the minimal value for the total integration time h.
+Increasing h beyond this bound will result in more expensive computations with little benefit of
+increased speed of convergence to the steady-state solution.
+3.3
+Newton–Krylov for Mean-Field Equations
+As a first step towards using the Newton–Krylov method for calculating steady-state solutions, let
+us look at the case when the underlying model for the particle timestepper is a partial differential
+equation, specifically a mean-field or Fokker-Planck equation. We prefer the terminology of the
+mean-field equation since the Fokker-Planck equation is only valid for linear models; however, we
+also consider nonlinear stochastic models here.
+We should note that our ultimate goal is to compute steady-state distributions of particle
+timesteppers. The mean-field PDE, although a useful mathematical concept, is not immediately
+known or available for most systems and particle codes. In the few cases where it is known, the
+mean-field model is usually an approximation through some kind of closure.
+However, in the
+settings where the mean-field model is known and exact - like the linear Fokker-Planck equation
+- steady-state distributions are directly encoded, and we can compute it using a Newton–Krylov
+method. We investigate this idea in this section.
+Suppose we have a collection of particles or agents {Xi}n
+i=1 that follow a stochastic process.
+We will discuss two examples below. In the limit of n →∞, the particles or agents are distributed
+according to a time-dependent probability distribution µt(x), where x represents the spatial loca-
+tions. This probability distribution, in turn, follows a deterministic and coarse mean-field equation
+of the form
+∂tµt(x) = F(µt(x))
+(37)
+with the appropriate boundary conditions. On this level, all stochasticity has been removed, and we
+can simply use the regular Newton–Krylov method to compute the steady-state distributions. Most
+15
+
+mean-field models never have their right-hand sides coded, so we will rely on a coarse timestepper
+Φh(µt) that progresses the current distribution µt over a time window of size h to µt+h. Analogous
+to equation (2), we will solve
+Ψ(µ) = µ −Φh(µ) = 0
+(38)
+for µ — the steady-state distribution. We will demonstrate this approach on two examples from
+last section: the linear chemotaxis model (section 3.3.1) and the nonlinear economic agents model
+(section 3.3.2).
+3.3.1
+Bacterial chemotaxis model
+The coarse Fokker-Planck equation for the spatial distribution µ(x, t) of the bacteria from sec-
+tion 2.4.1 reads
+∂tµ = −∂x(χ(S(x))Sx(x)µ) + D∂xxµ,
+(39)
+and describes how the concentration of bacteria changes over time. This equation is sometimes
+known as the Keller-Segel model for chemotaxis [30]. The correct no-flux boundary conditions are
+J(±L) = 0 with flux
+J(x) = χ(S(x))Sx(x)µ(x, t) −Dµx(x, t).
+It admits a unique steady-state distribution of the form
+µ(x) = Z−1 exp
+ 
+1
+D
+Z S(x)
+−1
+χ(S)dS
+!
+,
+(40)
+where Z is the normalization constant. See Appendix B for a short derivation of (40).
+In our example, S(x) = tanh(x) and χ(S) = 1+ 1
+2S2. We compute the steady-state distribution
+using the Newton–Krylov method based on a finite volumes discretization of (39) with N = 1000
+equidistant grid points representing the volume centers. That is, the solution will be a vector
+u ∈RN representing the values of the steady-state distribution at the fixed volume centers. For
+timestepping, we use an explicit Euler time discretization over a time window of size h = 1 second.
+Figure 6(a) shows the steady-state distribution obtained by the Newton–Krylov method along-
+side the analytic formula (40). We observe an excellent correspondence between these two distribu-
+tions. Additionally, in Figure (b), we observe that the Newton–Krylov method reaches a residual
+of 10−8, the minimal obtainable residual according to (24), after only 9 steps.
+−10.0
+−7.5
+−5.0
+−2.5
+0.0
+2.5
+5.0
+7.5
+10.0
+x
+0.00
+0.02
+0.04
+0.06
+0.08
+0.10
+0.12
+μ(x)
+Newton-Krylov Steady State
+Analytic Steady State
+0
+2
+4
+6
+8
+10
+k
+10
+−7
+10
+−5
+10
+−3
+10
+−1
+10
+1
+Newton-Krylov Residual ||ψ(μ
+μ
+)||
+Figure 6: (Left) Steady-state distribution of the Keller-Segel model: Newton–Krylov (blue) vs.
+analytic solution (dashed orange). (Right) Newton–Krylov residual per iteration.
+Remark 2. Although the Fokker-Planck equation (39) and the Ψ-function are linear in µt, the
+Newton–Krylov method is not guaranteed to converge to the steady-state distribution in one step,
+unlike the regular second-order Newton method. The reasons are twofold. First, the Newton–Krylov
+method does not solve the exact Jacobian system Dψ(xk)sk + ψ(xk) = 0, rather an approximation
+16
+
+D ˜ψ(xk)sk +ψ(xk) = 0. Secondly, we typically use a fixed tolerance ηk = η > 0 for all linear system
+solves. So instead of converging to the real steady state distribution, the Newton–Krylov method
+will stay within a tolerance η of the exact steady state; see also equation (24).
+3.3.2
+Economic Agents Model
+As a second demonstration of using Newton–Krylov to compute steady-state distributions of mean-
+field equations, let us reconsider the example of economic agents trading stocks. For this example,
+we look at the deterministic density µ(x, t) of the economic agents at location x and time t. It can
+be shown that an approximate mean-field equation exists, of the form
+∂tµ = 1
+2σ2(t)∂xxµ + ∂x (b(x, t)µ) +
+ J+ + J−
+δ(x).
+(41)
+In this model, b(x, t) and σ2(t) are the time-dependent drift and diffusivity of the agents, and J+
+and J−are integral operators with δ the Dirac-delta distribution. Further details on this model
+can be found in Appendix A of [12]. Importantly, this mean-field PDE is nonlinear, non-local and
+admits multiple steady-state distributions.
+−1.00
+−0.75
+−0.50
+−0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+x
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+1.4
+Evolved Agents
+Newton-Krylov
+Figure 7: Steady-state distribution from Newton–Krylov versus time evolution of stochastic agents.
+For the following numerical experiment, we discretized (41) using a finite-volume method with
+N = 100 equidistant volume centers. Our PDE timestepper uses an explicit Euler method with
+step size 10−4, and we integrate over a time window of size h = 11 second.
+Figure 7 shows
+the steady-state distribution calculated by Newton–Krylov method in orange. It also shows the
+histogram distributions of the random agents obtained by timestepping the stochastic model to
+steady state. There is an excellent visual agreement between the two, as well as in the average
+agent position ⟨Xi⟩of 0.0892.
+4
+From Particles to Smooth Representations
+Newton–Krylov may not work on the level of noisy particles, but it can work if we add smoothness
+to the optimization criterion; enter the Inverse Cumulative Density Function. In one dimension,
+optimal transport with respect to the Wasserstein-2 distance admits an especially convenient for-
+mulation. Composing the ICDF with the CDF of the particles is exactly equivalent to computing
+the optimal transport map, ensuring that the geometry of the problem is preserved. Furthermore,
+if the ICDF is known in fixed (grid-) percentiles, we can interpolate it using splines, making the
+17
+
+(interpolated) ICDF a smooth and monotonic representation of the empirical measure. The ICDF
+is continuously differentiable, so we can employ Newton-type methods to calculate steady states.
+Finally, evaluating the ICDF at prescribed percentiles corresponds to drawing samples from the
+distribution.
+These combined elements make it possible to define a timestepper directly at the level of the
+ICDF. Starting from the current ICDF, we first sample N particles by evaluating the ICDF in
+the (fixed) k/N percentiles. Next, we propagate these samples through the stochastic particle
+timestepper, after which we construct the new ICDF by retaining some of the (sorted) particles.
+In this representation, derivatives are well defined, and Newton–Krylov iterations can be applied
+meaningfully, recovering the fast convergence that is lost in the purely particle-based formulation.
+4.1
+The ICDF-to-ICDF Timestepper
+Given a one-dimensional probability density µ(x) on a fixed interval [a, b], the cumulative density
+function is defined as
+F(x) =
+Z x
+a
+µ(y)dy,
+x ∈[a, b]
+(42)
+Because F is monotonic, it is injective and inverse cumulative density F −1(p) exists. This ICDF
+is defined for p ∈[0, 1] and x = F −1(p) corresponds to the p-th percentile of µ.
+For a discrete set of (sorted) particles {Xn}N
+n=1, the cumulative density function is piecewise
+continuous with jumps at the locations
+F(Xn) = n
+N .
+(43)
+The inverse cumulative density function is also piecewise continuous defined in the discrete per-
+centiles F −1 (n/N) = Xn. To reduce the impact of precise particle locations Xn, we propose to
+evaluate the ICDF in a fixed percentile grid pk, k = 1, . . . , K - typically uniform between 0 and 1
+- with K ≪N. This allows us to construct a coarse ICDF-to-ICDF timestepper
+Φh
+ F −1
+t
+
+= F −1
+t+h
+(44)
+in four stages:
+1. Interpolate F −1(t) on the fixed grid pk, k = 1, . . . , K using a differentiable spline;
+2. Sample {Xn(t)} by evaluating F −1(t) in uniform percentiles n/N;
+3. Propagate the particles to {Xn(t + h)} using the particle timestepper ϕh;
+4. Construct the new ICDF by sorting {Xn(t + h)} and retaining every K-th particle.
+A schematic of the ICDF-to-ICDF timestepper is shown in Figure 8.
+By construction, both the ICDF representation and its spline approximation ensure that the
+timestepper maps one smooth ICDF into another. In this setting, finite-difference approximations
+of the directional derivative DΦh · v no longer suffer from variance-amplifying 1/ε terms, since
+the noise inherent at the particle level has been averaged out by the smooth representation. As
+a result, Newton–Krylov iterations regain their expected fast convergence toward the steady-state
+distribution, now expressed consistently through the ICDF. The associated ICDF-based objective
+function is given by
+Ψ(F −1) = F −1 −Φh(F −1).
+(45)
+which is zero at steady state. Notice that the error bound in equation (30) remains applicable, since
+the ICDF-to-ICDF timestepper is ultimately constructed from the underlying particle timestep-
+per ϕh. However, because the ICDF provides a smooth aggregate representation of the ensemble,
+the effective noise variance σ2 is substantially reduced. As a result, the stochastic error in the
+finite-difference approximation becomes small enough for the method to operate within the stable,
+“workable” Newton–Krylov regime, where second-order convergence is visible.
+18
+
+Inverse CDF F −1
+t
+(p)
+Inverse CDF F −1
+t+T (p)
+−1
+1
+p
+Xt
+Xt+T
+−1
+1
+p
+Effective ICDF Timestepper
+Sampling by Evaluating F −1
+t
+Particle Timestepper
+Optimal Transport Map
+Figure 8: Schematic of the effective ICDF–to-ICDF timestepper.
+4.2
+Three Numerical Illustrations
+We now demonstrate the performance of the Newton–Krylov method on the ICDF-to-ICDF timestep-
+per through three examples. These examples illustrate the accuracy, robustness, and noise tolerance
+of Newton–Krylov on smooth particle representations across increasingly complex systems.
+4.2.1
+The Bimodal Distribution
+As a first demonstration of the Newton–Krylov method applied to the ICDF-to-ICDF timestepper,
+we consider a bimodal distribution defined by
+µ(dx) = 1
+Z exp
+
+−1
+2
+ x2 −1
+2
+.
+(46)
+The particle timestepper is based on an Euler-Maruyama discretization of the overdamped Langevin
+dynamics
+dXt = ∇log µ(Xt)dt +
+√
+2dWt
+(47)
+with step size 10−3. The time-integration horizon is h = 0.1.
+The unknowns in the ICDF-to-ICDF formulation are the values of the ICDF on a fixed percentile
+grid pk = (k −0.5)/100 for 1 ≤k ≤100. During each evaluation of the timestepper, we interpolate
+the ICDF using piecewise linear functions, sample N = 105 particles at equidistant percentiles,
+propagate them forward using the microscopic timestepper ϕh over a time window of length h = 0.1,
+and reconstruct the new ICDF by retaining every 1000th particle (i.e., N/100) in sorted order (i.e.
+after applying the optimal transport map). These retained particle locations define the updated
+ICDF on the fixed percentile grid at time h. Jacobian–vector products are approximated by finite
+differences with a step size of ε = 10−2.
+The convergence behavior of Newton–Krylov on the ICDF timestepper is shown in Figure 9.
+The left panel compares the ICDF of the initial guess—corresponding to a standard Gaussian—with
+the steady-state ICDF obtained after convergence.
+The right panel displays the histogram of
+N = 105 particles sampled from this steady-state ICDF, showing excellent agreement with the
+19
+
+Figure 9: (Left) Initial ICDF (green), true steady-state (orange) and steady-state ICDF computed
+by Newton–Krylov (dashed blue). (Right) Particles sampled from the Newton–Krylov ICDF (blue)
+and corresponding steady-state bimodal density.
+analytical bimodal invariant distribution.
+For completeness, we also report the residual norm
+
+Ψ
+ (F −1)(k)
+
+ per Newton–Krylov iteration k, which decreases rapidly to a noise floor around
+10−2. This residual level is consistent with the theoretical prediction from equation (30).
+The Newton–Krylov method converges to the noise floor in 11 iterations, for a total of 63
+evaluations of the ICDF timestepper (GMRES needs a few function evaluations per global Newton
+iteration). This technically corresponds to 6.3 in-simulation seconds of propagating particles to
+reach the steady state distribution - much less than the hundreds of seconds that would be required
+to reach steady state using the Euler-OT timestepper. The total in-simulation time is the most
+important metric for comparing optimizers.
+4.2.2
+Bacterial Chemotaxis
+As a second example, we revisit the bacterial chemotaxis model introduced in section 2.4.1. The
+ICDF is again discretized on a fixed percentile grid pk = (k −0.5)/100, for 1 ≤k ≤100. At
+each timestepper evaluation, we interpolate the ICDF using piecewise linear functions, sample
+N = 105 particles at equidistant percentiles, and propagate them over a time horizon of h = 1
+second using the microscopic particle timestepper described in section 2.4.1.
+The propagated
+ensemble is then projected back onto the ICDF representation by sorting the particle locations.
+The initial distribution is again taken to be a Gaussian with mean 5 and standard deviation 2, and
+Jacobian–vector products are again evaluated using finite differences with step size ε = 10−1.
+Figure 10 illustrates the convergence of the Newton–Krylov method on this ICDF-to-ICDF
+timestepper. The left panel shows the initial ICDF (corresponding to the Gaussian guess), the
+true steady-state ICDF obtained from long-time simulation, and the ICDF recovered by New-
+ton–Krylov. The latter two curves show close agreement, confirming that the method correctly
+identifies the stationary distribution. The right panel displays the histogram of N = 105 par-
+ticles sampled from the steady-state ICDF computed by Newton–Krylov, which closely matches
+the invariant chemotactic density. The Newton–Krylov method is able to reach this steady-state
+profile after 11 Newton iterations and 114 objective evaluations, corresponding to 114 seconds of
+in-simulation time (h = 1 second). Regular simulation using the Euler-OT timestepper requires
+about 300 seconds to reach steady state from the same initial distribution.
+4.2.3
+Economic Agents
+As a final example, we apply the ICDF-to-ICDF timestepper framework to the economic agents
+model introduced in section 2.4.2. The microscopic timestepper ϕh for this system is the McK-
+ean–Vlasov Euler scheme described in [12]. This model is nonlinear and non-local, and its corre-
+sponding mean-field equation (41) is known to admit multiple steady-state distributions.
+20
+
+Figure 10: (Left) Initial ICDF(green), true steady-state (orange) and steady-state ICDF computed
+by Newton–Krylov (dashed blue). (Right) Particles sampled from the Newton–Krylov ICDF (blue)
+and corresponding steady-state density (40) in orange.
+The construction of the ICDF-to-ICDF timestepper is identical to the prior two examples. That
+is, we discretize the ICDF on a fixed percentile grid pk = (k−0.5)/100, for 1 ≤k ≤100 and N = 105
+particles are sampled uniformly in percentile space. The microscopic timestepper ϕh is then applied
+to evolve these particles over a time horizon of h = 1 second. After propagation, the updated
+ICDF is reconstructed by sorting the particle ensemble retaining every 1000th particle. The initial
+ICDF corresponds to a Gaussian distribution centered around x = 0 with standard deviation 0.1.
+Jacobian–vector products of the timestepper are again computed using finite differences with step
+size ε = 10−1.
+Figure 11: (Left) Initial ICDF (green), true steady-state (orange) and steady-state ICDF computed
+by Newton–Krylov (dashed blue). (Right) Particles sampled from the Newton–Krylov ICDF (blue)
+and steady-state density corresponding to the mean-field PDE.
+Figure 11 illustrates the results obtained with Newton–Krylov on this ICDF timestepper. The
+left panel shows the initial ICDF, the invariant ICDF obtained from long-time microscopic simu-
+lation, and the steady-state ICDF recovered by Newton–Krylov. The close agreement between the
+two confirms that the algorithm correctly identifies the stable steady-state distributions of the sys-
+tem. The right panel displays the histogram of N = 105 particles sampled from the Newton–Krylov
+steady-state CDF, which closely matches the invariant distribution of the mean-field PDE (41).
+For completeness we also show the Newton–Krylov error as a function of the iteration number in
+Figure 12. We see that the error first decreases quadratically as is typical for Newton-like schemes,
+before settling down in the noise regime.
+21
+
+Figure 12: Newton–Krylov ICDF residual Ψ
+ (F −1)(k)
+per iteration for the economics agents
+model (blue); Second-order convergence rate (green).
+5
+Extending Smooth Representations to Multiple Dimen-
+sions
+In one dimension, the ICDF approach allows us to handle the issue presented by noisy particles and
+still develop an appropriate Newton–Krylov method. Extending this idea beyond one dimension
+requires additional care.
+There is not an analog of the ICDF that appropriately captures the
+optimal transport maps.
+In particular, an inverse cumulative distribution function cannot be
+defined in a straightforward manner for d ≥2. The reason is that the CDF is not injective: for a
+given probability level p ∈[0, 1], the level set
+
+(x, y) ∈R2 | FX,Y (x, y) = p
+ 
+(48)
+typically forms a one-dimensional manifold (a curve) rather than a single point. Hence, the map-
+ping (FX,Y )−1 (p) is not a well-defined function from [0, 1] →R2. Consequently, the notion of “eval-
+uating the ICDF” becomes ambiguous in higher dimensions. It follows that the one-dimensional
+ICDF-based timestepper illustrated in Figure 8 cannot be extended to multivariate distributions
+in a direct manner. Even if a generalized notion of inverse CDF were introduced (e.g., by param-
+eterizing level sets), its numerical evaluation would be computationally inefficient, since sampling
+points uniformly on such two-dimensional level sets is considerably more expensive than evaluating
+the scalar inverse F −1(p) in one dimension.
+One must instead construct alternative smooth representations that retain the essential link
+to Optimal Transport theory. An option is to work with the two-dimensional cumulative distri-
+bution function (CDF), which generalizes the one-dimensional case and retains links to optimal
+transport. An alternative is the sliced Wasserstein distance. By projecting the distribution onto
+many one-dimensional directions, each projection yields an ICDF that is well defined, and these are
+aggregated to approximate the full Wasserstein geometry. Therefore, both the CDF and the sliced
+Wasserstein framework act as higher-dimensional analogues of the one-dimensional ICDF, provid-
+ing the smoothness needed to construct well-behaved timesteppers and to restore the accelerated
+convergence of Newton–Krylov methods in the multidimensional setting.
+It is worth emphasizing, though, that the reason we need an alternative approach is purely
+for computational feasibility. If we had an oracle that could instantaneously compute the optimal
+transport map between any two distributions of arbitrary size, our original approach would still
+work in multiple dimensions. Indeed, if we were able to compute the associated vector field in
+the case of continuous distributions, then there would not be any noise, and we could run the
+Newton–Krylov method exactly as expected. However, due to the noisy nature of the timestepper,
+our Newton–Krylov approach needs more particles in the simulation than would be reasonable to
+22
+
+pass to an explicit OT solver.
+This computational issue only appears in the setting of multiple ambient dimensions precisely
+because optimal transport maps are extremely cheap to compute in one dimension. For multiple
+dimensions, computing an optimal transport map requires solving a linear program which is no
+longer practical for the number of particles we would need in order for the desired effects to become
+observable. As we have discussed, the signal-to-noise ratio in the computation of the Jacobians
+is extremely poor for small numbers of particles, and in order to make the ratio high enough
+for our Newton–Krylov method to work, we need to make the number of particles so high that
+solving the linear program becomes computationally infeasible. Additionally, the statistical rate of
+convergence of discrete optimal transport maps depends poorly on the dimension (typically n−1/d,
+where n is the number of points and d is the ambient dimension), meaning the number of particles
+needed also scales with the dimension. This creates a bad tradeoff with computational complexity
+that cannot be resolved without unreasonable computational power. Thus, the reason we need
+additional alternative approaches in multiple dimensions is the practical computational ability, not
+some fundamental flaw with the approach of running Newton–Krylov on the OT velocity fields.
+We discuss two such alternatives in detail here: the multidimensional cumulative distribution
+function and the sliced-Wasserstein distance. We discuss the former idea in section 5.1 and the
+latter in section 5.2.
+5.1
+The CDF-to-CDF Timestepper
+A natural choice is to work directly with the two-dimensional cumulative distribution function
+FX,Y (x, y), which provides a continuous and differentiable description of the underlying particle
+ensemble. The notion of a cumulative distribution function (CDF) extends naturally to multiple
+dimensions.
+For clarity of exposition, we focus on the bivariate case, although all subsequent
+algorithms and results generalize to arbitrary number of dimensions. Let (X, Y ) be a random
+vector with joint distribution. Its cumulative distribution function is defined by
+FX,Y (x, y) = P(X ≤x, Y ≤y) =
+Z x
+−∞
+Z y
+−∞
+µ(u, v)dudv.
+(49)
+Sampling from a two-dimensional cumulative distribution function can be performed through its
+marginal and conditional components. Following the approach described by [31, 32], the joint CDF
+FX,Y (x, y) can be decomposed into the marginal CDF FX(x) of one variable and the conditional
+CDF FY |x(y|x) of the other. This decomposition allows sampling to proceed through a sequence of
+one-dimensional operations: one first draws a sample x from the marginal cumulative distribution
+FX(x), and subsequently samples y from the conditional cumulative distribution FY |X(y). In this
+way, multidimensional sampling reduces to iterated evaluations of smooth one-dimensional ICDFs,
+which are mathematically well-defined.
+The two-dimensional sampling algorithm works as follows. First we construct the marginal
+CDF of the x-coordinates, given by
+FX(x) = P(X ≤x) =
+Z x
+−∞
+Z ∞
+−∞
+µ(u, v)dudv = FX,Y (x, ∞).
+(50)
+This one-dimensional CDF can be easily inverted to generate samples x1, x2, . . . , xn at equidistant
+percentiles pi = (i −0.5)/n. Next, for each x-sample xi we construct the one-dimensional CDF
+of the conditional distribution µ(y|xi). It can be shown [23, 3] that this conditional cumulative
+distribution function is given by the formula
+FY |Xi(y) = ∂xFX,Y (Xi, Y )
+µX(Xi)
+.
+(51)
+Given any smooth representation of FX,Y (x, y) this partial derivative is readily available, and
+sampling the y-coordinates Xi can also be achieved by inverting FY |Xi(y) and evaluating it in
+equidistant percentiles qj = (j −0.5)/m. The end product of this staged sampling algorithm are
+N particles (Xn, Yn)N
+n=1. After propagating the particles through the timestepper
+( ˜Xn, ˜Yn) = ϕh(Xn, Yn),
+(52)
+23
+
+we reconstruct the updated two-dimensional CDF by computing, at each grid node (xi, yj), the
+fraction of particles ( ˜Xn, ˜Yn)N
+n=1 located in the lower-left quadrant relative to that point:
+FX,Y (xi, yj) = #
+n
+n | ˜Xn ≤xi and ˜Yn ≤yj
+o
+/N
+(53)
+Starting from the CDF F t
+X,Y at time t, the three steps
+1. Sampling (Xn, Yn) from marginal and conditional CDFs;
+2. Forward particle propagation using the particle timestepper ( ˜Xn, ˜Yn) = ϕh(Xn, Yn);
+3. Restriction to the 2D CDF by counting particles in the lower right quadrant of each grid
+point;
+define a consistent CDF-to-CDF timestepper
+Φh
+ F t
+X,Y
+
+= F t+h
+X,Y .
+(54)
+See Figure 13 for a schematic of this timestepper. The associated residual map reads
+Ψ
+ F t
+X,Y
+
+= F t
+X,Y −Φh(F t
+X,Y ),
+(55)
+which is identical to 0 at every grid point (xi, yj) in steady state.
+We note that constructing the two-dimensional CDF of a particle ensemble and re-sampling it
+through the marginal and conditional one-dimensional CDFs, as we outlined above, yields a mono-
+tone triangular map that is close to the OT solution under many practical conditions. In fact,
+it corresponds to the Knothe–Rosenblatt rearrangement [26, 21, 27, 24], a sequential, measure-
+preserving transformation that orders variables one at a time through their conditional distribu-
+tions. While the Knothe–Rosenblatt map does not minimize the standard quadratic OT cost (and
+hence is not itself an optimal transport map in the usual sense), it can be expressed as a limit
+of optimal transport maps for different cost functions [8]. In particular, it shares key structural
+properties and can be viewed as a computationally efficient approximation to the optimal transport
+map in high-dimensional sampling contexts. We do not require the exact optimal transport map in
+our Newton–Krylov calculations; any fast and reasonably accurate alternative that preserves the
+steady state is sufficient. The Knothe–Rosenblatt rearrangement offers a good alternative that is
+computationally efficient and preserves the steady state.
+Numerical Example
+Consider the two-dimensional half-moon distribution (16) as a representa-
+tive example of our approach. We evaluate the empirical two-dimensional cumulative distribution
+function (CDF) on a uniform grid (xi, yj)i,j of nX = nY = 100 points, equally spaced between
+−4 and 4. The CDF-to-CDF timestepper is constructed using N = 104 particles, and sampling
+is performed by inverting the marginal and conditional one-dimensional cumulative distribution
+functions. To increase regularity, we interpolate the two-dimensional CDF with a piecewise-linear
+spline and solve for the corresponding percentiles. Specifically, for every percentile pair (pi, qj), we
+determine the coordinates (Xi, Yj|Xi) such that
+FX(Xi) = pi, FY |Xi(Yj) = qj.
+(56)
+This inversion can be implemented efficiently by vectorizing the evaluation of the marginal and
+conditional CDFs. Because the two-dimensional CDF is represented as a smooth spline, its partial
+derivatives—such as those appearing in (51)—are spline functions as well and need to be computed
+only once, independent of pi, qj, Xi or Yj|Xi.
+We next apply the Newton–Krylov scheme to find the steady-state distribution of the CDF-to-
+CDF timestepper. The timestepper is based on an Euler-Maruyama discretization of the dynam-
+ics (18) with time step 10−3. We integrate this dynamics up to time h = 1 second. The initial
+condition for the Newton–Krylov method is the standard bivariate Gaussian distribution (see the
+left of Figure 14). The optimized distribution obtained by Newton–Krylov is displayed on the
+right of Figure 14. One can see that Newton–Krylov can recover the true steady-state distribution
+even though the initial distribution is quite far from equilibrium. Figure 15 shows how the ‘loss‘
+∥Ψ (FX,Y )∥decreases steadily per nonlinear iteration and settles down to the noise level, a clear
+signal of convergence.
+24
+
+CDF Ft(x, y)
+CDF Ft+T (x, y)
+Effective CDF Timestepper
+Sampling by
+Marginal Ft(x) and Conditional
+Ft(y|x) CDFs
+Particle Timestepper
+CDF by Counting
+Particles below x and y
+Figure 13: Schematic of the effective two-dimensional CDF–to-CDF timestepper.
+5.2
+The Sliced Wasserstein Timestepper
+For completeness, we also consider an alternative smooth representation of multidimensional parti-
+cle systems based on the sliced Wasserstein distance (SWD). The key idea is to project probability
+distributions in Rd onto one-dimensional subspaces defined by unit vectors θ ∈Sd−1 at percentiles of
+the angular CDF, and to compute the Wasserstein distance between the resulting one-dimensional
+projected measures. Formally, for two distributions µ and ν,
+SW 2
+d (µ, ν) =
+Z
+Sd−1 W 2
+d−1 (Pθ#µ, Pθ#ν) dθ,
+(57)
+where Pθ(x) = ⟨x, θ⟩is the projection onto the line spanned by θ and Pθ#µ denotes the pushforward
+of µ by Pθ. In two dimensions, we approximate the integral with a finite set of angles {θi}Nθ
+i=1:
+SW 2
+2 (µ, ν) ≈
+1
+Nθ
+Nθ
+X
+i=1
+W 2
+2
+ Pθi#µ, Pθi#ν
+
+=
+1
+Nθ
+Nθ
+X
+i=1
+Z F −1
+Pθiµ(r) −F −1
+Pθiν(r)
+2 dr,
+(58)
+where FPθiµ is the one-dimensional CDF of the projected measure Pθi#µ. We note that the sliced
+Wasserstein distance lower bounds the ordinary Wasserstein distance, and it also gives an upper
+bound up to a constant that depends on the ambient dimension [4]. Thus, the sliced Wasserstein
+distance is indeed a reasonable approximation, preservers the steady state, and we can still use it
+effectively build a similar timestepper.
+The sliced Wasserstein idea provides an alternative to build smooth timesteppers from an
+underlying particle timestepper. We retain a rectangular grid representation of the two-dimensional
+CDF, but sampling proceeds through directional projections. To achieve a consistent sampling, we
+need to first sample directions θi from the marginal angular CDF FΘ and, for each θi, generate radii
+rj|θi from the conditional CDF FR|θi(r). However, unlike the Cartesian marginal and conditional
+CDFs, there are no explicit expressions analogous to equations (50) and (51) for the marginal
+angular and conditional radial CDFs. We need to first explicitly construct the two-dimensional
+density
+µ(x, y) = ∇FX,Y (x, y)
+(59)
+25
+
+Figure 14: Histogram heatmaps of particle density: (left) initial Gaussian condition; (right) dis-
+tribution after Newton–Krylov optimization using the 2D CDF smooth representation.
+Figure 15: Newton–Krylov loss
+
+Ψ
+
+F (k)
+X,Y
+
+
+ per iteration k. The loss decreases up until a noise
+level induced by the finite number of particles.
+which can be obtained efficiently from a spline representation of FX,Y . Then the marginal angular
+CDF is given by
+FΘ(θ) =
+Z θ
+0
+Z ∞
+0
+µ (r cos ϕ, r sin ϕ) r dr dϕ.
+(60)
+and the conditional radial CDF for any angle θ reads
+FR|θ(r) =
+Z r
+0
+µ(s cos θ, s sin θ) s ds.
+(61)
+Sampling the 2D CDF consistently in a sliced Wasserstein-inspired way can then be achieved
+through
+1. Generating a set of angles {θi}NΘ
+i=1 ⊂[0, 2π) by inverting the marginal angular CDF (60) in
+fixed percentiles pi = (i −0.5)/NΘ;
+2. For each θi, constructing the radial conditional CDF FR|θi(r) using the projection (61);
+3. Inverting each radial conditional CDF in fixed percentiles {rj}Nr
+j=1 ⊂(0, 1) through a bisection-
+like scheme
+ρij = F −1
+R|θi(rj).
+;
+26
+
+4. Mapping these 1D samples back to R2 via the inverse projection
+Xn = ρij cos θi,
+Yn = ρij sin θi,
+and collecting all (Xn, Yn) across i, j.
+After sampling we proceed as with the CDF-to-CDF timestepper by propagating the samples
+through the particle timestepper to obtain new particles ( ˜Xn, ˜Yn) and restricting back to the CDF
+by counting the number of ( ˜Xn, ˜Yn) to the lower left of each CDF grid point (xi, yj). Together, this
+sliced representation captures much of the transport geometry while remaining computationally
+light, providing a scalable surrogate for the full multidimensional Wasserstein map within our
+Newton–Krylov framework. The complete sliced Wasserstein-to-sliced Wasserstein timestepper is
+shown schematically in Figure 16.
+CDF Ft(x, y)
+CDF Ft+T (x, y)
+Effective CDF Timestepper
+Sampling Directional
+CDFs Ft(x|θ)
+Particle Timestepper
+CDF by Counting
+Particles below x and y
+Figure 16: Schematic of the effective sliced Wasserstein to sliced Wasserstein timestepper.
+Finally we also show how the Newton–Krylov method on the sliced-Wasserstein representation
+of particles converges to the steady-state distribution of the half-moon potential.
+The initial
+condition and timestepper parameters are the same as in section 5.1, and sampling is done by
+first generating NΘ = 100 angular samples and then NR = 100 radial samples for each angle.
+The Newton–Krylov loss per iteration is shown in the left subfigure of Figure 17 and the resulting
+steady-state distribution is shown on the right.
+As shown, there is no significant difference in either the convergence rate or the resulting steady
+state between the sliced Wasserstein and the direct CDF representations. This outcome is expected,
+since both formulations are mathematically equivalent. The key insight is that employing smooth
+representations enables the use of higher-order optimization schemes, while the specific choice of
+representation is comparatively unimportant. The decisive factor is the computational efficiency
+of sampling.
+6
+Discussion and Outlook
+We have presented a unified, matrix-free framework for computing steady-state distributions of
+(stochastic) particle timesteppers. The key idea is to reformulate a steady state in the language of
+27
+
+Figure 17: (left) Loss
+
+Ψ(F (k)
+X,Y
+
+ per iteration; (right) Histogram heatmap of resulting steady-state
+particle density of the Newton–Krylov method applied to the Sliced Wasserstein representation.
+optimal transport. On the deterministic side, we revisited the residual formulation ψ(u) = u−ϕh(u)
+and showed how the Newton–Krylov method efficiently recovers steady states of the Fokker-Planck
+equation. We also derived a practical criterion for selecting the integration horizon h from the
+spectral gap. On the stochastic side, we introduced a first-order Adam-Wasserstein method for
+calculating steady states directly on the particle level. We also clarified why a naive particle-level
+extension fails to higher-order optimizers such as Newton–Krylov. Stochastic noise breaks the one-
+to-one correspondence between ensembles, and Jacobian–vector products acquire variance scaling
+as 1/ε. Our analysis makes this bias–variance trade-off explicit and shows that stable convergence
+can be achieved when the finite-difference step size is chosen within a noise-dependent range.
+To address this limitation, we introduced smooth distributional timesteppers—first in one di-
+mension through the ICDF-to-ICDF map, and then in multiple dimensions through CDF-to-CDF
+and sliced Wasserstein formulations. These representations aggregate microscopic variability into
+smooth macroscopic objects on which Newton–Krylov regains its fast, second-order convergence.
+Numerical results confirm that these smooth timesteppers yield comparable steady states with
+markedly reduced stochastic fluctuations, enabling accurate steady-state computations even in
+noisy particle systems. The central message is that smoothness in representation, rather than in
+the underlying dynamics, is the key to robust, matrix-free solvers for stochastic steady states.
+One of the main questions we want to address during further research will be to reduce the
+stochastic error in the finite-differences approximation of the Jacobian. Variance reduction at the
+particle level through correlated samples could further stabilize Jacobian-vector products and allow
+smaller finite-difference steps. In the case of central finite differences, antithetic variates might be
+a natural variance reduction technique since paired perturbations with opposite randomness can
+cancel leading-order stochastic fluctuations while preserving the deterministic directional derivative
+signal.
+Beyond computing single steady states, an important next step is to apply Newton–Krylov
+to compute steady-state branches of parameter-dependent particle systems. Such numerical con-
+tinuation algorithms require consistent residual evaluations between successive Newton–Krylov
+steps. Therefore, improving variance reduction at the particle level—through correlated sampling,
+common-random-number strategies, or smoother estimators will be crucial to enable robust and
+efficient continuation of stochastic steady states, including the reliable detection of folds and bi-
+furcations in distribution space.
+Finally, scaling these approaches to large particle ensembles and to systems with potentially
+thousands of dimensions remains a major challenge.
+A key open question is how to identify
+the most effective sampling strategy for multidimensional CDFs (or their smooth equivalents)
+constructed via percentile evaluations. What constitutes “best” in this context is not yet defined,
+but it will likely involve a balance between proximity to the true optimal transport map (much
+like the Knothe–Rosenblatt rearrangement approximates it) and the computational efficiency of
+28
+
+the resulting sampling algorithm. Establishing this balance will be essential for extending smooth
+timestepper frameworks to high-dimensional stochastic systems like molecular dynamics [9] or real
+economic systems.
+Acknowledgments
+H.V. and I.G.K. acknowledge partial support by the Department of Energy (DOE) under Grant
+No. DE-SC0024162; I.G.K. also acknowledges partial support by the National Science Foundation
+under Grants No. CPS2223987 and FDT2436738.
+A
+Derivation of the Relation between the Eigenvalues of Df
+and Dϕh
+Let
+∂tut = f (ut)
+(62)
+be a semi-discretized PDE. We are interested in steady-state points u∗such that f(u∗) = 0.
+However, in most situations the right-hand side f of the PDE is not available, only a timestepper
+is. Call ϕh(u) the flow map of a timestepper with initial condition u over a time interval of size h.
+Steady-states of the PDE (62), i.e., zeros of f, are also zeros of
+ψ(u) = u −ϕh(u).
+Additionally, stable steady states of f are stable steady states of ψ and vise versa. In general, the
+following theorem holds.
+Theorem A.1. Let λi and µi be the respective eigenvalues of Df(u∗) and Dϕh(u∗). Then µi =
+exp (λih).
+Proof. Starting from the integral representation of ODE (62),
+ϕh(u) = u +
+Z h
+0
+∂susds =
+Z h
+0
+f (us) ds.
+Then, taking the gradient with respect to the initial condition u (D = Du), we get
+Dϕh(u) = I + Du
+Z h
+0
+f (us) ds = I +
+Z h
+0
+D [f (us)] ds.
+(63)
+Applying the chain rule D [f (us)] = Df (us) Dus.
+However, us is just ϕs(u).
+Plugging these
+results into equation (63)
+Dϕh(u) = I +
+Z h
+0
+Df (us) Dϕs(u)ds.
+For brevity, call J(s) = Df(us) and A(t) = Dϕt(u). We then obtain a compact integral equation
+A(t) = I +
+Z h
+0
+J(s)A(s)ds,
+which is the integral representation of the solution to the matrix ODE
+∂tA(t) = J(t)A(t)
+with initial condition A(0) = I. This ODE has a unique solution
+A(t) = exp
+Z t
+0
+J(s)ds
+
+.
+In steady-state, J(s) is just a constant matrix J = Df(u∗), and A(t) = exp (tJ). The eigenvalues
+of J are just λi. We can conclude that the eigenvalues of Dϕh(u∗) = A(h) are exp (hλi), and
+therefore
+µi = 1 −exp (hλi) .
+29
+
+B
+Analytic Steady-State Distribution of the Chemotaxis
+Model
+The chemotaxis stochastic model (15) can be seen as a special case of the overdamped Langevin
+dynamics
+dXt = −U ′(Xt)dt +
+√
+2DdWt
+with potential energy
+U(x) = −
+Z x
+−L
+χ(S(y))Sy(y)dy = −
+Z S(x)
+S(−L)
+χ(S)dS.
+The invariant distribution of the overdamped Langevin dynamics is
+µ(x) = Z−1 exp
+
+−1
+DU(x)
+
+= Z−1 exp
+ 
+1
+D
+Z S(x)
+−1
+χ(S)dS
+!
+It can be seen that the no-flux boundary conditions are automatically satisfied because J(x) = 0
+everywhere in steady state.
+References
+[1] Luigi Ambrosio, Nicola Gigli, and Giuseppe Savar´e. Gradient flows: in metric spaces and in
+the space of probability measures. Springer, 2005.
+[2] Jean-David Benamou and Yann Brenier. A computational fluid mechanics solution to the
+Monge-Kantorovich mass transfer problem. Numerische Mathematik, 84(3):375–393, 2000.
+[3] Patrick Billingsley. Probability and measure. John Wiley and Sons, 1995.
+[4] Nicolas Bonneel, Julien Rabin, Gabriel Peyr´e, and Hanspeter Pfister. Sliced and radon wasser-
+stein barycenters of measures. Journal of Mathematical Imaging and Vision, 51(1):22–45,
+2015.
+[5] Yann Brenier. Polar factorization and monotone rearrangement of vector-valued functions.
+Communications on Pure and Applied Mathematics, 44(4):375–417, 1991.
+[6] Peter N. Brown, Homer F. Walker, Rebecca Wasyk, and Carol S. Woodward. On using approx-
+imate finite differences in matrix-free newton–krylov methods. SIAM Journal on Numerical
+Analysis, 46(4):1892–1911, 2008.
+[7] Rainer Burkard, Mauro Dell’Amico, and Silvano Martello.
+Assignment problems: revised
+reprint. SIAM, 2012.
+[8] G. Carlier, A. Galichon, and F. Santambrogio. From knothe’s transport to brenier’s map
+and a continuation method for optimal transport. SIAM Journal on Mathematical Analysis,
+41(6):2554–2576, 2010.
+[9] L. Chen, P.G. Debenedetti, C. W. Gear, and I. G. Kevrekidis. From molecular dynamics to
+coarse self-similar solutions: a simple example using equation-free computation. Journal of
+Non-Newtonian Fluid Mechanics, 120:215–223, 07/2004 2004.
+[10] Ligang Chen, Pablo G. Debenedetti, William C. Gear, and Ioannis G. Kevrekidis.
+From
+molecular dynamics to coarse self-similar solutions: a simple example using equation-free
+computation. Journal of non-Newtonian Fluid Mechanics, 120(1-3):215–223, 2004.
+[11] Nicolas
+Evangelou.
+Agent-based
+modeling
+repository.
+https://gitlab.com/
+nicolasevangelou/agent_based/-/tree/main?ref_type=heads, 2025.
+Accessed:
+Oc-
+tober 26, 2025.
+30
+
+[12] Gianluca Fabiani, Nikolaos Evangelou, Tianqi Cui, Juan M Bello-Rivas, Cristina P Martin-
+Linares, Constantinos Siettos, and Ioannis G Kevrekidis.
+Task-oriented machine learning
+surrogates for tipping points of agent-based models.
+Nature communications, 15(1):4117,
+2024.
+[13] Gianluca Fabiani, Hannes Vandecasteele, Somdatta Goswami, Constantinos Siettos, and Ioan-
+nis G Kevrekidis. Enabling local neural operators to perform equation-free system-level anal-
+ysis. arXiv preprint arXiv:2505.02308, 2025.
+[14] Nicolas Fournier and Benjamin Jourdain. Stochastic particle approximation of the keller–segel
+equation and two-dimensional generalization of bessel processes. 2017.
+[15] William C. Gear. Projective integration methods for distributions. NEC Report, 2001.
+[16] Nicholas Karris, Evangelos A. Nikitopoulos, Ioannis G. Kevrekidis, Seungjoon Lee, and
+Alexander Cloninger. Using linearized optimal transport to predict the evolution of stochastic
+particle systems. arXiv preprint arXiv:2408.01857, 2024.
+[17] Carl T. Kelley, Ioannis G. Kevrekidis, and Liang Qiao.
+Newton-krylov solvers for time-
+steppers. arXiv preprint math/0404374, 2004.
+[18] Ioannis G Kevrekidis, C William Gear, and Gerhard Hummer. Equation-free: The computer-
+aided analysis of complex multiscale systems. AIChE Journal, 50(7):1346–1355, 2004.
+[19] Ioannis G Kevrekidis, C William Gear, James M Hyman, Panagiotis G Kevrekidis, Olof
+Runborg, and Constantinos Theodoropoulos. Equation-free multiscale computation: enabling
+microscopic simulators to perform system-level tasks. arXiv preprint physics/0209043, 2002.
+[20] Diederik P Kingma.
+Adam:
+A method for stochastic optimization.
+arXiv preprint
+arXiv:1412.6980, 2014.
+[21] Herbert Knothe. Contributions to the theory of convex bodies. Michigan Mathematical Jour-
+nal, 4(1):39–52, 1957.
+[22] Soheil Kolouri, Kimia Nadjahi, Umut Simsekli, Roland Badeau, and Gustavo Rohde. Gen-
+eralized sliced wasserstein distances. Advances in neural information processing systems, 32,
+2019.
+[23] Athanasios Papoulis. Random variables and stochastic processes. McGraw Hill, 1965.
+[24] Gabriel Peyr´e and Marco Cuturi. Computational optimal transport: With applications to
+data science. Foundations and Trends in Machine Learning, 11(5-6):355–607, 2019.
+[25] Liang Qiao, Radek Erban, Carl T. Kelley, and Ioannis G. Kevrekidis. Spatially distributed
+stochastic systems: Equation-free and equation-assisted preconditioned computations. The
+Journal of chemical physics, 125(20), 2006.
+[26] Murray Rosenblatt. Remarks on a multivariate transformation. The annals of mathematical
+statistics, 23(3):470–472, 1952.
+[27] Filippo Santambrogio. Optimal transport for applied mathematicians. 2015.
+[28] C. I. Siettos, C. W. Gear, and I. G. Kevrekidis. An equation-free approach to agent-based
+computation:
+Bifurcation analysis and control of stationary states.
+Europhysics Letters,
+99(4):48007, 2012.
+[29] Constantinos I Siettos. System level numerical analysis of a monte carlo simulation of the e.
+coli chemotaxis. arXiv preprint arXiv:1011.1467, 2010.
+[30] Angela Stevens. The derivation of chemotaxis equations as limit dynamics of moderately inter-
+acting stochastic many-particle systems. SIAM Journal on Applied Mathematics, 61(1):183–
+212, 2000.
+31
+
+[31] Yu Zou, Ioannis Kevrekidis, and Roger Ghanem.
+Equation-free dynamic renormalization:
+Self-similarity in multidimensional particle system dynamics. Physical Review E—Statistical,
+Nonlinear, and Soft Matter Physics, 72(4):046702, 2005.
+[32] Yu Zou, Ioannis G. Kevrekidis, and Roger G. Ghanem. Equation-free particle-based compu-
+tations: Coarse projective integration and coarse dynamic renormalization in 2d. Industrial
+& engineering chemistry research, 45(21):7002–7014, 2006.
+32

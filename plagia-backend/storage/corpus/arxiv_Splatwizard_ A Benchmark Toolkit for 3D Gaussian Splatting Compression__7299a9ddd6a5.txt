@@ -1,0 +1,1912 @@
+Splatwizard: A Benchmark Toolkit for 3D Gaussian Splatting Compression
+Xiang Liu1,3
+Yimin Zhou1
+Jinxiang Wang1
+Yujun Huang1
+Shuzhao Xie1
+Shiyu Qin1
+Mingyao Hong3
+Jiawei Li4
+Yaowei Wang2,3
+Zhi Wang1
+Shu-Tao Xia1
+Bin Chen2,*
+1Tsinghua University 2Harbin Institute of Technology, Shenzhen
+3Pengcheng Laboratory 4Huawei Technologies Ltd.
+Abstract
+The recent advent of 3D Gaussian Splatting (3DGS) has
+marked a significant breakthrough in real-time novel view
+synthesis. However, the rapid proliferation of 3DGS-based
+algorithms has created a pressing need for standardized
+and comprehensive evaluation tools, especially for com-
+pression task. Existing benchmarks often lack the specific
+metrics necessary to holistically assess the unique charac-
+teristics of different methods, such as rendering speed, rate
+distortion trade-offs memory efficiency, and geometric ac-
+curacy. To address this gap, we introduce Splatwizard, a
+unified benchmark toolkit designed specifically for bench-
+marking 3DGS compression models. Splatwizard provides
+an easy-to-use framework to implement new 3DGS com-
+pression model and utilize state-of-the-art techniques pro-
+posed by previous work. Besides, an integrated pipeline
+that automates the calculation of key performance indica-
+tors, including image-based quality metrics, chamfer dis-
+tance of reconstruct mesh, rendering frame rates, and com-
+putational resource consumption is included in the frame-
+work as well. Code is available at Github.
+1. Introduction
+With the rapid progress of computer vision, 3D reconstruc-
+tion has emerged as a core research area, underpinning
+downstream applications in virtual reality and embodied in-
+telligence. Among various 3D representations, 3D Gaus-
+sian Splatting (3DGS) [23] achieves state-of-the-art ren-
+dering quality and real-time performance, enabling a wide
+range of practical uses.
+However, raw 3DGS scenes contain substantial redun-
+dancy. A 3DGS represents a scene with millions of Gaus-
+sian ellipsoids distributed in 3D space, whose projected
+splats jointly capture geometry and appearance. In practice,
+a single scene often requires up to 107 Gaussians, leading to
+hundreds of megabytes of storage and limiting the deploy-
+*Corresponding author
+ability of uncompressed 3DGS in real applications. This
+has driven the development of numerous 3DGS compres-
+sion techniques, as summarized in Table 1. These meth-
+ods introduce heterogeneous designs across preprocessing,
+rendering pipelines, and post-processing stages, resulting in
+large differences in code structure, system behavior, and
+implementation logic. Consequently, they exhibit notable
+trade-offs in FPS, memory footprint, model size, and recon-
+struction quality, making it difficult to achieve consistent
+evaluation or identify universally effective improvements.
+To address this issue, several works [2, 45] have at-
+tempted to summarize or benchmark existing 3DGS com-
+pression methods.
+However, these surveys largely rely
+on reported results or cover only a subset of representa-
+tive techniques, leaving the practical selection of a suitable
+method still unclear—especially because downstream tasks
+prioritize different properties. For instance, streaming sys-
+tems [14, 37, 50] demand extremely low encoding and de-
+coding latency, while robotics applications [16, 27] require
+high inference throughput and minimal memory usage for
+onboard deployment.
+Besides, another major limitation of existing evaluations
+is the absence of geometric assessment. Geometric recon-
+struction is a central problem in computer graphics, and nu-
+merous recent works [6, 15, 20, 21] focus on improving the
+surface reconstruction quality of 3DGS, drawing substantial
+attention from the community. However, research on 3DGS
+compression has so far concentrated almost exclusively on
+photorealistic metrics such as PSNR and SSIM. Although
+these metrics capture appearance fidelity, they overlook the
+fact that 3DGS is fundamentally a three-dimensional repre-
+sentation. As a result, existing evaluations fail to reveal how
+compression affects the geometric integrity of the underly-
+ing 3D structure.
+To mitigate the aforementioned issues, we have devel-
+oped a unified training and evaluation framework, charac-
+terized by the following features: 1) Standardization. It
+defines a unified pipeline encompassing data loading, model
+training, compression encoding, and rendering evaluation,
+supporting the rapid development of new methods. 2) De-
+1
+arXiv:2512.24742v1 [cs.CV] 31 Dec 2025
+
+Method
+Year
+Std Rasterizer
+QAT
+Entropy Model
+Post Pruning
+Compression
+3DGS [23]
+2023
+✓
+-
+-
+✗
+✗
+Trimming the Fat [1]
+2024
+✓
+-
+-
+✓
+✗
+PUP-3DGS [18]
+2025
+✓
+-
+-
+✓
+✗
+Speedy splat [17]
+2025
+✓
+-
+-
+✗
+✗
+LightGaussian [11]
+2024
+✓
+-
+-
+✓
+✓
+MesonGS [42]
+2024
+✓
+-
+-
+✓
+✓
+C3DGS [33]
+2024
+✗
+Fake
+-
+✓
+✓
+Compact3DGS [26]
+2024
+✗
+RVQ
+-
+✗
+✓
+HAC [8]
+2024
+✗
+Noise
+Gaus
+✗
+✓
+CAT-3DGS [48]
+2025
+✗
+Noise
+Gaus/Laplace
+✗
+✓
+Table 1. Comparison of different methods.
+coupling. We decouple components such as the rasterizer,
+entropy module, and codec as independent modules. This
+facilitates the combination of different methods and sup-
+ports the integration of new modules in the future. 3) More
+Metrics. Based on the same evaluation pipeline, we have
+not only included metrics such as PSNR but also extended
+to Gaussians count, peak memory usage, and geometric re-
+construction accuracy, in order to provide a more compre-
+hensive benchmark.
+In summary, our contributions are threefold:
+• We propose a unified training and evaluation framework
+for 3DGS compression, which alleviates reproducibility
+issues of existing methods and lowers the development
+barrier for new methods.
+• We reproduce existing 3DGS compression methods under
+the proposed framework, providing the community with
+a fair, reliable, and comprehensive technical benchmark.
+• Based on the framework, we have developed a new com-
+pression model, ChimeraGS, which has demonstrated
+competitive results across several dimensions, highlight-
+ing the flexibility and effectiveness of this framework.
+2. Related Work
+The high rendering quality and flexibility of 3DGS have
+motivated research aimed at improving both reconstruction
+fidelity and storage efficiency. In this section, we review
+related works on 3D Gaussian Splatting and the methods
+proposed to compress and optimize the representation.
+2.1. Novel View Synthesis
+Novel view synthesis is a classic problem in graphics re-
+search. Many work on the topic focused on image-based
+rendering [13, 38] and Neural Radiance Fields [5, 32]. In re-
+cent years, 3D Gaussian Splatting (3DGS) [23] has emerged
+as an efficient and expressive representation for novel view
+synthesis and 3D reconstruction. By explicitly modeling
+scenes with anisotropic Gaussians, 3DGS achieves high-
+quality rendering and real-time performance, attracting ex-
+tensive research attention.
+Numerous works have improved the rendering pipeline
+through adaptive density control [17], anti-aliasing [47] and
+more realistic shading mechanisms [44]. These advances
+consolidate 3DGS as a versatile representation bridging ex-
+plicit geometry and neural rendering. Our framework sup-
+ports various static Gaussian Splatting pipelines with dis-
+tinct models and optimization objectives, providing a uni-
+fied platform for evaluation and analysis.
+2.2. Compression of 3DGS
+Despite its rendering efficiency, 3DGS models are storage-
+intensive, prompting research on compact representations.
+Pruning-based methods[1, 11, 17, 18, 49] remove redun-
+dant or visually insignificant Gaussians by analyzing opac-
+ity, gradient importance, or visibility contribution, ef-
+fectively reducing both model size and rendering cost.
+Entropy-based compression[8, 33, 48] further reduces stor-
+age through learned probabilistic coding of Gaussian pa-
+rameters or by applying rate–distortion optimization to bal-
+ance bit usage and rendering accuracy.
+Although these
+studies have substantially advanced 3DGS compression,
+their implementations are often inconsistent, making cross-
+method evaluation difficult. To address this, our work in-
+troduces a unified framework that integrates representative
+pruning, quantization, distillation, and entropy coding tech-
+niques under a consistent training and evaluation pipeline,
+facilitating reproducible and comprehensive benchmarking
+for future research.
+2.3. Benchmark and Tools
+Unlike fully neural network-based models, the 3DGS
+framework incorporates numerous components beyond
+conventional neural network architectures, with the raster-
+izer being a typical example. Furthermore, the inherently
+complex control flow of 3DGS has generated a need for
+substantial boilerplate code.
+GSplat [46] serves as an open-source, efficient, and user-
+friendly library that provides an efficient implementation of
+3D Gaussian Splatting. GauStudio [45] serves as a frame-
+2
+
+work for modeling 3D Gaussian Splatting to provide stan-
+dardized, plug-and-play components for users to easily cus-
+tomize and implement a 3DGS pipeline.
+GSCodec Stu-
+dio [28] focuses specifically on Gaussian Splat compres-
+sion, offering a modular design for integrating and bench-
+marking different compression strategies such as prun-
+ing, quantization, and entropy coding.
+Beyond tools,
+3DGS.zip [3] introduces a comprehensive compression for
+3DGS compression task, and compared the characteristics
+of various methods.
+Our work is also inspired by these studies and possesses
+unique characteristics. The most representative aspect is
+the design of a flexible modular mechanism, which inte-
+grates over 10 different rasterizers and other modules in-
+cluding entropy estimation and encoding.
+Furthermore,
+based on a scheduler mechanism, we have implemented
+a more streamlined template for Gaussian Splatting mod-
+els. Using this foundation, we have reproduced several rep-
+resentative methods and conducted comprehensive perfor-
+mance comparisons.
+3. Architecture
+In Fig. 1, we conceptualize our Splatwizard framework.
+The primary objective of this framework is to provide a uni-
+fied and reusable training and evaluation pipeline, thereby
+simplifying the implementation and research of future GS
+models. In the subsequent sections, we will provide a de-
+tailed introduction to the key mechanisms and functional
+modules of Splatwizard.
+3.1. Dynamic and AOT module loading
+A challenge in 3DGS research lies in the frequent need to
+modify or extend the rasterizer [11, 12, 21, 29]. These mod-
+ifications often tailored to specific tasks and introduce a
+host of non-research-related hurdles that hinder productiv-
+ity. This problem is further compounded in compression-
+focused 3DGS tasks, where the integration of diverse en-
+tropy encoders [8, 48] adds another layer of complexity.
+These encoders, often implemented in C++ or CUDA for ef-
+ficiency, introduce additional build dependencies, version-
+ing conflicts, and compatibility issues with existing raster-
+izer codebases. As a result, researchers spending significant
+time resolving linker errors, adjusting makefiles, or ensur-
+ing cross-platform consistency—efforts that contribute little
+to the scientific goals of their work.
+To address these challenges, we designed a flexible mod-
+ule system leveraging PyTorch’s built-in loading mecha-
+nisms and extension frameworks [34]. This system supports
+both Just-in-Time (JIT) loading and Ahead-of-Time (AOT)
+compilation, enabling seamless integration of custom com-
+ponents with minimal configuration. For JIT loading, mod-
+ules are compiled dynamically at runtime using PyTorch’s
+C++ extension APIs. For AOT compilation, modules are
+Listing 1 Snippet used to register task.
+1 class GaussainModel:
+2
+def register_pre_task(
+3
+self,
+4
+scheduler: Scheduler,
+5
+ppl: PipelineParams,
+6
+opt: OptimizationParams
+7
+):
+8
+scheduler.register_task(
+9
+range(opt.iterations),
+10
+task=self.update_learning_rate
+11
+)
+built during installation, generating platform-specific bina-
+ries that can be loaded instantly at runtime.
+Built on this foundation, we have integrated distinct ras-
+terizers and a suite of CUDA/C++ modules. Critically, this
+system abstracts all compilation details from end users: re-
+gardless of whether a module is JIT-loaded or pre-built, re-
+searchers can import and use it via simple Python import.
+The underlying framework handles dependency resolution,
+and kernel loading, ensuring that even complex combina-
+tions of rasterizers and compression modules work out-of-
+the-box.
+3.2. Unified Pipeline
+Another characteristic of 3DGS is that its training process
+involves many operations beyond parameter updates and
+gradient computations [23, 26]. The most representative of
+these are the pruning and densification of Gaussian points.
+Additionally, many methods incorporate operations that are
+coupled with training epochs. For example, in HAC [8],
+the training is mainly divided into full-precision training,
+training with simulated quantization, and training with en-
+tropy constraints. Beyond these three main training stages,
+there are also brief pauses in pruning/densification oper-
+ations. The training phases in CAT-3DGS [48] are even
+more complex. Manually controlling these intricate train-
+ing processes solely through if-else code is both cumber-
+some and error-prone. Therefore, we have implemented a
+unified training workflow based on a scheduler mechanism.
+A general flowchart can be referred to in Fig 1.
+We have unified the training process of 3DGS into five
+stages: pre-scheduler execution, rendering, loss calcula-
+tion, post-scheduler execution, and optimizer update. The
+scheduler is designed to execute specified tasks at desig-
+nated training iterations, and Listing 1 demonstrates the API
+for task registration in the scheduler. When the scheduler
+executes tasks, it automatically uses appropriate parame-
+ters for dispatch based on the type annotations [9] of the
+task’s formal parameters. With this design, various oper-
+ations beyond rendering and loss calculation can be con-
+verted into tasks and clearly presented through the schedul-
+ing flow. Taking the training process of the original Gaus-
+3
+
+Loss
+Init PC
+Prune 
+Densify
+Manager
+Pre Scheduler
+Rasterizer Lib
+Pre Task
+Render
+Loss
+Post Task
+Optimizer Step
+Update 
+Learning Rate
+Adaptive Density 
+Control
+Encode/Decode
+Entropy/Codec Lib
+Recon Lib
+Reconstruct
+Data Flow
+Model Specific 
+Operation
+Modules
+General Training 
+Pipeline
+Module Details
+Metric Lib
+Register
+Register
+Control
+Control
+Post Scheduler
+Finish?
+Start
+End
+Metric Lib
+MSE/PSNR, L1, SSIM, 
+LPIPS, Chamfer Distance
+Standard Rasterizer, 
+FlashGS, 2DGS,
+Speedy Splat, etc.
+Rasterizer Lib
+Entropy/Codec Lib
+Gaussian Entropy, 
+Laplace Entropy,
+Triplane, VQ, etc.
+Marching Cube,
+SDF
+Recon Lib
+Model Specific Rasterizer
+Figure 1. Framework of Splatwizard. We have abstracted the Gaussian training process into a universal training pipeline, which can
+support various custom operations through a task scheduler mechanism. The horizontal arrow lines in the diagram illustrate the modules
+used at different stages of Gaussian training. For instance, different models employ different adaptive density control mechanisms, and
+such control mechanisms can be registered into the scheduler. This results in a GS model implemented based on Splatwizard, while also
+seamlessly leveraging various auxiliary modules and functions provided by the framework.
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+increase SH degree
+range(0, 30000, 1000)
+Post
+collect gradient statistics
+range(15000)
+prune and densify
+range(500, 15000, 100)
+reset opacity
+range(0, 15000, 3000)
+Table 2. Schedule plan for vanilla 3DGS. We use python style
+range expression to illustrate detail execution time.
+sian as an example, Table 4 shows the tasks included in the
+pre-scheduler and post-scheduler. One constraint in task
+allocation is that tasks requiring the use of rendering re-
+sults must be registered in the post-scheduler, as the pre-
+scheduler cannot access rendering results.
+In addition to clarifying the training workflow, another
+advantage of the scheduler-based mechanism is its similar-
+ity in code organization to the original 3DGS implementa-
+tion. This allows for easy adaptation of various new works
+based on the original codebase into a scheduler-based orga-
+nizational structure. This significantly reduces the difficulty
+of integrating new methods into our framework.
+3.3. Function Library
+The Rasterizer Lib is a collection of encapsulated raster-
+izer from previous works. This includes a standard raster-
+izer [23], along with its subsequent accelerated version [30]
+and an additional variant that incorporates depth computa-
+tion [24]. Since pruning methods often rely on importance
+assessment [18], the framework provides rasterizers capa-
+ble of calculating global importance scores based on opac-
+ity [11], as well as variants that support computing repa-
+rameterized approximate Hessian importance [17]. Addi-
+tionally, it includes versions designed specifically for re-
+construction, such as 2DGS [21] and TrimGS [10]. The
+architectural design of Splatwizard allows for flexible com-
+bination of these modules, enabling the mixed use of differ-
+ent rasterizers within a single method.
+The Metrics Lib module focuses on loss calculation and
+performance metric evaluation, providing rich tool support
+for the Loss module.
+It includes the implementation of
+various loss functions and the calculation of image qual-
+ity metrics (PSNR, SSIM [39] and LPIPS [51]). In addition
+to these image quality assessment metrics, we have specif-
+ically introduced geometric evaluation metrics, including
+Chamfer distance of point cloud [10] and reconstructed
+mesh [21]. While such metrics are often unreported in pre-
+vious compression models, we believe their inclusion can
+provide a more comprehensive reflection of model perfor-
+mance.
+We have categorized modules related to entropy estima-
+tion, quantization, and entropy encoding into the Codec Lib.
+Current research on 3DGS compression has applied a vari-
+ety of entropy models and encoding algorithms. In terms
+of quantization, methods such as STE quantization, noise
+relaxation quantization, vector quantization, and training-
+aware quantization are included.
+For context modeling,
+4
+
+models based on hash grids and triplanes have also been
+utilized. As for entropy encoders, techniques such as arith-
+metic coding, rANS coding, and Huffman coding are cov-
+ered.
+These diverse methods were previously scattered
+across different studies, and consolidating these modules
+here will facilitate future research.
+Reconstruction Lib acts as a critical bridge between
+3DGS and mesh-based models, converting optimized Gaus-
+sian primitives into structured meshes. Following previous
+work, we render depth maps of the training views and utilize
+truncated signed distance fusion (TSDF) to fuse the recon-
+struction depth maps, using Open3D [52].
+3.4. Model Zoo
+Building on the aforementioned modular framework, we
+have systematically reproduced several mainstream algo-
+rithms in 3DGS compression, forming a unified benchmark
+implementation. Throughout the reproduction process, we
+adhered principle of minimizing reproduction discrepan-
+cies: on one hand, we precisely aligned key parameter set-
+tings described in the original papers to ensure that the criti-
+cal logic of each algorithm remains consistent with the orig-
+inal descriptions; on the other hand, leveraging the frame-
+work’s modular design, we abstracted common components
+across different algorithms into shared modules, only im-
+plementing unique innovations of each algorithm.
+This
+approach reduce performance deviations caused by differ-
+ences in engineering implementation. Notably, during the
+reproduction process, we identified and fixed several poten-
+tial issues in the original code that affected result consis-
+tency. Through this approach, our implementation not only
+provides a unified comparison benchmark for 3DGS com-
+pression algorithms but also offers a more robust code refer-
+ence for the community, effectively reducing discrepancies
+in research caused by differences in engineering implemen-
+tations.
+4. ChimeraGS
+As a demonstration, we have developed a new model with
+closer comprehensive performance comparing with end-to-
+end trained model like HAC [8] by strategically integrat-
+ing effective modules and proposed distillation guided SH
+pruning. Fig. 2 illustrate the framework of our method.
+4.1. Pruning Strategy
+The original LightGaussian [11] comprises multiple stages:
+pruning, distillation, and the final vector quantization en-
+coding phase. Each of these stages has room for optimiza-
+tion. During the pruning stage, we can adopt more aggres-
+sive pruning methods and ratios to reduce the number of
+Gaussian primitives. For example, we can adopt the prun-
+ing strategy from PUP-3DGS [18] to significantly reduce
+the number of Gaussian kernels after pruning while main-
+taining comparable rendering quality. Additionally, beyond
+post-processing pruning, we can directly learn a compact
+Gaussian representation to replace the pruning stage. This
+approach often achieves higher compression rates.
+We adopt the SpeedySplat [17] to obtain a highly com-
+pact initialization of Gaussians. SpeedySplat utilizes the
+reparameterized approximation of Hessian matrix to mea-
+sure the importance of each Gaussian primitive
+˜Ui = log |∇giIG∇giIT
+G |,
+(1)
+where IG is rendered image. gi is the 2D projected value of
+Gi at pixel p, given by
+gi = eq, q = −1
+2(p −µi2D)Σ−1
+i2D(p −µi2D)T .
+(2)
+Since log is monotonically increasing, Equation 3 can be
+further rewrited as
+˜Ui = (∇giIG)2.
+(3)
+Based on this efficient importance evaluation metric, effec-
+tive pruning was achieved during the training phase.
+4.2. Distillation Guided SH Pruning
+LightGaussian further reduces the number of parameters
+per Gaussian primitive by directly reduce the spherical har-
+monic degree and then applying distillation fine-tuning.
+This approach significantly reduces the encoded size. How-
+ever, adopting a more aggressive strategy during the pruning
+stage may result in a scenario where simply reducing the or-
+der followed by fine-tuning fails to adequately compensate
+for the quality loss caused by the degree reduction. There-
+fore, we have adopted a dynamic pruning approach here,
+which determines which Gaussian primitives undergo order
+reduction in a learnable manner.
+More specifically, We apply binary masks M ∈{0, 1}N
+to degree-3 SH parameter of each Gaussian primitive.
+ˆc(3)
+n
+= Mnc(3)
+n ,
+(4)
+where n is the index of the primitive, c(3)
+n
+is degree-3 SH
+parameter. During rendering, we use ˆc(3)
+n
+instead of c(3)
+n .
+Obviously, binary mask M is non-differentiable, follow-
+ing previous works, we use a straight-through-estimator
+Mn = sg(1[σ(mn) > c] −σ(mn)) + σ(mn),
+(5)
+where sg(·) is stop gradient operator, 1[·] and σ(·) are in-
+dicator function and sigmoid respectively. To eliminate re-
+dundant degree-3 SH parameters, an additional loss is re-
+quired
+Lm = 1
+N
+N
+X
+n=1
+σ(mn).
+(6)
+5
+
+>1000 FPS
+~4GB Mem
+>800 FPS
+~2.5GB Mem
+3D Gaussians
+Standard GS 
+SpeedySplat
+LightGS
+FlashGS
+TC-GS
+Rasterizer
+Rasterizer
+Soft & Hard Pruned
+3D Gaussians
+Distillation Guided
+SH Pruning
+Vector Quantization
+Novel View Synthesis
+Learnable SH Mask
+Codebook degree 3
+Codebook degree 2
+Distillation
+1
+k
+...
+...
+k
+1
+Train Model
+Figure 2. Framework of ChimeraGS. Since Splatwizard natively supports flexible module composition, we can easily mix multiple different
+rasterizers in same model. The labels on the left side indicate the rasterizers used in each phase.
+The use of learnable masks for pruning Gaussians or
+Gaussian parameters has also been explored in previous
+works [26, 36]. Our main improvement here is to lever-
+age distillation to further enhance performance. Follow-
+ing LightGaussian [11], we use a teacher model to generate
+pseudo view to supervise student model
+Ldistill =
+1
+HW ∥Iteacher(R|t) −Istudent(R|t)∥2
+2 ,
+(7)
+where Iteacher(R|t) and Istudent(R|t) are the rendered image
+given a camera rotation R and position t of teacher model
+and student model respectively. The position is given by
+tpseudo = ttrain + N(0, σ2),
+(8)
+where ttrain is sampled position, N is denotes a Gaussian
+distribution with mean 0 and variance σ2. The final loss in
+distillation stage is
+L = Ldistill + λLm
+(9)
+By comprehensively applying learnable masks and
+knowledge distillation, our method can mitigate the perfor-
+mance loss caused by pruning, thereby improving the rate-
+distortion performance of the model.
+4.3. Encoding and Rendering
+In the encoding phase, we adopt the vector quantization
+encoder from LightGaussian. The main difference is that
+we use separate codebooks for the degree-2 and degree-
+3 SH parameters respectively. Since Gaussian rendering
+is position-order-independent, Gaussian points can be en-
+coded separately according to their SH degrees. Addition-
+ally, to further improve encoding performance, we sort the
+Gaussian points using Morton order before the final encod-
+ing.
+Since our method does not rely on a specially imple-
+mented rasterizer during the rendering phase, it can be eas-
+ily integrated with existing rendering acceleration schemes.
+Here, we have experimented with FlashGS [12] and TC-
+GS [29] respectively. Combined with the model size ad-
+vantage brought by compression itself, both methods have
+achieved impressive rendering speed.
+5. Benchmarking
+5.1. Benchmarking Setup
+Our evaluation is conducted on six multi-view image
+datasets: Mip-NeRF 360 [4], Tanks & Temples [25], Deep
+Blending [19], BungeeNeRF [41], NeRF Synthetic [31]
+and DTU. Tanks&Temples features real-world scenes with
+complex geometry captured using laser scanners, while
+Mip-NeRF 360 contains 9 unbounded scenes enabling 360-
+degree rendering. Deep Blending provides diverse indoor
+and outdoor environments, BungeeNeRF focuses on ex-
+treme multi-scale scenarios, and NeRF Synthetic offers 8
+photorealistic Blender-rendered scenes. For geometric eval-
+uation, DTU dataset [22] provides measure based geometry
+ground truth. This enables us to evaluate the reconstruction
+accuracy of the model, thereby providing a more compre-
+hensive reflection of its performance.
+In terms of model selection, we evaluated all methods in
+the model zoo, with specific methods detailed in the Table 1.
+All approaches were implemented or reproduced based on
+SW, using unified evaluation protocols and consistent train-
+ing/testing dataset splits. Furthermore, to prevent potential
+data leakage from affecting bitrate evaluation, we strictly
+isolated the models used during the encoding and decoding
+phases. All included methods support encoding complete
+information into a single binary file, while the decoding
+phase utilizes only a newly initialized model and the cor-
+responding binary file for testing.
+6
+
+101
+102
+103
+Size [MB]
+26.0
+26.5
+27.0
+27.5
+28.0
+PSNR [dB]
+Better
+101
+102
+103
+Size [MB]
+0.76
+0.78
+0.80
+0.82
+SSIM
+Better
+101
+102
+103
+Size [MB]
+0.25
+0.30
+0.35
+LPIPS
+Better
+105
+106
+Total Gaussians
+26.0
+26.5
+27.0
+27.5
+28.0
+PSNR (dB)
+Better
+105
+106
+Total Gaussians
+0.76
+0.78
+0.80
+0.82
+SSIM
+Better
+105
+106
+Total Gaussians
+0.25
+0.30
+0.35
+LPIPS
+Better
+102
+FPS
+26.0
+26.5
+27.0
+27.5
+28.0
+PSNR [dB]
+Better
+102
+FPS
+0.76
+0.78
+0.80
+0.82
+SSIM
+Better
+102
+FPS
+0.25
+0.30
+0.35
+LPIPS
+Better
+103
+Peak Memory (MB)
+26.0
+26.5
+27.0
+27.5
+28.0
+PSNR [dB]
+Better
+103
+Peak Memory (MB)
+0.76
+0.78
+0.80
+0.82
+SSIM
+Better
+103
+Peak Memory (MB)
+0.25
+0.30
+0.35
+LPIPS
+Better
+CAT-3DGS
+HAC
+3DGS
+C3DGS
+Compact 3DGS
+PUP-3DGS
+Speedy Splat
+Trimming the fat
+LightGaussian
+MesonGS
+ChimeraGS
+Figure 3. Results of Mip-NeRF 360. Note that when counting the total number of Gaussian primitives in HAC and CAT-3DGS, only the
+number of anchor is considered, and the values are not directly comparable to other methods, hence they are drawn with a dashed line.
+5.2. Photorealistic Metrics Results
+Fig. 3 presents evaluation results of all methods on Mip-
+NeRF, with results on additional datasets included in the
+Supplementary. Beyond the previously mentioned PSNR,
+SSIM, and LPIPS metrics, we also measured bitrate, Gaus-
+sian count, inference rendering speed, and peak memory us-
+age during rendering. The figure reports cross-comparison
+results of these metrics.
+From the conventional rate-distortion curves, we observe
+a trend: methods employing hybrid implicit neural net-
+works and 3DGS generally achieve superior rate-distortion
+7
+
+100
+101
+102
+Size [MB]
+29
+30
+31
+32
+33
+34
+35
+36
+PSNR [dB]
+Better
+100
+101
+102
+Size [MB]
+0.8
+1.0
+1.2
+1.4
+1.6
+1.8
+2.0
+Mesh
+Better than 3DGS
+100
+101
+102
+Size [MB]
+1.1
+1.2
+1.3
+1.4
+1.5
+1.6
+1.7
+1.8
+Point
+Better than 3DGS
+CAT-3DGS
+HAC
+2DGS
+3DGS
+Compact 3DGS
+PUP-3DGS
+Speedy Splat
+Trimming the fat
+LightGaussian
+MesonGS
+ChimeraGS
+Figure 4. Results of DTU dataset. Here we present the PSNR, along with the Chamfer distance based on mesh and point cloud respectively.
+performance, while models that combine quantization op-
+erations with rate-distortion optimization also demonstrate
+relatively competitive performance. However, when con-
+sidering Gaussian count as the metric for bitrate, the afore-
+mentioned observations may not necessarily hold.
+Furthermore, comparisons of rendering frame rate and
+peak GPU memory usage provide a more comprehen-
+sive perspective. As expected, hybrid representation-based
+models generally exhibit lower frame rates compared to
+pruning-based approaches, though their impact on memory
+consumption is not significant.
+The proposed ChimeraGS also achieves competitive re-
+sults across several dimensions.
+Compared to prior ap-
+proaches, our method attains rate-distortion performance
+closer to HAC [8], while achieving top-tier results in terms
+of Gaussian count.
+However, experimental observations
+reveal that multi-stage models like LightGaussian [11] in-
+cur additional performance overhead between stages. Com-
+bined with previous findings, this insight points toward fu-
+ture improvement directions, such as incorporating quanti-
+zation during training to enhance performance.
+5.3. Geometric Metrics Results
+Fig. 4 shows the rate-distortion performance of geomet-
+ric metrics. Unlike the previous section, the evaluation for
+photo employs the novel view synthesis task, where the
+dataset is divided into training and test sets, and the decoded
+model is only tested on the test set for reconstruction met-
+rics. In the measurement of geometric metrics, we primarily
+focus on geometric reconstruction accuracy; therefore, the
+entire dataset is used for training. Correspondingly, the rate-
+distortion curves here only represent data fitting capability,
+not novel view synthesis capability. Since current TSDF-
+based mesh reconstruction methods rely on depth maps de-
+rived from Gaussians, for all models using standard ras-
+terizers (including hybrid models), we have replaced their
+rasterizers with versions that support depth computation to
+facilitate subsequent mesh reconstruction stages.
+Compared to photo-level evaluation, we find that some
+methods even achieve point cloud-level accuracy that ap-
+proaches or surpasses the performance of 2DGS. This sug-
+gests that compression tasks and geometric reconstruction
+tasks are not entirely conflicting objectives. In the future,
+we could explore integrating methods from these two spe-
+cialized tasks to investigate pathways for enhancing each
+other’s performance. Meanwhile, we should also note that
+not every compressor can improve geometric quality, so the
+design of specific methods remains particularly important.
+6. Conclusion and Future Work
+In this paper, we introduce a universal framework for
+GS compression evaluation, named Splatwizard.
+This
+framework provides a unified training and evaluation
+pipeline adaptable to various Gaussian methods, while
+offering a flexible module utilization mechanism and a
+comprehensive function library. Based on this framework,
+we have reproduced multiple Gaussian compression meth-
+ods and, leveraging the flexible architecture, developed
+a distinctive approach with unique performance charac-
+teristics.
+Experimental results include multi-dimensional
+comparisons of all methods.
+We hope this work will
+accelerate research in this field by providing fundamental
+tools and resources. In the future, we will further expand
+the capabilities of this framework by incorporating a
+wider range of methods for comparison, while system-
+atically organizing its functional modules to facilitate
+their use in subsequent work.
+Additionally, while the
+current framework is primarily tailored for static GS scene
+compression methods, we plan to extend its functional-
+ity to tasks like dynamic scenes [40, 43], feed-forward
+paradigm [7] and streaming 3DGS compression [35].
+8
+
+References
+[1] Muhammad Salman Ali, Maryam Qamar, Sung-Ho Bae, and
+Enzo Tartaglione.
+Trimming the fat: Efficient compres-
+sion of 3d gaussian splats through pruning. arXiv preprint
+arXiv:2406.18214, 2024. 2
+[2] M. T. Bagdasarian, P. Knoll, Y. Li, F. Barthel, A. Hils-
+mann, P. Eisert, and W. Morgenstern.
+3dgs.zip: A sur-
+vey on 3d gaussian splatting compression methods. Com-
+puter Graphics Forum, page e70078, 2025. https://w-
+m.github.io/3dgs-compression-survey/. 1
+[3] Milena T Bagdasarian, Paul Knoll, Y Li, Florian Barthel,
+Anna Hilsmann, Peter Eisert, and Wieland Morgenstern.
+3dgs. zip: A survey on 3d gaussian splatting compression
+methods. In Computer Graphics Forum, page e70078. Wi-
+ley Online Library, 2025. 3
+[4] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. CVPR, 2022. 6
+[5] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman.
+Zip-nerf:
+Anti-aliased
+grid-based neural radiance fields.
+In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 19697–19705, 2023. 2
+[6] Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian
+Xie, Shangjin Zhai, Nan Wang, Haomin Liu, Hujun Bao,
+and Guofeng Zhang. Pgsr: Planar-based gaussian splatting
+for efficient and high-fidelity surface reconstruction. arXiv
+preprint arXiv:2406.06521, 2024. 1
+[7] Yihang Chen, Qianyi Wu, Mengyao Li, Weiyao Lin,
+Mehrtash
+Harandi,
+and
+Jianfei
+Cai.
+Fast
+feedfor-
+ward 3d gaussian splatting compression.
+arXiv preprint
+arXiv:2410.08017, 2024. 8
+[8] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi,
+and Jianfei Cai.
+Hac: Hash-grid assisted context for 3d
+gaussian splatting compression. In European Conference on
+Computer Vision, pages 422–438. Springer, 2024. 2, 3, 5, 8
+[9] Luca Di Grazia and Michael Pradel. The evolution of type
+annotations in python: an empirical study. In Proceedings of
+the 30th ACM Joint European Software Engineering Confer-
+ence and Symposium on the Foundations of Software Engi-
+neering, pages 209–220, 2022. 3
+[10] Lue Fan, Yuxue Yang, Minxing Li, Hongsheng Li, and
+Zhaoxiang Zhang. Trim 3d gaussian splatting for accurate
+geometry representation. arXiv preprint arXiv:2406.07499,
+2024. 4
+[11] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia
+Xu, Zhangyang Wang, et al.
+Lightgaussian: Unbounded
+3d gaussian compression with 15x reduction and 200+ fps.
+Advances in neural information processing systems, 37:
+140138–140158, 2024. 2, 3, 4, 5, 6, 8
+[12] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang,
+Tao Liu, Boni Hu, Linning Xu, Zhilin Pei, Hengjie Li, et al.
+Flashgs: Efficient 3d gaussian splatting for large-scale and
+high-resolution rendering. In Proceedings of the Computer
+Vision and Pattern Recognition Conference, pages 26652–
+26662, 2025. 3, 6
+[13] John Flynn, Michael Broxton, Lukas Murmann, Lucy Chai,
+Matthew DuVall, Cl´ement Godard, Kathryn Heal, Srinivas
+Kaza, Stephen Lombardi, Xuan Luo, et al. Quark: Real-time,
+high-resolution, and general neural view synthesis.
+ACM
+Transactions on Graphics (TOG), 43(6):1–20, 2024. 2
+[14] Yongjie Guan, Xueyu Hou, Nan Wu, Bo Han, and Tao Han.
+Metastream: Live volumetric content capture, creation, de-
+livery, and rendering in real time.
+In Proceedings of the
+29th Annual International Conference on Mobile Computing
+and Networking, New York, NY, USA, 2023. Association for
+Computing Machinery. 1
+[15] Minghao Guo, Bohan Wang, Kaiming He, and Wojciech Ma-
+tusik.
+Tetsphere splatting: Representing high-quality ge-
+ometry with lagrangian volumetric meshes. arXiv preprint
+arXiv:2405.20283, 2024. 1
+[16] Xiaoshen Han, Minghuan Liu, Yilun Chen, Junqiu Yu, Xi-
+aoyang Lyu, Yang Tian, Bolun Wang, Weinan Zhang, and
+Jiangmiao Pang. Re3sim: Generating high-fidelity simula-
+tion data via 3d-photorealistic real-to-sim for robotic manip-
+ulation. arXiv preprint arXiv:2502.08645, 2025. 1
+[17] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias
+Zwicker, and Tom Goldstein. Speedy-splat: Fast 3d gaus-
+sian splatting with sparse pixels and sparse primitives. In
+Proceedings of the Computer Vision and Pattern Recognition
+Conference, pages 21537–21546, 2025. 2, 4, 5
+[18] Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana,
+Matthias Zwicker, and Tom Goldstein. Pup 3d-gs: Principled
+uncertainty pruning for 3d gaussian splatting. In Proceedings
+of the Computer Vision and Pattern Recognition Conference,
+pages 5949–5958, 2025. 2, 4, 5
+[19] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep blending for
+free-viewpoint image-based rendering. ACM Trans. Graph.,
+37(6), 2018. 6
+[20] Jan Held, Renaud Vandeghen, Sanghyun Son, Daniel Re-
+bain, Matheus Gadelha, Yi Zhou, Ming C. Lin, Marc Van
+Droogenbroeck, and Andrea Tagliasacchi.
+Triangle splat-
+ting+: Differentiable rendering with opaque triangles, 2025.
+1
+[21] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d gaussian splatting for geometrically ac-
+curate radiance fields. In ACM SIGGRAPH 2024 conference
+papers, pages 1–11, 2024. 1, 3, 4
+[22] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola,
+and Henrik Aanæs. Large scale multi-view stereopsis eval-
+uation. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 406–413, 2014. 6
+[23] Bernhard Kerbl, Georgios Kopanas, Thomas Leimk¨uhler,
+and George Drettakis.
+3d gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4):139–1,
+2023. 1, 2, 3, 4
+[24] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas,
+Michael Wimmer, Alexandre Lanvin, and George Drettakis.
+A hierarchical 3d gaussian representation for real-time ren-
+dering of very large datasets. ACM Transactions on Graphics
+(TOG), 43(4):1–15, 2024. 4
+[25] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and temples: Benchmarking large-scale scene
+9
+
+reconstruction. ACM Transactions on Graphics, 36(4), 2017.
+6
+[26] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko,
+and Eunbyung Park. Compact 3d gaussian representation for
+radiance field. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 21719–
+21728, 2024. 2, 3, 6
+[27] Ke Li, Reinhard Bacher, Susanne Schmidt, Wim Leemans,
+and Frank Steinicke. Reality fusion: Robust real-time im-
+mersive mobile robot teleoperation with volumetric visual
+data fusion. arXiv preprint arXiv:2408.01225, 2024. 1
+[28] Sicheng Li, Chengzhen Wu, Hao Li, Xiang Gao, Yiyi Liao,
+and Lu Yu. Gscodec studio: A modular framework for gaus-
+sian splat compression. arXiv preprint arXiv:2506.01822,
+2025. 3
+[29] Zimu Liao, Jifeng Ding, Siwei Cui, Ruixuan Gong, Boni
+Hu, Yi Wang, Hengjie Li, XIngcheng Zhang, Hui Wang, and
+Rong Fu. Tc-gs: A faster gaussian splatting module utilizing
+tensor cores. arXiv preprint arXiv:2505.24796, 2025. 3, 6
+[30] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl,
+Markus Steinberger, Francisco Vicente Carrasco, and Fer-
+nando De La Torre.
+Taming 3dgs: High-quality radiance
+fields with limited resources. In SIGGRAPH Asia 2024 Con-
+ference Papers, pages 1–11, 2024. 4
+[31] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view syn-
+thesis. In Proceedings of the European Conference on Com-
+puter Vision (ECCV), 2020. 6
+[32] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view syn-
+thesis. Communications of the ACM, 65(1):99–106, 2021.
+2
+[33] Simon Niedermayr, Josef Stumpfegger, and R¨udiger West-
+ermann. Compressed 3d gaussian splatting for accelerated
+novel view synthesis. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+10349–10358, 2024. 2
+[34] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer,
+James Bradbury, Gregory Chanan, Trevor Killeen, Zeming
+Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An im-
+perative style, high-performance deep learning library. Ad-
+vances in neural information processing systems, 32, 2019.
+3
+[35] Jiakai Sun, Han Jiao, Guangyuan Li, Zhanjie Zhang, Lei
+Zhao, and Wei Xing.
+3dgstream: On-the-fly training of
+3d gaussians for efficient streaming of photo-realistic free-
+viewpoint videos.
+In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+20675–20685, 2024. 8
+[36] Henan Wang, Hanxin Zhu, Tianyu He, Runsen Feng, Jia-
+jun Deng, Jiang Bian, and Zhibo Chen.
+End-to-end rate-
+distortion optimized 3d gaussian representation. In European
+Conference on Computer Vision, pages 76–92. Springer,
+2024. 6
+[37] Penghao Wang, Zhirui Zhang, Liao Wang, Kaixin Yao,
+Siyuan Xie, Jingyi Yu, Minye Wu, and Lan Xu. Vˆ3: View-
+ing volumetric videos on mobiles via streamable 2d dynamic
+gaussians. CoRR, abs/2409.13648, 2024. 1
+[38] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P
+Srinivasan, Howard Zhou, Jonathan T Barron, Ricardo
+Martin-Brualla, Noah Snavely, and Thomas Funkhouser. Ibr-
+net: Learning multi-view image-based rendering. In Pro-
+ceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 4690–4699, 2021. 2
+[39] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Si-
+moncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004. 4
+[40] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng
+Zhang, Wei Wei, Wenyu Liu, Qi Tian, and Xinggang Wang.
+4d gaussian splatting for real-time dynamic scene rendering.
+In Proceedings of the IEEE/CVF conference on computer vi-
+sion and pattern recognition, pages 20310–20320, 2024. 8
+[41] Yuanbo Xiangli, Linning Xu, Xingang Pan, Nanxuan Zhao,
+Anyi Rao, Christian Theobalt, Bo Dai, and Dahua Lin.
+Bungeenerf: Progressive neural radiance field for extreme
+multi-scale scene rendering. In The European Conference
+on Computer Vision (ECCV), 2022. 6
+[42] Shuzhao Xie, Weixiang Zhang, Chen Tang, Yunpeng Bai,
+Rongwei Lu, Shijia Ge, and Zhi Wang.
+Mesongs: Post-
+training compression of 3d gaussians via efficient attribute
+transformation. In European Conference on Computer Vi-
+sion. Springer, 2024. 2
+[43] Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing
+Zhang, and Xiaogang Jin. Deformable 3d gaussians for high-
+fidelity monocular dynamic scene reconstruction.
+In Pro-
+ceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 20331–20341, 2024. 8
+[44] Yuxuan Yao, Zixuan Zeng, Chun Gu, Xiatian Zhu, and
+Li Zhang.
+Reflective gaussian splatting.
+arXiv preprint
+arXiv:2412.19282, 2024. 2
+[45] Chongjie Ye, Yinyu Nie, Jiahao Chang, Yuantao Chen, Yi-
+hao Zhi, and Xiaoguang Han. Gaustudio: A modular frame-
+work for 3d gaussian splatting and beyond. arXiv preprint
+arXiv:2403.19632, 2024. 1, 2
+[46] Vickie Ye, Ruilong Li, Justin Kerr, Matias Turkulainen,
+Brent Yi, Zhuoyang Pan, Otto Seiskari, Jianbo Ye, Jeffrey
+Hu, Matthew Tancik, et al. gsplat: An open-source library for
+gaussian splatting. Journal of Machine Learning Research,
+26(34):1–17, 2025. 2
+[47] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and
+Andreas Geiger. Mip-splatting: Alias-free 3d gaussian splat-
+ting. In Proceedings of the IEEE/CVF conference on com-
+puter vision and pattern recognition, pages 19447–19456,
+2024. 2
+[48] Yu-Ting Zhan, Cheng-Yuan Ho, Hebi Yang, Yi-Hsin Chen,
+Jui Chiu Chiang, Yu-Lun Liu, and Wen-Hsiao Peng.
+Cat-3dgs:
+A context-adaptive triplane approach to rate-
+distortion-optimized 3dgs compression.
+arXiv preprint
+arXiv:2503.00357, 2025. 2, 3
+[49] Fengdi Zhang, Hongkun Cao, and Ruqi Huang. Consistent
+quantity-quality control across scenes for deployment-aware
+gaussian splatting. arXiv preprint arXiv:2505.10473, 2025.
+2
+10
+
+[50] Jiakai Zhang, Liao Wang, Xinhang Liu, Fuqiang Zhao,
+Minzhang Li, Haizhao Dai, Boyuan Zhang, Wei Yang, Lan
+Xu, and Jingyi Yu. Neuvv: Neural volumetric videos with
+immersive rendering and editing.
+CoRR, abs/2202.06088,
+2022. 1
+[51] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shecht-
+man, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 586–595, 2018. 4
+[52] Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. Open3d:
+A modern library for 3d data processing.
+arXiv preprint
+arXiv:1801.09847, 2018. 5
+11
+
+Splatwizard: A Benchmark Toolkit for 3D Gaussian Splatting Compression
+Supplementary Material
+7. Schedule plan of methods
+In this section, we will introduce the execution plans for all
+methods included. We use python style range expression to
+illustrate detail execution time.
+7.1. 3DGS
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+increase SH degree
+range(0, 30000, 1000)
+Post
+collect gradient statistics
+range(15000)
+prune and densify
+range(500, 15000, 100)
+reset opacity
+range(0, 15000, 3000)
+Table 3. Schedule plan for vanilla 3DGS.
+7.2. Trimming the Fat
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+Post
+gradient aware prune
+range(100, 5000, 500)
+Table 4. Schedule plan for Trimming the Fat.
+7.3. PUP-3DGS
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+Post
+gradient aware prune
+range(100, 5000, 500)
+Table 5. Schedule plan for PUP-3DGS.
+7.4. Speedy-Splat
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+increase SH degree
+range(0, 30000, 1000)
+Post
+collect gradient statistics
+range(15000)
+prune and densify
+range(500, 15000, 100)
+reset opacity
+range(0, 15000, 3000)
+soft prune
+range(6000, 15000, 3000)
+hard prune
+range(15000, 30000, 3000)
+Table 6. Schedule plan for Speedy-Splat.
+7.5. LightGaussian
+Note we separate prune and distillation to different stages.
+Stage
+Task
+Plan
+Post
+prune
+1
+Table 7. Schedule plan for LightGaussian PRUNE stage.
+Stage
+Task
+Plan
+Post
+calculate importance score
+5000
+Table 8. Schedule plan for LightGaussian DISTILL stage.
+7.6. MesonGS
+Stage
+Task
+Plan
+Pre
+update lr
+range(3000)
+calculate importance score
+1
+create octree
+1
+Table 9. Schedule plan for MesonGS.
+7.7. C3DGS
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+VQ compress
+1
+Table 10. Schedule plan for C3DGS.
+7.8. Compact3DGS
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+increase SH degree
+range(0, 30000, 1000)
+switch to RVQ training
+29000
+Post
+collect gradient statistics
+range(15000)
+prune and densify
+range(500, 15000, 100)
+reset opacity
+range(0, 15000, 3000)
+mask prune
+range(15000, 30000, 1000)
+Table 11. Schedule plan for Compact3DGS.
+1
+
+7.9. HAC
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+update anchor bound
+1
+Post
+collect gradient statistics
+range(15000)
+adjust anchor
+range(1500, 3000, 100)
+adjust anchor
+range(4000, 15000, 100)
+switch to quantized training
+3000
+switch to entropy training
+10001
+Table 12. Schedule plan for HAC.
+7.10. CAT-3DGS
+Stage
+Task
+Plan
+Pre
+update lr
+range(30000)
+update cam mask
+range(30000)
+update anchor bound
+1
+setup triplane
+10000
+switch to quantized training
+3000
+switch to entropy training
+10001
+Post
+collect gradient statistics
+range(15000)
+adjust anchor
+range(1500, 3000, 100)
+adjust anchor
+range(4000, 15000, 100)
+Table 13. Schedule plan for CAT-3DGS.
+8. More experiments results.
+These figures respectively show the results on the Deep
+Blending, NeRF Synthetic, and BungeeNeRF datasets. All
+training and testing were completed on a single RTX 3090.
+Note that when counting the total number of Gaussian prim-
+itives in HAC and CAT-3DGS, only the number of anchor
+is considered, and the values are not directly comparable to
+other methods, hence they are drawn with a dashed line.
+2
+
+100
+101
+102
+Size [MB]
+28.5
+29.0
+29.5
+30.0
+PSNR [dB]
+Better
+100
+101
+102
+Size [MB]
+0.88
+0.89
+0.90
+0.91
+SSIM
+Better
+100
+101
+102
+Size [MB]
+0.32
+0.34
+0.36
+0.38
+0.40
+LPIPS
+Better
+105
+106
+Total Gaussians
+28.5
+29.0
+29.5
+30.0
+PSNR (dB)
+Better
+105
+106
+Total Gaussians
+0.88
+0.89
+0.90
+0.91
+SSIM
+Better
+105
+106
+Total Gaussians
+0.32
+0.34
+0.36
+0.38
+0.40
+LPIPS
+Better
+102
+103
+FPS
+28.5
+29.0
+29.5
+30.0
+PSNR [dB]
+Better
+102
+103
+FPS
+0.88
+0.89
+0.90
+0.91
+SSIM
+Better
+102
+103
+FPS
+0.32
+0.34
+0.36
+0.38
+0.40
+LPIPS
+Better
+103
+Peak Memory (MB)
+28.5
+29.0
+29.5
+30.0
+PSNR [dB]
+Better
+103
+Peak Memory (MB)
+0.88
+0.89
+0.90
+0.91
+SSIM
+Better
+103
+Peak Memory (MB)
+0.32
+0.34
+0.36
+0.38
+0.40
+LPIPS
+Better
+CAT-3DGS
+HAC
+3DGS
+C3DGS
+Compact 3DGS
+PUP-3DGS
+Speedy Splat
+Trimming the fat
+LightGaussian
+MesonGS
+ChimeraGS
+Figure 5. Results of DeepBlending.
+3
+
+101
+102
+103
+Size [MB]
+23
+24
+25
+26
+27
+PSNR [dB]
+Better
+101
+102
+103
+Size [MB]
+0.775
+0.800
+0.825
+0.850
+0.875
+SSIM
+Better
+101
+102
+103
+Size [MB]
+0.25
+0.30
+0.35
+LPIPS
+Better
+106
+Total Gaussians
+23
+24
+25
+26
+27
+PSNR (dB)
+Better
+106
+Total Gaussians
+0.775
+0.800
+0.825
+0.850
+0.875
+SSIM
+Better
+106
+Total Gaussians
+0.25
+0.30
+0.35
+LPIPS
+Better
+102
+FPS
+23
+24
+25
+26
+27
+PSNR [dB]
+102
+FPS
+0.775
+0.800
+0.825
+0.850
+0.875
+SSIM
+102
+FPS
+0.25
+0.30
+0.35
+LPIPS
+103
+Peak Memory (MB)
+23
+24
+25
+26
+27
+PSNR [dB]
+Better
+103
+Peak Memory (MB)
+0.775
+0.800
+0.825
+0.850
+0.875
+SSIM
+Better
+103
+Peak Memory (MB)
+0.25
+0.30
+0.35
+LPIPS
+Better
+CAT-3DGS
+HAC
+3DGS
+C3DGS
+Compact 3DGS
+PUP-3DGS
+Speedy Splat
+Trimming the fat
+LightGaussian
+MesonGS
+ChimeraGS
+Figure 6. Results of BungeeNeRF.
+4
+
+100
+101
+102
+Size [MB]
+31.5
+32.0
+32.5
+33.0
+33.5
+PSNR [dB]
+Better
+100
+101
+102
+Size [MB]
+0.955
+0.960
+0.965
+0.970
+SSIM
+Better
+100
+101
+102
+Size [MB]
+0.04
+0.05
+0.06
+LPIPS
+Better
+105
+Total Gaussians
+31.5
+32.0
+32.5
+33.0
+33.5
+PSNR (dB)
+Better
+105
+Total Gaussians
+0.955
+0.960
+0.965
+0.970
+SSIM
+Better
+105
+Total Gaussians
+0.04
+0.05
+0.06
+LPIPS
+Better
+102
+FPS
+31.5
+32.0
+32.5
+33.0
+33.5
+PSNR [dB]
+Better
+102
+FPS
+0.955
+0.960
+0.965
+0.970
+SSIM
+Better
+102
+FPS
+0.04
+0.05
+0.06
+LPIPS
+Better
+109
+Peak Memory (MB)
+31.5
+32.0
+32.5
+33.0
+33.5
+PSNR [dB]
+Better
+109
+Peak Memory (MB)
+0.955
+0.960
+0.965
+0.970
+SSIM
+Better
+109
+Peak Memory (MB)
+0.04
+0.05
+0.06
+LPIPS
+Better
+CAT-3DGS
+HAC
+3DGS
+C3DGS
+Compact 3DGS
+PUP-3DGS
+Speedy Splat
+Trimming the fat
+LightGaussian
+MesonGS
+ChimeraGS
+Figure 7. Results of NeRF Synthetic.
+5
+
+101
+102
+103
+Size [MB]
+23.5
+24.0
+24.5
+25.0
+PSNR [dB]
+Better
+101
+102
+103
+Size [MB]
+0.80
+0.82
+0.84
+SSIM
+Better
+101
+102
+103
+Size [MB]
+0.26
+0.28
+0.30
+0.32
+0.34
+LPIPS
+Better
+105
+106
+Total Gaussians
+23.5
+24.0
+24.5
+25.0
+PSNR (dB)
+Better
+105
+106
+Total Gaussians
+0.80
+0.82
+0.84
+SSIM
+Better
+105
+106
+Total Gaussians
+0.26
+0.28
+0.30
+0.32
+0.34
+LPIPS
+Better
+102
+FPS
+23.5
+24.0
+24.5
+25.0
+PSNR [dB]
+Better
+102
+FPS
+0.80
+0.82
+0.84
+SSIM
+Better
+102
+FPS
+0.26
+0.28
+0.30
+0.32
+0.34
+LPIPS
+Better
+103
+Peak Memory (MB)
+23.5
+24.0
+24.5
+25.0
+PSNR [dB]
+Better
+103
+Peak Memory (MB)
+0.80
+0.82
+0.84
+SSIM
+Better
+103
+Peak Memory (MB)
+0.26
+0.28
+0.30
+0.32
+0.34
+LPIPS
+Better
+CAT-3DGS
+HAC
+3DGS
+C3DGS
+Compact 3DGS
+PUP-3DGS
+Speedy Splat
+Trimming the fat
+LightGaussian
+MesonGS
+ChimeraGS
+Figure 8. Results of Tanks & Temples.
+6

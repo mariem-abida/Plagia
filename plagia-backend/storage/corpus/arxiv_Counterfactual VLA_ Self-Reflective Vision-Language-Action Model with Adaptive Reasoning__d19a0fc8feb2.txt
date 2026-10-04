@@ -1,0 +1,2315 @@
+Counterfactual VLA: Self-Reflective Vision-Language-Action Model
+with Adaptive Reasoning
+Zhenghao “Mark” Peng1,2*
+Wenhao Ding1
+Yurong You1
+Yuxiao Chen1
+Wenjie Luo1
+Thomas Tian1
+Yulong Cao1
+Apoorva Sharma1
+Danfei Xu1
+Boris Ivanovic1
+Boyi Li1
+Bolei Zhou2
+Yan Wang1†
+Marco Pavone1,3†
+1NVIDIA
+2UCLA
+3Stanford University
+Abstract
+Recent reasoning-augmented Vision-Language-Action
+(VLA) models have improved the interpretability of end-to-
+end autonomous driving by generating intermediate reason-
+ing traces. Yet these models primarily describe what they
+perceive and intend to do, rarely questioning whether their
+planned actions are safe or appropriate. This work intro-
+duces Counterfactual VLA (CF-VLA), a self-reflective VLA
+framework that enables the model to reason about and re-
+vise its planned actions before execution. CF-VLA first gen-
+erates time-segmented meta-actions that summarize driv-
+ing intent, and then performs counterfactual reasoning con-
+ditioned on both the meta-actions and the visual context.
+This step simulates potential outcomes, identifies unsafe
+behaviors, and outputs corrected meta-actions that guide
+the final trajectory generation. To efficiently obtain such
+self-reflective capabilities, we propose a rollout–filter–label
+pipeline that mines high-value scenes from a base (non-
+counterfactual) VLA’s rollouts and labels counterfactual
+reasoning traces for subsequent training rounds. Experi-
+ments on large-scale driving datasets show that CF-VLA
+improves trajectory accuracy by up to 17.6%, enhances
+safety metrics by 20.5%, and exhibits adaptive thinking: it
+only enables counterfactual reasoning in challenging sce-
+narios. By transforming reasoning traces from one-shot de-
+scriptions to causal self-correction signals, CF-VLA takes
+a step toward self-reflective autonomous driving agents that
+learn to think before they act.
+1. Introduction
+Recent advances in Vision–Language–Action (VLA) mod-
+els highlight the promise of test-time reasoning for em-
+bodied decision-making. By generating intermediate lan-
+guage traces that describe the scene and task, reasoning-
+*Work done while the author was an intern at NVIDIA.
+†Equal advising.
+Trajectory Error
+0
+0.2
+0.4
+0.6
+0.8
+1
+0.04
+0.08
+0.12
+0.16
+0.2
+Vehicle Following
+Other Normal Scenarios
+Vulnerable Road Users (VRU)
+Lane Keeping Curve
+Cut-In
+Turning Maneuver
+Merging
+Lane Change
+Trajectory error after counterfactual training
+Trajectory error before counterfactual training
+Think Rate
+Task Improvement
+Meta-actions:
+Counterfactual Reasoning:
+The meta-actions suggests accelerating towards the roundabout while a pedestrian is 
+crossing, which may lead to collision... Adjusting to slowing down and waiting can 
+ensure safety.
+Trajectory:
+Think Rate
+System: Your task is ... 
+Generate the trajectory.
+Corrected Meta-actions:
+[x=1.2, y=0.1, θ=0.32], ...
+0.0s-1.3s: Keep Speed, 1.3s-6.4s: Accelerate
+0.0s-5.0s: Decelerate, 5.0s-6.4s: Wait
+CF-VLA:
+Figure 1. Counterfactual Vision-Language-Action (CF-VLA)
+Model. Top: CF-VLA conducts reasoning adaptively. The model
+engages in reasoning more frequently and achieves more signifi-
+cant task performance gains in complex scenarios that have higher
+trajectory errors. Bottom: CF-VLA reflects on its own action plan
+and corrects it before generating the final trajectory.
+augmented VLAs have improved interpretability and ro-
+bustness in manipulation [2, 4, 12, 23] as well as au-
+tonomous driving [17, 19, 21]. In these systems, a large
+vision-language backbone engages in a slower, more delib-
+erative form of “thinking”, spending additional compute to
+verbalize the observation and justify the planned actions.
+However, the reasoning in current VLAs is largely de-
+scriptive rather than self-reflective. Existing models typi-
+cally describe what they observe (e.g., “the cabbage next to
+the bowl” and “a pedestrian is crossing”) and what they in-
+tend to do (e.g., “place the cabbage into the container” and
+“I should be cautious”). As a result, the reasoning trace of-
+ten serves as a one-shot commentary on the scene and action
+1
+arXiv:2512.24426v1 [cs.RO] 30 Dec 2025
+
+choice, without a self-reflective loop that verifies whether
+the model’s own command is appropriate: once the VLA
+model produces a textual intent, it is typically treated as
+ground truth and used to condition a low-level policy, rather
+than being checked for inconsistencies with visual cues and
+revised accordingly.
+Self-correction has been explored in embodied VLMs
+through replanning and failure recovery [10, 23], where
+the agent detects that an action it executed failed and then
+switches to an alternative plan. These mechanisms typically
+operate after observing a mistake or via an external verifier,
+and do not enable the VLA itself to reason explicitly about
+the consequences of its own action plan before execution.
+We refer to this desired ability as counterfactual reason-
+ing. More recent robotics VLAs begin to incorporate world
+models to proactively simulate, verify, and select planning
+steps [5, 20, 27]. While these approaches move toward ear-
+lier detection of problematic actions, they fundamentally
+rely on an external future-prediction model to judge the
+quality of the proposed plan. This is qualitatively differ-
+ent from self-reflection: external simulation can evaluate a
+plan, but it cannot help the VLA understand its own reason-
+ing process. This raises a central question: can we obtain
+self-reflective, counterfactual reasoning inside the VLA it-
+self, without an external world model or verifier, analogous
+to the self-reflection behaviors observed in language-only
+reasoning models? Two obstacles make this challenging.
+First, most VLAs lack an action–language alignment: the
+action is represented by latent tokens [11], and there is no
+action→language alignment, leaving the language model
+with no handle to talk about its actions. Second, standard
+training pipelines rarely teach models to answer counter-
+factual questions such as: “Given the plan I just proposed,
+what will happen, and how should I change it?”
+In this paper, we propose Counterfactual VLA (CF-
+VLA), a VLA equipped with a self-reflective reasoning loop
+that performs counterfactual analysis directly on its pre-
+dicted controls. As illustrated in Fig. 1 (bottom), CF-VLA
+first predicts a sequence of language-based, time-segmented
+meta-actions that summarize the agent’s intent. Instead of
+treating them as final, the model then conditions a coun-
+terfactual chain-of-thought step on both the visual context
+and its own meta-actions, asking “If I follow this plan, what
+would happen and is that desirable?” It revises unsafe or
+suboptimal plans (e.g., from “accelerate toward the inter-
+section” to “decelerate early and yield”) before committing
+to the final trajectory. This meta-actions →counterfactual
+reasoning →updated meta-actions →trajectory loop up-
+grades reasoning from one-shot description to counterfac-
+tual analysis of the model’s own behavior, and turns that
+one-shot analysis into actionable self-correction. To realize
+such behavior in practice, CF-VLA combines meta-actions
+with a rollout–filter–label pipeline: 1) the current policy is
+rolled out to generate candidate meta-actions and trajecto-
+ries; 2) high-value data points are automatically selected
+by checking if pre-filling ground-truth meta-actions sub-
+stantially improves trajectories over model-generated meta-
+actions; and 3) a teacher model is prompted to produce
+counterfactual reasoning traces that explain why the cur-
+rent plan is less preferable and how to adjust it. Training
+on a mixture of nominal and counterfactual-labeled datasets
+under a unified instruction prompt yields a single CF-VLA
+model that exhibits adaptive counterfactual reasoning: as
+shown in Fig. 1 (top), the model thinks more often and
+achieves larger task improvement in the hardest scenarios.
+We conduct extensive experiments on a large-scale in-
+ternal dataset to validate our design. CF-VLA consistently
+outperforms trajectory-only and non-reflective meta-action
+baselines on trajectory metrics by 17.6% and 9%, respec-
+tively, and increases the safety metric by 14.7%. We fur-
+ther show that performance can be improved if we apply
+the trained CF-VLA again to the rollout-filter-label pipeline
+for multi-round training. Our core contributions are:
+1) Self-reflective counterfactual reasoning for VLA. We
+propose a new reasoning-about-action paradigm to con-
+dition the reasoning of VLA on its own predicted meta-
+actions, anticipate the consequences, and revise the plan
+before generating final actions. This upgrades reasoning
+from descriptive explanations to causal self-correction.
+2) Meta-actions and counterfactual data pipeline. We use
+time-segmented meta-actions for action-language align-
+ment and propose the rollout–filter–label pipeline to au-
+tomatically curate counterfactual data from the rollout of
+the model, forming a self-improving loop that enhances
+both reasoning and action.
+3) Adaptive thinking in autonomous driving. CF-VLA
+exhibits the ability to think when necessary, concentrat-
+ing counterfactual reasoning on the most challenging sce-
+narios. Experiments show that CF-VLA improves trajec-
+tory accuracy, safety metrics, and meta-action alignment,
+while maintaining reasonable test-time compute by adapt-
+ing its think rate to the scenario difficulty.
+2. Related Works
+VLA Models for Autonomous Driving.
+Recent VLA
+models integrate language reasoning with visual context
+to generate control actions.
+Some use high-level com-
+mands [13, 22, 28], while others rely on intermediate tra-
+jectory tokens [19, 21, 24, 32]. SimLingo [21] introduces
+“action dreaming” to align language and control via of-
+fline counterfactual simulation. Alpamayo-R1 [19] incor-
+porates a structured language abstraction and trajectory dif-
+fusion to improve long-tail generalization. AutoVLA [33]
+incorporates chain-of-thought (CoT) traces, but uses them
+primarily as one-pass rationales for interpretability. These
+2
+
+`
+Trajectory
+Meta-action
+Trajectory
+Meta-action
+Trajectory
+Meta-action
+Trajectory
+Reasoning
+Updated
+Meta-action
+Vision-Language-Action
+Model (VLA)
+Counterfactual VLA
+(CF-VLA)
+Counterfactual
+Reasoning
+Dataset
+Self-reflective Inference
+Direct Inference
+Rollout-Filter-Label
+Pipeline
+Figure 2.
+The framework of CF-VLA. A base VLA is fine-
+tuned on a counterfactual reasoning dataset generated by a roll-
+out–filter–label pipeline. The resulting CF-VLA supports both di-
+rect inference and self-reflective inference, in which counterfac-
+tual reasoning edits meta-actions before trajectory generation.
+models enhance interpretability but remain largely descrip-
+tive: they describe what the model sees and intends, without
+critiquing the proposed action itself. In contrast, our CF-
+VLA explicitly conditions reasoning on the model’s own
+proposed behavior, enabling self-reflective revision through
+counterfactual analysis.
+Counterfactual Reasoning and Self-Reflection.
+Coun-
+terfactual reasoning models alternative actions and their
+consequences, but most prior work uses counterfactu-
+als externally rather than as model-internal self-reflection.
+CAST [9], SimLingo [21], and VLAPS [18] generate coun-
+terfactual instruction–action pairs or search over simulated
+futures to improve instruction following or correct policies,
+while the underlying VLA does not itself reason about or
+revise its own plan. A separate line of work introduces re-
+flective loops around the policy using auxiliary verifiers or
+planners [5, 10, 27]. Several works analyze failures and
+successes with large models to relabel data, synthesize re-
+wards, or trigger replanning [1, 8, 14, 16]. In all these cases,
+counterfactual evaluation and reflection are implemented by
+external modules wrapped around the policy. In contrast,
+CF-VLA performs counterfactual reasoning over its own
+predicted meta-actions inside the forward pass and revises
+them before trajectory generation, yielding an online self-
+correction mechanism without separate validators.
+Adaptive Reasoning.
+Adaptive reasoning dynamically
+selects between direct response and step-by-step think-
+ing [3, 7, 25, 26, 29–31]. OneTwoVLA [15] uses control
+tokens to toggle between fast acting and slow reasoning,
+invoking language reasoning mainly at subtask boundaries
+(e.g., task completion or errors), so “slow thinking” is tied
+to task switching rather than scene difficulty. In contrast,
+CF-VLA learns to invoke reasoning from visual cues and
+its own behavior, focusing on challenging scenes and skip-
+ping reasoning in normal cases. AdaThinkDrive [17] cate-
+gorizes scenarios into simple or challenging ones via rule-
+based heuristics and uses RL to fine-tune when to think.
+We instead show that adaptive reasoning can emerge from
+supervised fine-tuning alone: by identifying hard scenarios
+based on the model’s capability (Sec. 3.1) and training on a
+mixture of data, CF-VLA naturally allocates more test-time
+compute to difficult scenes (see Fig. 1).
+3. Method
+End-to-end Vision-Language-Action (VLA) models have
+demonstrated promising progress in mapping visual con-
+text directly to control output. However, their reasoning
+processes are largely descriptive: when the agent proposes
+an incorrect plan, there is no mechanism for the model it-
+self to analyze the plan and revise the decision before exe-
+cution. This section introduces Counterfactual VLA (CF-
+VLA), which equips a VLA with a self-reflective loop that
+reasons about its own predicted actions and uses that rea-
+soning to correct the plan.
+3.1. Self-Reflective Counterfactual Reasoning
+Several challenges remain to empower a VLA with counter-
+factual (CF) reasoning. First, the model needs an intermedi-
+ate representation that is both interpretable to the language
+backbone and tightly coupled to action. We address this
+with time-segmented meta-actions (Sec. 3.2), so the model
+can reason about and revise high-level intent in language
+space before decoding trajectories. Second, CF reasoning
+must relate meta-actions to their future consequences. To
+prepare data to fine-tune the model, we develop a rollout–
+filter–label pipeline (Sec. 3.3) that selects data and auto-
+generates high-value counterfactual reasoning traces. We
+consider CF reasoning as a plugged-in self-reflective mech-
+anism on top of meta-actions. As shown in Fig. 2, instead of
+mapping meta-actions to trajectories (meta→traj), CF-
+VLA performs a self-reflective loop:
+meta-actions →CF reasoning
+→updated meta-actions →trajectory.
+Adaptive Thinking. Adaptive reasoning allows a model to
+decide dynamically when to conduct reasoning and when
+to respond directly. This mechanism is essential because
+most scenarios are straightforward, and explicit reasoning
+on them increases hallucination risks and wastes test-time
+compute.
+As shown in Fig. 3(A), we use the same in-
+struction for the model and allow it to implicitly decide
+whether to generate the reasoning traces. As both meta-
+actions and reasoning operate in the language space, the CF
+reasoning behavior is controlled by the words (Action:
+or Thinking:) generated after the first meta-action se-
+quence. Training on a mixture of samples with and without
+CF traces allows the model to implicitly learn when self-
+reflective inference is necessary.
+3.2. Meta-Actions
+Meta-actions provide a language-native intermediate ab-
+straction between reasoning and low-level action.
+Each
+3
+
+VLA
+Predicted Meta-actions
+Trajectory
+Metrics
+Counterfactual
+Reasoning 
+Traces
+Rollout on
+training data
+CF Reasoning
+Call external
+VLM
+Meta
+Traj.
+Trajectory-only
+Finetune on 
+data mixture
+Filter based on
+disagreement
+(B) Data Generation Pipeline
+(A) Adaptive Reasoning
+<|im_start|>assistant 
+Meta-actions: 
+- longitudinal 
+ - 0.0s–0.9s: Keep Speed ...
+<|im_start|>assistant 
+Meta-actions: 
+- longitudinal 
+ - 0.0s–0.9s: Keep Speed ... 
+Thinking: 
+The ego vehicle is approaching a 
+crosswalk with a pedestrian 
+stepping off the curb from the 
+right side. Maintaining speed 
+would create a potential conflict, 
+violating the right-of-way rule and 
+risking pedestrian safety. I will 
+slow down in advance to yield 
+before the crosswalk. 
+Meta-actions: 
+- longitudinal 
+ - 0.0s–4.2s: Decelerate ... 
+Action: 
+<|begin_of_traj|> [trajectory 
+tokens]<|end_of_traj|>
+<|im_start|>system [shared system prompt for all 
+tasks] <|im_end|> 
+<|im_start|>user 
+[videos] [trajectory history] 
+First, list the meta-actions in the driving process. 
+Then, generate a possible future trajectory. If the 
+meta-actions sequence is unsafe or incorrect, 
+reflect on it and provide a corrected one. Use the 
+output format below. 
+Meta-actions: [meta-actions text] 
+(optional) Thinking: [CF reasoning text] 
+(optional) Meta Actions: [meta-actions text] 
+Action: [trajectory tokens]<|im_end|>
+Action: 
+<|begin_of_traj|> 
+[trajectory tokens] 
+<|end_of_traj|>
+Unified Prompt
+w/ Counterfactual Reasoning
+w/o Counterfactual Reasoning
+MinADE w/ free generation
+MinADE w/ pre-filled meta
+(C) Data Filtering
+Selected 
+Data Point
+Figure 3. (A) Adaptive Reasoning can be achieved by training models on a mixture of data with the unified instruction prompt. (B) Data
+generation process. We build a rollout–filter–label pipeline that runs the VLA, detects samples where its meta-actions are problematic, and
+labels counterfactual (CF) reasoning traces, forming a CF reasoning dataset. (C) Data filtering process. We use trajectory disagreement
+between trajectories that are free-generated and those induced by the ground-truth meta-actions to filter data. Each data point is colored by
+the meta-actions IOU in free generation.
+meta-action sequence expresses the ego vehicle’s intended
+behavior along three orthogonal dimensions: longitudinal
+(Accelerate, Decelerate, Keep Speed, Wait, Reverse), lat-
+eral (Straight, Left Turn, Right Turn), and lane-level (Keep
+Lane, Left Lane Change, Right Lane Change).
+Though playing an analogous role to the low-level com-
+mand used in manipulation VLAs [11, 23], navigation mod-
+els [6] and autonomous driving VLAs [24, 33], our meta-
+actions consider timing and are tightly coupled to the con-
+tinuous trajectories. CF-VLA models meta-actions as time-
+partitioned segments covering the 6.4-second planning
+horizon.
+Within each of the three groups, meta-actions
+are defined over non-overlapping temporal intervals and to-
+gether describe the intended evolution of driving behavior.
+This temporal format allows the model to reason composi-
+tionally about action transitions and to capture temporal in-
+tent and directly align language reasoning with the structure
+of the predicted trajectory. Example meta-action sequences
+can be found in Fig. 5.
+3.3. Rollout-Filter-Label Counterfactual Pipeline
+As illustrated in Fig. 3(B), to supervise counterfactual rea-
+soning, CF-VLA relies on a rollout–filter–label data cura-
+tion pipeline that mines high-value scenes from the model’s
+own behavior.
+Data Rollout.
+Starting from a VLA trained with meta-
+actions but without counterfactual reasoning, the model is
+rolled out on the training set. For each scene, two sets of tra-
+jectories are generated: 1) Free generation xfree: the model
+first predicts meta-actions and then decodes the trajectory
+conditioned on its own meta-actions. 2) Pre-filled meta-
+actions xpf: the model is conditioned on the ground-truth
+meta-actions and only decodes the trajectory. For robust-
+ness, 6 output trajectories are sampled per scene in each
+setting. This yields paired sets of trajectories (xfree, xpf) for
+the same visual context.
+Data Filtering.
+Let minADE(x, x⋆) denote the mini-
+mum displacement error between a set of predicted trajec-
+tories x and the expert future x⋆.
+We scatter each sce-
+nario based on (minADE(xfree, x⋆), minADE(xpf, x⋆)) in
+Fig. 3(C), where each data point is colored by the meta-
+actions accuracy (IOU) in free generation.
+The key in-
+sight is that many scenes lie below the diagonal: the model
+performs poorly in free generation but matches the expert
+trajectory when meta-actions are pre-filled and they usu-
+ally have low IOU. These are precisely the scenes where
+meta-actions are the bottleneck. CF-VLA uses trajectory
+disagreement between trajectories that are free-generated
+and those induced by ground-truth-filled meta-actions to
+filter data: minADE(xpf, x⋆) < minADE(xfree, x⋆) and
+minADE(xfree, x⋆) > ϵ, where ϵ = 0.5 avoids labels on al-
+ready mastered scenarios. Intuitively, these are cases where
+improving meta-actions would significantly improve trajec-
+tory quality. As long as we improve the meta-actions to
+be closer to the ground truth, we can harvest task improve-
+ment. Samples above the diagonal already have good free-
+generation trajectories, so counterfactual supervision brings
+limited benefit and is not needed. Sec. 4.3 shows the data
+filtering is crucial to the final performance.
+Data Labeling. For the filtered scenes, concise counter-
+factual traces are generated with a high-capacity teacher
+model (Qwen2.5-VL-72B-Instruct). The outline of
+the prompt to the teacher is presented in Fig. 3(B). The out-
+put is a single paragraph that: 1) diagnoses why the pre-
+dicted meta-actions are less preferable than the expert plan,
+and 2) indicates how they should be adjusted. These labeled
+4
+
+Trajectory-only  
+Meta-action-labeled  
+Counterfactual
+Reasoning 
+ 
+ 
+Validation
+ 
+Figure 4. The dataset composition. We use a subset of the meta-
+action-labeled dataset Dmeta as the validation set Dval.
+samples form the counterfactual reasoning dataset DCF. The
+full teacher prompt is provided in the Appendix.
+3.4. Implementation Details
+Mixed-data Training.
+We adopt a mixed-data training
+scheme combining the trajectory-only dataset Dtraj, the
+meta-action–labeled dataset Dmeta, and the counterfactual
+reasoning dataset DCF as shown in Fig. 4. Training proceeds
+in stages. The base VLM is first trained on Dtraj to learn ba-
+sic trajectory generation (traj-only). Meta-actions are
+then introduced by fine-tuning on Dtraj ∪Dmeta, yielding the
+meta-act model used in the initial rollout (Sec. 3.3). Fi-
+nally, the full CF-VLA is obtained by further fine-tuning on
+the mixture Dtraj ∪Dmeta ∪DCF. We unfreeze all parameters
+during training.
+Loss Masking and Weighting. The model is optimized
+with cross-entropy loss over assistant-generated tokens
+only; tokens from system or user prompts are masked. For
+counterfactual samples in DCF, the loss on the first (un-
+corrected) meta-action block is also masked to prevent the
+model from learning from prior mistakes. Within the assis-
+tant response, different token groups (meta-actions, reason-
+ing, or trajectory tokens) have different loss weights.
+Multi-round training.
+An appealing property of CF-
+VLA is that the trained model can be inserted back into
+the rollout–filter–label loop to create new rounds of CF
+data DRound2
+CF
+.
+Unlike traditional CoT methods that gen-
+erate mostly deterministic explanations for a given scene,
+CF-VLA’s reasoning is conditioned on the predicted meta-
+actions and can therefore produce diverse reasoning traces
+for the same scenario. This allows us to further exploit the
+dataset and generate different reasoning traces with differ-
+ent meta-actions. As shown in Sec. 4.2, fine-tuning on an-
+other round of CF datasets further improves the model, re-
+alizing a self-improving counterfactual flywheel.
+Model Architecture. CF-VLA is similar in size and de-
+sign to Alpamayo-R1 [19]. The model takes text prompts,
+two front-facing videos, and the ego-trajectory history as
+inputs. The text prompt defines the tasks: 1) pure trajec-
+tory prediction, or 2) meta-actions and trajectory prediction
+with optional counterfactual reasoning. A wide (120°) and
+a telephoto (30°) cameras provide 2 videos at 2 Hz over the
+past 2 s. The past 1.6 s of ego motion is embedded into a
+single trajectory-history token by an MLP-based trajectory
+history encoder. Future motion is represented by a compact
+set of discrete trajectory tokens. We expand the vocabulary
+of the VLM backbone to accommodate the new tokens in-
+troduced by the trajectory tokenizer, as well as additional
+<begin of traj> and <end of traj> tokens.
+4. Experiments
+4.1. Experimental Setup
+Datasets. We train and evaluate models on a large propri-
+etary dataset consisting of 80,000 hours of human driving
+data from 25 countries, covering a variety of scenarios in-
+cluding highway and urban driving, weather conditions, and
+daytime and nighttime. The entire data corpus forms the
+trajectory-only dataset Dtraj, which contains raw sensor data
+paired with ego-vehicle future trajectories.
+Within Dtraj,
+we auto-labeled 3,000 hours of data and constructed the
+meta-action-labeled subset Dmeta. Meta-action annotations
+are automatically extracted from expert trajectories through
+rule-based detectors operating on kinematic profiles. We la-
+bel meta-actions at 10Hz over the balanced dataset curated
+based on Operational Design Domains (ODDs). We split
+Dmeta into training and validation subsets, with the valida-
+tion subset denoted as Dval. All of our results are reported
+on this evaluation set. The counterfactual reasoning dataset
+DCF comes from the training set of Dmeta. In summary,
+the base trajectory-only set Dtraj contains about 11.6M 20-
+second video clips and provides large-scale behavioral di-
+versity. For Dmeta, multiple samples are used for one video
+clip. The training set of Dmeta includes 433K 20s clips and
+801K 8.4s samples. There are 39K video clips and 73K
+samples in the validation set. The counterfactual reasoning
+dataset DCF usually contains 200K samples.
+Metrics. We evaluate models along three dimensions:
+1) Trajectory Accuracy: We report MinADE/AvgADE and
+MinFDE/AvgFDE as mean/endpoint displacement errors
+over 6 predicted modes (lower is better), and Corner Dis-
+tance as the average deviation of vehicle-corner keypoints
+for measuring turning and lane-keeping precision.
+2) Safety Characteristics: Collision Rate measures the
+proportion of predicted trajectories that collide with other
+road users’ trajectories within 5s, while Out-of-road Rate
+quantifies whether the predicted trajectories violate the road
+boundary. These complement distance-based metrics by re-
+vealing whether small deviations lead to unsafe outcomes.
+3) Reasoning Quality: Meta-Action IOU measures the
+alignment between predicted and ground-truth meta-actions
+over 64 × 3 bins (longitudinal, lateral, and lane). For CF-
+VLA, we report IOU after self-reflection, i.e., for the up-
+dated meta-actions. We also record Output Length (# to-
+kens) and Think Rate, the fraction of responses containing
+counterfactual reasoning, to quantify the test-time compute
+and adaptive reasoning.
+5
+
+Table 1. Evaluation results. CF-VLA improves trajectory accuracy (ADE, FDE), behavioral safety (Corner Distance, Collision, Off-road),
+and reasoning quality (IOU). ↓lower is better, ↑higher is better.
+Model
+ADE↓
+Min (Avg)
+FDE↓
+Min (Avg)
+Corner
+Dist.↓
+Collision↓
+Off-road↓
+IOU↑
+init→edited
+Output Len.
+(Think Rate)
+traj-only
+0.9283 (1.8284)
+2.5912 (5.1150)
+0.8563
+0.0244
+0.0720
+–
+10.00 (–)
+lang-meta-act
+0.8021 (1.5607)
+2.2540 (4.4967)
+0.7358
+0.0206
+0.0617
+0.9183
+144.28 (1.00)
+meta-act (w/o route)
+0.8411 (1.6216)
+2.3647 (4.6616)
+0.7720
+0.0224
+0.0625
+0.9169
+85.32 (–)
+CF-VLA (w/o r., round1)
+0.7650 (1.5606)
+2.1416 (4.3307)
+0.6975
+0.0191
+0.0601
+0.9153→0.9212
+113.36 (0.148)
+CF-VLA (w/o r., round2)
+0.7647 (1.5032)
+2.1365 (4.1927)
+0.6996
+0.0194
+0.0583
+0.9174→0.9228
+102.12 (0.083)
+meta-act (w/ route)
+0.7263 (1.4612)
+1.9561 (3.9269)
+0.6600
+0.0196
+0.0619
+0.9236
+87.20 (–)
+CF-VLA (w/ r., round1)
+0.6712 (1.4574)
+1.7988 (3.9466)
+0.6010
+0.0177
+0.0593
+0.9207→0.9231
+125.67 (0.219)
+CF-VLA (w/ r., round2)
+0.6813 (1.3898)
+1.8291 (3.7474)
+0.6168
+0.0174
+0.0585
+0.9238→0.9276
+109.36 (0.123)
+Baselines. All models are initialized from traj-only for
+fair comparison. We prepare two variants of the models to
+train with or without route information, which contain 20
+waypoints spanning the future 80m with equal spacing.
+• traj-only: trained purely on Dtraj without any meta-
+action or reasoning signals, serving as the standard end-
+to-end Vision-Action model. No route is used.
+• meta-act: introduces meta-action sequence as inter-
+mediate control primitives before trajectory generation.
+• lang-meta-act: jointly predicts language reasoning,
+meta-actions, and trajectory.
+• CF-VLA: our fine-tuned models from meta-act and
+can perform counterfactual reasoning. The second round
+training of CF-VLA uses data from calling the data
+pipeline in Sec. 3.1 on the first round CF-VLA.
+4.2. Main Experiments
+We evaluate whether counterfactual reasoning improves tra-
+jectory accuracy, safety characteristics, and reasoning qual-
+ity. Quantitative results are reported in Table 1.
+Impact of meta-actions and language.
+Starting from
+traj-only, introducing meta-actions (meta-act w/o
+route) reduces trajectory error by about 9% in minADE and
+minFDE, showing that structured action abstraction pro-
+vides stronger motion priors than direct trajectory gener-
+ation. Adding language supervision (lang-meta-act)
+yields a further ∼5% improvement over meta-act, which
+indicates that language helps align motion intent with scene
+semantics. With route information, meta-act (w/ route)
+provides an even stronger baseline.
+Impact of counterfactual reasoning. Compared to their
+non-reasoning counterparts, CF-VLA variants consistently
+improve both trajectory error and meta-action alignment.
+Without route, CF-VLA (round2) achieves around 9-10%
+lower minADE / minFDE than meta-act while also
+increasing meta-action IOU by roughly 0.5–1.0 absolute
+points after counterfactual editing. With route, CF-VLA
+(round1) similarly improves over meta-act across trajec-
+tory, safety, and IOU, confirming that self-reflective reason-
+ing leads to more expert-like meta-actions and trajectories.
+Behavioral safety. Gains from CF-VLA are not only geo-
+metric but also safety-critical. Relative to traj-only, the
+best CF models reduce collision rate by roughly 25–30%
+and off-road violations by about 15–20%, while also low-
+ering corner distance by ∼30%. Within each setting (with
+/ without route), CF-VLA variants consistently achieve the
+lowest or near-lowest collision and off-road rates, indicating
+that counterfactual self-reflection translates into smoother,
+more stable, and more rule-consistent driving behavior.
+Impact of multi-round counterfactual training.
+Ap-
+plying the data pipeline in Sec. 3.3 a second time yields
+additional gains while making reasoning more efficient.
+CF-VLA (w/o route, round2) outperforms CF-VLA (w/o
+route, round1) in AvgADE/FDE, off-road rate, and edited
+IOU, while using a lower think rate. With route informa-
+tion, CF-VLA (w/ route, round2, 3 ds) slightly trades min-
+imum error for better average ADE/FDE and higher IOU,
+and further improves collision and off-road rates compared
+to CF-VLA (w/ route, round1). Importantly, the second-
+round models trained on 3 datasets reduce the think rate by
+almost half and shorten the average output length.
+This
+shows that a second CF round can simultaneously refine
+performance and substantially reduce test-time overhead,
+extracting more value from the same driving data.
+Adaptive thinking and compute. Reasoning inevitably in-
+creases sequence length compared to non-reasoning mod-
+els, but CF-VLA uses test-time compute much more
+efficiently than models that always think.
+Compared
+with lang-meta-act, which reasons for every sample,
+CF-VLA (w/ route, round1) already achieves better per-
+formance with a think rate below 0.25. After the second
+CF training round, CF-VLA (w/ route, round2, 3 datasets)
+further reduces the think rate by roughly 40–45% while
+maintaining or improving average errors and IOU. A sim-
+ilar pattern appears in the no-route setting, indicating that
+the model learns adaptive reasoning.
+Another illustra-
+tion is Fig. 1. It shows the model thinks more frequently
+when the scenario is harder.
+The top plot shows that
+6
+
+Table 2. Ablations on meta–trajectory alignment and adaptive counterfactual reasoning. We train models without route information.
+Model
+MinADE↓
+AvgADE↓
+MinFDE↓
+AvgFDE↓
+MinIOU↑
+(init →edited)
+Corner
+Dist.↓
+Output
+Length
+Think
+Rate
+meta-act (baseline)
+0.8411
+1.6216
+2.3647
+4.6616
+0.9169
+0.7720
+85.32
+-
+meta-act (pre-filled)
+0.4831
+0.9968
+1.2412
+2.5667
+1.0
+0.4399
+8.00
+-
+CF-VLA (adaptive)
+0.7650
+1.5606
+2.1416
+4.3307
+0.9153→0.9212
+0.6975
+113.36
+0.1478
+CF-VLA (force no think)
+0.7897
+1.4890
+2.2178
+4.1508
+0.9133
+0.7274
+87.43
+0.0
+CF-VLA (force think)
+0.9319
+2.1144
+2.8822
+6.3699
+0.9132→0.8565
+0.8271
+257.42
+1.0
+explicit (meta→act)
+0.7968
+1.4686
+2.2426
+4.0922
+0.9127
+0.7363
+87.99
+-
+explicit (CF reasoning)
+0.9331
+2.0628
+2.8647
+6.1872
+0.8902→0.8551
+0.8339
+258.06
+0.9971
+meta-act (multi-round)
+0.7906
+1.504
+2.216
+4.1995
+0.9128
+0.7275
+88.3093
+-
+Table 3. Effect of our proposed data filtering pipeline. Models are fine-tuned with route information from meta-act (w/ route).
+Model
+MinADE↓
+AvgADE↓
+MinFDE↓
+AvgFDE↓
+MinIOU↑
+(init →edited)
+Corner
+Dist.↓
+Output
+Length
+Think
+Rate
+CF-VLA (filtered ds)
+0.6712
+1.4574
+1.7988
+3.9466
+0.9207→0.9231
+0.6010
+125.67
+0.2190
+CF-VLA (whole ds)
+0.6811
+1.4185
+1.8296
+3.8344
+0.9207→0.9231
+0.6128
+191.14
+0.6677
+the think rate correlates strongly with the trajectory error
+(minADE). Simple scenarios like vehicle following rarely
+trigger counterfactual reasoning, while high-uncertainty or
+high-risk scenarios, such as lane changes, turning maneu-
+vers, and VRUs, induce significantly more CF reasoning.
+CF-VLA achieves better error reduction when the scenarios
+are harder, suggesting that CF-VLA not only reasons adap-
+tively but learns when reasoning is most beneficial.
+Key Takeaways
+1) Self-reflection
+via
+counterfactual
+reasoning
+in
+CF-VLA consistently improves both the precision
+and reliability of driving planners, delivering the
+largest gains in accuracy, safety, and IOU beyond
+single-shot reasoning models.
+2) Multi-round CF training squeezes more value from
+the same data, improves performance while substan-
+tially reducing think rate, achieving the best accu-
+racy–safety–compute trade-off.
+3) The results establish a clear performance ladder:
+traj-only < meta-traj
+< lang-meta-traj < CF-VLA.
+4) CF-VLA learns adaptive reasoning: it saves compu-
+tation on easy scenes and “thinks harder” in challeng-
+ing scenarios, where counterfactual reasoning yields
+the largest error reductions.
+4.3. Ablation Studies
+Effect of meta-actions.
+Table 1 has shown that adding
+meta-actions already improves over traj-only.
+Here
+we focus on how well the meta-trajectory alignment is
+by comparing meta-act (baseline) and meta-act (pre-
+filled) in Table 2. Pre-filling the meta-actions with ground
+truth nearly halves the trajectory error and substantially re-
+duces corner distance. This indicates that, once the meta-
+actions are correct, the model already has a strong meta-
+actions→trajectory alignment, and most remaining error
+comes from imperfect meta-action prediction rather than the
+trajectory decoding. This observation motivates conducting
+counterfactual reasoning directly on meta-actions.
+Effect of adaptive thinking. We study whether the adap-
+tive reasoning control learned by the model improves rea-
+soning quality and action accuracy. We compare four vari-
+ants: (1) CF-VLA (force no think), where reasoning is dis-
+abled by forcing the model to emit “Action:” after meta-
+actions; (2) CF-VLA (force think), where “Thinking:” is
+appended after meta-actions; (3) explicit models that
+perform reasoning and action as two separate tasks un-
+der different user prompts; and (4) the proposed CF-VLA
+(adaptive), which autonomously decides whether to self-
+reflect. Results in Table 2 show that always thinking in-
+creases computational cost and even degrades trajectory
+accuracy, while never thinking underperforms on difficult
+scenes. The adaptive variant attains the best trade-off: low-
+est minADE among non-pre-filled models, higher edited
+IOU, and a moderate think rate, supporting that reasoning
+should be used selectively rather than uniformly, consistent
+with prior work on adaptive thinking [15].
+Data filtering pipeline. We compare two CF-VLA mod-
+els that differ only in this selection step.
+In the Whole
+Dataset variant, reasoning traces are generated for all meta-
+action–labeled samples. In the Filtered Data variant, CF
+traces are generated only for the subset that satisfies the
+trajectory-disagreement criterion (Sec. 3.3). The Filtered
+Data model achieves better minADE and minFDE and a
+lower corner distance, despite emitting much shorter re-
+7
+
+Meta Actions: 
+- longitudinal 
+ - 0.0s-0.1s: Accelerate 
+ - 0.1s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest constant 
+speed after a brief acceleration, which may not 
+account for the pedestrian crossing ahead. 
+Decelerating around 2.8s is necessary to safely 
+navigate while the pedestrian crossing, as 
+indicated by the pedestrian's position and the 
+road's proximity. Adjusting the longitudinal 
+actions to include deceleration and a wait period 
+would better align with the observed scene and 
+ensure safety.
+Meta Actions: 
+- longitudinal 
+ - 0.0s-2.8s: Keep Speed 
+ - 2.8s-6.4s: Accelerate 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-1.7s: Left Lane Change 
+ - 1.7s-6.4s: Keep Lane
+Meta Actions: 
+- longitudinal 
+ - 0.0s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest maintaining 
+speed and lane, but the construction barriers 
+and the van ahead indicate a need for 
+acceleration and lane change. Keeping speed 
+may lead to congestion. Accelerating after 2.8s 
+and changing lanes left early could improve flow 
+and safety, aligning with the visible road 
+conditions and vehicle positions. Adjusting the 
+lane action to include a left change would be 
+more appropriate.
+(A) Merging
+Meta Actions: 
+- longitudinal 
+ - 0.0s-0.8s: Accelerate 
+ - 0.8s-4.8s: Keep Speed 
+ - 4.8s-6.4s: Accelerate 
+- lateral 
+ - 0.0s-5.6s: Straight 
+ - 5.6s-6.4s: Right Turn 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest a late right 
+turn, which may cause hesitation at the 
+intersection. The stop sign and crossing vehicles 
+indicate a need for early acceleration and lane 
+change. Adjusting the right turn earlier and 
+incorporating a lane change can improve traffic 
+flow and safety, aligning with the observed traffic 
+conditions and road layout.
+(B) Turning Maneuver
+Meta Actions: 
+- longitudinal 
+ - 0.0s-0.5s: Accelerate 
+ - 0.5s-2.8s: Keep Speed 
+ - 2.8s-6.4s: Accelerate 
+- lateral 
+ - 0.0s-4.2s: Straight 
+ - 4.2s-6.1s: Right Turn 
+ - 6.1s-6.4s: Straight 
+- lane 
+ - 0.0s-3.8s: Keep Lane 
+ - 3.8s-6.4s: Right Lane Change
+Meta Actions: 
+- longitudinal 
+ - 0.0s-0.3s: Accelerate 
+ - 0.3s-2.8s: Keep Speed 
+ - 2.8s-3.5s: Decelerate 
+ - 3.5s-4.4s: Keep Speed 
+ - 4.4s-6.4s: Wait 
+- lateral 
+ - 0.0s-4.4s: Straight 
+- lane 
+ - 0.0s-4.4s: Keep Lane
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+(C) Vulnerable Road Users
+60
+y=0
+20
+x=-20
+0
+40
+20
+Figure 5. Qualitative results of CF-VLA. For three representative and safety-critical scenarios, each row shows the model’s initial meta-
+actions (left), the reasoning trace (middle), and the updated meta-actions (right) together with the resulting trajectory. The counterfactual
+reasoning step identifies issues (missing lane changes, late turns, and failure to slow for pedestrians) and edits the meta-actions accordingly.
+sponses and a lower think rate.
+These results indicate
+that counterfactual supervision must be targeted: simply
+adding more CF labels and forcing the model to “think”
+on every scene introduces redundant or noisy reasoning
+signals, diluting the impact of informative counterfactual
+examples and ultimately harming the performance.
+The
+rollout–filter–label stage is therefore not merely a data-
+efficiency optimization, but a crucial component for extract-
+ing reliable self-reflection signals.
+Multi-round training. We additionally train a model on the
+counterfactual filtered dataset, namely using (Dtraj∪Dmeta∪
+DCF). This model, meta-act (multi-round), is trained to
+predict only meta-actions and we discard the CF reasoning
+traces. The resulting meta-act (multi-round) in Table 2
+shows that simply repeating high-value samples based on
+trajectory disagreement already yields a modest improve-
+ment over the single-round meta-act baseline. However,
+CF-VLA brings larger gains in trajectory error and IOU, in-
+dicating that learning to edit meta-actions is more effective
+than only reusing them as fixed labels.
+4.4. Qualitative Results
+Fig. 5 visualizes the counterfactual self-reflection loop of
+CF-VLA in three representative scenarios. CF-VLA con-
+sistently identifies when its initial intent is misaligned with
+the scene and corrects it before trajectory generation. In
+(A) Merging, the initial plan maintains speed and lane de-
+spite construction barriers and a slow van ahead, trapping
+the ego vehicle.
+The model opts for an early left lane
+change with acceleration to avoid congestion. In (B) Turn-
+ing Maneuver, the model identifies the stop sign and cross-
+ing traffic and corrects a late right turn that causes hesita-
+tion at the intersection, yielding a more decisive and effi-
+cient maneuver. In (C) Vulnerable Road Users, the model
+notices a crossing pedestrian from the telephoto view and
+edits the dangerous actions to slow down and wait. These
+cases show that CF-VLA’s self-reflection produces targeted,
+scene-grounded corrections that improve safety, traffic effi-
+ciency, and semantic consistency.
+5. Conclusion
+We introduced Counterfactual VLA (CF-VLA), a self-
+reflective VLA framework that critiques and corrects its
+own actions before execution. A rollout–filter–label coun-
+terfactual pipeline allows CF-VLA to mine its own failure
+cases and improve over multiple training rounds. Experi-
+ments on large-scale driving datasets show consistent gains
+in trajectory accuracy, safety, and reasoning quality, demon-
+strating up to 17.6% lower trajectory error and 20.5% lower
+collisions than non-reasoning baselines. The model demon-
+strates adaptive thinking: it reasons more in difficult, high-
+risk scenarios. CF-VLA thus demonstrates that counterfac-
+tual self-reflection can effectively bridge reasoning and con-
+trol, offering a general paradigm for autonomous driving
+systems that learn to think before they act.
+8
+
+References
+[1] Abbas Abdolmaleki, Saminda Abeyruwan, Joshua Ainslie,
+Jean-Baptiste Alayrac, Montserrat Gonzalez Arenas, Ash-
+win Balakrishna, Nathan Batchelor, Alex Bewley, Jeff Bing-
+ham, Michael Bloesch, et al. Gemini robotics 1.5: Push-
+ing the frontier of generalist robots with advanced embod-
+ied reasoning, thinking, and motion transfer. arXiv preprint
+arXiv:2510.03342, 2025. 3
+[2] Johan Bjorck, Fernando Casta˜neda, Nikita Cherniadev,
+Xingye Da, Runyu Ding, Linxi Fan, Yu Fang, Dieter Fox,
+Fengyuan Hu, Spencer Huang, et al. Gr00t n1: An open
+foundation model for generalist humanoid robots.
+arXiv
+preprint arXiv:2503.14734, 2025. 1
+[3] Sijia Chen and Baochun Li. Toward adaptive reasoning in
+large language models with thought rollback. arXiv preprint
+arXiv:2412.19707, 2024. 3
+[4] Xinyi Chen, Yilun Chen, Yanwei Fu, Ning Gao, Jiaya Jia,
+Weiyang Jin, Hao Li, Yao Mu, Jiangmiao Pang, Yu Qiao,
+et al.
+Internvla-m1: A spatially guided vision-language-
+action framework for generalist robot policy. arXiv preprint
+arXiv:2510.13778, 2025. 1
+[5] Yuxin Chen,
+Jianglan Wei,
+Chenfeng Xu,
+Boyi Li,
+Masayoshi Tomizuka,
+Andrea Bajcsy,
+and Ran Tian.
+Reimagination with test-time observation interventions:
+Distractor-robust world model predictions for visual model
+predictive control. arXiv preprint arXiv:2506.16565, 2025.
+2, 3
+[6] An-Chieh Cheng, Yandong Ji, Zhaojing Yang, Xueyan Zou,
+Jan Kautz, Erdem Biyik, Hongxu Yin, Sifei Liu, and Xiao-
+long Wang.
+Navila: Legged robot vision-language-action
+model for navigation. In RSS, 2025. 4
+[7] Stephen Chung, Wenyu Du, and Jie Fu. Thinker: Learning to
+think fast and slow. arXiv preprint arXiv:2505.21097, 2025.
+3
+[8] Seyed
+Kamyar
+Seyed
+Ghasemipour,
+Ayzaan
+Wahid,
+Jonathan Tompson, Pannag Sanketi, and Igor Mordatch.
+Self-improving embodied foundation models. arXiv preprint
+arXiv:2509.15155, 2025. 3
+[9] Catherine Glossop, William Chen, Arjun Bhorkar, Dhruv
+Shah, and Sergey Levine. Cast: Counterfactual labels im-
+prove instruction following in vision-language-action mod-
+els. arXiv preprint arXiv:2508.13446, 2025. 3
+[10] Chi-Pin Huang, Yueh-Hua Wu, Min-Hung Chen, Yu-
+Chiang Frank Wang, and Fu-En Yang. Thinkact: Vision-
+language-action reasoning via reinforced visual latent plan-
+ning. arXiv preprint arXiv:2507.16815, 2025. 2, 3
+[11] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, et al. π0.5: a
+vision-language-action model with open-world generaliza-
+tion. arXiv preprint arXiv:2504.16054, 2025. 2, 4
+[12] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, et al.
+π0. 5:
+a vision-language-action model with open-world generaliza-
+tion, 2025. URL https://arxiv. org/abs/2504.16054, 2025. 1
+[13] Bo Jiang, Shaoyu Chen, Qian Zhang, Wenyu Liu, and Xing-
+gang Wang. Alphadrive: Unleashing the power of vlms in
+autonomous driving via reinforcement learning and reason-
+ing. arXiv preprint arXiv:2503.07608, 2025. 2
+[14] Baicheng Li, Dong Wu, Zike Yan, Xinchen Liu, Zecui
+Zeng, Lusong Li, and Hongbin Zha.
+Reflection-based
+task adaptation for self-improving vla.
+arXiv preprint
+arXiv:2510.12710, 2025. 3
+[15] Fanqi Lin, Ruiqian Nai, Yingdong Hu, Jiacheng You, Jun-
+ming Zhao, and Yang Gao. Onetwovla: A unified vision-
+language-action model with adaptive reasoning.
+arXiv
+preprint arXiv:2505.11917, 2025. 3, 7
+[16] Zeyi Liu, Arpit Bahety, and Shuran Song. Reflect: Summa-
+rizing robot experiences for failure explanation and correc-
+tion. arXiv preprint arXiv:2306.15724, 2023. 3
+[17] Yuechen Luo, Fang Li, Shaoqing Xu, Zhiyi Lai, Lei Yang,
+Qimao Chen, Ziang Luo, Zixun Xie, Shengyin Jiang, Ji-
+axin Liu, et al. Adathinkdrive: Adaptive thinking via rein-
+forcement learning for autonomous driving. arXiv preprint
+arXiv:2509.13769, 2025. 1, 3
+[18] Cyrus Neary, Omar G Younis, Artur Kuramshin, Ozgur
+Aslan, and Glen Berseth.
+Improving pre-trained vision-
+language-action policies with model-based search.
+arXiv
+preprint arXiv:2508.12211, 2025. 3
+[19] NVIDIA, Yan Wang, Wenjie Luo, Junjie Bai, Yulong Cao,
+Tong Che, Ke Chen, Yuxiao Chen, Jenna Diamond, Yi-
+fan Ding, Wenhao Ding, Liang Feng, Greg Heinrich, Jack
+Huang, Peter Karkus, Boyi Li, Pinyi Li, Tsung-Yi Lin, Don-
+gran Liu, Ming-Yu Liu, Langechuan Liu, Zhijian Liu, Ja-
+son Lu, Yunxiang Mao, Pavlo Molchanov, Lindsey Pavao,
+Zhenghao Peng, Mike Ranzinger, Ed Schmerling, Shida
+Shen, Yunfei Shi, Sarah Tariq, Ran Tian, Tilman Wekel,
+Xinshuo Weng, Tianjun Xiao, Eric Yang, Xiaodong Yang,
+Yurong You, Xiaohui Zeng, Wenyuan Zhang, Boris Ivanovic,
+and Marco Pavone. Alpamayo-R1: Bridging reasoning and
+action prediction for generalizable autonomous driving in the
+long tail, 2025. 1, 2, 5
+[20] Han Qi, Haocheng Yin, Aris Zhu, Yilun Du, and Heng Yang.
+Strengthening generative robot policies through predictive
+world modeling. arXiv preprint arXiv:2502.00622, 2025. 2
+[21] Katrin Renz, Long Chen, Elahe Arani, and Oleg Sinavski.
+Simlingo: Vision-only closed-loop autonomous driving with
+language-action alignment. In Conference on Computer Vi-
+sion and Pattern Recognition (CVPR), 2025. 1, 2, 3
+[22] Hao Shao, Yuxuan Hu, Letian Wang, Guanglu Song,
+Steven L Waslander, Yu Liu, and Hongsheng Li. Lmdrive:
+Closed-loop end-to-end driving with large language models.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 15120–15130, 2024.
+2
+[23] Gemini Robotics Team,
+Saminda Abeyruwan,
+Joshua
+Ainslie, Jean-Baptiste Alayrac, Montserrat Gonzalez Are-
+nas, Travis Armstrong, Ashwin Balakrishna, Robert Baruch,
+Maria Bauza, Michiel Blokzijl, et al.
+Gemini robotics:
+Bringing ai into the physical world.
+arXiv preprint
+arXiv:2503.20020, 2025. 1, 2, 4
+[24] Xiaoyu Tian, Junru Gu, Bailin Li, Yicheng Liu, Yang Wang,
+Zhiyong Zhao, Kun Zhan, Peng Jia, XianPeng Lang, and
+9
+
+Hang Zhao.
+Drivevlm: The convergence of autonomous
+driving and large vision-language models. In Conference on
+Robot Learning, pages 4698–4726. PMLR, 2025. 2, 4
+[25] Xiangqi Wang, Yue Huang, Yanbo Wang, Xiaonan Luo, Ke-
+han Guo, Yujun Zhou, and Xiangliang Zhang. Adareasoner:
+Adaptive reasoning enables more flexible thinking.
+arXiv
+preprint arXiv:2505.17312, 2025. 3
+[26] Siye Wu, Jian Xie, Yikai Zhang, Aili Chen, Kai Zhang, Yu
+Su, and Yanghua Xiao. Arm: Adaptive reasoning model.
+arXiv preprint arXiv:2505.20258, 2025. 3
+[27] Yilin Wu, Ran Tian, Gokul Swamy, and Andrea Bajcsy.
+From foresight to forethought: Vlm-in-the-loop policy steer-
+ing via latent alignment. arXiv preprint arXiv:2502.01828,
+2025. 2, 3
+[28] Zhenhua Xu, Yujia Zhang, Enze Xie, Zhen Zhao, Yong Guo,
+Kwan-Yee K Wong, Zhenguo Li, and Hengshuang Zhao.
+Drivegpt4: Interpretable end-to-end autonomous driving via
+large language model. IEEE Robotics and Automation Let-
+ters, 2024. 2
+[29] Zishun Yu, Tengyu Xu, Di Jin, Karthik Abinav Sankarara-
+man, Yun He, Wenxuan Zhou, Zhouhao Zeng, Eryk He-
+lenowski, Chen Zhu, Sinong Wang, et al. Think smarter not
+harder: Adaptive reasoning with inference aware optimiza-
+tion. arXiv preprint arXiv:2501.17974, 2025. 3
+[30] Zizheng Zhan, Ken Deng, Huaixi Tang, Wen Xiang, Kun
+Wu, Weihao Li, Wenqiang Zhu, Jingxuan Xu, Lecheng
+Huang, Zongxian Feng, et al. Kat-v1: Kwai-autothink tech-
+nical report. arXiv preprint arXiv:2507.08297, 2025.
+[31] Jiajie Zhang, Nianyi Lin, Lei Hou, Ling Feng, and Juanzi
+Li. Adaptthink: Reasoning models can learn when to think.
+arXiv preprint arXiv:2505.13417, 2025. 3
+[32] Xingcheng Zhou, Xuyuan Han, Feng Yang, Yunpu Ma, and
+Alois C Knoll.
+OpenDriveVLA: Towards end-to-end au-
+tonomous driving with large vision language action model.
+arXiv preprint arXiv:2503.23463, 2025. 2
+[33] Zewei Zhou, Tianhui Cai, Seth Z Zhao, Yun Zhang, Zhiyu
+Huang, Bolei Zhou, and Jiaqi Ma.
+Autovla: A vision-
+language-action model for end-to-end autonomous driving
+with adaptive reasoning and reinforcement fine-tuning. arXiv
+preprint arXiv:2506.13757, 2025. 2, 4
+10
+
+Counterfactual VLA: Self-Reflective Vision-Language-Action Model
+with Adaptive Reasoning
+Supplementary Material
+This supplementary material is organized as follows.
+• Sec. 6 presents additional ablation studies on dataset mix-
+ture, token-level loss weighting, and the effect of decod-
+ing temperature on adaptive counterfactual reasoning.
+• Sec. 7 details the optimization setup, batching strategy,
+loss weighting, and sequence configuration used for all
+CF-VLA variants.
+• Sec. 8 presents the full instruction prompts given to the
+VLA model during training and inference and to the VLM
+expert labeller for generating counterfactual reasoning
+traces.
+• Sec. 9 provides extended qualitative visualizations, in-
+cluding both representative success cases and failure
+modes of CF-VLA’s counterfactual reasoning.
+6. Additional Ablation Studies
+Importance of counterfactual data filtering.
+The coun-
+terfactual pipeline deliberately applies CF supervision only
+to scenes where trajectory quality is bottlenecked by
+meta-actions, identified by the disagreement between free-
+generation and pre-filled meta-action rollouts. A straight-
+forward question is what if we train the model to generate
+counterfactual reasoning for all data? Fig. 6 compares
+two CF-VLA models that differ only in this selection step,
+and Tab. 4 reports their final metrics. In the Whole Dataset
+variant, counterfactual reasoning traces are generated for
+all meta-action–labeled samples and used as CF data. In
+the Filtered Data variant, CF traces are generated only for
+the subset that satisfies the trajectory-disagreement criterion
+(Sec. 3.3), i.e., cases where improved meta-actions are ex-
+pected to yield significant trajectory gains. Despite using
+strictly more labeled CF data, the Whole Dataset model
+converges more slowly and plateaus at a higher validation
+minADE. The filtered model attains lower error across al-
+most the entire training horizon and achieves the best final
+minADE.
+When counterfactual reasoning traces are generated only
+on the filtered subset, the model achieves better minADE
+and minFDE and a lower corner distance, despite emit-
+ting much shorter responses and a lower think rate (aver-
+age length 125.7 vs. 191.1 tokens; think rate 0.22 vs. 0.67).
+Generating CF traces on the entire dataset leads to substan-
+tially more and longer “Thinking:” segments but does not
+improve, and in fact slightly degrades, key planning met-
+rics. These results indicate that counterfactual supervision
+must be targeted: simply adding more CF labels and forcing
+the model to “think” on every scene introduces redundant or
+noisy reasoning signals, diluting the impact of informative
+counterfactual examples and ultimately harming the perfor-
+mance. The rollout–filter–label stage is therefore not merely
+a data-efficiency optimization, but a crucial component for
+extracting reliable self-reflection signals.
+0
+20K
+40K
+60K
+80K
+100K
+Training Step
+0.66
+0.68
+0.70
+0.72
+0.74
+Validation minADE
+Whole Dataset
+Filtered Data
+Figure 6.
+Effect of counterfactual data filtering.
+Valida-
+tion minADE of CF-VLA on Dval when counterfactual (CF)
+labels are generated on the entire meta-action dataset (Whole
+Dataset) versus only on the high-value subset selected by the roll-
+out–filter–label pipeline (Filtered Data). Training on CF labels
+for all scenes slows convergence and converges to a noticeably
+worse validation error, while restricting CF supervision to the fil-
+tered subset yields lower minADE throughout training and a better
+final model.
+The impact of data mixture.
+As shown in Fig. 7(B), re-
+moving the large trajectory-only dataset Dtraj and training
+only on meta-action and CF data (blue curve, D×1
+meta ∪D×1
+CF )
+causes the model to overfit rapidly and generalize poorly.
+Even when Dtraj is included, aggressively repeating the
+smaller meta-action or CF datasets (e.g. D×1
+traj ∪D×2
+meta∪D×10
+CF ,
+D×1
+traj ∪D×10
+meta ∪D×10
+CF , and D×1
+traj ∪D×10
+meta ∪D×100
+CF
+) eventually
+hurts validation minADE: the model degrades as duplicated
+meta-actions / CF traces dominate the training distribution.
+The best configuration is the natural mixture of each dataset
+(green, D×1
+traj ∪D×1
+meta ∪D×1
+CF ), where the data is sampled
+from the concatenated pool of all samples. This yields both
+the lowest validation error and the most stable convergence.
+These results indicate that the large, diverse base trajectory
+dataset Dtraj is essential for grounding the planner in realis-
+tic driving statistics, while a moderate amount of meta-ac-
+tion and counterfactual data is sufficient to teach the model
+how to verbalize and revise its plans; oversampling these
+1
+
+Table 4. Effect of our proposed data filtering pipeline. We use models with route information and train them with the counterfactual
+reasoning traces on the filtered or the whole training dataset.
+Model
+MinADE↓
+AvgADE↓
+MinFDE↓
+AvgFDE↓
+MinIOU↑
+(init →edited)
+Corner
+Dist.↓
+Output
+Length
+Think
+Rate
+CF-VLA (w/ route, filtered ds)
+0.6712
+1.4574
+1.7988
+3.9466
+0.9207→0.9231
+0.6010
+125.67
+0.2190
+CF-VLA (w/ route, whole ds)
+0.6811
+1.4185
+1.8296
+3.8344
+0.9207→0.9231
+0.6128
+191.14
+0.6677
+L→1
+traj + L→10
+meta + L→10
+CF
+L→1
+traj + L→10
+meta + L→20
+CF
+Training Step
+Validation minADE
+(A) Dataset Composition
+(B) Dataset Mixture
+(C) Loss Weights
+D→1
+meta →D→1
+CF
+D→1
+traj →D→1
+meta →D→1
+CF
+D→1
+traj →D→10
+meta →D→10
+CF
+D→1
+traj →D→10
+meta →D→100
+CF
+Training Step
+D→1
+traj →D→2
+meta →D→10
+CF
+L→1
+traj + L→1
+meta + L→10
+CF
+L→10
+traj + L→1
+meta + L→1
+CF
+L→1
+traj + L→1
+meta + L→1
+CF
+Trajectory-only  
+Meta-action-labeled  
+Counterfactual
+Reasoning 
+ 
+ 
+Validation
+ 
+Figure 7. (A) Dataset composition. A subset of the meta-action-labeled dataset Dmeta is held out as the validation set Dval. (B) Ablation
+on dataset mixture. D×x denotes repeating the dataset x times. For simplicity, Dmeta denotes the training subset of meta-action-labeled
+data. Training with the natural combination of three tasks (traj-only, meta-traj, and CF) avoids overfitting and yields the best
+validation performance. (C) Ablation on loss weights. L×y applies a multiplier y to the cross-entropy loss of the corresponding token
+group. Emphasizing meta-action and CF reasoning tokens with L×1
+traj + L×10
+meta + L×10
+CF
+stabilizes training and improves trajectory accuracy,
+whereas putting a large weight only on trajectory tokens degrades performance (the gray line). Further increasing the CF weight to
+L×1
+traj + L×10
+meta + L×20
+CF
+induces more thinking (think rate 0.2338 vs. 0.1478 for the 1 : 10 : 10 model) but harms trajectory accuracy,
+indicating that a higher think rate alone is not a reliable proxy for better control performance.
+specialized datasets reduces effective scene diversity and
+leads to worse trajectory accuracy due to overfitting.
+The impact of loss mixture.
+Token-level loss weight-
+ing is used to preserve the desired balance across sections
+(meta-actions, reasoning, and trajectory) in the model’s re-
+sponse. Denote the losses on trajectory, meta-action, and
+counterfactual reasoning tokens as Ltraj, Lmeta, and LCF. A
+configuration such as L×1
+traj + L×10
+meta + L×10
+CF
+(Fig. 7(C)) ap-
+plies a 10× multiplier to the meta-action and CF reason-
+ing tokens relative to trajectory tokens and corresponds to
+the best-performing model. As shown in Fig. 7(C), increas-
+ing the weights on meta-action and CF tokens (L×10
+meta, L×10
+CF )
+stabilizes training and improves reasoning consistency,
+whereas emphasizing trajectory tokens alone (L×10
+traj ) dete-
+riorates validation error. However, pushing the CF weight
+further to L×1
+traj + L×10
+meta + L×20
+CF
+induces more thinking
+(raising the think rate from 0.1478 to 0.2338) but slightly
+harms trajectory accuracy. This shows that think rate is not
+monotonically correlated with performance: overly reward-
+ing CF tokens encourages longer and more frequent rea-
+soning traces even when they do not translate into better
+meta-actions or trajectories. Balanced supervision between
+reasoning and control, rather than simply “thinking more”,
+is the key to strong performance.
+Trajectory Error
+0.68
+0.76
+0.84
+0.92
+1
+Think Rate
+0.197
+0.204
+0.211
+0.218
+0.225
+Temperature
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+Figure 8. Effect of decoding temperature on adaptive coun-
+terfactual reasoning. Think rate (left axis) and trajectory error
+(minADE, right axis) of CF-VLA on the validation set under dif-
+ferent sampling temperatures are plotted. Both curves exhibit a
+strong inverse correlation: temperatures that induce higher think
+rates generally correspond to lower trajectory error, up to a moder-
+ate range around 0.8, while very low or very high temperatures ei-
+ther under-utilize counterfactual reasoning or introduce noisy gen-
+erations that harm planning accuracy.
+Effect of decoding temperature.
+To study how decoding
+stochasticity interacts with adaptive counterfactual reason-
+ing, this ablation varies the sampling temperature at infer-
+2
+
+Table 5. Ablation study on the training datasets. We train CF-VLA (w/ route, round 2, 3 ds) with 3 datasets: Dtraj,Dmeta,DRound2
+CF
+(3 ds).
+We train CF-VLA (w/ route, round 2, 4 ds) with 4 datasets: Dtraj,Dmeta,DRound1
+CF
+,DRound2
+CF
+(4 ds). ↓lower is better, ↑higher is better.
+Model
+ADE↓
+Min (Avg)
+FDE↓
+Min (Avg)
+Corner
+Dist.↓
+Collision↓
+Off-road↓
+IOU↑
+init→edited
+Output Len.
+(Think Rate)
+meta-act (w/ route)
+0.7263 (1.4612)
+1.9561 (3.9269)
+0.6600
+0.0196
+0.0619
+0.9236
+87.20 (–)
+CF-VLA (w/ route, round1)
+0.6712 (1.4574)
+1.7988 (3.9466)
+0.6010
+0.0177
+0.0593
+0.9207→0.9231
+125.67 (0.219)
+CF-VLA (w/ r., round2, 3 ds)
+0.6813 (1.3898)
+1.8291 (3.7474)
+0.6168
+0.0174
+0.0585
+0.9238→0.9276
+109.36 (0.123)
+CF-VLA (w/ r., round2, 4 ds)
+0.6776 (1.4405)
+1.8108 (3.9017)
+0.6083
+0.0176
+0.0588
+0.9186→0.9241
+140.23 (0.299)
+ence while keeping all other settings fixed. As shown in
+Fig. 8, trajectory error monotonically decreases when in-
+creasing the temperature from 0.2 to 0.8, but starts to rise
+again at 1.0 and 1.2, forming a U-shaped curve. The think
+rate changes more mildly and peaks around 0.8. Across
+temperatures, think rate and trajectory error are strongly and
+inversely correlated: configurations that elicit more coun-
+terfactual reasoning tend to produce more accurate trajec-
+tories. Very low temperatures make the model overly de-
+terministic—once it settles on emitting “Action:” for many
+scenes, it under-explores the “Thinking:” branch, limiting
+the benefit of self-reflection and leading to suboptimal tra-
+jectories. In contrast, overly high temperatures inject ex-
+cessive randomness into meta-actions and reasoning traces,
+which degrades trajectory quality despite a similar aver-
+age think rate. A moderate temperature therefore provides
+the best trade-off, preserving stable planning while allow-
+ing CF-VLA to invoke counterfactual reasoning where it is
+most beneficial.
+Training dataset composition.
+As shown in Tab. 5, com-
+paring CF-VLA (w/ route, round 2, 3 datasets) and CF-VLA
+(w/ route, round 2, 4 datasets) reveals an important ef-
+ficiency trade-off.
+Including the first-round CF data (4
+datasets) slightly improves geometric metrics, but degrades
+average errors, IOU, and safety metrics, and nearly dou-
+bles the think rate and output length. This suggests simply
+adding more CF traces (especially when they are not on-
+policy rolled out) is not always beneficial, and CF-VLA (w/
+route, round2, 3 datasets) offers a better balance between
+accuracy, safety, and test-time efficiency.
+7. Training Hyper-parameters
+All
+CF-VLA
+variants
+are
+trained
+from
+the
+Qwen2.5-VL-3B-Instruct
+backbone
+using
+the
+optimization and data settings listed below.
+Optimization.
+Models are optimized with AdamW with
+β1 = 0.9, β2 = 0.95, ϵ = 10−8 and weight decay 0.01. The
+initial learning rate is 1 × 10−5 with a cosine decay sched-
+ule and 2,000 warm-up steps. For CF-VLA models, we set
+the learning rate to 5 × 10−6. Training runs for 300,000
+optimization steps with gradient norm clipping at 1.0.
+Batching and precision.
+The per-device training batch
+size is 1 with gradient accumulation set to 1 (global batch
+size equal to the number of GPUs). Training uses bfloat16
+without gradient checkpointing and activation checkpoint-
+ing. Distributed training uses fully sharded data parallelism.
+The VLM side uses FlashAttention-2 for all attention layers
+with bfloat16 activations. We use 64 NVIDIA A100 GPUs
+and thus batch size is 64 for each experiment.
+Loss weighting and data mixture.
+Training minimizes
+token-level cross-entropy over the assistant outputs only.
+Different token groups are weighted as
+wact : wmeta : wCF = 1 : 10 : 10,
+for trajectory tokens (act), meta-action tokens (meta),
+and counterfactual reasoning tokens (cot), respectively.
+For counterfactual samples, the loss on the first (uncor-
+rected) meta-action block is masked out. Unless otherwise
+specified, the meta-act models are trained on the mixture
+Dtraj ∪Dmeta and CF-VLA models are trained on the mix-
+ture Dtraj ∪Dmeta ∪DCF without oversampling (repetition)
+of any dataset.
+Sequence configuration.
+Each training example uses 4
+frames per camera over a 2s history window (2Hz), with
+resolution set to 448 × 796. The model inputs 16 history
+waypoints and predicts 64 future waypoints.
+3
+
+8. Instruction Template
+The following box shows the full instruction prompt (system and user messages) used to query the VLA models for producing
+meta-actions and the optional counterfactual reasoning traces during training and evaluation:
+<|im start|>system
+You are a helpful autonomous driving assistant.
+You will receive videos and a history trajectory as context and the goal is to produce
+future trajectories that are reasonable in the driving scene, safe and consistent
+with the history trajectory.
+The videos are captured by cameras mounted on the self-driving car, showing the driving
+scene over the past 2 seconds. Camera camera_front_wide_120fov shows the front of the
+car with a 120 degree field of view. Camera camera_front_tele_30fov shows the front
+of the car with a 30 degree field of view, the zoom-in view of
+camera_front_wide_120fov.
+The history trajectory is 1.6 seconds of past motion for the self-driving car, sampled
+at 10 Hz, and includes x, y, z coordinates and heading (all four values are relative
+to the state at the current time). It is enclosed between <|traj_history_start|> and
+<|traj_history_end|>, and is encoded into a continuous latent representation using 1
+token by the history trajectory encoder.
+The future trajectory covers 6.4 seconds of predicted motion, also sampled at 10 Hz, and
+includes x, y, z coordinates and heading (relative to the state at the current time)
+. The future trajectory is represented by a set of 6 discrete tokens enclosed between
+<|traj_future_start|> and <|traj_future_end|>. Each token is sampled from the
+vocabulary of the future trajectory tokenizer, which will decode the 6 tokens into a
+6.4-second future trajectory.
+You may receive different types of tasks given the context, including:
+- Producing a future trajectory given the video and history trajectory.
+- Proposing the meta actions in the driving process and generate the future trajectory
+according to the meta actions.
+- Reflecting on the correctness of the meta actions according to the information in the
+scene and correcting the meta actions if necessary.
+Meta actions are a set of high-level descriptions of the vehicle’s behavior. Meta
+actions are grouped into three categories:
+- **longitudinal**: ["Accelerate", "Decelerate", "Keep Speed", "Wait", "Reverse"]
+- **lateral**: ["Straight", "Left Turn", "Right Turn"]
+- **lane**: ["Keep Lane", "Left Lane Change", "Right Lane Change"]
+The meta actions must partition the 6.4-second planning horizon (from 0.0s to 6.4s)
+without gaps or overlaps *within each group*. Groups are optional; omit any group not
+relevant to the current scene. List the meta actions in each group in bullet-point
+format, like the example below:
+- longitudinal
+- 0.0s-0.9s: Keep Speed
+- 0.9s-6.4s: Accelerate
+- lateral
+- 0.0s-6.4s: Straight
+- lane
+- 0.0s-4.4s: Left Lane Change
+- 4.4s-6.4s: Keep Lane
+4
+
+Each time interval (in seconds) is specified as ‘start-end‘, followed by a colon and an
+action within the group.
+If you are tasked to propose the meta actions, you should first generate the meta
+actions before generating the future trajectory. If you think the first proposed meta
+actions are **incorrect**, generate a "Thinking:" section that briefly reflects on
+your meta-actions and explains the problem. Then provide a second "Meta Actions:"
+section with a corrected meta-action plan, and finally generate the future trajectory
+in the "Action:" section. If you are confident that the first meta actions are **
+valid**, you may skip the reflection section and go directly to the trajectory
+generation.
+Respond appropriately based on the given input and task.<|im end|>
+<|im start|>user
+The video for camera 1 (camera_front_wide_120fov) is: <|vision_start|><|video_pad|>...<|
+vision_end|>The video for camera 6 (camera_front_tele_30fov) is: <|vision_start|><|
+video_pad|>...<|vision_end|>The trajectory history is: <|traj_history_start|><|
+traj_history|><|traj_history_end|>First, list the meta actions in the driving process
+. Then, generate a possible future trajectory. If the meta-action is unsafe or
+incorrect, reflect on it and provide a corrected one. Use the output format below.
+Meta Actions:
+[meta actions]
+Thinking: (optional)
+[text]
+Meta Actions: (optional)
+[corrected meta actions]
+Action:
+<|traj_future_start|>[6 tokens]<|traj_future_end|><|im end|>
+<|im start|>assistant
+The following box shows the full instruction prompt (system and user messages) given to the VLM expert labeller
+(Qwen2.5-VL-72B-Instruct) for generating counterfactual reasoning traces and refining meta-action annotations:
+<|im start|>system
+You are an autonomous-driving labeling assistant. Your job is to **diagnose and correct
+** prediction errors **using visual cues** in the provided frames/videos. You **must
+not use** or reveal any privileged knowledge beyond what is visually observable. Be
+concrete, timestamped, and concise.<|im end|>
+<|im start|>user
+You will be presented with a driving scenario where you need to choose the correct meta-
+actions. Your task is to analyze the situation and provide reasoning about why the
+previous meta-actions are less preferable to the expert meta-actions.
+## Observation
+You will receive: the PREDICTED meta-actions (longitudinal, lateral, lane) with time
+intervals as well as the EXPERT meta-actions. Meta-actions are a set of high-level
+descriptions of the vehicle’s behavior. Meta-actions are grouped into three
+categories with these options in each category:
+- **longitudinal**: ["Accelerate", "Decelerate", "Keep Speed", "Wait", "Reverse"]
+5
+
+- **lateral**: ["Straight", "Left Turn", "Right Turn"]
+- **lane**: ["Keep Lane", "Left Lane Change", "Right Lane Change"]
+The meta-actions must partition the 6.4-second planning horizon (from 0.0s to 6.4s).
+Groups are optional - omit any group not relevant to the current scene. The meta-
+actions are in bullet-point format. Each time interval (in seconds) is specified as ‘
+start-end‘, followed by a colon and an action within the group. Like the example
+below (note that this example is not related to the scene you are watching):
+- longitudinal
+- 0.0s-0.9s: Keep Speed
+- 0.9s-6.4s: Accelerate
+- lateral
+- 0.0s-6.4s: Straight
+- lane
+- 0.0s-4.4s: Left Lane Change
+- 4.4s-6.4s: Keep Lane
+You will receive: VIDEOS/FRAMES from two cameras. The images are captured by cameras
+mounted on the self-driving car, showing the driving scene at this moment. Camera ‘
+camera_front_wide_120fov‘ shows the front of the car with a 120 degree field of view.
+Camera ‘camera_front_tele_30fov‘ shows the front of the car with a 30 degree field
+of view, the zoom-in view of ‘camera_front_wide_120fov‘.
+## Task
+Your task is to provide a detailed counterfactual reasoning trace as an internal self-
+reflection that demonstrates your reasoning process for the current situation. Your
+reasoning should:
+1. Start with analyzing the driving scenario and the goal. Highlight any relevant visual
+clues, constraints, or consequences from the scenario. For example, the lane
+markings, the traffic lights, the vehicles, the pedestrians, the road conditions, etc
+.
+2. Discuss the predicted meta-actions, explain why they may be less optimal, think about
+the expected consequences. If the predicted meta-actions are already close to the
+expert meta-actions, it’s OK to simply acknowledge that the meta-actions are already
+good and explain why.
+3. Justify why the expert action may be more preferable, while not indicating you have
+access to the expert action. State the possible changes to the predicted meta-actions
+to make it closer to the expert action.
+Hard rules:
+- **Never mention** ground truth, labels, "expert", "GT", "dataset", or phrases implying
+access to future or privileged information. The ground truth meta-actions are only
+used to help you understand the scene and the predicted meta-actions. Do not discuss
+the ground truth meta-actions in the reasoning to avoid information leakage. The
+ultimate goal is to insert the reasoning after the predicted meta-actions and before
+the GT meta-actions so I can build the dataset that have 1) wrong meta-actions, 2)
+the reflection, and 3) the corrected meta-actions. Therefore, it’s strictly forbidden
+to imply that you have access to the ground truth meta-actions in the reasoning. Do
+not discuss anything like "according to the images", "the trajectory suggests" or "
+the GT meta-actions suggest", "the vehicles seem like [some future actions]", etc.
+- **Anchor** every claimed correction with one or more specific cues. Always ground your
+decisions based on the provided images. Discuss the reasoning in the context
+6
+
+according to the given images. Do not simply say "which meta action is wrong and I
+should change it to something".
+- Use **one short paragraph** for ‘reasoning‘ ( ≤80 words, no line breaks). Your
+reasoning should be concise and to the point. Do not list the final (correct) meta-
+actions. Do not use markdown or other formatting in the reasoning. Avoid meta-
+commentary about being an AI. Use natural, step-by-step reasoning. Focus on logical
+decision-making. Directly write the self-reflection reasoning, no extra headings,
+disclaimers, or external notes.
+- If uncertain or the predicted meta-actions are similar to the ground truth meta-
+actions, you can simplify the reasoning.
+- It’s OK to find that the predicted meta-actions are already close to the expert meta-
+actions, and you don’t need to change too much.
+## Scenario Data
+The video captured by camera_front_wide_120fov: <|vision_start|><|video_pad|>...<|
+vision_end|>
+The video captured by camera_front_tele_30fov: <|vision_start|><|video_pad|>...<|
+vision_end|>
+The expert meta-actions are:
+- longitudinal
+- 0.0s-0.5s: Keep Speed
+- 0.5s-5.0s: Decelerate
+- 5.0s-5.9s: Keep Speed
+- 5.9s-6.4s: Accelerate
+- lateral
+- 0.0s-5.0s: Left Turn
+- 5.0s-6.4s: Straight
+- lane
+- 0.0s-5.5s: Keep Lane
+- 5.5s-6.4s: Left Lane Change
+The predicted meta actions are:
+- longitudinal
+- 0.0s-6.4s: Keep Speed
+- lateral
+- 0.0s-3.4s: Left Turn
+- 3.4s-6.4s: Straight
+- lane
+- 0.0s-6.4s: Keep Lane
+Please propose counterfactual reasoning on the predicted meta-actions.<|im end|>
+<|im start|>assistant
+7
+
+9. Additional Visualization
+In this section, we provide more visualization results for model CF-VLA (w/ route, round 2, 3 datasets).
+Meta Actions: 
+- longitudinal 
+ - 0.0s-3.8s: Accelerate 
+ - 3.8s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-1.4s: Straight 
+ - 1.4s-2.9s: Right Turn 
+ - 2.9s-6.4s: Straight 
+- lane 
+ - 0.0s-3.3s: Left Lane Change 
+ - 3.3s-6.4s: Keep Lane
+Meta Actions: 
+- longitudinal 
+ - 0.0s-6.4s: Accelerate 
+- lateral 
+ - 0.0s-2.0s: Straight 
+ - 2.0s-3.5s: Right Turn 
+ - 3.5s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest continuous 
+acceleration, which may be excessive as the vehicle 
+approaches the curve. The lane change is not considered, 
+potentially leading to unsafe positioning. Adjusting to 
+accelerate initially then maintain speed, and incorporating 
+a left lane change before the curve, aligns better with 
+safe driving practices observed in the scene. The right 
+turn timing seems appropriate but lane adjustments 
+improve safety. 
+Ground Truth: 
+Meta Actions: 
+- longitudinal 
+ - 0.0s-2.8s: Accelerate 
+ - 2.8s-6.3s: Keep Speed 
+- lateral 
+ - 0.0s-6.3s: Straight 
+- lane 
+ - 0.0s-6.3s: Keep Lane
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+Cut In
+Figure 9. Counterfactual reasoning for a cut-in near a curve. The scene shows the ego vehicle following traffic on a two-lane road where
+a right-hand curve and potential cut-in are ahead. The initial meta-actions (orange) prescribe continuous acceleration through the entire
+horizon and keep the ego in its current lane while executing the right turn, which could build up unnecessary speed as the vehicle enters the
+curve and leaves no lateral margin to surrounding traffic. Conditioned on these meta-actions and the video, the counterfactual reasoning
+step (blue) recommends accelerating only in the early phase and then maintaining speed, while also introducing a left lane change before
+the curve to obtain a safer positioning. The revised meta-actions (green) thus shorten the acceleration period, add a brief left lane change
+followed by lane keeping, and retain a similar right-turn timing; the resulting trajectory remains very close to the ground truth (gray) in
+space while adopting a more explicitly safety-oriented lane strategy. This example highlights how CF-VLA can simultaneously reshape
+longitudinal and lane-level intent around curves and cut-ins, yielding a conservative yet efficient plan that stays consistent with the scene.
+Meta Actions: 
+- longitudinal 
+ - 0.0s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-4.0s: Straight 
+ - 4.0s-6.4s: Left Turn 
+- lane 
+ - 0.0s-3.6s: Keep Lane 
+ - 3.6s-6.4s: Left Lane Change
+Meta Actions: 
+- longitudinal 
+ - 0.0s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-0.1s: Right Turn 
+ - 0.1s-3.4s: Straight 
+ - 3.4s-6.4s: Left Turn 
+- lane 
+ - 0.0s-0.1s: Left Lane Change 
+ - 0.1s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest an early right turn 
+and lane change, which may conflict with the traffic flow. 
+The vehicle ahead is not turning right, indicating a 
+straight path. Adjusting the lateral action to maintain a 
+straight course initially and then left turn later aligns 
+better with the traffic pattern and avoids potential lane 
+conflicts. The lane change should be extended to ensure 
+a smooth transition.
+Ground Truth: 
+- longitudinal 
+ - 0.0s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-3.4s: Straight 
+ - 3.4s-6.3s: Left Turn 
+ - 6.3s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+Lane Change
+Figure 10. Self-correction in a lane-change scenario. The scene shows the ego vehicle following a lead car on an urban road while
+approaching a junction where the traffic ahead continues straight and then bends left. The initial meta-actions (orange) incorrectly introduce
+a brief right turn and lane change at the beginning of the horizon (around 0–0.1 s), followed by a later left turn, creating an unnecessarily
+complex maneuver that could conflict with the surrounding traffic pattern. Conditioned on these meta-actions and the video frames, the
+counterfactual reasoning step (blue) notes that the lead vehicle is not turning right and recommends maintaining a straight lateral course
+for longer before initiating a smoother left turn and extended lane change. The revised meta-actions (green) thus remove the spurious
+early right turn, delay the left-turn phase to around 4.0 s, and stretch the lane-change interval, yielding a predicted trajectory that closely
+follows the ground-truth path (gray) while preserving similar speed. This example illustrates how CF-VLA can use visually grounded
+counterfactual reasoning to correct an initially misaligned turning intent and produce a more coherent, traffic-consistent plan.
+Meta Actions: 
+- longitudinal 
+ - 0.0s-1.5s: Accelerate 
+ - 1.5s-2.3s: Keep Speed 
+ - 2.3s-2.8s: Decelerate 
+ - 2.8s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Meta Actions: 
+- longitudinal 
+ - 0.0s-1.8s: Accelerate 
+ - 1.8s-6.3s: Keep Speed 
+- lateral 
+ - 0.0s-6.3s: Straight 
+- lane 
+ - 0.0s-6.3s: Keep Lane
+Thinking: 
+The predicted meta-actions lack a deceleration phase, 
+which is necessary as the vehicle approaches the 
+intersection. The pedestrian crossing and the yield sign 
+indicate a need to slow down. Adding a deceleration 
+action from 1.8s-2.3s ensures safe passage through the 
+intersection, aligning with traffic rules and pedestrian 
+safety. The rest of the actions are appropriate for the 
+straight path and lane.
+Ground Truth: 
+- longitudinal 
+ - 0.0s-1.3s: Accelerate 
+ - 1.3s-2.8s: Keep Speed 
+ - 2.8s-3.5s: Decelerate 
+ - 3.5s-4.4s: Keep Speed 
+ - 4.4s-5.8s: Accelerate 
+ - 5.8s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-4.8s: Straight 
+ - 4.8s-5.9s: Right Turn 
+ - 5.9s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane 
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+Vulnerable Road Users
+Figure 11. Counterfactual reasoning near vulnerable road users and queuing traffic. The scene shows a pedestrian finishing a crossing
+at an intersection while a queue of vehicles waits ahead. The initial meta-actions (orange) instruct the ego to accelerate from standstill and
+then maintain speed from 1.8–6.3 s, lacking any explicit deceleration phase before reaching the intersection and the queue. Conditioned
+on these meta-actions and the telephoto views, the reasoning step (blue) notes the pedestrian crossing and yield signage and recommends
+inserting a short deceleration interval, yielding revised meta-actions (green) that accelerate from 0–1.5 s, briefly cruise, then decelerate
+between 2.3–2.8 s before keeping speed while joining the line of cars. The resulting trajectory closely follows the longitudinal profile,
+where the human driver also accelerates once the pedestrian has cleared the crosswalk and then slows to queue at the intersection. This
+example illustrates that CF-VLA’s self-reflection can enrich an initially over-optimistic plan with an appropriate queuing deceleration,
+achieving behavior that is both pedestrian-aware and consistent with surrounding traffic.
+8
+
+Meta Actions: 
+- longitudinal 
+ - 0.0s-0.3s: Decelerate 
+ - 0.3s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Meta Actions: 
+- longitudinal 
+ - 0.0s-4.5s: Decelerate 
+ - 4.5s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest decelerating for too 
+long, which may cause unnecessary slowing down and 
+disrupt traffic flow. The vehicle ahead is maintaining a 
+steady speed, and the road is clear. Adjusting the 
+deceleration period to a shorter duration and then 
+keeping speed aligns better with the current traffic 
+conditions and ensures smoother driving.
+Ground Truth: 
+- longitudinal 
+ - 0.0s-0.9s: Decelerate 
+ - 0.9s-2.2s: Keep Speed 
+ - 2.2s-4.4s: Accelerate 
+ - 4.4s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-0.2s: Keep Lane 
+ - 0.2s-4.9s: Left Lane Change 
+ - 4.9s-6.4s: Keep Lane
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+Cut In
+Figure 12. Conservative counterfactual reasoning in a cut-in scenario. The scene shows highway driving with a lead vehicle in the
+ego lane and another vehicle overtaking in the adjacent left lane. The initial meta-actions (orange) propose a long deceleration from
+0–4.5 s followed by keeping speed, even though the lead vehicle is already maintaining a steady pace and the road ahead is largely clear.
+Conditioned on these meta-actions and the videos, the reasoning step (blue) correctly identifies this as overly cautious and recommends
+shortening the deceleration period, switching to a plan that briefly decelerates from 0–0.3 s and then keeps speed (green), yielding a
+smoother and less disruptive longitudinal profile that better matches the traffic flow. However, both the initial and revised meta-actions
+retain a “Keep Lane” decision for the full horizon, whereas the human driver (gray) performs a left lane change and subsequent acceleration
+to pass slower traffic. As a result, the predicted trajectory remains safe but more conservative and less efficient than the human expert,
+likely prioritizing collision avoidance with the adjacent overtaking vehicle over an aggressive lane change.
+Meta Actions: 
+- longitudinal 
+ - 0.0s-2.6s: Accelerate 
+ - 2.6s-4.8s: Keep Speed 
+ - 4.8s-6.4s: Accelerate 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-4.8s: Keep Lane 
+ - 4.8s-6.4s: Left Lane Change
+Meta Actions: 
+- longitudinal 
+ - 0.0s-3.1s: Accelerate 
+ - 3.1s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-2.8s: Keep Lane 
+ - 2.8s-6.4s: Left Lane Change
+Thinking: 
+The predicted lane change at 2.8s is premature as the 
+road is clear and no immediate need for a lane shift is 
+visible. This could disrupt traffic flow unnecessarily. 
+Instead, maintaining the lane until 4.8s aligns better with 
+the current traffic conditions and ensures smoother 
+navigation. The predicted acceleration and speed 
+maintenance are appropriate given the green light and 
+open road ahead.
+Ground Truth: 
+- longitudinal 
+ - 0.0s-1.1s: Accelerate 
+ - 1.1s-5.0s: Keep Speed 
+ - 5.0s-6.4s: Accelerate 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-5.4s: Keep Lane 
+ - 5.4s-6.4s: Left Lane Change
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+Lane Change
+Figure 13. Refining lane-change timing with counterfactual reasoning at night. The scene shows nighttime urban driving through
+a signalized intersection with pedestrians near the crosswalk and open road beyond. The initial meta-actions (orange) plan to accelerate
+through the green light and initiate a left lane change at 2.8 s, causing the ego vehicle to start shifting lanes shortly after entering the
+intersection. Conditioned on these meta-actions and the video input, the counterfactual reasoning step (blue) judges this maneuver as
+premature given the clear lane ahead and potential disruption to traffic, and recommends extending the keep-lane phase before moving
+left. The revised meta-actions (green) therefore maintain lane until about 4.8 s, then perform a later left lane change while preserving
+a smooth accelerate–cruise–accelerate longitudinal pattern. As shown in the trajectory visualization, this produces a predicted trajectory
+whose lane-change timing closely matches the human driver (gray), who also stays in the original lane until well past the intersection
+before merging left. This example highlights how CF-VLA can use counterfactual self-reflection to delay unnecessary early lane changes,
+leading to behavior that is both smoother and more consistent with human driving.
+Meta Actions: 
+- longitudinal 
+ - 0.0s-1.6s: Keep Speed 
+ - 1.6s-5.5s: Accelerate 
+ - 5.5s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-3.7s: Left Turn 
+ - 3.7s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Meta Actions: 
+- longitudinal 
+ - 0.0s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-4.7s: Left Turn 
+ - 4.7s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest a constant speed, 
+but the traffic light is green and the road is clear, 
+indicating an opportunity to accelerate. Keeping a 
+constant speed may lead to unnecessary delay. Adjusting 
+the longitudinal action to accelerate after 1.6 seconds 
+aligns better with the current traffic conditions and 
+maximizes efficiency. The lateral and lane actions are 
+already appropriate for the scene.
+Ground Truth: 
+- longitudinal 
+ - 0.0s-1.6s: Keep Speed 
+ - 1.6s-5.9s: Accelerate 
+ - 5.9s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-3.5s: Left Turn 
+ - 3.5s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+Turning Maneuver
+Figure 14. Refining acceleration timing in a turning maneuver with counterfactual reasoning. The scene shows the ego vehicle
+approaching a large signalized intersection with a green light and no visible cross-traffic. The initial meta-actions (orange) plan to keep a
+constant speed for the entire 6.4 s horizon while executing a left turn followed by a straight segment, which is safe but under-utilizes the
+open intersection and may lead to unnecessary delay. Conditioned on these meta-actions and the video input, the counterfactual reasoning
+step (blue) correctly notes that the road is clear under green and recommends introducing an acceleration phase after roughly 1.6 s, while
+leaving the lateral and lane decisions unchanged. The revised meta-actions (green) therefore maintain speed initially, then accelerate
+through the middle of the intersection before returning to a cruising speed, producing a predicted trajectory that closely matches the human
+driver’s motion (gray) in both lateral path and longitudinal profile. This example illustrates how CF-VLA can inject a well-timed mid-
+intersection acceleration through self-reflection, improving efficiency without sacrificing safety.
+9
+
+We also show the failure cases:
+Meta Actions: 
+- longitudinal 
+ - 0.0s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-0.2s: Keep Lane 
+ - 0.2s-4.3s: Left Lane Change 
+ - 4.3s-6.4s: Keep Lane
+Meta Actions: 
+- longitudinal 
+ - 0.0s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest staying in the 
+current lane, but the traffic ahead is dense and a left lane 
+change could provide a smoother path. The left lane 
+appears less congested, allowing for better flow. 
+Adjusting the lane action to include a left lane change 
+around 0.2s-4.3s would improve navigation through the 
+traffic. The current prediction lacks this strategic moving, 
+potentially leading to unnecessary delays.
+Ground Truth: 
+- longitudinal 
+ - 0.0s-6.4s: Keep Speed 
+- lateral 
+ - 0.0s-6.4s: Straight 
+- lane 
+ - 0.0s-6.4s: Keep Lane
+Lane Change
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+Figure 15. Failure case of CF-VLA’s counterfactual reasoning at a straight lane. The scene shows the ego vehicle on a straight
+multi-lane urban road with moderate traffic ahead. The initial meta-actions (orange) propose a reasonable plan that keeps speed and lane
+throughout the horizon. However, conditioned on these meta-actions and the video input, the counterfactual reasoning step (blue) argues
+that the left lane “appears less congested” and recommends inserting a left lane change between 0.2 s and 4.3 s to “improve navigation
+through the traffic.” The revised meta-actions (green) follow this suggestion and introduce a left lane change, causing the predicted
+trajectory to drift into the adjacent lane, while the ground-truth driver in fact keeps lane and continues straight, as indicated by the trajectory
+visualization and ground-truth meta-actions (gray). This example illustrates that CF-VLA can occasionally over-correct a safe plan based
+on a misinterpretation of visual cues, hallucinating a beneficial lane change where the human driver does not perform one. Such failure
+cases highlight the need for better calibration between counterfactual reasoning, route-level intent, and true traffic semantics.
+Meta Actions: 
+- longitudinal 
+ - 0.0s-6.4s: Wait 
+Meta Actions: 
+- longitudinal 
+ - 0.0s-3.1s: Wait 
+ - 3.1s-6.4s: Accelerate 
+- lateral 
+ - 3.1s-6.4s: Straight 
+- lane 
+ - 3.1s-6.4s: Keep Lane
+Thinking: 
+The predicted meta-actions suggest accelerating after 
+waiting, but the traffic light is red, indicating a need to 
+remain stopped. Accelerating could lead to a traffic 
+violation or collision. Instead, waiting for the full 6.4 
+seconds aligns with the traffic signal, ensuring safety and 
+compliance. The predicted actions are less optimal as 
+they ignore the red light and the need to wait.
+Ground Truth: 
+- longitudinal 
+ - 0.0s-4.5s: Wait 
+ - 4.5s-6.4s: Accelerate 
+- lateral 
+ - 4.5s-6.4s: Straight 
+- lane 
+ - 4.5s-6.4s: Keep Lane 
+Predicted Trajectory
+GT Trajectory
+History Trajectory
+Cut In
+Figure 16. Failure case of CF-VLA’s counterfactual reasoning at a cut-in. The scene shows the ego vehicle waiting while a nearby
+vehicle cuts into the lane ahead at an urban intersection. The initial meta-actions (orange) propose to wait until about 3.1 s and then
+accelerate straight in the current lane from 3.1–6.4 s, which qualitatively resembles the human driver who eventually moves off when
+the vehicle above leaves. Conditioned on these meta-actions and the video frames, the counterfactual reasoning step (blue) incorrectly
+concludes that any acceleration would “ignore the red light” and recommends waiting for the full 6.4s to ensure safety and compliance.
+The revised meta-actions (green) therefore switch to a pure “wait” plan over the entire horizon, producing a predicted trajectory that
+remains stopped, whereas the ground-truth trajectory (gray) waits only until about 4.5 s before accelerating and clearing the intersection.
+The model misinterprets the scenario by observing the traffic light and ignores that the major factor causing the waiting behavior is the
+vehicle above. This example illustrates how CF-VLA’s self-reflection can sometimes become overly conservative and miscalibrated with
+respect to the spatial relationship between objects and traffic lights, degrading performance by overriding a reasonable initial plan.
+10

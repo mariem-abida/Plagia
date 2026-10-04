@@ -1,0 +1,4276 @@
+Are First-Order Diffusion Samplers Really Slower?
+A Fast Forward-Value Approach
+Yuchen Jiao∗†
+Na Li∗‡
+Changxiao Cai§
+Gen Li†
+January 1, 2026
+Abstract
+Higher-order ODE solvers have become a standard tool for accelerating diffusion probabilistic model
+(DPM) sampling, motivating the widespread view that first-order methods are inherently slower and
+that increasing discretization order is the primary path to faster generation. This paper challenges this
+belief and revisits acceleration from a complementary angle: beyond solver order, the placement of DPM
+evaluations along the reverse-time dynamics can substantially affect sampling accuracy in the low-neural
+function evaluation (NFE) regime.
+We propose a novel training-free, first-order sampler whose leading discretization error has the op-
+posite sign to that of DDIM. Algorithmically, the method approximates the forward-value evaluation
+via a cheap one-step lookahead predictor. We provide theoretical guarantees showing that the resulting
+sampler provably approximates the ideal forward-value trajectory while retaining first-order convergence.
+Empirically, across standard image generation benchmarks (CIFAR-10, ImageNet, FFHQ, and LSUN),
+the proposed sampler consistently improves sample quality under the same NFE budget and can be
+competitive with, and sometimes outperform, state-of-the-art higher-order samplers. Overall, the results
+suggest that the placement of DPM evaluations provides an additional and largely independent design
+angle for accelerating diffusion sampling.
+Keywords: diffusion model, training-free acceleration, first-order sampler, forward-value discretization
+Contents
+1
+Introduction
+2
+1.1
+Our contributions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+1.2
+Other related work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2
+Problem setup
+3
+3
+Main results
+6
+3.1
+Algorithm . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+3.2
+Convergence analysis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+4
+Experiments
+10
+5
+Discussion
+13
+A Further experimental results
+18
+A.1 Further results on our sampler
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+A.2 Experimental results on augmenting with DPMSolver-2
+. . . . . . . . . . . . . . . . . . . . .
+18
+∗The authors contributed equally. Corresponding author: Gen Li.
+†Department of Statistics, The Chinese University of Hong Kong, Hong Kong; Email: {yuchenjiao,genli}@cuhk.edu.hk.
+‡College of Information Science and Electronic Engineering, Zhejiang University, Hangzhou, China; Email: nlee@zju.edu.cn.
+§Department of Industrial and Operations Engineering, University of Michigan, Ann Arbor, USA; Email: cxcai@umich.edu.
+1
+arXiv:2512.24927v1 [stat.ML] 31 Dec 2025
+
+B Proof of convergence order upper bounds (Theorems 3 and 4)
+18
+B.1
+Proof of Theorem 3 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+B.2
+Proof of Theorem 4 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+C Proof of convergence order lower bound (Theorem 2)
+28
+1
+Introduction
+Diffusion probabilistic models (DPMs) have rapidly emerged as a leading paradigm in modern generative
+modeling, achieving state-of-the-art performance across a wide range applications in generative AI (Ho et al.,
+2020; Song et al., 2020b; Song and Ermon, 2019; Song et al., 2020a; Dhariwal and Nichol, 2021). Rooted
+in principles from non-equilibrium thermodynamics (Sohl-Dickstein et al., 2015), DPMs generate complex
+data by learning to reverse a gradual noise-injection process, transforming simple noise into structured, high-
+fidelity outputs. This transformation is achieved through a denoising process guided by pre-trained neural
+networks that approximate the score functions. These models have shown remarkable success in a wide range
+of generative tasks, including image synthesis (Rombach et al., 2022; Ramesh et al., 2022; Saharia et al.,
+2022), audio generation (Kong et al., 2021), video generation (Villegas et al., 2022), and molecular design
+(Hoogeboom et al., 2022), underscoring their versatility and impact. See e.g., Yang et al. (2023); Croitoru
+et al. (2023); Lai et al. (2025) for overviews of recent development.
+Sampling from a pre-trained DPM typically proceeds by discretizing either the diffusion SDE (e.g., Ho
+et al. (2020); Nichol and Dhariwal (2021); Bao et al. (2022)) or the diffusion ODE (e.g., Song et al. (2020a);
+Lu et al. (2022a)) associated with the DPM. DPMs, parameterized by large neural networks, are commonly
+trained as noise prediction models: given a noisy sample and a time step, they are trained to predict the noise
+added to the original clean data at that time in the forward process. Since subtracting this noise estimate
+from the noisy sample yields an estimate of the clean data, equivalently, these models learn to predict the
+clean data. As a result, high-quality generation relies on how effectively we discretize an diffusion SDE/ODE
+and leverage the pre-trained DPMs.
+Most existing diffusion-based samplers first choose a sequence of time steps for the iterations and then
+iterate backward in time. At each step, the pre-trained DPM is evaluated at the current iterate and time to
+produce an estimate of the clean data, which is then used to update the iterate. In particular, a first-order
+discretization of the diffusion ODE and SDE leads to the celebrated deterministic DDIM (Song et al., 2020a)
+and the DDPM (Ho et al., 2020) samplers, respectively.
+A major drawback of DDIM and DDPM is their slow convergence, often requiring tens to thousands of
+iterations to generate high-quality samples. Since each iteration involves a neural function evaluation (NFE)
+of the pre-trained DPM, sampling speed is often the main bottleneck in deployment. One can expect that
+the slow sampling convergence is largely due to the discretization error incurred by the sampling schemes.
+This has motivated a line of accelerated samplers (Lu et al., 2022a,b; Zhao et al., 2023) that use higher-order
+discretization schemes of the diffusion ODE to reduce the discretization error and improve the sampling
+convergence speed.
+The practical success of higher-order samplers has lead to a widespread belief: the order of a diffusion
+sampler (the order of the underlying discretization scheme) is the key to speed, and higher-order samplers
+are inherently faster than first-order ones. This belief has driven substantial effort towards more refined
+diffusion ODEs solvers.
+In this work, we challenge this common belief by asking two fundamental questions:
+1. Is the order of a diffusion sampler truly the bottleneck limiting sampling speed?
+2. If not, can a carefully designed first-order sampler reach comparable (or better) performance?
+1.1
+Our contributions
+Motivated by these questions, we revisit the conventional wisdom that acceleration in diffusion-based sam-
+pling necessarily requires increasing the discretization order.
+We start from a simple but under-explored idea: a forward-value discretization of the diffusion ODE.
+Given the current iterate and time, the idealized forward-value update would evaluate the DPM at quantities
+2
+
+corresponding the next time. We observe that such a scheme can perform effectively even in the extremely
+low-NFE regime, which motivates us to design a practical sampler that approximates the forward-value
+update. Specifically, we propose a first-order sampler that predicts these next-step quantities on the fly:
+at each iteration, we first generate a rough estimate using a vanilla first-order sampler (e.g., DDIM), and
+then combine the current iterate with a DPM evaluation at this estimate to produce the next iterate. We
+then theoretically prove that the discretization error of our proposed sampler is of the same order as the
+deterministic DDIM, both scaling eΘ(1/M) where M is the number of iterations.
+We validate the effectiveness of the proposed sampling procedure through extensive experiments using
+pre-trained DPMs on standard image generation benchmarks, including the CIFAR-10 (Krizhevsky et al.,
+2009), ImageNet (Deng et al., 2009), FFHQ (Karras et al., 2019), and LSUN (Yu et al., 2015) dataset.
+Despite being first-order, our approach achieves substantial improvements over FID scores (Heusel et al.,
+2017), in comparison with higher-order samplers including DPMSolver-2, DPMSolver-3 (Lu et al., 2022b),
+and UniPC-3 (Zhao et al., 2023); see Section 4 for details.1
+These results convey a surprising insight: the order of a diffusion sampler is not the decisive factor
+governing practical sampling efficiency. Instead, they reveal a complementary and largely orthogonal lever
+to classical order analysis—where and how the DPM is evaluated and combined across time steps can matter
+just as much (and sometimes more) than the nominal solver order.
+1.2
+Other related work
+Training-free/based acceleration.
+Existing acceleration strategies for diffusion sampling can be broadly
+divided into training-free and training-based approaches. Training-free methods reuse a fixed pre-trained
+DPM and speed up sampling solely by modifying the sampling update rule, making them broadly applicable
+to off-the-shelf DPMs. The methods discussed in the introduction belong to this category. In contrast,
+training-based strategies introduce an additional stage of training (e.g., distillation (Luhman and Luhman,
+2021; Salimans and Ho, 2022; Meng et al., 2023) and consistency models (Song et al., 2023)). They aim
+to shorten sampling trajectories by adapting pre-trained models into related architectures, at the cost of
+additional training computation. Since our focus is training-free acceleration, we next summarize related
+work from both practical and theoretical viewpoints.
+Training-free acceleration: practice.
+Most practical training-free accelerations are driven by higher-
+order numerical discretizations of the reverse-time SDE/ODE. For ODE-based samplers, a prominent line
+of work exploits the structure of the diffusion ODE to design higher-order solvers, including DPM-Solver++
+(Lu et al., 2022a,b), exponential-integrator-based methods (Zhang and Chen, 2022), and predictor-corrector-
+based schemes such as UniPC (Zhao et al., 2023). For SDE-based samplers, acceleration is comparatively
+less explored due to the intrinsic difficulty of SDE discretization, but notable progress includes stochastic
+Improved Euler’s methods (Jolicoeur-Martineau et al., 2021), stochastic Adams methods (Xue et al., 2024),
+and stochastic Runge–Kutta methods (Wu et al., 2024).
+Training-free acceleration: theory.
+Convergence theory has been established for a wide range of dif-
+fusion samplers (Chen et al., 2022; Lee et al., 2023; Chen et al., 2023a; Li et al., 2023; Chen et al., 2023b;
+Huang et al., 2024a; Benton et al., 2023; Li and Yan, 2024; Li et al., 2025a), mostly focusing on standard
+DDPM and DDIM. For provable acceleration, most existing results likewise concentrate on higher-order
+discretization and on controlling the resulting discretization error for the reverse-time dynamics (Li and Cai,
+2024; Li and Jiao, 2024; Jiao and Li, 2024; Huang et al., 2024a,b; Li et al., 2024; Yu and Yu, 2025; Li et al.,
+2025b). Beyond designing improved solvers, another line of work accelerates generation via parallel sampling
+that implements multiple denoising steps in parallel (Shih et al., 2023; Chen et al., 2024; Gupta et al., 2024).
+2
+Problem setup
+In this section, we review basics of DPM sampling.
+1In our experiments, we do not incorporate certain implementation tricks (e.g., projecting to the valid pixel range or reducing
+the solver order in the final steps), which may lead to minor discrepancies with results reported in the prior works.
+3
+
+Forward process.
+Consider a forward process (xt)0≤t≤T in Rd whose marginal distribution at time t ∈
+[0, T] satisfies
+xt
+d= αtx0 + σtz,
+(1)
+where x0 ∼q0 and z ∼N(0, Id) are generated independently. Let qt be the law or density of xt. The
+functions αt, σt > 0, called noise schedules, are chosen to ensure that qT ≈N(0, ˜σ2Id) and that the signal-
+to-noise (SNR) ratio αt/σt is strictly decreasing in time t.
+Such a forward process can be realized by the following SDE
+dxt = f(t)xt dt + g(t) dωt,
+x0 ∼q0,
+(2)
+where (ωt)t≥0 is a standard Brownian motion in Rd, and the functions f(t) and g(t) are defined by
+f(t) = d log αt
+dt
+and
+g2(t) = dσ2
+t
+dt −2σ2
+t
+d log αt
+dt
+.
+For more details, see e.g., Kingma et al. (2021).
+Reverse process.
+According to classical results on time-reversal of SDEs (Anderson, 1982), the process
+in (2) has an associated reverse-time process that runs backward in time from T to 0, governed by the SDE
+dxt =
+
+f(t)xt −g2(t)s⋆
+t (xt)
+
+dt + g(t) d¯ωt,
+xT ∼qT ,
+where (¯ωt)t≥0 is standard reverse Brownian motion. Here, s⋆
+t (·) := ∇log qt(·) represents the score function
+associated with the marginal distribution qt of the forward process at time t. Instead of running this reverse
+SDE, an alternative is to use a deterministic ODE process, known as the probability flow ODE, given by
+˙xt = f(t)xt −1
+2g2(t)s⋆
+t (xt),
+xT ∼qT .
+(3)
+The forward process and these two reverse processes share the same marginal distribution; see e.g., Song et al.
+(2020b) for details. Since qT ≈N(0, ˜σ2Id) is easy to sample from, both reverse processes enable sampling
+from the target distribution q0, provided that the score functions s⋆
+t (·) can be accurately estimated.
+Noise prediction model.
+For any t ∈[0, T], the score function s⋆
+t (·) associated with qt satisfies
+s⋆
+t (·) =
+arg min
+s(·) : Rd→Rd E
+h
+
+s(αtx0 + σtz) + z/σt
+
+2
+2
+i
+,
+where x0 ∼q0 and z ∼N(0, Id) are generated independently. This motivates the use of a large neural
+network εθ(x, t), parameterized by θ, to approximate the scaled score function −σts⋆
+t (x). The parameter θ
+is optimized by minimizing
+Z T
+0
+ω(t) Ex0∼q0,z∼N (0,Id)
+h
+
+εθ(αtx0 + σtε, t) −z
+
+2
+2
+i
+dt,
+where ω(t) > 0 is a weight function. Since εθ(xt, t) can be viewed as a predictor for the Gaussian noise ε
+used in generating xt (through xt = αtx0 + σtz, where both x0 ∼q0 and z ∼N(0, Id) are not observed),
+it is known as the noise prediction model.
+Diffusion ODE.
+Given a pre-trained noise prediction model εθ(x, t), we can instantiate the probability
+flow ODE (3) by substituting the unknown score function s⋆
+t (x) with −εθ(x, t)/σt.
+With the Gaussian
+initialization xT ∼N(0, ˜σ2Id), this yields the diffusion ODE:
+˙xt = f(t)xt + g2(t)
+2σt
+εθ(xt, t),
+xT ∼N(0, ˜σ2Id).
+(4)
+4
+
+Sampling from the target distribution q0 can then be achieved by numerically solving this diffusion ODE
+backward from T to 0. By applying a time reparameterization λ(t) := log(αt/σt) (which is strictly decreasing
+on [0, T]) and its inverse t(λ), the solution xt to the diffusion ODE (4) at any time t < s can be expressed as
+xt = αt
+αs
+xs −αt
+Z λ(t)
+λ(s)
+e−λεθ
+ xt(λ), t(λ)
+
+dλ.
+(5)
+For a detailed derivation, see Lu et al. (2022b).
+Diffusion ODE solvers.
+In this paragraph, we summarize several popular diffusion samplers that are
+based on solving the diffusion ODE (5). We first discretize the time horizon from T to 0 into (M + 1) time
+steps and solve backward from T to 0:
+T = t0 > t1 > · · · > tM−1 > tM = 0.
+(6)
+Starting from an initial state xt0 sampled from a Gaussian distribution, the goal is to sequentially compute
+xt1, . . . , xtM that approximate the exact ODE solution at the corresponding times, given the initial condition
+xt0 at time T.
+The key challenge is to achieve accurate approximation using only a limited number of
+evaluations of the noise prediction model εθ(x, t). For notional convenience, we use the abbreviation
+εt := εθ(xt, t)
+whenever it is clear from context.
+• Deterministic DDIM. The deterministic DDIM (Song et al., 2020a), which can be interpreted as a
+first-order solver, admits the following update rule:
+xti =
+αti
+αti−1
+xti−1 −
+αtiσti−1
+αti−1
+−σti
+
+εti−1.
+(7)
+• Higher-order ODE solvers. A p-th order ODE solver constructs a p-th order approximation to the
+diffusion ODE (5) for p ≥2. A general form is given as follows (see e.g., Lu et al. (2022a)):
+xti = ODESolverp(xti−1, εti−1, · · · , εti−p)
+:=
+αti
+αti−1
+xti−1 −αtie−λti−1
+p−1
+X
+k=0
+φk(λti −λti−1)
+k!
+yk+1,
+(8)
+where the functions φk : R →R, for k = 0, · · · , p −1, are defined by
+φ0(x) = 1 −e−x,
+φk(x) =
+Z x
+0
+e−λλk dλ = kφk−1(x) −xke−x,
+k = 1, · · · , p −1,
+and y⊤
+k , for k ∈[p], is the k-th row of the solution Y to
+AY = B,
+A =
+"
+(λti−j −λti−1)k−1
+(k −1)!
+#
+1≤j,k≤p
+∈Rp×p,
+and
+B = [ε⊤
+ti−j]1≤j≤p ∈Rp×d.
+To provide some intuition, the p-th order ODE solver seeks to approximate εt by
+εt ≈
+p−1
+X
+k=0
+ λ(t) −λti−1
+k
+k!
+yk+1.
+In practice, one typically takes p = 2 or 3, which leads to the following specific schemes:
+5
+
+– Second-order ODE solver:
+xti = ODESolver2(xti−1, εti−1, εti−2)
+:=
+αti
+αti−1
+xti−1 + αti
+
+(e−λti −e−λti−1)εti−1 + ϕ1D1
+
+,
+(9a)
+where we define
+D1 := εti−1 −εti−2
+λti−1 −λti−2
+and
+ϕ1 := (λti −λti−1 + 1)e−λti −e−λti−1.
+(9b)
+– Third-order ODE solver:
+xti = ODESolver3(xti−1, εti−1, εti−2, εti−3)
+=
+αti
+αti−1
+xti−1 + αti
+ e−λti −e−λti−1
+εti−1
++ ϕ1[(λti−1 −λti−3)D1 −(λti−1 −λti−2)D2]
+λti−2 −λti−3
++ ϕ2(D1 −D2)
+λti−2 −λti−3
+
+,
+(10a)
+where in addition to D1 and ϕ1 defined in (9b), we further define
+D2 := εti−1 −εti−3
+λti−1 −λti−3
+and
+ϕ2 := (λti −λti−1)2e−λti + 2ϕ1.
+(10b)
+• UniPC. UniPC (Zhao et al., 2023) follows a predictor-corrector design: it first generates a corrected
+intermediate state and then performs the actual update using a (multi-step) ODE solver.
+In our
+notation, one can view UniPC as using the third-order solver to compute an intermediate corrected
+iterate
+xcor
+ti−1 = ODESolver3(xcor
+ti−2, εti−1, εti−2, εti−3),
+(11a)
+where ODESolver3 is defined in (10), and εti−k is evaluated at xti−k. Subsequently, it updates xti by
+either a second- or third-order rule:
+xti = ODESolver2(xcor
+ti−1, εti−1, εti−2)
+(11b)
+or
+xti = ODESolver3(xcor
+ti−1, εti−1, εti−2, εti−3),
+(11c)
+where ODESolver2 is given in (9).
+To conclude this paragraph, we emphasize that all the above ODE solvers can be interpreted as approxi-
+mate the integral in (5) by using the right-endpoint evaluation of the noise prediction model εθ(xti−1, ti−1).
+Notation.
+For vector x, we denote by ∥x∥2 or ∥x∥its ℓ2 norm. For matrix A, we denote by ∥A∥its
+spectral norm. In the rest of the paper, we use λ(t) or λt interchangeably to denote the mapping from the
+parameter t to λ. For random vector xt defined in (1), we let qt denote its probability density function. For
+function f(M), we write f(M) = O(M −k) if there exists some constant C > 0 such that |f(M)| ≤CM −k
+for all M ≥1. Similarly, we denote f(M) = Ω(M −k) if |f(M)| ≥cM −k holds for some constant c > 0, and
+f(M) = Θ(M −k) if both f(M) = O(M −k) and f(M) = Ω(M −k) hold. Finally, we say f(M) = o(M −k) if
+limM→∞M kf(M) = 0.
+3
+Main results
+In this section, we introduce our proposed first-order forward-value sampler and present its convergence
+guarantees.
+6
+
+3.1
+Algorithm
+Motivation.
+As discussed in Section 2, diffusion sampling can be interpreted as numerically solving the
+diffusion ODE (5). The essential challenge lies in accurately approximating the integral term involving the
+noise prediction model εθ when we only have access to its evaluations at finite time steps.
+A natural and straightforward approach, given the initial condition xs at time s, is to use the noise
+prediction model εθ(xs, s) evaluated at the backward endpoint s to approximate the integrand εθ(xt(λ), xt(λ))
+for all λ ∈[λ(t), λ(s)]. Indeed, this first-order, backward-value discretization leads to the widely used DDIM
+sampler:
+xt ≈αt
+αs
+xs −αtεθ(xs, s)
+Z λ(t)
+λ(s)
+e−λ dλ = αt
+αs
+xs −
+ αt
+αs
+σs −σt
+
+εθ(xs, s).
+Recall from Section 2 that a noise prediction model εθ(xt, t) seeks to predict the noise component in the
+noisy data xt = αtx0 + σtz where x0 is the clean data and z is the unobserved noise. It is often convenient
+to consider the associated data prediction model:
+µθ(xt, t) := 1
+αt
+ xt −σtεθ(xt, t)
+
+,
+(12)
+which can be interpreted as predicting the underlying clean data x0 from the noisy input xt. This inter-
+pretation is particularly transparent at t = 0, since σ0 = 0 and α0 = 1, so that µθ(x0, 0) = x0, i.e., it
+directly outputs the clean data x0. With this definition, we can rewrite the DDIM update by substituting
+εθ(xs, s) =
+ xs −αsµθ(xs, s)
+
+/σs, which yields
+xt = σt
+σs
+xs +
+
+αt −σt
+σs
+αs
+
+µθ(xs, s).
+(13)
+In light of its intuitive interpretation, let us revisit the discretization of the diffusion ODE from the
+perspective of the data prediction model µθ. Since the update effectively holds the DPM fixed over a finite
+interval, it inevitably introduces discretization error, which in turn governs the convergence rate of the
+sampler. This raises a natural question: can we design a more accurate approximation scheme by changing
+how (and where) the data predictor is evaluated? To this end, let us fix an end time T and consider two
+simple and extreme scenarios regarding the choice of the number of iterations (or equivalently, the number
+of discretization steps) M.
+• iterations sufficiently few. Let us begin with the case where the number of iterations takes a small
+value M = 1. In this case, the initial time s corresponds to s = T and the end time t corresponds to
+t = 0. Thus, if we replace the integrand εθ(xt(λ), t(λ)) with the forward value εθ(x0, 0), the resulting
+first-order, forward-value discretization becomes
+α0
+αT
+xT −α0εθ(x0, 0)
+Z λ(0)
+λ(T )
+e−λ dλ = α0
+αT
+xT −
+ α0
+αT
+σT −σ0
+
+εθ(x0, 0)
+= σ0
+σT
+xT +
+
+α0 −σ0
+σT
+αT
+
+µθ(x0, 0),
+where in the second line, we rewrite the expression in terms of the data prediction model µθ as in the
+previous derivation in (13). Now, recognizing that µθ(x0, 0) = x0, σ0 = 0, and α0 = 1, we find that
+σ0
+σT
+xT +
+
+α0 −σ0
+αT
+σT
+
+µθ(x0, 0) = x0,
+which implies that the forward-value approximation exactly recover the clean data without any dis-
+cretization error.
+• iterations sufficiently many. We now consider the opposite case where the number of iterations M
+approaches to infinity. In this case, one can expect that the discretization error is negligible regardless
+of whether we use the forward value εθ(xt, t) or the backward value εθ(xs, s) to approximate the
+integrand εθ(xt(λ), t(λ)) over the interval [λ(s), λ(t)]. Hence, the forward-value approximation also
+yields accurate results.
+7
+
+Algorithm 1 First-order forward-value sampler
+1: Input: Noise prediction model εθ(x, t), time grid t0 > t1 > · · · > tM, initialization xt0.
+2: Set µθ(xt, t) ←
+ xt −σtεθ(xt, t)
+
+/αt.
+3: for i = 1, . . . , M do
+4:
+Construct a lookahead estimate bxti for xti, using only information up to step i −1 (e.g., one-step
+DDIM from (xti−1, ti−1)).
+5:
+Update
+xti ←
+σti
+σti−1
+xti−1 −
+σtiαti−1
+σti−1
+−αti
+
+µθ(bxti, ti).
+6: end for
+7: Output: Generated sample xtM .
+Taken together, these two extremes suggest that the forward-value discretization is, in principle, a plau-
+sible alternative to the standard backward-value choice (used by DDIM) — it is exact in the one-step case
+(M = 1) and becomes indistinguishable from the backward-value discretization as M →∞when the step
+size vanishes. The practically relevant regime, however, is neither of these limits but rather a small number
+of iterations, where discretization error dominates and DPM evaluation placement matters. Our observa-
+tion suggests that for general M, forward-value evaluations can be systematically more accurate than the
+backward-value choice. This motivates the central question we study next: when M is small, how accurate
+is the first-order, forward-value discretization, and can its potential advantage be exploited in a practical
+way?
+First-order forward-value sampler.
+Capitalizing on the above observation, we propose a practical first-
+order forward-value sampler. In light of the above motivation, we find it more convenient to express the
+algorithm in terms of the data prediction model µθ defined in (12), which is computed deterministically from
+the pre-trained noise prediction model εθ and the known noise schedule.
+For iteration i = 1, . . . , M, we first form a one-step lookahead estimate bxti of the next state using only
+information available up to step i −1. We then evaluate the DPM at this lookahead estimate, µθ(bxti, ti),
+and combine it with the current iterate xti−1 to compute the next iterate xti via
+xti =
+σti
+σti−1
+xti−1 −
+σtiαti−1
+σti−1
+−αti
+
+µθ(bxti, ti).
+(14)
+The complete procedure is summarized in Algorithm 1.
+As a note, the lookahead estimate bxti can be generated by any algorithm that depends only on information
+available up to iteration i −1. For instance, one may obtain bxti by taking a single DDIM step (7) from
+xti−1. Alternatively, one can use a higher-order predictor, e.g., the second-order solver (9), applied using
+xti−1 together with previously computed DPM evaluations such as εθ(bxti−1, ti−1) and εθ(bxti−2, ti−2).
+3.2
+Convergence analysis
+Now that we have introduced our forward-value sampler, a natural question arises: how does its sampling
+convergence speed compare with existing diffusion ODE solvers such as DDIM and DPM-Solvers?
+To answer this rigorously, let us first introduce the notion of convergence order of a diffusion sample,
+which allows us to compare the sampling speeds of diffusion samplers formally.
+Definition 1. For a time grid {ti}M
+i=0, we say a diffusion sampler has convergence order k if
+
+xtM −x⋆
+tM
+
+2 = O(1/M k),
+where {x⋆
+ti}M
+i=0 denotes the exact solution to the diffusion ODE (5) when initialized at x⋆
+t0 = xt0, i.e.,
+x⋆
+ti = αti
+αt0
+x⋆
+t0 −αti
+Z λti
+λt0
+e−λεθ
+ x⋆
+t(λ), t(λ)
+
+dλ,
+i ∈[M].
+(15)
+8
+
+Convergence orders of existing ODE solvers.
+With this definition in hand, we now provide conver-
+gence guarantees for the diffusion ODE solvers presented in Section 2.
+In order to establish convergence results, we make the following assumptions on the time discretization
+and the pre-trained DPM. To stay consistent with the sampler description in (14), we impose regularity
+assumptions on the DPM through the associated data prediction model µθ defined in (12), which has one-
+to-one correspondence with the noise prediction model εθ.
+Assumption 1. We assume that the time discretization grid satisfies max1≤i≤M(λti −λti−1) = O(1/M)
+and that the noise schedule obeys αti ≥αti−1 and σti ≤σti−1 for all i ∈[M]. In addition, we assume that
+data prediction function µθ(x, t) defined in (12) satisfies
+(A1) ∥∇xµθ(x, t)∥≤Lx/αt for any x ∈Rd and any t ≥0;
+(A2) ∥∇2
+xµθ(x, t)∥≤Hx for any x ∈Rd and any t ≥0;
+(A3)
+
+ ∂
+∂λµθ
+ x⋆
+t(λ), t(λ)
+
+
+ ≤Lt for any λ ∈R;
+(A4)
+
+ ∂2
+∂λ2 µθ
+ x⋆
+t(λ), t(λ)
+
+
+ ≤Ht for any λ ∈R;
+(A5)
+
+ ∂
+∂λ∇xµθ
+ x⋆
+t(λ), t(λ)
+
+
+ ≤H for any λ ∈R.
+In words, Assumption 1 requires the time discretization to be sufficiently fine and the pre-trained DPM
+to be smooth in both the data variable x and the time variable t.
+According to Lu et al. (2022a, Theorem 3.2) and Zheng et al. (2023, Theorem 3.3), we have the following
+upper bound on the convergence orders of the diffusion ODE solvers summarized in Section 2.
+Theorem 1 (Convergence order upper bound). Under Assumption 1, the convergence orders of DDIM (7),
+the second-order ODE solver (9) and UniPC (10) are 1, 2 and 3, respectively.
+Theorem 1 formalizes the usual intuition: increasing the discretization order of a diffusion ODE solver
+leads to improved convergence rates.
+Moreover, we show that these convergence rates are tight by establishing the following matching lower
+bound, even in the idealized setting when the true score functions are available (i.e., there is no score matching
+error). For analytical simplicity, our analysis focuses on p = 1 and p = 2. The analysis for higher-order
+follows analogously. The proof is postponed to Appendix C.
+Theorem 2 (Convergence order lower bound). For any time grid {λti}M
+i=0 satisfying λti −λti−1 = O(M −1),
+there exists some distribution such that the convergence order of the deterministic DDIM (7) is at most 1.
+In addition, the convergence order of the second-order ODE solver (9) is at most 2.
+The lower bound indicates that there is no generic free improvement in convergence order for DDIM or
+standard second-order solvers without changing the underlying approximation strategy.
+Convergence order of forward-value discretization.
+Now let us consider the (idealized) first-oder
+forward-value discretization of the diffusion ODE (5). For each iteration i = 1, . . . , M, given the current
+iterate xfor
+ti−1 at time ti−1, we compute the next iterate xfor
+ti by
+xfor
+ti =
+σti
+σti−1
+xfor
+ti−1 +
+
+αti −σtiαti−1
+σti−1
+
+µθ(xfor
+ti , ti).
+(16)
+For comparison,the deterministic DDIM update (7) can be written in the data-prediction form as
+xbck
+ti
+=
+σti
+σti−1
+xbck
+ti−1 +
+
+αti −σtiαti−1
+σti−1
+
+µθ(xbck
+ti−1, ti−1).
+(17)
+The only difference between (16) and (17) is whether the data prediction model µθ(x, t) is evaluated at the
+next state/time (xfor
+ti , ti), or the current state/time (xbck
+ti−1, ti−1). As a note, while the update rule of the naive
+forward-value discretization (16) is not directly implementable, it serves as a clean lens for understanding
+how evaluation placement affects discretization error.
+Interestingly, it turns out that the first-order discretization errors introduced by these two strategies have
+exactly opposite signs, as formalized in the following theorem. The proof is postponed to Section B.1.
+9
+
+Theorem 3. Under Assumption 1, the idealized forward-value discretization scheme (16) has conver-
+gence order 1.
+Moreover, let xfor
+tM and xbck
+tM denote the outputs of the forward-value discretization (16)
+and DDIM (17), respectively, and let x⋆
+tM be the exact ODE solution defined in (15), with the common
+initialization xbck
+t0 = xfor
+t0 = x⋆
+t0. Then we have
+
+xbck
+tM −x⋆
+tM + xfor
+tM −x⋆
+tM
+
+2 = O(1/M 2).
+(18)
+Theorem 3 implies that the leading O(1/M) errors of the forward-value and backward-value discretizations
+cancel to second order:
+xbck
+tM −x⋆
+tM ≈−(xfor
+tM −x⋆
+tM ).
+Conceptually, this suggests that if one can (even approximately) access forward-value information, then
+combining it with the standard backward-value update can greatly reduce the most harmful part of the
+discretization error. This “signed error” viewpoint motivates our algorithmic design in the next section,
+where we aim to leverage estimates for the next-step state to unlock the benefits of forward-value evaluations,
+without assuming access to the true xti.
+Convergence order of our sampler.
+Finally, we provide the convergence guarantee of the proposed
+sampler in Theorem 4 below; with proof postponed to Section B.2.
+Theorem 4. Suppose that Assumption 1 holds. In addition, assume the the one-step lookahead estimate bxti
+satisfies ∥bxti −x⋆
+ti(xti−1, ti−1)∥= o(1/M) for all i ∈[M], where x⋆
+t (xti−1, ti−1) denotes the solution to the
+diffusion ODE at time t when initialized at time tt−1 with state xti−1, i.e.,
+x⋆
+t (xti−1, ti−1) =
+αt
+αti−1
+xti−1 −αt
+Z λt
+λti−1
+e−λεθ
+ x⋆
+t(λ)(xti−1, ti−1), t(λ)
+
+dλ,
+∀t ≤ti−1.
+(19)
+Then the proposed sampler (14) satisfies
+
+xtM −xfor
+tM
+
+ = o(1/M),
+where xfor
+t
+represents the idealized forward-value iterate defined in (16) with the same initialization as xt. In
+particular, the convergence order of the sampler (14) is 1.
+This theorem guarantees that, as long as the one-step lookahead bxti is consistent (its error vanishes as
+the number of iterations M grows), the implemented method tracks the idealized forward-value trajectory
+closely enough that it inherits the same first-order rate. This matters because the idealized forward-value
+discretization is precisely the object that exhibits signed error cancellation with DDIM, as established in
+Theorem 3.
+Even more interesting, despite being only a first-order method, we observe that the sampler (16) converges
+even faster than the second-order ODE solver (9) when bxti provides a reasonably accurate proxy for the
+next-step iterate. This phenomenon conveys a surprising message: the discretization error introduced by the
+first-order, forward-value scheme (16) is less harmful than that of the backward-value approximation (7), or
+even the second-order solver (9). This supports the main takeaway suggested by the theorems above: where
+the DPM is evaluated (and how those evaluations are combined) can matter as much as nominal solver order
+for practical sampling efficiency.
+4
+Experiments
+In this section, we present extensive experiments to compare the performance of our sampler and high-order
+samplers.
+10
+
+DDIM
+DPM
+Solver-2
+DPM
+Solver-3
+UniPC-3
+Ours
+NFE=4
+5
+6
+8
+10
+NFE=4
+5
+6
+8
+10
+(a) ImageNet64, EDM2-S
+(b) ImageNet64, EDM2-L
+Figure 1:
+Qualitative comparisons between our sampler and DDIM, DPMSolver-2, DPMSolver-3, and
+UniPC-3. Images are sampled from pre-trained EDM2 with S and L size on ImageNet64 dataset.
+Experiment setup.
+We conduct experiments on four datasets, employing different pre-trained data pre-
+diction models: (1) CIFAR-10 (Krizhevsky et al., 2009) with Diffusion-Based Generative Models (EDM)
+(Karras et al., 2022); (2) the ImageNet dataset (Deng et al., 2009) in 64×64 resolution with EDM2 in size S
+and L; (3) the ImageNet dataset (Deng et al., 2009) in 512×512 resolution with EDM2 in size XS and XXL;
+(4) the large scale Scene Understanding (LSUN) dataset (Yu et al., 2015) and the Flickr-Faces-HQ (FFHQ)
+dataset (Karras et al., 2019) with latent diffusion models using noise predictors (Rombach et al., 2022;
+Blattmann et al., 2022). For all datasets, we evaluate samplers with a number of NFEs M ∈{4, 5, 6, 8, 10}.
+For the LSUN and FFHQ datasets, since no public reference statistics are available for computing FID, we
+calculate them ourselves. As a result, our FID scores may differ from those reported in previous studies. We
+will release both the reference statistics we used and the code to generate them.
+We compare our sampler with DDIM, a second-order DPM Solver (DPMSolver-2, see (9)), a third-order
+DPM Solver (DPMSolver-3, see (10)), and a third-order predictor-corrector-based sampler (UniPC-3, see
+(11a) and (11b)). We ignore certain implementation-specific tricks, such as reducing the solver order in the
+final iterations, which may lead to difference between our results and those reported in Zhao et al. (2023).
+The noise schedules αti and σti are subsampled from the reference schedules αref
+t
+and σref
+t . Specifically,
+for the reference schedules defined over M ref steps, the sampler with M iterations adopts
+αti = αref
+ti′,
+σti = σref
+ti′ ,
+where
+i′ = round
+iM ref
+M
+
+.
+Qualitative comparisons.
+Figures 1–3 summarize sampling results across both unconditional (Figure 3)
+and conditional generation (Figure 1 and 2), and across different resolutions (ImageNet-64 in Figure 1 and
+ImageNet-512 in Figure 2), and across pixel-space (Figure 1) and latent-space (Figure 2 and 3). Across these
+settings, our sampler consistently generates superior samples with more visual details, especially at lower
+NFEs. In comparison, DDIM and the higher-order solvers (DPMSolver-2/3 and UniPC-3) more often lack
+similar visual details or show localized artifacts under the same compute budget.
+11
+
+DDIM
+DPM
+Solver-2
+DPM
+Solver-3
+UniPC-3
+Ours
+NFE=4
+5
+6
+8
+10
+NFE=4
+5
+6
+8
+10
+(a) ImageNet512, EDM2-XS
+(b) ImageNet512, EDM2-XXL
+Figure 2:
+Qualitative comparisons between our sampler and DDIM, DPMSolver-2, DPMSolver-3, and
+UniPC-3. Images are sampled from pre-trained EDM2 with XS and XXL size on ImageNet512 dataset.
+DDIM
+DPM
+Solver-2
+DPM
+Solver-3
+UniPC-3
+Ours
+NFE=4
+5
+6
+8
+10
+NFE=4
+5
+6
+8
+10
+Figure 3:
+Qualitative comparisons between our sampler and DDIM, DPMSolver-2, DPMSolver-3, and
+UniPC-3. Images are sampled from pre-trained latent diffusion model on FFHQ dataset.
+12
+
+Table 1: The FID of different samplers on CIFAR-10 dataset across varying NFEs, including both uncon-
+ditional (EDM-uncond) and conditional generation (EDM-cond). All FID scores are calculated using 50K
+generated samples.
+Model
+NFE
+High-order Algorithms
+First-order Algorithms
+DPMSolver-2
+DPMSolver-3
+UniPC-3
+DDIM
+Ours
+EDM
+-uncond
+4
+44.03
+33.77
+111.60
+67.03
+25.02
+5
+27.88
+18.20
+55.13
+50.52
+16.05
+6
+17.88
+10.69
+58.83
+35.89
+9.47
+8
+9.92
+5.60
+9.82
+22.46
+4.92
+10
+6.63
+3.88
+2.86
+15.85
+3.46
+EDM
+-cond
+4
+63.31
+23.99
+78.67
+99.41
+18.44
+5
+40.10
+13.69
+41.48
+76.04
+12.30
+6
+26.76
+8.66
+39.25
+60.42
+7.57
+8
+14.37
+5.00
+5.61
+41.88
+4.32
+10
+8.75
+3.61
+2.55
+30.89
+3.18
+Table 2: The FID of different samplers on ImageNet64 dataset across varying NFEs. All FID scores are
+calculated using 50K generated samples.
+Model
+NFE
+High-order Algorithms
+First-order Algorithms
+DPMSolver-2
+DPMSolver-3
+UniPC-3
+DDIM
+Ours
+EDM2
+-S
+4
+29.91
+23.66
+50.00
+43.86
+22.35
+5
+18.16
+12.57
+26.93
+31.41
+11.98
+6
+11.89
+7.63
+15.26
+23.22
+7.20
+8
+6.40
+3.92
+5.78
+14.20
+3.64
+10
+4.26
+2.70
+2.71
+9.85
+2.51
+EDM2
+-L
+4
+27.00
+21.49
+54.43
+39.37
+20.55
+5
+16.13
+11.16
+28.88
+28.11
+10.69
+6
+10.66
+6.96
+16.23
+20.65
+6.67
+8
+5.83
+3.74
+6.14
+12.56
+3.50
+10
+3.98
+2.70
+3.05
+8.76
+2.56
+Quantitative results (FID).
+Tables 1–3 report the FID scores, computed over 50K generated samples,
+for pixel-space sampling across varying NFEs, where lower FIDs generally indicate better sample quality.
+Across all datasets and model sizes, our sampler achieves the lowest FID throughout the low-to-mid compute
+regime (up to NFE = 8). Only when the compute budget is pushed beyond this regime (NFE > 8) does
+a higher-order solver become competitive or slightly better in some settings (e.g., UniPC-3 on CIFAR-10
+at NFE = 10 in Table 1). On higher-resolution ImageNet (Tables 2 and 3), our sampler remains the top
+performer across all tested NFEs and model sizes, with the largest gains at small NFEs. Table 4 reports
+the FID scores for latent space sampling across varying NFEs. Across all datasets, out sampler achieves
+significantly lower scores than the first-order algorithm DDIM, and obtains at least comparable performance
+with all of the high-order algorithms.
+Finally, we also validate the effectiveness of our proposed forward-value framework when it is augmented
+with higher-order solvers; see Appendix A.2 for details.
+5
+Discussion
+In this paper, we have developed a novel, training-free acceleration method for sampling from DPMs. Despite
+its first-order nature, our method leverages a forward-value discretization strategy that achieves significant
+empirical improvements over standard first-order samplers like DDIM, and even competes with state-of-
+the-art higher-order methods. This result challenges the conventional wisdom that higher-order accuracy is
+necessary for effective acceleration in diffusion sampling, and reveals a distinct lever for acceleration that is
+13
+
+Table 3: FID comparison of different samplers on ImageNet512 dataset across varying NFEs. All FID scores
+are calculated using 50K generated samples.
+Model
+NFE
+High-order Algorithms
+First-order Algorithms
+DPMSolver-2
+DPMSolver-3
+UniPC-3
+DDIM
+Ours
+EDM2
+-XS
+4
+68.17
+60.11
+62.94
+91.44
+52.32
+5
+40.61
+28.41
+34.03
+65.25
+23.56
+6
+28.46
+16.57
+16.43
+53.93
+14.04
+8
+12.06
+6.03
+5.63
+32.39
+5.04
+10
+6.58
+3.60
+3.30
+21.48
+3.06
+EDM2
+-XXL
+4
+66.21
+59.34
+217.22
+87.78
+50.96
+5
+38.02
+28.05
+94.36
+61.62
+22.69
+6
+28.23
+16.11
+30.65
+53.88
+14.33
+8
+12.18
+7.01
+8.51
+31.16
+6.18
+10
+7.44
+4.93
+4.90
+20.97
+4.57
+Table 4: FID comparison of different samplers on latent diffusion model across varying NFEs. All FID scores
+are calculated using 50K generated samples.
+Dataset
+NFE
+High-order Algorithms
+First-order Algorithms
+DPMSolver-2
+DPMSolver-3
+UniPC-3
+DDIM
+Ours
+FFHQ
+4
+31.22
+15.65
+77.39
+80.19
+15.78
+5
+16.30
+11.29
+21.89
+58.33
+9.75
+6
+10.45
+11.55
+9.96
+43.68
+7.89
+8
+7.19
+12.09
+9.96
+27.00
+6.80
+10
+6.58
+11.63
+7.37
+18.77
+6.46
+Lsun
+Bedroom
+4
+18.98
+10.13
+121.68
+70.55
+12.17
+5
+8.66
+8.50
+24.71
+41.07
+6.98
+6
+6.01
+9.30
+9.39
+26.15
+5.56
+8
+4.77
+9.24
+5.70
+13.70
+4.92
+10
+4.48
+8.38
+4.82
+9.00
+4.65
+orthogonal to classical order analysis.
+Moving forward, several extensions appear natural. First, it would be valuable to develop a more rigorous
+theoretical understanding of the proposed forward-value discretization, including sharper error bounds and a
+characterization of why it yields practical gains beyond standard first-order schemes. Second, extending the
+framework to diffusion SDE sampling is an important direction, where stochasticity introduces additional
+challenges such as the interaction between discretization and noise injection. Third, it remains to be ex-
+plored how the method behaves under classifier guidance and, more broadly, classifier-free guidance, where
+guidance strength can amplify errors and alter the effective dynamics. Finally, it is of interest to investigate
+applications beyond unconditional/conditional generation, such as leveraging the forward-value principle in
+diffusion-prior inverse problems (e.g., deblurring, super-resolution, and related reconstruction tasks), where
+measurement consistency constraints may interact nontrivially with the sampling discretization.
+Acknowledgements
+G. Li is supported in part by the Chinese University of Hong Kong Direct Grant for Research and the Hong
+Kong Research Grants Council ECS 2191363. C. Cai is supported in part by the NSF grants DMS-2515333.
+References
+Anderson, B. D. (1982). Reverse-time diffusion equation models. Stochastic Processes and their Applications,
+12(3):313–326.
+14
+
+Bao, F., Li, C., Zhu, J., and Zhang, B. (2022). Analytic-dpm: an analytic estimate of the optimal reverse
+variance in diffusion probabilistic models. arXiv preprint arXiv:2201.06503.
+Benton, J., De Bortoli, V., Doucet, A., and Deligiannidis, G. (2023). Nearly d-linear convergence bounds for
+diffusion models via stochastic localization. arXiv preprint arXiv:2308.03686.
+Blattmann, A., Rombach, R., Oktay, K., Müller, J., and Ommer, B. (2022). Retrieval-augmented diffusion
+models. Advances in Neural Information Processing Systems, 35:15309–15324.
+Chen, H., Lee, H., and Lu, J. (2023a). Improved analysis of score-based generative modeling: User-friendly
+bounds under minimal smoothness assumptions. In International Conference on Machine Learning, pages
+4735–4763. PMLR.
+Chen, H., Ren, Y., Ying, L., and Rotskoff, G. M. (2024). Accelerating diffusion models with parallel sampling:
+Inference at sub-linear time complexity. arXiv preprint arXiv:2405.15986.
+Chen, S., Chewi, S., Lee, H., Li, Y., Lu, J., and Salim, A. (2023b). The probability flow ode is provably fast.
+Advances in Neural Information Processing Systems, 36:68552–68575.
+Chen, S., Chewi, S., Li, J., Li, Y., Salim, A., and Zhang, A. R. (2022). Sampling is as easy as learning the
+score: theory for diffusion models with minimal data assumptions. arXiv preprint arXiv:2209.11215.
+Croitoru, F.-A., Hondru, V., Ionescu, R. T., and Shah, M. (2023). Diffusion models in vision: A survey.
+IEEE Transactions on Pattern Analysis and Machine Intelligence.
+Deng, J., Dong, W., Socher, R., Li, L.-J., Li, K., and Fei-Fei, L. (2009). Imagenet: A large-scale hierarchical
+image database. In 2009 IEEE conference on computer vision and pattern recognition, pages 248–255.
+Ieee.
+Dhariwal, P. and Nichol, A. (2021). Diffusion models beat gans on image synthesis. Advances in neural
+information processing systems, 34:8780–8794.
+Gupta, S., Cai, L., and Chen, S. (2024).
+Faster diffusion-based sampling with randomized midpoints:
+Sequential and parallel. arXiv preprint arXiv:2406.00924.
+Heusel, M., Ramsauer, H., Unterthiner, T., Nessler, B., and Hochreiter, S. (2017). Gans trained by a two
+time-scale update rule converge to a local nash equilibrium. Advances in neural information processing
+systems, 30.
+Ho, J., Jain, A., and Abbeel, P. (2020).
+Denoising diffusion probabilistic models.
+Advances in neural
+information processing systems, 33:6840–6851.
+Hoogeboom, E., Satorras, V. G., Vignac, C., and Welling, M. (2022). Equivariant diffusion for molecule
+generation in 3d. In International conference on machine learning, pages 8867–8887. PMLR.
+Huang, D. Z., Huang, J., and Lin, Z. (2024a). Convergence analysis of probability flow ODE for score-based
+generative models. arXiv preprint arXiv:2404.09730.
+Huang, X., Zou, D., Dong, H., Zhang, Y., Ma, Y.-A., and Zhang, T. (2024b). Reverse transition kernel: A
+flexible framework to accelerate diffusion inference. arXiv preprint arXiv:2405.16387.
+Jiao, Y. and Li, G. (2024). Instance-dependent convergence theory for diffusion models. arXiv preprint
+arXiv:2410.13738.
+Jolicoeur-Martineau, A., Li, K., Piché-Taillefer, R., Kachman, T., and Mitliagkas, I. (2021). Gotta go fast
+when generating data with score-based models. arXiv preprint arXiv:2105.14080.
+Karras, T., Aittala, M., Aila, T., and Laine, S. (2022). Elucidating the design space of diffusion-based
+generative models. In Proc. NeurIPS.
+15
+
+Karras, T., Laine, S., and Aila, T. (2019). A style-based generator architecture for generative adversarial
+networks. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+4401–4410.
+Kingma, D., Salimans, T., Poole, B., and Ho, J. (2021). Variational diffusion models. Advances in neural
+information processing systems, 34:21696–21707.
+Kong, Z., Ping, W., Huang, J., Zhao, K., and Catanzaro, B. (2021). DiffWave: A versatile diffusion model
+for audio synthesis. In International Conference on Learning Representations.
+Krizhevsky, A., Hinton, G., et al. (2009). Learning multiple layers of features from tiny images.
+Lai, C.-H., Song, Y., Kim, D., Mitsufuji, Y., and Ermon, S. (2025). The principles of diffusion models. arXiv
+preprint arXiv:2510.21890.
+Lee, H., Lu, J., and Tan, Y. (2023).
+Convergence of score-based generative modeling for general data
+distributions. In International Conference on Algorithmic Learning Theory, pages 946–985. PMLR.
+Li, G. and Cai, C. (2024). Provable acceleration for diffusion models under minimal assumptions. arXiv
+preprint arXiv:2410.23285.
+Li, G., Cai, C., and Wei, Y. (2025a). Dimension-free convergence of diffusion models for approximate gaussian
+mixtures. arXiv preprint arXiv:2504.05300.
+Li, G., Huang, Y., Efimov, T., Wei, Y., Chi, Y., and Chen, Y. (2024). Accelerating convergence of score-based
+diffusion models, provably. arXiv preprint arXiv:2403.03852.
+Li, G. and Jiao, Y. (2024). Improved convergence rate for diffusion probabilistic models. In The Thirteenth
+International Conference on Learning Representations.
+Li, G., Wei, Y., Chen, Y., and Chi, Y. (2023). Towards faster non-asymptotic convergence for diffusion-based
+generative models. arXiv preprint arXiv:2306.09251.
+Li, G. and Yan, Y. (2024). O(d/T) convergence theory for diffusion probabilistic models under minimal
+assumptions. arXiv preprint arXiv:2409.18959.
+Li, G., Zhou, Y., Wei, Y., and Chen, Y. (2025b). Faster diffusion models via higher-order approximation.
+arXiv preprint arXiv:2506.24042.
+Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., and Zhu, J. (2022a). Dpm-solver: A fast ode solver for diffusion
+probabilistic model sampling in around 10 steps. Advances in Neural Information Processing Systems,
+35:5775–5787.
+Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., and Zhu, J. (2022b). Dpm-solver++: Fast solver for guided
+sampling of diffusion probabilistic models. arXiv preprint arXiv:2211.01095.
+Luhman, E. and Luhman, T. (2021). Knowledge distillation in iterative generative models for improved
+sampling speed. arXiv preprint arXiv:2101.02388.
+Meng, C., Rombach, R., Gao, R., Kingma, D., Ermon, S., Ho, J., and Salimans, T. (2023). On distillation
+of guided diffusion models. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 14297–14306.
+Nichol, A. Q. and Dhariwal, P. (2021). Improved denoising diffusion probabilistic models. In International
+Conference on Machine Learning, pages 8162–8171.
+Ramesh, A., Dhariwal, P., Nichol, A., Chu, C., and Chen, M. (2022). Hierarchical text-conditional image
+generation with clip latents. arXiv preprint arXiv:2204.06125, 1(2):3.
+16
+
+Rombach, R., Blattmann, A., Lorenz, D., Esser, P., and Ommer, B. (2022). High-resolution image synthesis
+with latent diffusion models. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 10684–10695.
+Saharia, C., Chan, W., Saxena, S., Li, L., Whang, J., Denton, E. L., Ghasemipour, K., Gontijo Lopes, R.,
+Karagol Ayan, B., Salimans, T., et al. (2022). Photorealistic text-to-image diffusion models with deep
+language understanding. Advances in neural information processing systems, 35:36479–36494.
+Salimans, T. and Ho, J. (2022). Progressive distillation for fast sampling of diffusion models. arXiv preprint
+arXiv:2202.00512.
+Shih, A., Belkhale, S., Ermon, S., Sadigh, D., and Anari, N. (2023). Parallel sampling of diffusion models.
+Advances in Neural Information Processing Systems, 36:4263–4276.
+Sohl-Dickstein, J., Weiss, E., Maheswaranathan, N., and Ganguli, S. (2015). Deep unsupervised learning
+using nonequilibrium thermodynamics. In International conference on machine learning, pages 2256–2265.
+pmlr.
+Song, J., Meng, C., and Ermon, S. (2020a).
+Denoising diffusion implicit models.
+arXiv preprint
+arXiv:2010.02502.
+Song, Y., Dhariwal, P., Chen, M., and Sutskever, I. (2023).
+Consistency models.
+arXiv preprint
+arXiv:2303.01469.
+Song, Y. and Ermon, S. (2019).
+Generative modeling by estimating gradients of the data distribution.
+Advances in neural information processing systems, 32.
+Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., and Poole, B. (2020b). Score-based
+generative modeling through stochastic differential equations. arXiv preprint arXiv:2011.13456.
+Villegas, R., Babaeizadeh, M., Kindermans, P.-J., Moraldo, H., Zhang, H., Saffar, M. T., Castro, S., Kunze,
+J., and Erhan, D. (2022). Phenaki: Variable length video generation from open domain textual descrip-
+tions. In International Conference on Learning Representations.
+Wu, Y., Chen, Y., and Wei, Y. (2024). Stochastic runge-kutta methods: Provable acceleration of diffusion
+models. arXiv preprint arXiv:2410.04760.
+Xue, S., Yi, M., Luo, W., Zhang, S., Sun, J., Li, Z., and Ma, Z.-M. (2024). Sa-solver: Stochastic adams
+solver for fast sampling of diffusion models. Advances in Neural Information Processing Systems, 36.
+Yang, L., Zhang, Z., Song, Y., Hong, S., Xu, R., Zhao, Y., Zhang, W., Cui, B., and Yang, M.-H. (2023).
+Diffusion models: A comprehensive survey of methods and applications. ACM Computing Surveys, 56(4):1–
+39.
+Yu, F., Seff, A., Zhang, Y., Song, S., Funkhouser, T., and Xiao, J. (2015). Lsun: Construction of a large-scale
+image dataset using deep learning with humans in the loop. arXiv preprint arXiv:1506.03365.
+Yu, Y. and Yu, L. (2025). Advancing wasserstein convergence analysis of score-based models: Insights from
+discretization and second-order acceleration. arXiv preprint arXiv:2502.04849.
+Zhang, Q. and Chen, Y. (2022). Fast sampling of diffusion models with exponential integrator. arXiv preprint
+arXiv:2204.13902.
+Zhao, W., Bai, L., Rao, Y., Zhou, J., and Lu, J. (2023). Unipc: A unified predictor-corrector framework for
+fast sampling of diffusion models. Advances in Neural Information Processing Systems, 36:49842–49869.
+Zheng, K., Lu, C., Chen, J., and Zhu, J. (2023). Dpm-solver-v3: Improved diffusion ode solver with empirical
+model statistics. Advances in Neural Information Processing Systems, 36:55502–55542.
+17
+
+A
+Further experimental results
+A.1
+Further results on our sampler
+DDIM, NFE=5
+DPMSolver-2, NFE=5
+DPMSolver-3, NFE=5
+UniPC-3, NFE=5
+Ours, NFE=5
+Figure 4:
+Qualitative comparisons between our sampler and DDIM, DPMSolver-2, DPMSolver-3, and
+UniPC-3. Images are sampled from pre-trained unconditional EDM on CIFAR10 dataset.
+Figure 4 and 5 present sampling results on CIFAR-10 dataset, including unconditional and conditional
+generation with NFE= 5. In both settings, our sampler consistently generate much clearer samples with more
+visual details than the first-order algorithm DDIM, comparable with high-order algorithms DPMSolver-2/3,
+and avoid localized artifacts appearing in samples generated by UniPC-3. Figure 6 presents sampling results
+on LSUN bedroom dataset. Our sampler can generate high-quality samples close to the high-order reference
+samplers DPMSolver-2/3 and UniPC-3, which are significantly clearer than those generated by DDIM.
+A.2
+Experimental results on augmenting with DPMSolver-2
+Figures 7 and 8 show that augmenting our sampler with DPMSolver-2 can further improve perceptual fidelity
+at low NFEs, often yielding cleaner details and more consistent global structure.
+Tables 5 and 6 quantify a hybrid variant that augments our sampler with DPMSolver-2. It typically
+improves FID at low-to-mid NFEs, while at the highest NFE the gain may diminish or reverse depending
+on the setting or model size.
+B
+Proof of convergence order upper bounds (Theorems 3 and 4)
+In this section, we analyze the convergence behavior of the idealized first-order forward-value discretization
+scheme (16) (Theorem 3) and our practical sampler (14) (Theorem 4).
+18
+
+DDIM, NFE=5
+DPMSolver-2, NFE=5
+DPMSolver-3, NFE=5
+UniPC-3, NFE=5
+Ours, NFE=5
+Figure 5:
+Qualitative comparisons between our sampler and DDIM, DPMSolver-2, DPMSolver-3, and
+UniPC-3. Images are sampled from pre-trained conditional EDM on CIFAR10 dataset.
+DDIM
+DPM
+Solver-2
+DPM
+Solver-3
+UniPC-3
+Ours
+NFE=4
+5
+6
+8
+10
+NFE=4
+5
+6
+8
+10
+Figure 6:
+Qualitative comparisons between our sampler and DDIM, DPMSolver-2, DPMSolver-3, and
+UniPC-3. Images are sampled from pre-trained latent diffusion model on LSUN bedroom dataset.
+19
+
+Ours, NFE=5
+Ours+DPMSolver-2, NFE=5
+Ours, NFE=5
+Ours+DPMSolver-2, NFE=5
+(a) CIFAR10, EDM-uncond
+(b) CIFAR10, EDM-cond
+Figure 7: Qualitative comparisons between our sampler and its variant Ours+DPMSolver-2. Images are
+sampled from pre-trained EDM model on CIFAR10 dataset.
+Ours
+NFE=4
+5
+6
+8
+10
+NFE=4
+5
+6
+8
+10
+(a) ImageNet512, EDM2-XS
+(b) ImageNet512, EDM2-XXL
+Ours +
+DPMSolver-2
+Figure 8: Qualitative comparisons between our sampler and its variant Ours+DPMSolver-2. Images are
+sampled from pre-trained EDM2 model on ImageNet512 dataset.
+20
+
+Table 5: FID comparison between our sampler and the hybrid variant (ours + odesolver) on CIFAR-10 and
+ImageNet512 datasets across different NFEs. All FID scores are calculated using 50K generated samples.
+NFE
+EDM-uncond
+EDM-cond
+Ours
+Ours+DPMSolver-2
+Ours
+Ours+DPMSolver-2
+4
+25.02
+22.30
+18.44
+14.76
+5
+16.05
+15.26
+12.30
+7.48
+6
+9.47
+8.49
+7.57
+3.66
+8
+4.92
+4.19
+4.32
+2.90
+10
+3.46
+2.88
+3.18
+3.32
+Table 6: FID comparison between our sampler and the hybrid variant (ours+DPMSolver-2) on ImageNet512
+datasets across different NFEs. All FID scores are calculated using 50K generated samples.
+NFE
+EDM2-XS
+EDM2-XXL
+Ours
+Ours+DPMSolver-2
+Ours
+Ours+DPMSolver-2
+4
+50.96
+47.63
+52.32
+47.06
+5
+22.69
+20.30
+23.56
+18.97
+6
+14.33
+11.93
+14.04
+10.89
+8
+6.18
+6.09
+5.04
+4.24
+10
+4.57
+4.90
+3.06
+2.89
+For ease of presentation, we use the notation δti := λti −λti−1 for each i ∈[M] throughout this section.
+In addition, ∇kµ(x, t) denotes the k-th order gradient of µ(x, t) with respect to x.
+Finally, we note that the diffusion ODE in (4) can be equivalently written in terms of the data prediction
+model µθ. Indeed, using the approximation s⋆
+t (x) ≈
+ αtµθ(x, t) −x
+
+/σ2
+t and substituting it into (3) yields
+the following diffusion ODE associated with a data prediction model:
+˙xt =
+
+f(t) + g2(t)
+2σ2
+t
+
+xt −αtg2(t)
+2σ2
+t
+µθ(xt, t),
+xT ∼N(0, ˜σ2Id).
+(20)
+Solving this ODE from T to 0 again produces a sample x0. Under the same change of variables λ(t), the
+solution admits the integral form: for t < s,
+xt = σt
+σs
+xs + σt
+Z λ(t)
+λ(s)
+eλµθ
+ xt(λ), t(λ)
+
+dλ.
+(21)
+B.1
+Proof of Theorem 3
+Proof for the first-order forward-value discretization scheme.
+By the diffusion ODE with the data
+prediction model (see (21)), for each i ∈[M], we can express x⋆
+ti in terms of x⋆
+ti−1 as
+x⋆
+ti =
+σti
+σti−1
+x⋆
+ti−1 + σti
+Z λti
+λti−1
+eλµθ
+ x⋆
+t(λ), t(λ)
+
+dλ.
+(22)
+Combining this identity with the forward-value discretization (16), we can decompose the distance between
+the iterates xfor
+ti and x⋆
+ti as
+xfor
+ti −x⋆
+ti =
+σti
+σti−1
+ xfor
+ti−1 −x⋆
+ti−1
+
++ σti
+Z λti
+λti−1
+eλ
+
+µθ
+ xfor
+ti , ti
+
+−µθ
+ x⋆
+t(λ), t(λ)
+
+dλ
+=
+σti
+σti−1
+ xfor
+ti−1 −x⋆
+ti−1
+
++ σti
+Z λti
+λti−1
+eλ dλ ·
+
+µθ
+ xfor
+ti , ti
+
+−µθ
+ x⋆
+ti, ti
+
++ σti
+Z λti
+λti−1
+eλ
+µθ
+ x⋆
+ti, ti
+
+−µθ
+ x⋆
+t(λ), t(λ)
+
+dλ.
+(23)
+21
+
+Let us control the last two terms on the right-hand-side of (23) separately. For the second term, we can
+leverage the Lipschitz property of µθ(x, t) with respect to x (see Assumption 1 (A1)) to derive
+
+σti
+Z λti
+λti−1
+eλ dλ ·
+
+µθ
+ xfor
+ti , ti
+
+−µθ
+ x⋆
+ti, ti
+
+
+ ≤σtieλtiδti
+Lx
+αti
+
+xfor
+ti −x⋆
+ti
+
+= δtiLx
+
+xfor
+ti −x⋆
+ti
+
+,
+(24)
+where the last inequality holds due to the fact that λti ≤λti−1 and λt = log(αt/σt). Similarly, we can
+control the third term by the Lipschitz property of µθ(x, t) with respect to t (see Assumption 1 (A3)):
+
+σti
+Z λti
+λti−1
+eλ
+µθ
+ x⋆
+ti, ti
+
+−µθ
+ x⋆
+t(λ), t(λ)
+
+dλ
+
+ ≤σtieλti
+Z λti
+λti−1
+Lt(λti −λ) dλ = 1
+2σtieλtiLtδ2
+ti
+= 1
+2αtiLtδ2
+ti = O(M −2),
+(25)
+where the last step arises from the condition that δti = O(M −1). Substituting (24) and (25) into (23), we
+find that for each i ∈[M],
+
+xfor
+ti −x⋆
+ti
+
+ ≤
+σti
+σti−1
+
+xfor
+ti−1 −x⋆
+ti−1
+
+ + Lxδti
+
+xfor
+ti −x⋆
+ti
+
+ + O(M −2),
+(26)
+or equivalently,
+
+xfor
+ti −x⋆
+ti
+
+ ≤
+σti
+σti−1(1 −Lxδti)
+
+xfor
+ti−1 −x⋆
+ti−1
+
+ + O(M −2),
+(27)
+where the last step arises from the fact that 1 −Lxδti = 1 −O(1/M) ≍1.
+Applying (27) recursively allows us to bound the final error as
+
+xfor
+tM −x⋆
+tM
+
+ ≤O(M −2)
+M
+X
+i=1
+M
+Y
+j=i+1
+σtj
+σtj−1(1 −Lxδtj) = O(M −1).
+(28)
+Here, the first step holds as xfor
+t0 = x⋆
+t0 and the last step arises from the following bound:
+M
+X
+i=1
+M
+Y
+j=i+1
+σtj
+σtj−1(1 −Lxδtj)
+(a)
+≤
+M
+X
+i=1
+σtM
+σti
+exp
+
+2Lx
+M
+X
+j=i+1
+δtj
+
+= exp(2LxλtM )
+M
+X
+i=1
+σtM
+σti
+exp(−2Lxλti)
+(b)
+≤exp(2LxλtM )
+M
+X
+i=1
+σtM
+αti
+(c)
+≤M exp(2LxλtM )σtM
+αt1
+= O(M),
+where (a) is true as 1/(1 −x) ≤exp(2x) for 0 ≤x ≤1/2 and δtjLx = O(M −1) ≤1/2 for all j; (b) holds as
+long as 2Lx ≥1; (c) follows from the fact that αti is increasing in i.
+This justifies that the convergence order of the first-order, forward-value discretization scheme is equal
+to 1.
+Proof of Claim (18).
+Let us fix an arbitrary i ∈[M]. Combining the expression of x⋆
+ti from (22) with the
+update rules for the deterministic DDIM xbck
+ti
+(see (7)) and the first-order forward-value discretization xfor
+ti
+(see (16)), we can express the target difference as
+xbck
+ti
+−x⋆
+ti + xfor
+ti −x⋆
+ti
+=
+σti
+σti−1
+ xbck
+ti−1 + xfor
+ti−1 −2x⋆
+ti−1
+
++ σti
+ Z λti
+λti−1
+eλ
+µθ
+ xbck
+ti−1, ti−1
+
++ µθ
+ xfor
+ti , ti
+
+−2µθ
+ x⋆
+t(λ), t(λ)
+
+dλ
+
+=
+σti
+σti−1
+ xbck
+ti−1 + xfor
+ti−1 −2x⋆
+ti−1
+
++ σti
+ Z λti
+λti−1
+eλ
+µθ
+ x⋆
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti, ti
+
+−2µθ
+ x⋆
+t(λ), t(λ)
+
+dλ
+
+|
+{z
+}
+=:χ1
+22
+
++ σti
+Z λti
+λti−1
+eλ
+µθ
+ xbck
+ti−1, ti−1
+
++ µθ
+ xfor
+ti−1, ti−1
+
+−2µθ
+ x⋆
+ti−1, ti−1
+
+dλ
+|
+{z
+}
+=:χ2
++ σti
+Z λti
+λti−1
+eλ
+µθ
+ xfor
+ti , ti
+
+−µθ
+ x⋆
+ti, ti
+
+−µθ
+ xfor
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti−1, ti−1
+
+dλ
+|
+{z
+}
+=:χ3
+(29)
+In what follows, we shall analyze χ1, χ2, and χ3 separately.
+• Controlling χ1. For simplicity of notation, let us denote µ(λ) := µθ
+ x⋆
+t(λ), t(λ)
+
+. We begin with
+decomposing χ1 as
+χ1 = eλti
+Z λti
+λti−1
+
+µθ
+ x⋆
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti, ti
+
+−2µθ
+ x⋆
+t(λ), t(λ)
+
+dλ
++
+Z λti
+λti−1
+ eλ −eλti
+µθ
+ x⋆
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti, ti
+
+−2µθ
+ x⋆
+t(λ), t(λ)
+
+dλ,
+(30)
+and control these two terms individually.
+– For the first term, we first rewrite it as
+Z λti
+λti−1
+
+µθ
+ x⋆
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti, ti
+
+−2µθ
+ x⋆
+t(λ), t(λ)
+
+dλ
+=
+Z λti
+λti−1
+
+µ(λti−1) + µ(λti) −2µ(λ)
+
+dλ
+= 2
+Z λti
+λti−1
+µ(λti) −µ(λti−1)
+λti −λti−1
+(λ −λti−1) + µ(λti−1) −µ(λ)
+
+dλ
++
+Z λti
+λti−1
+
+µ(λti) −µ(λti−1) −2
+ µ(λti) −µ(λti−1)
+
+λti −λti−1
+(λ −λti−1)
+
+dλ
+= 2
+Z λti
+λti−1
+µ(λti) −µ(λti−1)
+λti −λti−1
+(λ −λti−1) + µ(λti−1) −µ(λ)
+
+dλ,
+(31)
+where the last identity holds because
+Z λti
+λti−1
+
+µ(λti) −µ(λti−1) −2
+ µ(λti) −µ(λti−1)
+
+λti −λti−1
+(λ −λti−1)
+
+dλ
+=
+ µ(λti) −µ(λti−1)
+
+δti −2
+ µ(λti) −µ(λti−1)
+
+λti −λti−1
+Z λti
+λti−1
+(λ −λti−1) dλ
+=
+ µ(λti) −µ(λti−1)
+
+δti −2
+ µ(λti) −µ(λti−1)
+
+δti
+· 1
+2δ2
+ti = 0.
+Given the expression in (31), combining Taylor’s theorem with Assumption 1 (A4), we can derive
+
+Z λti
+λti−1
+µ(λti) −µ(λti−1)
+λti −λti−1
+(λ −λti−1) + µ(λti−1) −µ(λ)
+
+dλ
+
+≤
+
+Z λti
+λti−1
+µ(λti) −µ(λti−1)
+λti −λti−1
+(λ −λti−1) −∂
+∂λµ(λti−1)(λ −λti−1)
+
+dλ
+
++ Ht
+Z λti
+λti−1
+(λ −λti−1)2 dλ
+23
+
+≤
+
+µ(λti) −µ(λti−1)
+λti −λti−1
+−∂
+∂λµ(λti−1)
+
+Z λti
+λti−1
+(λ −λti−1) dλ + Ht
+3 δ3
+ti.
+(32)
+Applying Assumption 1 (A4) again, we can further bound the first term on the right-hand side of
+(32) as
+
+µ(λti) −µ(λti−1)
+λti −λti−1
+−∂
+∂λµ(λti−1)
+
+ ≤
+
+∂
+∂λµ(λti−1)λti −λti−1
+λti −λti−1
+−∂
+∂λµ(λti−1)
+
+ + Htδ2
+ti = Htδ2
+ti.
+Substituted into (32), this yields
+
+Z λti
+λti−1
+µ(λti) −µ(λti−1)
+λti −λti−1
+(λ −λti−1) + µ(λti−1) −µ(λ)
+
+dλ
+
+≤1
+2Htδ3
+ti + 1
+3Htδ3
+ti = O(M −3).
+(33)
+Finally, plugging (33) into (31), the first term on the right-hand side of (30) can be bounded as
+Z λti
+λti−1
+
+µθ
+ x⋆
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti, ti
+
+−2µθ
+ x⋆
+t(λ), t(λ)
+
+dλ = O(M −3).
+(34)
+– Turning to the second term, one can derive
+
+Z λti
+λti−1
+ eλ −eλti
+µθ
+ x⋆
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti, ti
+
+−2µθ
+ x⋆
+t(λ), t(λ)
+
+dλ
+
+≤
+eλti−1 −eλti
+
+Z λti
+λti−1
+
+µθ
+ x⋆
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti, ti
+
+−2µ
+ x⋆
+t(λ), t(λ)
+
+
+ dλ
+≤eλtiδti
+Z λti
+λti−1
+Lt(λ −λti−1 + λti −λ) dλ
+= eλtiLtδ3
+ti = O(M −3).
+(35)
+where the second inequality applies the Lipschitz property of µ
+ x⋆
+t(λ), t(λ)
+
+from Assumption 1
+(A3).
+– Putting (34) and (35) together, we conclude that
+∥χ1∥= O(M −3).
+(36)
+• Controlling χ2. From Taylor’s theorem and Assumption 1 (A2), we can bound
+
+µθ
+ xbck
+ti−1, ti−1
+
++ µθ
+ xfor
+ti−1, ti−1
+
+−2µθ
+ x⋆
+ti−1, ti−1
+
+−∇µθ
+ x⋆
+ti−1, ti−1
+ xbck
+ti−1 + xfor
+ti−1 −2x⋆
+ti−1
+
+
+≤Hx
+
+
+xbck
+ti−1 −x⋆
+ti−1
+
+2 +
+
+xfor
+ti−1 −x⋆
+ti−1
+
+2
+= O(M −2),
+where the last step results from Theorem 1 and (28). This allows us to bound χ2 as
+∥χ2∥≤
+Z λti
+λti−1
+eλ
+
+∇µθ
+ x⋆
+ti−1, ti−1
+ xbck
+ti−1 + xfor
+ti−1 −2x⋆
+ti−1
+
+
+ + O(M −2)
+
+dλ
+≤
+ eλti −eλti−1  Lx
+αti−1
+
+xbck
+ti−1 + xfor
+ti−1 −2x⋆
+ti−1
+
+ + O(M −2)
+
+≤eλtiδti
+Lx
+αti−1
+
+xbck
+ti−1 + xfor
+ti−1 −2x⋆
+ti−1
+
+ + eλtiδtiO(M −2)
+24
+
+= Lxδti
+σti−1
+
+xbck
+ti−1 + xfor
+ti−1 −2x⋆
+ti−1
+
+ + O(M −3),
+(37)
+where the second line applies Assumption 1 (A1) and the last step holds as λt = log(αt/σt) and
+δti = O(M −1).
+• Controlling χ3. By Taylor’s theorem and Assumption 1 (A2), we can bound
+
+µθ
+ xfor
+ti , ti
+
+−µθ
+ x⋆
+ti, ti
+
+−µθ
+ xfor
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti−1, ti−1
+
+
+≤
+
+∇µθ
+ x⋆
+ti, ti
+
+(xfor
+ti −x⋆
+ti) −∇µθ
+ x⋆
+ti−1, ti−1
+
+(xfor
+ti−1 −x⋆
+ti−1)
+
++ Hx
+
+xfor
+ti −x⋆
+ti
+
+2 + Hx
+
+xfor
+ti−1 −x⋆
+ti−1
+
+2
+≤
+
+ ∇µθ
+ x⋆
+ti, ti
+
+−∇µθ(x⋆
+ti−1, ti−1)
+
+(xfor
+ti −x⋆
+ti)
+
++
+
+∇µθ
+ x⋆
+ti−1, ti−1
+
+
+xfor
+ti −x⋆
+ti −xfor
+ti−1 + x⋆
+ti−1
+
+ + O(M −2),
+(38)
+where the last step applies (28).
+To control the first term on the right-hand-side of (38), one knows from Assumption 1 (A5) that
+
+∇µθ
+ x⋆
+ti, ti
+
+−∇µθ
+ x⋆
+ti−1, ti−1
+
+
+ ≤H∥xfor
+ti −x⋆
+ti∥= O(M −1).
+(39)
+Therefore the first term is bounded by
+
+ ∇µθ
+ x⋆
+ti, ti
+
+−∇µθ(x⋆
+ti−1, ti−1)
+
+(xfor
+ti −x⋆
+ti)
+
+≤
+
+∇µθ
+ x⋆
+ti, ti
+
+−∇µθ
+ x⋆
+ti−1, ti−1
+
+
+xfor
+ti −x⋆
+ti
+
+ = O(M −2),
+(40)
+where the last equation applies (28) again.
+In addition, putting collectively what we have shown in (23), (24), and (25), one knows that
+
+xfor
+ti −x⋆
+ti −xfor
+ti−1 + x⋆
+ti−1
+
+ ≤
+
+σti
+σti−1
+−1
+
+
+xfor
+ti−1 −x⋆
+ti−1
+
+ + Lxδti
+
+xfor
+ti −x⋆
+ti
+
+ + O(M −2).
+Since σti ≤σti−1, we have
+
+σti
+σti−1
+−1
+ = 1 −σti
+σti−1
+= 1 −αti
+αti−1
+e−(λti−λti−1) ≤1 −e−δti ≤δti,
+which together with (27) leads to
+
+xfor
+ti −x⋆
+ti −xfor
+ti−1 + x⋆
+ti−1
+
+ ≤δti
+
+xfor
+ti−1 −x⋆
+ti−1
+
+ + Lxδti
+
+xfor
+ti −x⋆
+ti
+
+ + O(M −2) = O(M −2).
+(41)
+Therefore the second term in the right-hand-side of (38) is bounded by
+
+∇µθ
+ x⋆
+ti−1, ti−1
+
+
+xfor
+ti −x⋆
+ti −xfor
+ti−1 + x⋆
+ti−1
+
+ ≤Lx
+αti
+O(M −2)
+(a)
+≤Lx
+αtM
+O(M −2) = O(M −2),
+(42)
+where (a) uses the assumption that αti ≤αtM for all i ≤M.
+Finally, plugging the above bound into the definition of χ3, we conclude that
+∥χ3∥≤
+Z λti
+λti−1
+eλ dλ ·
+
+µθ
+ xfor
+ti , ti
+
+−µθ
+ x⋆
+ti, ti
+
+−µθ
+ xfor
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti−1, ti−1
+
+
+≤eλtiδti
+
+µθ
+ xfor
+ti , ti
+
+−µθ
+ x⋆
+ti, ti
+
+−µθ
+ xfor
+ti−1, ti−1
+
++ µθ
+ x⋆
+ti−1, ti−1
+
+
+ = O(M −3).
+(43)
+25
+
+• Putting bounds for χ1, χ2, and χ3 together. Finally, combining the bounds in (36), (37), and
+(43), and then plugging it into (29), we find that for any i ≥1,
+
+xbck
+ti
+−x⋆
+ti + xfor
+ti −x⋆
+ti
+
+ ≤
+σti
+σti−1
+(1 + Lxδti)
+
+xbck
+ti−1 + xfor
+ti−1 −2x⋆
+ti−1
+
+ + σtiO(M −3).
+Applying this inequality recursively from i = 1 to i = M, and noting that xbck
+t0 + xfor
+t0 −2x⋆
+t0 = 0, we
+obtain
+
+xbck
+ti
+−x⋆
+ti + xfor
+ti −x⋆
+ti
+
+ ≤
+M
+X
+i=1
+M
+Y
+j=i+1
+σtj
+σtj−1
+(1 + Lxδtj) · σtiO(M −3)
+≤
+M
+X
+i=1
+M
+Y
+j=i+1
+σtj
+σtj−1
+exp(Lxδtj) · σtiO(M −3)
+=
+M
+X
+i=1
+σtM exp(Lx(λtM −λti)) · O(M −3)
+≤MσtM exp(Lx(λtM −λt0)) · O(M −3) = O(M −2),
+where the second step is true because 1 + x ≤ex for any x ∈R, and the last line holds as λtM −λti ≤
+λtM −λt0 for all 0 ≤i ≤M.
+B.2
+Proof of Theorem 4
+Comparing the update rules of our sampler (14) and that of the idealized forward-value discretization (16),
+one can express the difference between their iterates as
+xti −xfor
+ti =
+σti
+σti−1
+ xti−1 −xfor
+ti−1
+
++ σti
+Z λti
+λti−1
+eλ dλ ·
+ µθ(bxti, ti) −µθ(xfor
+ti , ti)
+
+,
+for any i ≥1. Leveraging the Lipschitz property of µθ(xti, ti), we can bound
+
+xti −xfor
+ti
+
+ ≤
+σti
+σti−1
+
+xti−1 −xfor
+ti−1
+
+ + σti
+Z λti
+λti−1
+eλ dλ ·
+
+µθ(xfor
+ti , ti) −µθ(bxti, ti)
+
+≤
+σti
+σti−1
+
+xti−1 −xfor
+ti−1
+
+ + σtieλtiδti
+Lx
+αti
+
+xfor
+ti −bxti
+
+≤
+σti
+σti−1
+
+xti−1 −xfor
+ti−1
+
+ + δtiLx
+
+xfor
+ti −x⋆
+ti(xti−1, ti−1)
+
++ δtiLx
+
+x⋆
+ti(xti−1, ti−1) −bxti
+
+,
+(44)
+where the last equation uses σtieλti/αti = eλtie−λti = 1.
+We claim that the second term on the right-hand-side of (44) satisfies the following bound:
+
+xfor
+ti −x⋆
+ti(xti−1, ti−1)
+
+ ≤
+σti
+σti−1(1 −δtiLx)
+
+xfor
+ti−1 −xti−1
+
+ + σtieλtiLtδ2
+ti
+2(1 −δtiLx).
+(45)
+The proof is deferred to the end of this section.
+Suppose (45) holds temporarily. We can plug it into (44) to obtain the following key relationship regarding
+the difference between our sampler xti and the idealized forward-value discretization xfor
+ti :
+
+xti −xfor
+ti
+
+ ≤
+σti
+σti−1
+
+xti−1 −xfor
+ti−1
+
+ + δtiLx
+σti
+
+xfor
+ti−1 −xti−1
+
+σti−1(1 −δtiLx)
++ σtieλtiLtδ2
+ti
+2(1 −δtiLx)
+
++ δtiLx
+
+x⋆
+ti(xti−1, ti−1) −bxti
+
+26
+
+=
+σti
+
+xfor
+ti−1 −xti−1
+
+σti−1(1 −δtiLx)
++ σtieλtiLxLtδ3
+ti
+2(1 −δtiLx) + δtiLx
+
+x⋆
+ti(xti−1, ti−1) −bxti
+
+=
+σti
+
+xfor
+ti−1 −xti−1
+
+σti−1(1 −δtiLx)
++ o(M −2),
+(46)
+where the last equation uses the assumption that
+
+x⋆
+ti(xti−1, ti−1) −bxti
+
+ = o(M −1) and δti = O(M −1).
+Applying this relationship recursively, we can bound the final error at tM as
+
+xtM −xfor
+tM
+
+ ≤
+M
+X
+i=1
+M
+Y
+j=i+1
+σtj
+σtj−1(1 −δtjLx) · o(M −2).
+(47)
+To finish up, note that
+M
+Y
+j=i+1
+σtj
+σtj−1(1 −δtjLx)
+(a)
+≤
+M
+Y
+j=i+1
+σtj
+σtj−1
+exp
+ 2δtjLx
+
+= σtM
+σti
+exp
+
+2Lx
+M
+X
+j=i+1
+δtj
+
+= σtM
+σti
+exp
+ 2Lx(λtM −λti)
+
+(b)
+≤σtM
+σt0
+exp
+ 2Lx(λtM −λt0)
+
+,
+where (a) holds because 1/(1 −x) ≤exp(2x) for 0 ≤x ≤1/2 and δtjLx = O(M −1) ≤1/2; (b) is true
+because of the assumption σti ≥σt0 and λtM −λti ≤λtM −λt0 for all 0 ≤i ≤M. Summing over i from 1
+to M, we reach the advertised result:
+
+xti −xfor
+ti
+
+ ≤M σtM
+σt0
+exp
+ 2Lx(λtM −λt0)
+
+· o(M −2) = o(M −1).
+(48)
+It remains to prove the claim (45). Towards this, note that by the diffusion ODE (21), we can rewrite
+x⋆
+ti(xti−1, ti−1) defined in (19) in terms of the data predictor µθ as
+x⋆
+t (xti−1, ti−1) =
+σti
+σti−1
+xti−1 + σti
+Z λti
+λti−1
+eλµθ
+ x⋆
+t(λ)(xti−1, ti−1), t(λ)
+
+dλ.
+Combined with the definition of xfor
+ti (cf.
+(16)), the above representation allows us to decompose their
+difference as
+xfor
+ti −x⋆
+ti(xti−1, ti−1) =
+σti
+σti−1
+ xfor
+ti−1 −xti−1
+
++ σti
+Z λti
+λti−1
+eλ
+µθ
+ xfor
+ti , ti) −µθ(x⋆
+t(λ)(xti−1, ti−1), t(λ)
+
+dλ
+=
+σti
+σti−1
+ xfor
+ti−1 −xti−1
+
++ σti
+Z λti
+λti−1
+eλ dλ ·
+
+µθ
+ xfor
+ti , ti) −µθ(x⋆
+ti(xti−1, ti−1), ti
+
++ σti
+Z λti
+λti−1
+eλ
+µθ
+ x⋆
+ti(xti−1, ti−1), ti
+
+−µθ
+ x⋆
+t(λ)(xti−1, ti−1), t(λ)
+
+dλ.
+(49)
+Let us control the second and third quantities on the right-hand-side of (49) separately. Regarding the
+second term, we can invoke a similar argument as in (24) to bound it as
+
+σti
+Z λti
+λti−1
+eλ dλ ·
+
+µθ
+ xfor
+ti , ti) −µθ(x⋆
+ti(xti−1, ti−1), ti
+
+
+ ≤σtieλtiδti
+Lx
+αti
+
+xfor
+ti −x⋆
+ti(xti−1, ti−1)
+
+= δtiLx
+
+xfor
+ti −x⋆
+ti(xti−1, ti−1)
+
+,
+(50)
+where the first inequality uses λti ≤λti−1 and the Lipschitz condition of µθ from Assumption 1 (A1), and
+the last equation uses λti = log(αti/σti). As for the third quantity, repeating a similar argument for (25),
+one can bound it as
+σti
+
+Z λti
+λti−1
+eλ
+µθ(x⋆
+ti(xti−1, ti−1), ti) −µθ(x⋆
+t(λ)(xti−1, ti−1), t(λ))
+
+dλ
+
+ ≤1
+2σtieλtiLtδ2
+ti.
+27
+
+Plugging these two bounds into (49) and rearranging the inequality, we finish the proof of the claim (45).
+C
+Proof of convergence order lower bound (Theorem 2)
+Let us consider the case where the target distribution is an isotropic Gaussian distribution q0 = N(0, γId)
+for some constant γ ≥0.
+Preliminaries.
+Before proceeding to the main proof, we first introduce some preliminary results that will
+be frequently used in the following analysis.
+By the choice of the forward process (1), the distribution qt of xt at any time t ≥0 satisfies
+xt ∼qt = N
+ 0, (α2
+tγ2 + σ2
+t )Id
+
+,
+and its score function s⋆
+t (·) can be computed in closed form as
+s⋆
+t (x) = ∇x log qt(x) = ∇x
+
+−
+∥x∥2
+α2
+tγ2 + σ2
+t
+
+= −
+x
+α2
+tγ2 + σ2
+t
+.
+Combining this with the relationship between the noise predictor and score function εθ(xt, t) = −σts⋆
+t (xt),
+we can derive the noise predictor at noise level t(λ) for any λ ∈R as
+εθ
+ xt(λ), t(λ)
+
+= −σt(λ)s⋆
+t(λ)(xt(λ)) =
+σt(λ)xt(λ)
+α2
+t(λ)γ2 + σ2
+t(λ)
+=
+e−λxt(λ)
+αt(λ)(γ2 + e−2λ),
+(51)
+where the last line holds due to the fact that σt(λ) = αt(λ)e−λ.
+We claim that in the isotropic Gaussian case, the exact solution x⋆
+t of the diffusion ODE (5) remains
+colinear with the initial point x⋆
+t0. Specifically, for any λ ≥0, we have
+x⋆
+t(λ) = κ⋆
+t(λ)x⋆
+t0
+with
+κ⋆
+t(λ) = αt(λ)
+αt0
+s
+γ2 + e−2λ
+γ2 + e−2λ(t0) .
+(52)
+To verify this, let us substitute the expression (52) into the right-hand-side of the diffusion ODE (5). For
+arbitrary t, s ≥0, straightforward calculation yields
+αt
+αs
+x⋆
+s −αt
+Z λ(t)
+λ(s)
+e−λεθ
+ x⋆
+t(λ), t(λ)
+
+dλ
+(a)
+= αt
+αs
+x⋆
+s −
+Z λ(t)
+λ(s)
+e−2λ
+γ2 + e−2λ x⋆
+t(λ) dλ
+(b)
+= x⋆
+s
+ αt
+αs
+−
+Z λ(t)
+λ(s)
+e−2λκ⋆
+t(λ)
+(γ2 + e−2λ)κ⋆s
+dλ
+
+(c)
+= x⋆
+s
+ αt
+αs
+−
+αt
+αs
+p
+γ2 + e−2λ(s)
+Z λ(t)
+λ(s)
+e−2λ
+p
+γ2 + e−2λ dλ
+
+= αtx⋆
+s
+αs
+
+1 −
+1
+p
+γ2 + e−2λ(s)
+p
+γ2 + e−2λλ(s)
+λ(t)
+
+= αtx⋆
+s
+αs
+s
+γ2 + e−2λ(t)
+γ2 + e−2λ(s) = κ⋆
+t
+κ⋆s
+x⋆
+s = x⋆
+t ,
+(53)
+where (a) applies (51); (b) and (c) uses the expression of x⋆
+t(λ) from (52); and the penultimate line holds
+because
+d
+dλ
+p
+γ2 + e−2λ = −
+e−2λ
+√
+γ2+e−2λ . Setting s = t0 establishes the claim.
+28
+
+Moreover, the calculation in (53) implies the following identity regarding κti for any i ∈[M]:
+κ⋆
+ti =
+αti
+αti−1
+
+1 −
+1
+q
+γ2 + e−2λti−1
+Z λti
+λti−1
+e−2λ
+p
+γ2 + e−2λ dλ
+
+κ⋆
+ti−1,
+(54)
+which will be frequently used in the following proof.
+With the above preparation in hand, we shall establish the lower bound for deterministic DDIM (7) and
+second-order ODE solver (9) separately.
+Lower bound for deterministic DDIM.
+In this paragraph, let xti denote the iterates produced by the
+deterministic DDIM sampler.
+As shown in (51), the noise predictor εθ(x, t) is colinear with x. Together with the DDIM update rule
+(7), this implies that the i-th iterate xti is aligned with the initial point xt0 for all i ∈[M]. Therefore, we
+can write
+xti = κtixt0
+where κti ∈R denotes the scalar coefficient.
+Substituting xti = κtixt0 and the expression (51) for εθ into the DDIM update (7) yields the following
+recurrence for κti:
+κt0 = 1,
+and
+κti =
+αti
+αti−1
+
+1 −
+e−λti−1
+γ2 + e−2λti−1
+Z λti
+λti−1
+e−λ dλ
+
+κti−1,
+i ≥1.
+(55)
+Comparing (55) with the corresponding identity for κ⋆
+ti in (54), and using κ⋆
+t0 = κt0 = 1, we obtain that for
+any 1 ≤i ≤M,
+κ⋆
+ti −κti = ai(κ⋆
+ti−1 −κti−1) + κ⋆
+ti−1
+αti
+αti−1
+q
+γ2 + e−2λti−1
+Z λti
+λti−1
+e−λ
+ 
+e−λti−1
+q
+γ2 + e−2λti−1
+−
+e−λ
+p
+γ2 + e−2λ
+!
+dλ
+= ai(κ⋆
+ti−1 −κti−1) +
+αti
+αt0
+p
+γ2 + e−2λt0
+Z λti
+λti−1
+e−λ
+ 
+e−λti−1
+q
+γ2 + e−2λti−1
+−
+e−λ
+p
+γ2 + e−2λ
+!
+dλ,
+(56)
+where the coefficient ai is defined as
+ai :=
+αti
+αti−1
+
+1 −
+e−λti−1
+γ2 + e−2λti−1
+Z λti
+λti−1
+e−λ dλ
+
+,
+1 ≤i ≤M,
+(57)
+and the second line follows from the expression of κ⋆
+ti−1 from (52).
+Notice that for any γ > 0,
+e−λti−1
+q
+γ2 + e−2λti−1
+−
+e−λ
+p
+γ2 + e−2λ ≥0,
+∀λ ∈[λti−1, λti].
+Plugging this into (56) leads to κ⋆
+ti ≥κti for all 0 ≤i ≤M. Thus, the difference between the diffusion ODE
+and the deterministic DDIM trajectories at step M satisfies
+
+xtM −x⋆
+tM
+
+ = (κ⋆
+tM −κtM )∥xt0∥.
+Therefore, to establish that the deterministic DDIM has convergence order at most one, it is sufficient to
+show that κ⋆
+tM −κtM = Ω(1/M).
+To this end, note that the integral on the right-hand-side of (56) can be lower bounded by
+Z λti
+λti−1
+e−λ
+ 
+e−λti−1
+q
+γ2 + e−2λti−1
+−
+e−λ
+p
+γ2 + e−2λ
+!
+dλ
+29
+
+=
+Z λti
+λti−1
+e−λ′ Z λ′
+λti−1
+−d
+dλ
+e−λ
+p
+γ2 + e−2λ dλ dλ′
+=
+Z λti
+λti−1
+ e−λ −e−λti
+e2λ
+(γ2e2λ + 1)
+3
+2 dλ
+(a)
+≥δ2
+tie−λtie2λti−1
+2(γ2e2λti + 1)
+3
+2
+(b)
+≥
+δ2
+tieλti
+2(γ2e2λti + 1)
+3
+2 ,
+(58)
+where (a) holds because λti is decreasing in i and thus
+Z λti
+λti−1
+ e−λ −e−λti
+e2λ
+(γ2e2λ + 1)
+3
+2 dλ ≥
+e2λti−1
+(γ2e2λti + 1)
+3
+2
+Z λti
+λti−1
+ e−λ −e−λti
+dλ
+=
+e2λti−1e−λti
+(γ2e2λti + 1)
+3
+2
+ eδti −1 −δti
+
+≥e2λti−1e−λtiδ2
+ti
+2(γ2e2λti + 1)
+3
+2 ,
+and (b) is true because e2λti−1−λti = eλtie−2δti ≥eλti/2 provided that δti = O(1/M) ≤log(2)/2. Substitut-
+ing (58) into (56), we obtain
+κ⋆
+ti −κti ≥ai(κ⋆
+ti−1 −κti−1) +
+1
+αt0
+p
+γ2 + e−2λt0
+δ2
+tiαtieλti
+2(γ2e2λti + 1)
+3
+2 ,
+∀1 ≤i ≤M.
+(59)
+Applying (59) recursively allows us to bound the final error as
+κ⋆
+tM −κtM ≥
+1
+αt0
+p
+γ2 + e−2λt0
+M
+X
+i=1
+M
+Y
+j=i+1
+aj
+δ2
+tiαtieλti
+2(γ2e2λti + 1)
+3
+2 .
+(60)
+To control the right-hand-side of (60), let us introduce a subset of steps:
+S := {0 ≤i ≤M : c1 ≤eλti ≤c2},
+(61)
+where c1, c2 are two positive constants. Note that e−λti ≤e−λ and γ2 + e−2λti ≤(γ2 + e−2λ)e−2δti for all
+λ ∈[λti−1, λti]. This together with the definition of ai in (57) imply the following lower bound
+ai =
+αti
+αti−1
+ 
+1 −
+Z λti
+λti−1
+e−λti
+γ2 + e−2λti e−λ dλ
+!
+≥
+αti
+αti−1
+ 
+1 −e2δti−1
+Z λti
+λti−1
+e−2λ
+γ2 + e−2λ dλ
+!
+≥
+αti
+αti−1
+ 
+1 −5
+4
+Z λti
+λti−1
+e−2λ
+γ2 + e−2λ dλ
+!
+provided that 2δti = O(1/M) ≤log(5/4). This further allows us to lower bound the cumulative product
+QM
+j=i+1 aj for any i ∈S:
+M
+Y
+j=i+1
+aj ≥αtM
+αti
+M
+Y
+j=i+1
+ 
+1 −5
+4
+Z λtj
+λtj−1
+e−2λ
+γ2 + e−2λ dλ
+!
+≥αtM
+αti
+
+1 −5
+4
+M
+X
+j=i+1
+Z λtj
+λtj−1
+e−2λ
+γ2 + e−2λ dλ
+
+
+≥αtM
+αti
+
+
+1 −5
+4
+X
+e
+λtj ≥c1
+Z λtj
+λtj−1
+e−2λ
+γ2 + e−2λ dλ
+
+
+
+(a)
+≥αtM
+αti
+
+1 −5
+8 log(1 + γ−2c−2
+1 )
+
+≥αtM
+8αti
+,
+(62)
+30
+
+provided that log(1 + γ−2c−2
+1 ) ≤7/5, where (a) holds because
+X
+e
+λtj ≥c1
+Z λtj
+λtj−1
+e−2λ
+γ2 + e−2λ dλ ≤
+Z ∞
+log c1
+e−2λ
+γ2 + e−2λ dλ = 1
+2 log(γ2 + e−2λ)
+
+log c1
+∞
+= 1
+2 log(1 + γ−2c−2
+1 ).
+To finish up, substituting (62) into (60) yields
+κ⋆
+tM −κtM ≥
+1
+αt0
+p
+γ2 + e−2λt0
+X
+i∈S
+M
+Y
+j=i+1
+aj
+δ2
+tiαtieλti
+2(γ2e2λti + 1)
+3
+2
+(a)
+≥
+αtM
+αt0
+p
+γ2 + e−2λt0
+c1
+16(γ2c2
+2 + 1)
+3
+2
+X
+i∈S
+δ2
+ti
+(b)
+≥
+αtM
+αt0
+p
+γ2 + e−2λt0
+c1
+16(γ2c2
+2 + 1)
+3
+2
+(log c2 −log c1)2
+M
+= Ω(M −1),
+(63)
+where (a) holds because eλti/(γ2e2λti + 1)3/2 ≥c1/(γ2c2
+2 + 1)3/2, and (b) is true due to the Cauchy-Schwarz
+inequality (P
+i∈S δti)2 ≤|S| P
+i∈S δ2
+ti and the fact that P
+i∈S δti = log c2 −log c1. This completes the proof
+for the lower bound of deterministic DDIM.
+Lower bound for second-order ODE solver.
+In this paragraph, we use xti to represent the iterates
+generated by the second-order ODE solver (9). Similar to the analysis for the deterministic DDIM, we know
+that εθ(x, t) is colinear with x. In particular, we can express the i-th iterate as
+xti = κtixt0,
+where the coefficient κti satisfies that for any i ≥1,
+κti =
+αti
+αti−1
+κti−1 −αti
+Z λti
+λti−1
+e−λ dλ
+e−λti−1κti−1
+αti−1(γ2 + e−2λti−1)
+−αti
+Z λti
+λti−1
+(λ −λti−1)e−λ dλ
+e
+−λti−1 κti−1
+αti−1(γ2+e
+−2λti−1 ) −
+e
+−λti−2 κti−2
+αti−2(γ2+e
+−2λti−2 )
+λti−1 −λti−2
+.
+(64)
+Combining this with the recurrence for κ⋆
+ti given in (54), we can decompose the difference κ⋆
+ti −κti as
+κ⋆
+ti −κti = ai(κ⋆
+ti−1 −κti−1) + bi + ci,
+(65)
+where ai is define in (57), and bi and ci are given by
+bi := −αti
+Z λti
+λti−1
+(λ −λti−1)e−λ dλ ·
+1
+λti−1 −λti−2
+e−λti−1(κ⋆
+ti−1 −κti−1)
+αti−1(γ2 + e−2λti−1)
+−
+e−λti−2(κ⋆
+ti−2 −κti−2)
+αti−2(γ2 + e−2λti−2)
+
+,
+(66)
+ci := −αti
+Z λti
+λti−1
+ 
+e−2λ
+p
+γ2 + e−2λ
+κ⋆
+ti−1
+αti−1
+q
+γ2 + e−2λti−1
+−
+e−λti−1−λκ⋆
+ti−1
+αti−1(γ2 + e−2λti−1)
+−(λ −λti−1)e−λ
+1
+λti−1 −λti−2
+
+e−λti−1κ⋆
+ti−1
+αti−1(γ2 + e−2λti−1)
+−
+e−λti−2κ⋆
+ti−2
+αti−2(γ2 + e−2λti−2)
+!
+dλ. (67)
+Applying recursion to (65) yields
+κ⋆
+tM −κtM =
+M
+X
+i=1
+M
+Y
+j=i+1
+aj(bi + ci).
+(68)
+In what follows, we shall analyze ci, bi, and ai separately.
+31
+
+• Controlling ci. For simplicity of notation, define the auxiliary function
+f(λ) :=
+e−λ
+p
+γ2 + e−2λ .
+Using the expression of κtj in (52) , the following factors appearing in the definition of ci can be
+rewritten in terms of f(·) for any i ≥1:
+e−λtj κ⋆
+tj
+αtj(γ2 + e−2λtj )
+=
+1
+αt0
+p
+γ2 + e−2λt0
+e−λtj
+q
+γ2 + e−2λtj
+=
+f(λtj)
+αt0
+p
+γ2 + e−2λt0 ,
+j = i, i −1, i −2,
+e−2λ
+p
+γ2 + e−2λ
+κ⋆
+ti−1
+αti−1
+q
+γ2 + e−2λti−1
+=
+e−λf(λ)
+αt0
+p
+γ2 + e−2λt0 .
+(69)
+Consequently, the term ci can be expressed as:
+ci = −
+αti
+αt0
+p
+γ2 + e−2λt0
+Z λti
+λti−1
+e−λ
+
+f(λ) −f(λti−1) −(λ −λti−1)f(λti−1) −f(λti−2)
+λti−1 −λti−2
+
+dλ.
+(70)
+The derivative of f(λ) can be computed as
+f ′(λ) = −
+γ2e2λ
+(γ2e2λ + 1)
+3
+2 ,
+f ′′(λ) = −γ2e2λ(2 −γ2e2λ)
+(γ2e2λ + 1)
+5
+2
+.
+(71)
+By a second-order Taylor’s expansion and the fact that δti−1 = O(M −1) and δti = O(M −1), we obtain
+f(λ) −f(λti−1) −(λ −λti−1)f(λti−1) −f(λti−2)
+λti−1 −λti−2
+(a)
+= (λ −λti−1)
+
+f ′(λti−1) −f(λti−1) −f(λti−2)
+λti−1 −λti−2
+
++ 1
+2f ′′(λti−1)(λ −λti−1)2 + O(M −3)
+(b)
+= 1
+2f ′′(λti−1)(λti−1 −λti−2)(λ −λti−1) + 1
+2f ′′(λti−1)(λ −λti−1)2 + O(M −3)
+= 1
+2f ′′(λti−1)(λ −λti−2)(λ −λti−1) + O(M −3).
+where (a) holds because f(λ)−f(λti−1) = f ′(λti−1)(λ−λti−1)+ 1
+2f ′′(λti−1)(λ−λti−1)2 +O(M −3), and
+(b) is true because f(λti−1)−f(λti−2) = f ′(λti−1)(λti−1 −λti−2)−1
+2f ′′(λti−1)(λti−1 −λti−2)2 +O(M −3).
+Substituting this into (70) results in the following bound for ci:
+ci
+(a)
+= −
+αtif ′′(λti−1)
+2αt0
+p
+γ2 + e−2λt0
+Z λti
+λti−1
+e−λ(λ −λti−2)(λ −λti−1) dλ + O(M −4)
+(b)
+= −αtie−λti−1f ′′(λti−1)
+2αt0
+p
+γ2 + e−2λt0
+Z λti
+λti−1
+(λ −λti−2)(λ −λti−1) dλ + O(M −4)
+= −αtie−λti−1f ′′(λti−1)
+2αt0
+p
+γ2 + e−2λt0
+1
+6δ2
+ti
+
+2δti + 3δti−1
+
++ O(M −4)
+= −αtie−λti−1f ′′(λti−1)
+12αt0
+p
+γ2 + e−2λt0 δ2
+ti
+
+2δti + 3δti−1
+
++ O(M −4),
+(72)
+where (a) holds because
+
+αti
+αt0
+p
+γ2 + e−2λt0
+Z λti
+λti−1
+e−λO(M −3) dλ
+ ≤
+αtie−λti
+αt0
+p
+γ2 + e−2λt0 δti · O(M −3) = O(M −4),
+32
+
+and (b) is true because
+
+Z λti
+λti−1
+(e−λ −e−λti)(λ −λti−2)(λ −λti−1) dλ
+ ≤(e−λti−1 −e−λti)
+Z λti
+λti−1
+(λ −λti−2)(λ −λti−1) dλ
+≤e−λti−1δti
+1
+6δ2
+ti
+
+2δti + 3δti−1
+
+= O(M −4).
+• Controlling bi. For simplicity of notation, we introduce a sequence
+gti :=
+e−λti
+γ2 + e−2λti
+κ⋆
+ti −κti
+αti
+.
+By definition, bi can be expressed in terms of gti−1 and gti−2 as:
+bi = −αti
+Z λti
+λti−1
+(λ −λti−1)e−λ dλ gti−1 −gti−2
+λti−1 −λti−2
+.
+(73)
+Therefore it suffices to analyze the term
+gti−1−gti−2
+λti−1−λti−2 . Leveraging that κ⋆
+ti −κti = αti
+γ2+e−2λti
+e−λti
+gti,
+recurrence for κ⋆
+ti −κti in (65) also establishes a recurrence for gti as:
+gti = αti−1e−λti(γ2 + e−2λti−1)
+αti(γ2 + e−2λti)e−λti−1 aigti−1 −αti
+Z λti
+λti−1
+(λ −λti−1)e−λ dλ gti−1 −gti−2
+λti−1 −λti−2
++ ci.
+(74)
+We further have
+gti −gti−1
+λti −λti−1
+=
+ 
+αti−1e−λti(γ2 + e−2λti−1)
+αti(γ2 + e−2λti)e−λti−1 ai −1
+!
+gti−1
+δti
+−αti
+δti
+Z λti
+λti−1
+(λ −λti−1)e−λ dλ gti−1 −gti−2
+λti−1 −λti−2
++ ci
+δti
+.
+(75)
+Let us control three quantities on the right-hand-side of (75) separately. Regarding the third term,
+identity (72) gives
+|ci|
+δti
+≤αtie−λti−1|f ′′(λti−1)|
+12αt0
+p
+γ2 + e−2λt0 δti
+
+2δti + 3δti−1
+
++ O(M −3) = O(M −2).
+(76)
+Regarding the second term, provided that δti = O(M −1) ≤log 2, the coefficient before
+gti−1−gti−2
+λti−1−λti−2 is
+bounded by:
+αti
+δti
+Z λti
+λti−1
+(λ −λti−1)e−λ dλ ≤1
+2αtie−λti−1δti = 1
+2σtieδtiδti ≤σtiδti.
+(77)
+Moreover, by the definition of ai in (57), the first term is simplified as
+1
+δti
+ 
+αti−1e−λti(γ2 + e−2λti−1)
+αti(γ2 + e−2λti)e−λti−1 ai −1
+!
+= 1
+δti
+ 
+e−λti(γ2 + e−2λti−1)
+(γ2 + e−2λti)e−λti−1 −
+e−λti
+γ2 + e−2λti
+Z λti
+λti−1
+e−λ dλ −1
+!
+= 1
+δti
+ 
+e−λti−1(1 −e−δti)(e−λti−1−λti −γ2)
+(γ2 + e−2λti)e−λti−1
+−
+e−λti
+γ2 + e−2λti
+Z λti
+λti−1
+e−λ dλ
+!
+= −1
+δti
+γ2(1 −e−δti)
+γ2 + e−2λti ,
+(78)
+33
+
+where the second line holds because
+e−λti(γ2 + e−2λti−1)
+(γ2 + e−2λti)e−λti−1 −1 = e−λti(γ2 + e−2λti−1) −(γ2 + e−2λti)e−λti−1
+(γ2 + e−2λti)e−λti−1
+= γ2(e−λti −e−λti−1) + e−λtie−λti−1(e−λti−1 −e−λti)
+(γ2 + e−2λti)e−λti−1
+= (e−λti−1 −e−λti)(e−λtie−λti−1 −γ2)
+(γ2 + e−2λti)e−λti−1
+= e−λti−1(1 −e−δti)(e−λtie−λti−1 −γ2)
+(γ2 + e−2λti)e−λti−1
+,
+(79)
+and the last identity holds since
+e−λti−1(1 −e−δti)(e−λti−1−λti −γ2)
+(γ2 + e−2λti)e−λti−1
+−
+e−λti
+γ2 + e−2λti
+Z λti
+λti−1
+e−λ dλ
+= (1 −e−δti)(e−λti−1−λti −γ2)
+γ2 + e−2λti
+−
+e−λti
+γ2 + e−2λti (e−λti−1 −e−λti)
+= −γ2(1 −e−δti)
+γ2 + e−2λti
++ e−λti−1−λti −e−2λti −e−λti(e−λti−1 −e−λti)
+γ2 + e−2λti
+= −γ2(1 −e−δti)
+γ2 + e−2λti
+.
+Equation (78) can be further simplified by leveraging the fact that 1 −e−δti ≤δti:
+
+1
+δti
+ 
+αti−1e−λti(γ2 + e−2λti−1)
+αti(γ2 + e−2λti)e−λti−1 ai −1
+! ≤
+γ2
+γ2 + e−2λti ≤1.
+(80)
+Finally, plugging the above bounds (77), (76), and (78) into (75), we find that the absolute value of
+gti−gti−1
+λti−λti−1 is bounded by
+
+gti −gti−1
+λti −λti−1
+ ≤δtiσti
+
+gti−1 −gti−2
+λti−1 −λti−2
+ + gti−1 + O(M −2).
+According to Theorem 1, we have gti−1 = O(M −2). Hence, for σtiδti = (M −1) ≤1/2, we have
+
+gti −gti−1
+λti −λti−1
+ ≤2 max
+0≤i≤M |gti| + O(M −2) = O(M −2).
+(81)
+Substituting (81) into (73), we bound the term |bi| by
+|bi| ≤αti
+Z λti
+λti−1
+(λ −λti−1)e−λ dλ
+
+gti−1 −gti−2
+λti−1 −λti−2
+
+≤1
+2αtie−λti−1δ2
+ti
+
+gti−1 −gti−2
+λti−1 −λti−2
+ = O
+ M −4
+.
+(82)
+• Controlling ai. For simplicity of notation, let us denote
+˜δi :=
+e−λti−1
+γ2 + e−2λti−1
+Z λti
+λti−1
+e−λ dλ.
+34
+
+By the definition of ai in (57), we have
+M
+Y
+j=i+1
+aj = αtM
+αti
+M
+Y
+j=i+1
+(1 −˜δj)
+(a)
+= αtM
+αti
+exp
+
+−
+M
+X
+j=i+1
+˜δj + O
+ M
+X
+j=i+1
+˜δ2
+j
+
+,
+(83)
+where (a) holds because
+log(1 −δtj) = −δtj + O(δ2
+tj),
+(84)
+We can compute the sum of ˜δj and ˜δ2
+j as
+M
+X
+j=i+1
+˜δj =
+M
+X
+j=i+1
+e−λtj−1
+γ2 + e−2λtj−1
+Z λtj
+λtj−1
+e−λ dλ
+(a)
+=
+M
+X
+j=i+1
+Z λtj
+λtj−1
+e−2λ
+γ2 + e−2λ dλ + O(M −1)
+=
+Z λtM
+λti
+e−2λ
+γ2 + e−2λ dλ + O(M −1)
+(b)
+= 1
+2 log
+ γ2 + e−2λti
+γ2 + e−2λtM
+
++ O(M −1),
+(85)
+where (a) holds because
+Z λtj
+λtj−1
+
+e−λtj−1
+γ2 + e−2λtj−1 −
+e−λ
+γ2 + e−2λ
+ e−λ dλ ≤e−λti−1
+max
+λ∈[λti−1,λti]
+
+d
+dλ
+e−λ
+γ2 + e−2λ
+
+Z λtj
+λtj−1
+(λ −λti−1) dλ
+= δ2
+ti
+2 e−λti−1
+max
+λ∈[λti−1,λti]
+e−λ|γ2 −e−2λ|
+(γ2 + e−2λ)2
+≤eδti
+2 δ2
+ti = O(M −2),
+and (b) arises from
+Z λtM
+λti
+e−2λ
+γ2 + e−2λ dλ = 1
+2 log(γ2 + e−2λ)
+
+λti
+λtM
+= 1
+2 log
+ γ2 + e−2λti
+γ2 + e−2λtM
+
+.
+In addition, the sum of ˜δ2
+j is computed as
+M
+X
+j=i+1
+˜δ2
+j ≤
+M
+X
+i=1
+e−2λti−1
+(γ2 + e−2λti−1)2
+ Z λti
+λti−1
+e−λ dλ
+2
+≤
+M
+X
+i=1
+δ2
+tie−4λti−1
+(γ2 + e−2λti−1)2 ≤
+M
+X
+i=1
+δ2
+ti = O(M −1).
+(86)
+Substituting (85) and (86) into (83), we have
+M
+Y
+j=i+1
+aj = αtM
+αti
+s
+γ2 + e−2λtM
+γ2 + e−2λti
+
+1 + O(M −1)
+
+.
+(87)
+Finally, plugging the above bounds (87), (82), and (72) into (68), the discretization error at the last step
+is given by
+κ⋆
+tM −κtM = −αtM
+p
+γ2 + e−2λtM
+12αt0
+p
+γ2 + e−2λt0
+M
+X
+i=1
+e−λti−1f ′′(λti−1)
+p
+γ2 + e−2λti
+δ2
+ti
+ 2δti + 3δti−1
+
++ O(M −3)
+= αtM
+p
+γ2 + e−2λtM
+12αt0
+p
+γ2 + e−2λt0
+M
+X
+i=1
+e−λti−1
+p
+γ2 + e−2λti
+γ2e2λti−1(2 −γ2e2λti−1)
+(γ2e2λti−1 + 1)
+5
+2
+δ2
+ti
+ 2δti + 3δti−1
+
++ O(M −3)
+= αtM
+p
+γ2 + e−2λtM
+12αt0
+p
+γ2 + e−2λt0
+M
+X
+i=1
+γ2e2λti−1(2 −γ2e2λti−1)
+(γ2e2λti−1 + 1)3
+δ2
+ti
+ 2δti + 3δti−1
+
++ O(M −3),
+35
+
+where the second line inserts the second-order derivative of f from (71).
+Taking γ = e−λtM , we have
+2 −γ2e2λti−1 ≥0 for all 0 ≤i −1 ≤M. Therefore, we arrive at the desired result:
+κ⋆
+tM −κtM ≥αtM
+p
+γ2 + e−2λtM
+12αt0
+p
+γ2 + e−2λt0
+X
+i∈S
+γ2e2λti−1(2 −γ2e2λti−1)
+(γ2e2λti−1 + 1)3
+δ2
+ti
+
+2δti + 3δti−1
+
++ O(M −3)
+≥2αtM
+p
+γ2 + e−2λtM γ2c2
+1(2 −γ2c2
+2)
+12αt0
+p
+γ2 + e−2λt0(γ2c2
+2 + 1)3
+X
+i∈S
+δ3
+ti + O(M −3)
+≥2αtM
+p
+γ2 + e−2λtM γ2c2
+1(2 −γ2c2
+2)
+12αt0
+p
+γ2 + e−2λt0(γ2c2
+2 + 1)3
+(log c2 −log c1)3
+M 2
++ O(M −3) = Ω(M −2),
+where S is defined in (61), and the last inequality uses Holder inequality that
+log c2 −log c1 =
+X
+i∈S
+δti ≤
+ X
+i∈S
+δ3
+ti
+! 1
+3 X
+i∈S
+1
+! 2
+3
+≤
+ X
+i∈S
+δ3
+ti
+! 1
+3
+M
+2
+3 .
+This finishes the proof.
+36

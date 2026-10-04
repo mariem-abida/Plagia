@@ -1,0 +1,2484 @@
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+1
+Collaborative Low-Rank Adaptation for Pre-Trained
+Vision Transformers
+Zheng Liu, Jinchao Zhu, and Gao Huang, Member, IEEE
+Abstract—Low-rank adaptation (LoRA) has achieved remark-
+able success in fine-tuning pre-trained vision transformers for
+various downstream tasks. Existing studies mainly focus on
+exploring more parameter-efficient strategies or more effective
+representation learning schemes. However, these methods either
+sacrifice fine-tuning performance or introduce excessive train-
+able parameters, failing to strike a balance between learning
+performance and parameter efficiency. To address this problem,
+we propose a novel tuning method named collaborative low-
+rank adaptation (CLoRA) in this paper. CLoRA consists of
+base-space sharing and sample-agnostic diversity enhancement
+(SADE) components. To maintain parameter efficiency while
+expanding the learning capacity of low-rank modules (LRMs),
+base-space sharing allows all LRMs to share a set of down/up-
+projection spaces. In CLoRA, the low-rank matrices obtained
+from the shared spaces collaboratively construct each LRM.
+Since the representations extracted by these matrices may contain
+redundant information, SADE is employed to regularize the
+similarities among them to encourage diverse representations in
+the training process. We conduct extensive experiments on widely
+used image and point cloud datasets to evaluate the performance
+of CLoRA. Experimental results demonstrate that CLoRA strikes
+a better balance between learning performance and parameter
+efficiency, while requiring the fewest GFLOPs for point cloud
+analysis, compared with the state-of-the-art methods.
+Index Terms—Parameter-efficient fine-tuning, low-rank adap-
+tation, vision transformers, diversity enhancement.
+I. INTRODUCTION
+V
+ISION transformers (ViTs) [1] have attained significant
+success across various computer vision tasks [2], [3], [4].
+However, the strong performance relies on large amounts of
+training data. Consequently, a high-performing ViT is difficult
+to train from scratch in data-scarce scenarios [5]. To overcome
+the difficulty, a prevalent strategy is to first pre-train a ViT
+on large-scale datasets and subsequently fine-tune the entire
+model for target domains [6], [7]. Nevertheless, the strategy
+requires storing one entire ViT model for each downstream
+task, resulting in substantial storage costs.
+Parameter-efficient fine-tuning (PEFT) [8], [9], [10] has
+become an active research area aimed at addressing the above
+challenge. Unlike full fine-tuning, PEFT methods, such as
+adapter [11], prompt learning [12], and low-rank adaptation
+(LoRA) [13], normally introduce only a small number of train-
+able parameters while keeping the backbone model frozen.
+Z. Liu is with the School of Automation and Electrical Engineering,
+University of Science and Technology Beijing, Beijing 100083, China, and
+also with the Beijing Engineering Research Center of Industrial Spectrum
+Imaging, Beijing 100083, China. J. Zhu is with the College of Software,
+Nankai University, Tianjin 300350, China. G. Huang is with the Department
+of Automation, BNRist, Tsinghua University, Beijing 100084, China.
+Corresponding author: J. Zhu (e-mail: jczhu@nankai.edu.cn).
+Among these methods, LoRA has attracted increasing attention
+from researchers and has been broadly discussed in recent
+years [14], [15], [16].
+Given a set of pre-trained weights {Wi}m
+i=1 in a pre-trained
+backbone, where m denotes the number of weights, LoRA
+assumes that their weight updates {∆Wi}m
+i=1 are low-rank
+and can be learned by multiplying the corresponding low-rank
+down-projection matrices {Ai}m
+i=1 and up-projection matrices
+{Bi}m
+i=1. During the fine-tuning process, LoRA adopts m low-
+rank modules (LRMs) to capture the updates of {Wi}m
+i=1.
+As for the j-th LRM, its input is first projected into a
+low-dimensional space with dimension r by down-projection
+matrix Aj and then is remapped back to the original space
+by up-projection matrix Bj. After training, by substituting
+Wj with Wj + AjBj, LoRA keeps the structural integrity
+of the original backbone. As numerous weights exist in a
+transformer-based backbone, applying LRMs to all of them
+would significantly increase the number of trainable param-
+eters. Hence, LoRA typically employs LRMs to learn the
+updates of query and value projection weights. In ViT, each en-
+coder layer primarily consists of a multi-head attention (MHA)
+block and a feed-forward network (FFN) block. However,
+LoRA may perform poorly on some downstream tasks because
+it only adapts a limited subset of the MHA blocks (query and
+value projection weights) while ignoring the FFN blocks. A
+related method named ARC [17] experimentally demonstrates
+that adapting the inputs to MHA and FFN blocks is more
+effective than updating the query and value projection weights,
+when tuning pre-trained ViT backbones to downstream tasks.
+Note that each tuned weight in ARC can be viewed as an
+identity matrix I with proper size. Taking the j-th LRM as an
+example, we show the tuning difference between LoRA and
+ARC in Fig. 1.
+As illustrated by existing LoRA-based studies [14], [15], r
+significantly affects the expressive power of LRMs, and it is
+hard to achieve satisfactory fine-tuning results with small r.
+There are two widely used approaches to solve this problem.
+The first one is directly enlarging the value of r [18]. The
+second one is employing a group of low-rank matrices to
+learn the weight update in each inserted LRM [19]. How-
+ever, both approaches introduce a large number of trainable
+parameters, which may lead to overfitting during fine-tuning.
+This raises the question: is it necessary to improve the fine-
+tuning performance by substantially increasing the number of
+trainable parameters? Upon closer examination, both methods
+essentially increase the rank upper bound of weight updates,
+which indicates that expanding the rank capacity is a feasible
+way to enhance the learning abilities of LRMs.
+arXiv:2512.24603v1 [cs.CV] 31 Dec 2025
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+2
+Input
++
+j
+W
+j
+A
+j
+B
+Output
+j
+∆W
+(a)
+(b)
+( )
+1
+B
+1
+A
+m
+B
+m
+A
+…
+Information 
+aggregation
+Input
++
+j
+A
+j
+B
+Output
+j
+∆W
+I
+Input
++
+Output
+j
+∆W
+I
+Fig. 1. Low-rank structures of (a) LoRA, (b) ARC, and (c) CLoRA.
+In LoRA, m LRMs are independent of each other and the
+rank upper bound of each low-rank matrix is r. According
+to the subadditivity of matrix rank, we observe that the rank
+upper bound of
+m
+P
+i=1
+AiBi is larger than r. This suggests that
+it is possible to enhance the learning capacity of each injected
+module without introducing extra parameters by exploiting
+the low-rank matrices contained in the others. Based on this
+observation, we present a simple but effective method termed
+as collaborative low-rank adaptation (CLoRA) for pre-trained
+ViTs. As shown in Fig. 1, for the j-th LRM, CLoRA utilizes
+the information contained in all low-rank matrices {AiBi}m
+i=1
+to collaboratively learn ∆Wj, whereas LoRA and ARC rely
+solely on the individual information in AjBj.
+CLoRA consists of base-space sharing and sample-agnostic
+diversity enhancement (SADE) components. Under base-space
+sharing, {∆Wi}m
+i=1 of all LRMs are collaboratively con-
+structed by {Ai}m
+i=1 and {Bi}m
+i=1 which share the same base
+down-projection and up-projection spaces, respectively. Since
+each LRM in CLoRA combines multiple low-rank projection
+matrices, SADE is designed to enhance the diversity of the
+representations obtained by these projection matrices. The
+main contributions are as follows.
+• We present an effective base-space sharing scheme to
+combine the information contained in {Ai}m
+i=1 and
+{Bi}m
+i=1 during the learning process of each LRM, which
+significantly improves the learning capacity of LRMs and
+decreases the parameter count.
+• To mitigate redundant information in the representa-
+tions extracted from multiple low-rank matrices within
+each LRM, SADE efficiently regularizes the similarities
+among these representations during training.
+• Extensive experiments on widely used image and point
+cloud datasets demonstrate the superiority of CLoRA over
+the state-of-the-art methods.
+II. RELATED WORK
+In recent years, parameter-efficient fine-tuning (PEFT) has
+emerged as a dominant approach for transferring the general-
+izable knowledge embedded in pre-trained transformer back-
+bones to diverse downstream tasks. The mainstream studies
+can be roughly partitioned into five categories: prompt tuning,
+adapter tuning, reparameterization tuning, side-tuning, and
+hybrid tuning.
+Prompt tuning inserts extra learnable prompts into pre-
+trained backbones to capture task-specific information [20].
+For example, Jia et al. [12] prepend a set of trainable tokens to
+either the first encoder layer only or all encoder layers; Pei et
+al. [21] learn two-dimensional prompt maps with sizes match-
+ing the corresponding image token maps for encoder layers;
+Hu et al. [22] and Zhang et al. [23] aggregate the intermediate
+information of pre-trained backbones by adding additional
+tokens for the queries in MHA blocks; Nie et al. [24] first
+divide the pre-trained backbone into multiple stages and then
+construct stage-wise prompt blocks to generate task-specific
+discriminative prompts for downstream task inputs. Adapter
+tuning inserts trainable bottleneck modules into pre-trained
+backbones, where each module comprises a down-projection
+layer, a non-linear activation, and an up-projection layer [25],
+[26]. Adapter-based methods typically extract downstream
+task-specific representations by applying these modules to 1)
+learn the supplementary information for FFN blocks [27], [28]
+or additional transformer components [29] and 2) transform
+the input or output representations of core building blocks
+such as MHA and FFN blocks [30], [31]. Side-tuning trains
+a separate lightweight side network in parallel with the frozen
+pre-trained backbone and fuses their outputs for final predic-
+tions [32]. Such side networks either integrate the features
+extracted from the pre-trained backbone sequentially [33], [34]
+or fuse the extracted features through parallel aggregation
+[35], [36]. Unlike the above three categories which usually
+bring extra inference costs, reparameterization tuning aims
+to avoid the inference overhead by tuning the parameters that
+are either part of the backbone or can be merged into the
+backbone weights after training [37]. Methods belonging to
+this category design some strategies to identify task-specific
+parameters [38] or apply the modules with linear structures
+that can be incorporated into existing layers to learn task-
+specific representations [39], [40]. Hybrid tuning combines
+methods from different categories. For example, Zhou et al.
+[41] inject prompt tokens and dynamic adapters into encoder
+layers; Zhang et al. [42] explore the optimal combination
+of adapters, learnable tokens and linear LRMs by neural
+architecture search techniques.
+Owing to its ability to avoid extra computational overhead,
+reparameterization tuning has received growing interest in the
+deep learning community. As a representative method, LoRA
+[13] has been widely studied. LoRA assumes that the weight
+updates for downstream tasks can be captured by linear LRMs
+where each of them consists of a down-projection matrix
+(mapping inputs into a low space with dimension r) and an
+up-projection matrix (remapping subspace embeddings back to
+the original space). Most existing studies focus on exploring
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+3
+effective strategies to learn representative down-projection and
+up-projection matrices. For example, Liu et al. [14] divide
+pre-trained weights into magnitude and direction components
+and LRMs are employed to learn directional updates; Hayou
+et al. [43] assign different learning rates for down-projection
+and up-projection matrices; Lin et al. [44] learn projection
+matrices based on the singular value decomposition of pre-
+trained weights; Yang et al. [45] employ two vectors to dynam-
+ically generate down-projection and up-projection matrices.
+When the pre-trained weights for LRMs are set as identity
+matrices, these modules are normally adopted to adapt the
+inputs of some components (such as MHA and FFN blocks)
+contained in pre-trained backbones [17], [46]. In practice, r
+has a significant influence on the performance of LoRA-based
+methods. A small r usually results in poor learning abilities
+[14], [15] while a large r greatly increases the number of
+trainable parameters. Currently, motivated by the success of
+mixture of experts (MoE) [47], some researchers have begun
+to design strategies to combine multiple experts in LRM where
+each expert is composed of a pair of down-projection and
+up-projection matrices. MOLE [48] employs learnable gating
+functions to compose multiple experts. In HydraLoRA [49],
+all experts in each LRM share the same down-projection
+matrix. LoRAMoE [50] assigns multiple experts to learn task-
+specific information for FFN blocks. However, these methods
+introduce extra inference overhead due to the nonlinear routers
+used to evaluate the contribution of experts. To preserve
+the original property of LoRA, some studies [19], [50] treat
+different experts equally.
+Enlarging the value of r and combining multiple experts (a
+pair of down-projection and up-projection matrices) in LRMs
+are two effective ways to enhance the fine-tuning performance
+of LoRA-based methods. Both ways expand the rank upper
+bound of learned low-rank matrices, indicating that increasing
+the rank upper bound is a feasible approach to improve the
+learning abilities of these LRMs. Unfortunately, they bring a
+large number of trainable parameters, resulting in a parameter-
+inefficiency problem. Our proposed method (CLoRA) also
+incorporates multiple experts, but it is much more parameter-
+efficient than existing LoRA-based ensemble methods due to
+the designed base-space sharing scheme. Besides, during the
+training process, CLoRA encourages learning diverse experts
+by regularizing the similarities among the representations
+extracted by these experts, which is usually ignored by existing
+methods.
+III. PRELIMINARIES
+A. Vision Transformer
+The architecture of a standard vision transformer (ViT) [1]
+is composed of a patch embedding layer, L stacked encoder
+layers, and a prediction head.
+In ViT, the patch embedding layer is employed to transform
+input images into suitable embeddings for the subsequent
+layers. Specifically, given an input image X ∈Rh×w×3,
+it first converts X into a sequence of n flattened patches
+[x1; · · · ; xn] ∈Rn×3m2 and then obtains embedding tokens
+[x1W; · · · ; xnW] ∈Rn×d with mapping matrix W
+∈
+R3m2×d, where (h, w) and (m, m) are the resolutions of X
+and its patches, d is the dimension of each token, and n = hw
+m2 .
+The mathematical expression of this layer is formulated as
+Z0 = [xclass; x1W; · · · ; xnW] + Epos,
+(1)
+where xclass ∈R1×d is the prepended class token, Epos ∈
+R(n+1)×d denotes the position embeddings of tokens and Z0
+represents the transformed token set of this layer.
+Encoder layers inserted after the patch embedding layer are
+designed to process the output information Z0. Each encoder
+layer consists of a MHA block and a FFN block, where each
+of them is preceded by a layer normalization (LN) module.
+As for the l-th (1 ≤l ≤L) encoder layer, its mathematical
+expression is
+˜Zl = MHA(LN(Zl−1)) + Zl−1,
+(2)
+Zl = FFN(LN(˜Zl)) + ˜Zl,
+(3)
+where ˜Zl and Zl denote the outputs of the MHA and FFN
+blocks. Note that Zl is also the output of the encoder layer.
+Through equations (1)-(3), we can calculate the class token’s
+representation at the L-th encoder layer. Let zL
+class denote the
+representation of xclass contained in ZL, the prediction result
+y for X is
+y = PH(LN(zL
+class)),
+(4)
+where PH(·) represents a lightweight classifier.
+B. Low-Rank Adaptation
+LoRA [13] is based on the hypothesis that weight updates
+lie in low-rank spaces when adapting a pre-trained backbone
+to downstream tasks.
+When fine-tuning a ViT backbone with LoRA, the updated
+weights are typically d × d matrices. Therefore, for the j-th
+LRM, we have Wj ∈Rd×d and ∆Wj ∈Rd×d. As shown
+in Fig. 1(a), ∆Wj is parameterized as AjBj to ensure the
+low-rank property, where Aj ∈Rd×r and Bj ∈Rr×d are
+down-projection and up-projection matrices. In the j-th LRM,
+the output representation Xj
+output is obtained by
+Xj
+output = Xj
+input(Wj + ∆Wj) = Xj
+input(Wj + AjBj),
+(5)
+where Xj
+input is the input of this module.
+During the fine-tuning process, LoRA freezes the weights
+{Wi}m
+i=1 and only trains {AiBi}m
+i=1 with the data from
+downstream tasks. Compared with full fine-tuning, LoRA
+greatly reduces the number of trainable parameters. At the
+inference stage, {AiBi}m
+i=1 can be directly merged into
+the corresponding weights through replacing {Wi}m
+i=1 with
+{Wi + AiBi}m
+i=1, avoiding additional computational and
+storage costs.
+IV. COLLABORATIVE LOW-RANK ADAPTATION
+Inspired by the work of LoRA [13] and ARC [17], we
+show the architecture of CLoRA in Fig. 2. As displayed,
+two low-rank modules (LRMs) are employed to adapt the
+input representations of the MHA and FFN blocks in each
+encoder layer, respectively. To reduce the number of trainable
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+4
+Feed-forward
+network (FFN)
++
+Low-rank 
+module (LRM)
+Low-rank 
+module (LRM)
++
+Multi-head
+attention (MHA)
+Patch embedding layer
+Encoder layer 1 
+Encoder layer 𝐿𝐿
+Downstream task head
+…
+Encoder layer 𝑙𝑙
+…
+Frozen parameters
+Tunable parameters
+Input
+Output
+The -th LRM's learning strategy in CLoRA
+…
+j
+∆W
+I
++
+…
+…
+Weight updates learned by LoRA
+1
+∆W
+m
+∆W
+Down-projection matrices
+Up-projection matrices
+…
+…
+…
+Shared projection spaces
+…
+…
+1
+B
+1
+A
+m
+B
+m
+A
+1
+B
+m
+B
+1
+A
+m
+A
+1
+B
+m
+B
+1
+A
+m
+A
+1
+D
+1
+U
+1
+D
+1
+U
+Sample-agnostic 
+diversity enhancement 
+Base-space sharing
+𝑗𝑗
+…
+LRM-specific matrices 
+p
+D
+p
+U
+p
+D
+p
+U
+Fig. 2. Illustration of CLoRA. In LoRA, LRMs are applied to adapt the input representations of MHA and FFN blocks, yielding {∆Wi = AiBi}m
+i=1, where
+{AiBi}m
+i=1 are independent of each other. By contrast, each LRM in CLoRA effectively and efficiently utilizes the information contained in {AiBi}m
+i=1
+through the base-space sharing and SADE components.
+parameters and simultaneously increase the rank upper bounds
+of {∆Wi}m
+i=1, we introduce a novel base-space sharing
+scheme where {∆Wi}m
+i=1 are collaboratively parameterized
+by down/up-projection matrices ({Ai}m
+i=1/{Bi}m
+i=1) which
+share common down/up-projection spaces. Specifically, each
+of {Ai}m
+i=1 (or {Bi}m
+i=1) can be linearly represented by shared
+down-projection matrices {Dh}p
+h=1 (or up-projection matrices
+{Uh}p
+h=1), where p < m. Under this scheme, {∆Wi}m
+i=1 are
+learned via LRM-specific matrices and the shared down/up-
+projection matrices. As a result, each of {∆Wi}m
+i=1 is the
+combination of multiple low-rank projection matrices. Finally,
+sample-agnostic diversity enhancement (SADE) is designed to
+improve the quality of {∆Wi}m
+i=1 by regularizing the simi-
+larities among the representations extracted by these matrices
+during training.
+A. Base-Space Sharing
+When LRMs in LoRA are employed to tune the input
+representations of MHA and FFN blocks, as in ARC, the
+tuned weights in pre-trained backbones can be viewed as
+identity matrices. Correspondingly, for the j-th LRM, its
+output Xj
+output can be obtained by
+Xj
+output = Xj
+input(I+∆Wj) = Xj
+input +Xj
+inputAjBj. (6)
+The above equation indicates that the transformed represen-
+tation Xj
+output is the sum of the original representation and its
+update. In this case, the update of Xj
+input is learned by low-
+rank matrix AjBj. Since r ≪d, we have rank(AjBj) ≤r
+where rank(·) represents the rank of AjBj. r is an essential
+hyper-parameter for LoRA. In practice, a small r usually
+limits the fine-tuning abilities on pre-trained models, while
+a large r can bring numerous trainable parameters, resulting
+in parameter inefficiency. Actually, r affects the fine-tuning
+performance by controlling the upper bound of ∆Wj’s rank.
+A small (or large) r means a low (or high) upper bound on the
+rank. If r is set as a small value, the learned low-rank space
+may have difficulty approximating the actual low-rank space,
+because the rank upper bound is limited. Therefore, enlarging
+the upper bound of rank is a feasible way to enhance the fine-
+tuning performance when r is small.
+In
+LoRA-based
+tuning
+methods,
+low-rank
+matrices
+{AiBi}m
+i=1 inserted into pre-trained backbones are applied to
+extract different representations and {AiBi}m
+i=1 are normally
+different. Since rank(
+m
+P
+i=1
+AiBi) ≤
+m
+P
+i=1
+rank(AiBi) ≤mr,
+if we properly utilize all the inserted low-rank matrices, the
+rank upper bound can be increased to mr, thus improving
+the fine-tuning abilities. A simple idea is to learn each
+representation update by {AiBi}m
+i=1. For example, in the
+j-th LRM, the output Xj
+output is formulated as
+Xj
+output = Xj
+input(I + ∆Wj) = Xj
+input + Xj
+input
+m
+X
+i=1
+AiBi.
+(7)
+For the m LRMs at different locations, their input rep-
+resentation updates usually have different requirements for
+{AiBi}m
+i=1, indicating that some optimization conflicts may
+exist in the whole tuning process. To avoid the potential
+problem, we design LRM-specific transformation matrices
+{Λi,j}m
+i=1 for ∆Wj and then reformulate equation (7) as
+Xj
+output = Xj
+input + Xj
+input
+m
+X
+i=1
+AiΛi,jBi,
+(8)
+where Λij ∈Rr×r is ∆Wj’s specific transformation matrix
+used to utilize the information contained in AiBi. Note that
+Λij = I if j = i.
+However, equation (8) will introduce more trainable param-
+eters than those of LoRA. To lower the introduced parameter
+count, we assume that {AiBi}m
+i=1 share the same low-rank
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+5
+spaces {Sh}p
+h=1 (p < m). Under this assumption, each of
+{AiBi}m
+i=1 can be divided into multiple component matrices
+in spaces {Sh}p
+h=1. We denote the component matrices for
+Ai and Bi in the h-th low-rank space Sh as Ah
+i and Bh
+i .
+Suppose space Sh can be represented by DhUh, where Dh
+and Uh denote the base down-projection and up-projection
+matrices, respectively. Assuming matrices Th
+i ∈Rr×r and
+Rh
+i ∈Rr×r are the representations for Ah
+i and Bh
+i under
+base projection matrices Dh and Uh, we have Ah
+i = DhTh
+i
+and Bh
+i = Rh
+i Uh. Accordingly, we have Ai =
+pP
+h=1
+Ah
+i =
+pP
+h=1
+DhTh
+i and Bi =
+pP
+h=1
+Bh
+i =
+pP
+h=1
+Rh
+i Uh. Similarly, we
+also divide ∆Wj into multiple component matrices in spaces
+{Sh}p
+h=1. For ∆Wj, its component matrix ∆Wh
+j in space Sh
+is obtained as follows.
+∆Wh
+j =
+m
+X
+i=1
+Ah
+i Λh
+i,jBh
+i =
+m
+X
+i=1
+DhTh
+i Λh
+i,jRh
+i Uh,
+(9)
+where Λh
+i,j is the corresponding component of Λi,j in space
+Sh.
+Based on equation (9), we have
+∆Wj =
+p
+X
+h=1
+∆Wh
+j =
+p
+X
+h=1
+DhQh
+i Uh,
+(10)
+where Qj
+h =
+m
+P
+i=1
+Th
+i Λh
+i,jRh
+i .
+As analyzed above, the output of the j-th LRM in CLoRA
+is formulated as
+Xj
+output = Xj
+input + Xj
+input
+p
+X
+h=1
+DhQj
+hUh.
+(11)
+All components in Qj
+h are trainable during the fine-tuning
+process, which implies Qj
+h is also trainable. In equation
+(11), we can directly train a suitable Qj
+h using the data of
+downstream tasks and thus ignore the learning processes of
+its components.
+As shown in Fig. 2, two LRMs are inserted before the MHA
+and FFN blocks of each encoder layer. Taking the l-th encoder
+layer as an example, the (2l−1)-th and 2l-th LRMs are inserted
+in this layer. Let ˜Zl
+MHA and Zl
+F F N denote the transformed
+inputs for the MHA and FFN blocks, based on equations (1-
+3,11), we have
+˜Zl
+MHA = LN(Zl−1) + LN(Zl−1)
+p
+X
+h=1
+DhQ2l−1
+h
+Uh,
+(12)
+Zl
+F F N = LN(˜Zl) + LN(˜Zl)
+p
+X
+h=1
+DhQ2l
+h Uh.
+(13)
+Finally, the mathematical expressions of the MHA and FFN
+blocks become
+˜Zl = MHA(˜Zl
+MHA) + Zl−1,
+(14)
+Zl = FFN(Zl
+F F N) + ˜Zl.
+(15)
+During the fine-tuning stage, we freeze the parameters of the
+original backbone and only update the parameters contained
+in LRMs and the prediction head using the data of each down-
+stream task. In the above way, the total number of introduced
+extra parameters is (2dr + mr2)p + c, where c represents the
+number of parameters in the prediction head. In LoRA, the
+number of extra trainable parameters is 2drm+c. Since r ≪d
+and p < m, we have (2dr+mr2)p+c ≈2drp+c < 2drm+c.
+Although rank(
+pP
+h=1
+DhQj
+hUh) ≤pr < mr, CLoRA strikes
+a balance between parameter-efficient learning and the expan-
+sion of the rank upper bound.
+During the inference and storage processes, the low-rank
+matrices learned by CLoRA can be seamlessly merged into the
+corresponding weights in MHA and FFN blocks, thus avoiding
+extra costs. In MHA blocks, the inputs are projected into three
+spaces via different projection weights to obtain the query, key,
+and value matrices. When the j-th LRM of CLoRA is inserted
+before an MHA block, we have
+Xq/k/v = (Xj
+input + Xj
+input
+pP
+h=1
+DhQj
+hUh)Wq/k/v
+= Xj
+input(I +
+pP
+h=1
+DhQj
+hUh)Wq/k/v,
+(16)
+where Xq/k/v is the acquired query/key/value matrix and
+Wq/k/v denote the related projection weight. In FFN blocks,
+the inputs are first mapped into a high-dimensional space and
+then reprojected into the original space. Suppose W1 is the
+first projection weight and XF F N,1 is the representation in
+the high-dimensional space. When the j-th LRM of CLoRA
+is inserted before an FFN block, we have
+XF F N,1 = (Xj
+input + Xj
+input
+pP
+h=1
+DhQj
+hUh)W1
+= Xj
+input(I +
+pP
+h=1
+DhQj
+hUh)W1.
+(17)
+According to equations (16-17), the extra matrices in-
+troduced by CLoRA can be incorporated into the related
+projection weights contained in the pretrained ViT back-
+bone. In other words, CLoRA doesn’t change the structure
+of the original backbone by substituting Wq/k/v and W1
+with (I+
+pP
+h=1
+DhQj
+hUh)Wq/k/v and (I+
+pP
+h=1
+DhQj
+hUh)W1
+respectively, adding no extra computational or storage costs.
+B. Sample-Agnostic Diversity Enhancement
+As illustrated in equation (11), for the j-th LRM, its
+input representation update is captured by projection matrices
+{DhQj
+hUh}p
+h=1. The learning scheme can be regarded as
+a simplified form of MoE [47], where different projection
+matrices represent different experts. The performance of MoE
+is usually degraded by the redundant information among
+experts, and improving expert diversity is an effective way
+to address this issue [52], [53]. Therefore, the focus of this
+section is to design diverse projection matrices.
+For convenience, we let Mj
+h = DhQj
+hUh and denote
+Xj
+input as (xj
+1; · · · ; xj
+a; · · · ; xj
+n+1) where xj
+a ∈R1×d rep-
+resents the a-th token. When xj
+a is input into the j-th LRM,
+its representations obtained by these experts are {xj
+aMj
+h}p
+h=1.
+Much redundant information will exist in these representations
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+6
+if they are highly similar. In other words, lower similarity
+implies higher diversity. In practice, the similarities among
+vectors are normally measured by cosine similarity. As for the
+h-th and the r-th representations, the similarity sa,j
+h,r between
+them can be calculated as
+sa,j
+h,r = xj
+aMj
+h(xj
+aMj
+r)
+T
+xj
+aMj
+h
+
+xj
+aMj
+r
+
+= xj
+aMj
+h(Mj
+r)
+T(xj
+a)
+T
+xj
+aMj
+h
+
+xj
+aMj
+r
+
+,
+(18)
+where (·)T denote the transpose operator and |·| represent the
+magnitude of a vector.
+When the batch size is 1, the diversity of projection matrices
+{DhQj
+hUh}p
+h=1 can be naturally enhanced by minimizing the
+similarity regularization term SRj as follows.
+SRj =
+n+1
+X
+a=1
+p
+X
+h=1
+p
+X
+r=h+1
+(sa,j
+h,r)
+2.
+(19)
+When calculating SRj, the main computational complexity
+is O((p2n + p2 + pn + p)d2). Since this term is sample-
+dependent, the total computational complexity caused by a
+LRM is O((p2n + p2 + pn + p)bd2), where b represents
+the batch size in the training process. Clearly, computing
+the similarity regularization term becomes computationally
+expensive as b increases.
+Observing equation (18), we find that Mj
+h(Mj
+r)T is
+the
+dominant
+factor
+affecting
+the
+final
+similarity
+and
+Mj
+h(Mj
+r)T →0 indicates sa,j
+h,r →0. Based on these obser-
+vations, we propose a sample-agnostic diversity enhancement
+(SADE) scheme to reduce the high computational complexity
+induced by sample-dependent similarity. In SADE, we just
+focus on minimizing the distance between Mj
+h(Mj
+r)T and
+0, without considering any token contained in Xj
+input and
+any input samples. Following equation (19), we give the
+reformulated similarity-regularized (RSR) term as follows.
+RSRj =
+p
+X
+h=1
+p
+X
+r=h+1
+
+Mj
+h(Mj
+r)
+T
+
+2
+F ,
+(20)
+where ∥·∥2
+F represents the squared Frobenius norm.
+According to equation (20), the proposed SADE scheme
+needs about O((0.5p2 + 0.5p)d3). When b >
+d
+2(n+1), (p2n +
+p2 + pn + p)bd2 > (0.5p2 + 0.5p)d3, meaning that SADE
+is more computationally efficient than the sample-dependent
+similarity presented in equation (19). In ViT backbones,
+d
+2(n+1) is small enough. Taking the widely used ViT-Base, ViT-
+Large, and ViT-Huge backbones in [1] as examples, we report
+the reduced computational complexity of SADE in terms of
+GFLOPs in TABLE. I, compared to the sample-dependent
+similarity.
+TABLE I
+REDUCED GFLOPS ACHIEVED BY SADE FOR VARYING b.
+Backbone
+d
+2(n+1)
+b = 2
+b = 4
+b = 8
+b = 16
+b = 32
+b = 64
+ViT-Base
+1.95
+↓2.5% ↓51.3% ↓75.6% ↓87.8% ↓93.9% ↓97.0%
+ViT-Large
+2.60
+-
+↓35.0% ↓67.5% ↓83.8% ↓91.9% ↓95.9%
+ViT-Huge
+3.25
+-
+↓18.8% ↓59.4% ↓79.7% ↓89.9% ↓94.9%
+C. Objective Function
+To expand the rank upper bound and keep the parameter-
+efficient property, all down/up-projection weights of inserted
+LRMs share the same base down/up-projection matrices in
+CLoRA. The additional parameters brought by base-space
+sharing are trained with the original loss function of each
+downstream task, without introducing any extra loss term. In
+SADE, we introduce the similarity regularization term shown
+in equation (20) to improve the quality of the learned input
+representation updates. This term is optimized as part of the
+final loss function. Therefore, the final objective function is
+written as
+o = lossoriginal + α
+d2
+2L
+X
+j=1
+RSRj,
+(21)
+where α is a balance parameter; lossoriginal represents the
+loss of the related downstream task. For example, lossoriginal
+can be the average cross-entropy loss over training samples
+for classification tasks.
+D. Comparison to Existing Work
+Some learning strategies of CLoRA share similarities with
+those in ARC [17] and PEGO [19]. For instance, similar to
+ARC, the LRMs in CLoRA are designed to learn the input
+representation updates of MHA and FFN blocks; the LRMs
+in both CLoRA and PEGO contain multiple down-projection
+and up-projection matrices. However, CLoRA is substantially
+different from the two methods. The key differences are
+summarized as follows.
+In ARC, the LRMs for MHA (or FFN) blocks share the
+same symmetric down-projections and up-projections. Note
+that the projections applied in the two types of blocks are
+different. Additionally, low-dimensional re-scaling coefficients
+for LRMs are used to obtain block-specific representations.
+Although the parameter-sharing strategy in ARC can compress
+the number of new parameters, the symmetry constraint limits
+the learning directions of projection matrices. In PEGO, the
+LRMs generate the final projection matrices by combining
+multiple independent low-rank matrices, leading to a signif-
+icant increase in the number of trainable parameters. Suppose
+Gf and Gv are the f-th and the v-th projection matrices
+generated in the j-th LRMs. PEGO enhances the diversity be-
+tween the two projection matrices by encouraging (Gf)TGv
+to approximate 0.
+Following a learning scheme similar to that of LoRA, ARC
+learns the projection matrix ∆Wj in the j-th LRM using
+low-rank matrix AjBj. However, high performance is often
+accompanied by a large rank upper bound, which leads to
+an excessive number of trainable parameters. Unlike ARC,
+CLoRA learns ∆Wj through utilizing the information existing
+in {AiBi}m
+i=1. In addition, CLoRA significantly reduces the
+number of trainable parameters by the base-space sharing
+component. After incorporating {AiBi}m
+i=1 into all tuning
+modules, each LRM in CLoRA consists of a set of low-rank
+projection matrices. The LRMs in PEGO are trained indepen-
+dently, whereas in CLoRA they are jointly trained from the
+shared down/up-projection spaces. Similar to PEGO, CLoRA
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+7
+adopts the SADE component to improve the diversity of the
+learned information in each LRM. But the adopted diversity-
+induced strategies in PEGO and CLoRA are fundamentally
+different. For simplicity, we also use the above generated
+projection matrices Gf and Gv to exemplify the strategy of
+SADE. Under this strategy, we expect to minimize the distance
+between Gf(Gv)T and 0 to decrease the similarity between
+the representations extracted by Gf and Gv. However, PEGO
+just focuses on the orthogonality between the columns of Gf
+and Gv.
+V. EXPERIMENTS
+Extensive experiments are carried out to validate the learn-
+ing performance of our proposed method in this section.
+Since ViT is originally designed for visual classification tasks,
+existing studies [17], [21], [38], [39] typically evaluate their
+methods on VTAB-1K benchmark [54] and fine-grained visual
+classification (FGVC) benchmark [12]. For fair comparisons,
+we also evaluate CLoRA on the two benchmarks. As intro-
+duced in Section IV, CLoRA includes base-space sharing and
+SADE components. Ablation studies are conducted to further
+analyze our proposed method. Unless otherwise specified, we
+use the ViT-B/16 backbone [1] pre-trained on ImageNet-21K
+dataset for 2D visual tasks. Recently, ViT has been extended to
+the field of point cloud analysis. Since the network structures
+of these extensions are similar to the original ViT, CLoRA
+can be directly incorporated into their pre-trained backbones.
+Following IDPT [55], DAPT [41] and PointGST [56], we also
+test CLoRA’s fine-tuning performance on the tasks of point
+cloud object recognition and part segmentation. For compar-
+ison methods, we directly adopt their reported results when
+available; otherwise, we run their released code following the
+parameter settings provided in the original papers.
+A. Experiments on the VTAB-1K Benchmark
+VTAB-1K is composed of 19 visual classification datasets
+which are categorized into three groups: Natural (containing
+7 datasets), Specialized (containing 4 datasets) and Struc-
+tured (containing 8 datasets). More details are provided in
+TABLE. II, where “#Class”, “#Training”, “#Validation” and
+“#Test” represent the number of classes, training samples,
+validation samples and test samples, respectively. We follow
+the same standard data augmentations as described in VPT
+[12] to maintain consistency.
+Fully fine-tuning the whole pre-trained backbone (denoted
+as Full) and tuning the linear prediction head only (denoted
+as Linear) are two traditional fine-tuning methods. Here,
+we compare CLoRA with the two traditional fine-tuning
+methods and competitive PEFT baselines. The selected PEFT
+methods are LoRA [13], VPT [12], ARC [17], NOAH [42],
+RLRR [39], SCT [40], SA2VP [21], DoRA [14], PEGO [19],
+LoRA+AOFT [45] and CDRA-SPT [38]. In TABLE. III, we
+give the parameter settings of CLoRA. Following VPT, we
+first adopt the training (800)-validation (200) data split to
+determine the suitable parameter settings, then conduct tuning
+experiments on the entire 1000 training data using these
+TABLE II
+DETAILS OF THE VTAB-1K BENCHMARK.
+Dataset
+Group
+#Class #Training #Validation
+#Test
+Cifar100
+Natural
+100
+800/1000
+200
+10000
+Caltech101
+102
+6084
+DTD
+47
+1880
+Flower102
+102
+6149
+Pets
+37
+3669
+SVHN
+10
+26032
+Sun397
+397
+21750
+Camelyon
+Specialized
+2
+800/1000
+200
+32768
+EuroSAT
+10
+5400
+Resisc45
+45
+6300
+Retinopathy
+5
+42670
+Clevr-Count
+Structured
+8
+800/1000
+200
+15000
+Clevr-Dist
+6
+15000
+DMLab
+6
+22735
+KITTI-Dist
+4
+711
+dSpr-Loc
+16
+73728
+dSpr-Ori
+16
+73728
+sNORB-Azim
+18
+12150
+sNORB-Ele
+9
+12150
+TABLE III
+PARAMETER SETTINGS OF CLORA ON 2D VISUAL TASKS.
+Name
+Value
+Optimizer
+Adam
+Learning Rate
+{0.03,0.01,0.005,0.003,0.001}
+Weight Decay
+{0.05,0.01,0.005,0.001}
+Batch Size
+32
+Learning Rate Schedule
+Cosine Decay
+Warmup Epochs
+10
+Training Epochs
+100
+α
+{0.1,1.0,10.0}
+p
+{4,6,8,10}
+r
+8
+settings and finally report the top-1 test accuracy on each
+dataset.
+The comparison results on the VTAB-1K benchmark are
+reported in TABLE. IV. From these experimental results, we
+have the following observations. 1) PEFT methods have obvi-
+ous advantages over full fine-tuning (Full) and linear probing
+(Linear). Although full fine-tuning introduces a large number
+of trainable parameters, it tends to be negatively affected by
+overfitting due to the lack of sufficient training data. Linear
+probing reduces the number of trainable parameters by only
+tuning the linear prediction head, but it cannot obtain task-
+specific representations. These drawbacks explain why both
+linear probing and full fine-tuning obtain the worst and the
+second-worst mean results. 2) CLoRA achieves much more
+competitive classification results than all comparison methods.
+Specifically, it exceeds the two second-best methods (RLRR
+and CDRA-SPT) by 0.6% in terms of mean accuracy while
+further reducing the number of trainable parameters by 66.67%
+and 77.55%, respectively. Moreover, CLoRA obtains either the
+highest or second-highest accuracy on 16 out of 19 datasets. 3)
+LoRA+AOFT and CLoRA have the smallest and the second-
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+8
+TABLE IV
+EXPERIMENTAL RESULTS ON THE VTAB-1K BENCHMARK. “MEAN” REPRESENTS THE AVERAGE ACCURACY OF THE 19 DATASETS. “PARAM. (M)”
+DENOTES THE NUMBER OF TRAINABLE PARAMETERS IN MILLIONS AND “#PARAM. (M)” MEANS THE AVERAGE PARAM. (M). “GFLOPS” REPRESENTS
+THE AVERAGE GFLOPS ACROSS ALL DATASETS. IN PARAMETER-EFFICIENT TUNING METHODS, BOLD FONT AND UNDERLINE DENOTE THE BEST AND
+THE SECOND-BEST RESULTS.
+Natural
+Specialized
+Structured
+Method
+Cifar100
+Caltech101
+DTD
+Flower102
+Pets
+SVHN
+Sun397
+Camelyon
+EuroSAT
+Resisc45
+Retinopathy
+Clevr-Count
+Clevr-Dist
+DMLab
+KITTI-Dist
+dSpr-Loc
+dSpr-Ori
+sNORB-Azim
+sNORB-Ele
+Mean(%)
+#Param. (M)
+Traditional fine-tuning methods
+Full
+68.9 87.7 64.3 97.2 86.9 87.4 38.8
+79.7 95.7 84.2 73.9 56.3 58.6 41.7 65.5 57.5 46.7 25.7 29.1
+65.6 85.8
+Linear
+63.4 85.0 63.2 97.0 86.3 36.6 51.0
+78.5 87.5 68.6 74.0 34.3 30.6 33.2 55.4 12.5 20.0
+9.6
+19.2
+52.9 0.04
+Parameter-efficient tuning methods
+LoRA [13]
+67.1 91.4 69.4 98.8 90.4 85.3 54.0
+84.9 95.3 84.4 73.6 82.9 69.2 49.8 78.5 75.7 47.1 31.0 44.0 72.3 0.33
+VPT [12]
+78.8 90.8 65.8 98.0 88.3 78.1 49.6
+81.8 96.1 83.4 68.4
+68.5 60.0 46.5 72.8 73.6 47.9 32.9 37.8
+69.4 0.60
+ARC [17]
+72.2 90.1 72.7 99.0 91.0 91.9 54.4
+84.9 95.7 86.7 75.8 80.7 67.1 48.7 81.6 79.2 51.0 31.4 39.9
+73.4 0.13
+NOAH [42]
+69.6 92.7 70.2 99.1 90.4 86.1 53.7
+84.4 95.4 83.9 75.8 82.8 68.9 49.9 81.7 81.8 48.3 32.8 44.2
+73.3 0.50
+RLRR [39]
+75.6 92.4 72.9 99.3 91.5 89.8 57.0 86.8 95.2 85.3 75.9 79.7 64.2 53.9 82.1 83.9 53.7 33.4 43.6
+74.5 0.33
+SCT [40]
+75.3 91.6 72.2 99.2 91.1 91.2 55.0
+85.0 96.1 86.3 76.2
+81.5 65.1 51.7 80.2 75.4 46.2 33.2 45.7
+73.6 0.15
+SA2VP [21]
+73.0 91.9 70.5 99.1 90.8 84.7 56.8
+86.0 95.9 85.8 75.2 76.6 61.8 50.8 79.9 84.5 52.8 34.7 45.3 73.5 0.48
+DoRA [14]
+66.1 93.1 68.8 97.0 89.9 87.2 56.4
+83.1 94.5 80.8 75.2 79.1 62.1 48.0 80.6 83.1 51.8 33.2 44.0
+72.3 0.19
+PEGO [19]
+75.1 92.9 73.1 99.4 92.1 89.2 56.5
+87.0 96.2 86.1 76.1 78.4 62.4 52.7 79.5 80.6 52.3 31.9 37.7
+73.6 0.44
+LoRA+AOFT [45] 73.6 92.6 71.1 99.3 91.3 85.3 56.9 84.7 94.8 83.7 75.6 76.7 63.2 48.7 81.0 82.2 53.1 26.9 45.1 72.9 0.08
+CDRA-SPT [38]
+73.8 93.3 72.7 99.4 91.6 89.9 55.8
+86.8 96.2 86.2 76.0 83.0 68.9 51.5 82.1 80.9 51.7 33.0 43.2
+74.5 0.49
+CLoRA
+76.3 93.8 73.4 99.4 92.4 91.3 57.8
+87.4 96.2 86.4 76.4 81.6 67.3 52.9 81.9 84.7 53.7 33.9 40.1
+75.1 0.11
+smallest numbers of trainable parameters. However, compared
+with LoRA+AOFT, CLoRA achieves a 2.2% improvement in
+terms of mean accuracy. Note that CLoRA, ARC, RLRR,
+DoRA, PEGO and LoRA+AOFT are LoRA-based methods.
+CLoRA clearly performs better than LoRA and its variations
+(excluding LoRA+AOFT) in terms of both mean accuracy and
+parameter efficiency.
+B. Experiments on the FGVC Benchmark
+FGVC benchmark consists of five fine-grained visual clas-
+sification datasets including CUB-200-2011, NABirds, Oxford
+Flowers, Stanford Dogs and Stanford Cars. TABLE. V shows
+the details of these datasets. Since the effectiveness of LoRA,
+VPT, ARC, RLRR, SA2VP, LoRA+AOFT and CDRA-SPT
+has been verified on the five datasets, they are selected as
+comparison methods. For the purpose of comparison, samples
+from the datasets are processed by the same data augmenta-
+tions used in VPT.
+TABLE V
+DETAILS OF THE FGVC BENCHMARK.
+Dataset
+#Class #Training #Validation
+#Test
+CUB-200-2011 (CUB)
+200
+5394
+600
+5794
+NABirds (NBirds)
+555
+21536
+2393
+24633
+Oxford Flowers (Flowers)
+102
+1020
+1020
+6149
+Stanford Dogs (Dogs)
+120
+10800
+1200
+8580
+Stanford Cars (Cars)
+196
+7329
+815
+8041
+We present the experimental results of comparison methods
+and CLoRA in TABLE. VI. CLoRA outperforms the second-
+best method (RLRR) by 0.4% in terms of mean accuracy while
+TABLE VI
+EXPERIMENTAL RESULTS ON THE FGVC BENCHMARK.
+Method
+CUB NBirds Flowers Dogs Cars Mean(%) Param.(M)
+Traditional fine-tuning methods
+Full
+87.3
+82.7
+98.8
+89.4 84.5
+88.5
+85.98
+Linear
+85.3
+75.9
+97.9
+86.2 51.3
+79.3
+0.18
+Parameter-efficient tuning methods
+LoRA
+88.3
+85.6
+99.2
+91.0 83.2
+89.5
+0.44
+VPT
+88.5
+84.2
+99.0
+90.2 83.6
+89.1
+0.85
+ARC
+88.5
+85.3
+99.3
+91.9 85.7
+90.1
+0.25
+RLRR
+89.3
+84.7
+99.5
+92.0 87.0
+90.4
+0.47
+SA2VP
+89.1
+85.8
+99.3
+92.1 84.1
+90.1
+0.85
+LoRA+AOFT 88.8
+84.2
+99.4
+92.0 85.1
+89.9
+0.22
+CDRA-SPT
+88.6
+83.4
+99.3
+89.8 88.2
+89.9
+0.74
+CLoRA
+89.2
+85.7
+99.5
+92.1 87.3
+90.8
+0.25
+reducing the number of trainable parameters by 46.81%. In
+addition, CLoRA achieves the highest classification accuracies
+on Flowers and Dogs datasets and obtains the second-best
+classification accuracies on the other datasets.
+C. Experiments on Larger-Scale ViT Backbones
+We further validate the performance of CLoRA on larger-
+scale
+ViT
+backbones.
+LoRA,
+VPT,
+ARC,
+RLRR,
+and
+LoRA+AOFT have been extensively validated on ViT-Large
+and ViT-Huge backbones, showing strong performance on
+the VTAB-1K benchmark. For comparison consistency, we
+also conduct experiments on the same benchmark with the
+two larger ViT backbones. Comparison results on ViT-Large
+and ViT-Huge backbones are reported in TABLE. VII and
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+9
+TABLE. VIII. From the experimental results, we observe
+that CLoRA achieves much more competitive classification
+performance than the comparison methods and simultaneously
+introduces the smallest number of trainable parameters.
+TABLE VII
+COMPARISON RESULTS ON THE VIT-LARGE BACKBONE.
+Method
+Natural(7) Specialized(4) Structured(8) Mean(%) #Param.(M)
+Traditional fine-tuning methods
+Full
+74.7
+83.8
+48.1
+65.4
+303.40
+Linear
+70.9
+69.1
+25.8
+51.5
+0.05
+Parameter-efficient tuning methods
+LoRA
+70.5
+85.0
+57.3
+72.0
+0.74
+VPT
+82.5
+83.9
+54.1
+70.8
+0.49
+ARC
+82.3
+85.6
+57.3
+72.5
+0.18
+RLRR
+83.9
+86.4
+61.9
+75.2
+0.82
+LoRA+AOFT
+83.3
+85.9
+60.2
+74.3
+0.15
+CLoRA
+84.7
+86.6
+61.5
+75.3
+0.15
+TABLE VIII
+COMPARISON RESULTS ON THE VIT-HUGE BACKBONE.
+Method
+Natural(7) Specialized(4) Structured(8) Mean(%) #Param.(M)
+Traditional fine-tuning methods
+Full
+70.9
+83.6
+46.0
+63.1
+630.90
+Linear
+67.9
+79.0
+26.1
+52.7
+0.06
+Parameter-efficient tuning methods
+LoRA
+77.1
+83.5
+55.4
+69.3
+1.21
+VPT
+77.9
+83.3
+52.2
+68.2
+0.96
+ARC
+79.1
+84.8
+53.7
+69.9
+0.22
+RLRR
+79.4
+85.1
+59.0
+72.0
+1.33
+LoRA+AOFT
+78.8
+83.8
+58.3
+71.3
+0.20
+CLoRA
+80.7
+85.6
+58.4
+72.3
+0.19
+D. Ablation Studies
+CLoRA includes base-space sharing and SADE compo-
+nents. In base-space sharing, two LRMs are inserted before
+the MHA and FFN blocks in each encoder layer, and all
+down/up-projection weights in LRMs share the same down/up-
+projection spaces. To improve the diversity of the information
+learned from the shared spaces, SADE is introduced in the
+training process. Here, taking the VTAB-1K benchmark as an
+example, we first conduct ablation experiments to investigate
+the influence of different parts and then verify the effectiveness
+of base-space sharing and SADE components.
+The results of ablation experiments are reported in TA-
+BLE. IX. Note that notations are listed in the first column
+for convenience. “✓” means the corresponding item is se-
+lected, while “×” indicates it is not selected. For instance,
+in CLoRAMF, two LRMs are inserted before MHA and FFN
+blocks while SADE is not applied. According to the results,
+we observe that CLoRA exceeds CLoRAMF, CLoRAMS
+and CLoRAFS by 1.7%, 2.8% and 2.6%, respectively. This
+observation implies that adapting the input representations of
+FFN blocks is more important than the others and SADE has
+the least influence.
+TABLE IX
+ABLATION EXPERIMENTS ON THE VTAB-1K BENCHMARK.
+Notation
+Inserted Before MHA Inserted Before FFN SADE Mean(%)
+CLoRAMF
+✓
+✓
+×
+73.4
+CLoRAMS
+✓
+×
+✓
+72.3
+CLoRAFS
+×
+✓
+✓
+72.5
+CLoRA
+✓
+✓
+✓
+75.1
+Based on LoRA, each LRM in PEGO combines a group of
+low-rank projection matrices which are regularized by column
+orthogonality. LRMs in LoRA and its variants including PEGO
+are usually adopted to update the query and value projection
+weights. Following an information-learning scheme similar
+to LoRA, CLoRA can be easily applied to learn the query
+and value weight updates by replacing the identity matrices
+with the corresponding projection weights. Directly calculat-
+ing the similarities among the representations extracted by
+multiple projection matrices is computationally expensive for
+relatively large batch sizes. In contrast, SADE can efficiently
+approximate these relationships. Here, we further evaluate the
+performance of the two components designed for CLoRA.
+PEGO CLoRA(CO) CLoRA# 
+LoRA CLoRA(QV) CLoRA 
+CLoRA*
+70
+72
+74
+76
+Mean (%)
+1.4
+1.8
+1.0
+Fig. 3. Performance verification of the two components in CLoRA.
+The comparison results on the VTAB-1K benchmark in
+terms of mean accuracy are shown in Fig. 3. CLoRA(QV)
+denotes the variant where LRMs are employed to learn the
+query and value weight updates. CLoRA(CO) replaces the
+SADE component with the column orthogonality regulariza-
+tion used in PEGO. Additionally, CLoRA(CO) follows the
+learning scheme provided by PEGO. By comparing PEGO,
+CLoRA(CO), CLoRA(QV) and LoRA, we observe that:
+1) CLoRA(CO) achieves similar performance to PEGO; 2)
+CLoRA(QV) evidently outperforms PEGO, CLoRA(CO) and
+LoRA. These comparisons illustrate the effectiveness of the
+base-space sharing and SADE components. From the results
+of CLoRA (QV) and CLoRA, we observe that inserting LRMs
+to tune the input representations for MHA and FFN blocks
+enables learning more informative representations than those
+learned through the query and value weight updates. CLoRA#
+represents that the final low-rank matrices obtained by LRMs
+are directly learned by {AiBi}m
+i=1 (see equation (7)). Ac-
+cording to these results, CLoRA exceeds CLoRA# by 4.2%
+and CLoRA# even underperforms LoRA, which illustrates that
+our designed base-space sharing component can address the
+potential optimization conflicts effectively. CLoRA* means
+that the similarities are directly calculated using equation (18).
+Compared with CLoRA*, CLoRA performs comparably while
+achieving a 93.9% reduction in GFLOPs (see TABLE. I),
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+10
+TABLE X
+CLASSIFICATION ACCURACY (%) ON MODELNET40 DATASET AND THREE VARIANTS OF SCANOBJECTNN DATASET. #PARAM. (M) AND #GFLOPS
+DENOTE THE AVERAGE NUMBER OF TRAINABLE PARAMETERS AND THE AVERAGE GFLOPS ACROSS ALL DATASETS.
+Pre-trained model Fine-tuning strategy
+Reference
+#Param. (M) #GFLOPs
+ScanObjectNN
+ModelNet40
+OBJ BG
+OBJ ONLY PB T50 RS
+Point-MAE [61]
+Full
+-
+22.1 (100%)
+4.76
+90.02
+88.29
+85.18
+93.2
+IDPT [55]
+ICCV 23
+1.7 (7.69%)
+7.10(↑)
+91.22(+1.20)
+90.02(+1.73)
+84.94(-0.24)
+93.3(-0.1)
+Point-PEFT [63]
+AAAI 24
+0.7 (3.13%)
+7.61(↑)
+89.67(-0.35)
+88.98(+0.69)
+84.91(-0.27)
+93.3(+0.1)
+DAPT [41]
+CVPR 24
+1.1 (4.97%)
+4.96(↑)
+90.88(+0.86)
+90.19(+1.90)
+85.08(-0.10)
+93.5(+0.3)
+PointGST [56]
+TPAMI 25
+0.6 (2.77%)
+4.81(↑)
+91.74(+1.72)
+90.19(+1.90)
+85.29(+0.11)
+93.5(+0.3)
+PointLoRA [64]
+CVPR 25
+0.8 (3.43%)
+5.06(↑)
+90.71(+0.69)
+89.33(+1.04)
+85.53(+0.35)
+93.3(+0.1)
+CLoRA(ours)
+-
+0.3 (1.36%)
+4.76(-)
+91.57(+1.55)
+90.19(+1.90)
+85.32(+0.14)
+93.6(+0.4)
+Point-BERT [60]
+Full
+-
+22.1 (100%)
+4.76
+87.43
+88.12
+83.07
+92.7
+IDPT [55]
+ICCV 23
+1.7 (7.69%)
+7.10(↑)
+88.12(+0.69)
+88.30(+0.18)
+83.69(+0.62)
+92.6(-0.1)
+Point-PEFT [63]
+AAAI 24
+0.7 (3.13%)
+7.61(↑)
+88.81(+1.38)
+89.67(+1.55)
+85.00(+1.93)
+93.4(+0.7)
+DAPT [41]
+CVPR 24
+1.1 (4.97%)
+4.96(↑)
+91.05(+3.62)
+89.67(+1.55)
+85.43(+2.36)
+93.1(+0.4)
+PointGST [56]
+TPAMI 25
+0.6 (2.77%)
+4.81(↑)
+91.39(+3.96)
+89.67(+1.55)
+85.64(+2.57)
+93.4(+0.7)
+PointLoRA [64]
+CVPR 25
+0.9 (4.07%)
+5.06(↑)
+89.85(+2.42)
+88.98(+0.86)
+84.63(+1.56)
+93.2(+0.5)
+CLoRA(ours)
+-
+0.3 (1.36%)
+4.76(-)
+91.74(+4.31)
+90.36(+2.24)
+85.80(+2.73)
+93.4(+0.7)
+RECON [62]
+Full
+-
+22.1 (100%)
+4.76
+94.32
+92.77
+90.01
+92.5
+IDPT [55]
+ICCV 23
+1.7 (7.69%)
+7.10(↑)
+93.29(-1.03)
+91.57(-1.20)
+87.27(-2.74)
+93.4(+0.9)
+Point-PEFT [63]
+AAAI 24
+0.7 (3.13%)
+7.61(↑)
+91.91(-2.41)
+90.19(-2.58)
+86.36(-3.65)
+93.3(+0.8)
+DAPT [41]
+CVPR 24
+1.1 (4.97%)
+4.96(↑)
+94.32(+0.00)
+92.43(-0.34)
+89.38(-0.63)
+93.5(+1.0)
+PointGST [56]
+TPAMI 25
+0.6 (2.77%)
+4.81(↑)
+94.49(+0.17)
+92.94(+0.17)
+89.49(-0.52)
+93.6(+1.1)
+PointLoRA [64]
+CVPR 25
+0.8 (3.43%)
+5.06(↑)
+93.46(-0.86)
+91.22(-1.55)
+88.65(-1.36)
+93.4(+0.9)
+CLoRA(ours)
+-
+0.4 (1.81%)
+4.76(-)
+94.32(+0.00)
+92.77(+0.00)
+89.51(-0.50)
+93.8(+1.3)
+indicating the efficiency brought by SADE.
+TABLE XI
+PARAMETER SETTINGS OF CLORA ON POINT CLOUD DATASETS.
+Name
+Value
+Number of Points
+1024 (ModelNet40)
+2048 (ScanObjectNN&ShapeNetPart)
+Batch Size
+32 (ModelNet40&ScanObjectNN)
+16 (ShapeNetPart)
+Learning Rate
+0.0005 (ModelNet40&ScanObjectNN)
+0.0002 (ShapeNetPart)
+Weight Decay
+0.05
+Optimizer
+AdamW
+Learning Rate Schedule
+Cosine Decay
+Warmup Epochs
+10
+Training Epochs
+300
+α
+{0.01,0.1,1.0,10.0}
+p
+{6,8,10,12}
+r
+8
+E. Further Exploration
+Since pre-trained point cloud transformers share similar
+encoder blocks with ViT, CLoRA can be directly applied to
+adapt these models for downstream tasks. Consistent with
+related methods [41], [55], we verify the performance of
+CLoRA on three widely used point cloud datasets: Mod-
+elNet40 [57], ScanObjectNN [58] and ShapeNetPart [59].
+Both ModelNet40 and ScanObjectNN are point cloud object
+recognition datasets. ModelNet40 consists of 12311 CAD
+models from 40 classes. All point clouds in ModelNet40
+are complete, uniform and noise-free. Besides, they are inde-
+pendently and identically distributed. ScanObjectNN contains
+approximately 15000 real-world point cloud instances cov-
+ering 15 indoor object categories. It includes three variants
+(OBJ BG, OBJ ONLY, PB T50 RS) arranged in order of
+increasing difficulty. ShapeNetPart is a widely used dataset for
+point-level part segmentation and it comprises 16881 samples
+across 16 object types and 50 part categories.
+Following IDPT [55] and DAPT [41], we select Point-
+BERT [60], Point-MAE [61], and RECON [62] as pre-trained
+backbones. IDPT, Point-PEFT [63], DAPT, PointGST [56] and
+PointLoRA [64] are excellent PEFT methods for point cloud
+learning and are therefore selected as comparison methods
+in this subsection. Additionally, full fine-tuning (Full) serves
+as the baseline. For fair comparisons, we adopt the same
+data augmentation techniques used in [41]. Note that all
+experimental results are reported without voting strategies.
+1) Experiments on Point Cloud Object Recognition
+The classification results of the comparison methods and
+CLoRA are presented in TABLE. X. Based on IDPT and
+DAPT, the parameter settings of CLoRA used in these experi-
+ments are provided in TABLE. XI. All methods are compared
+using three metrics: 1) the average number of trainable pa-
+rameters (#Param.(M)); 2) the average GFLOPs (#GFLOPs);
+and 3) top-1 classification accuracy. Observing these results,
+we find that CLoRA achieves the highest or the second-
+highest classification accuracy across different pre-trained
+backbones and datasets. Among the comparison methods,
+PointGST introduces the fewest trainable parameters when
+fine-tuning Point-BERT, Point-MAE and RECON backbones.
+Nevertheless, compared with PointGST, CLoRA further re-
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+11
+duces the parameter count by 50%, 50%, and 33.3%, respec-
+tively, demonstrating its strong parameter efficiency. Although
+IDPT, Point-PEFT, DAPT, PointGST and PointLoRA perform
+well in terms of classification accuracy and the number of
+trainable parameters, they bring extra computational cost at
+the inference stage. In contrast, the trainable modules designed
+for CLoRA can be seamlessly incorporated into the original
+backbones at the inference stage, without introducing extra
+cost.
+We further evaluate the few-shot learning ability of our
+proposed method by conducting few-shot experiments on
+the ModelNet40 dataset. Following the same data settings
+provided by Zha et al. [54], we report the learning results
+in TABLE. XII. In low-data scenarios, CLoRA achieves the
+highest accuracy in most cases across the three backbones
+when compared to IDPT, Point-PEFT, DAPT, and PointLoRA.
+While PointGST performs better than CLoRA on the Point-
+MAE backbone, CLoRA outperforms PointGST on the RE-
+CON backbone. These results demonstrate the effectiveness
+of CLoRA under low-data regimes.
+TABLE XII
+FEW-SHOT LEARNING RESULTS ON THE MODELNET40 DATASET.
+RESULTS ARE PRESENTED AS MEAN CLASSIFICATION ACCURACY
+(%)±STANDARD DEVIATION (%) OVER 10 INDEPENDENT EXPERIMENTS.
+Method
+Reference
+5-way
+10-way
+10-shot
+20-shot
+10-shot
+20-shot
+Pre-trained Point-MAE backbone
++ Full
+ECCV 22
+96.3±2.5
+97.8±1.8
+92.6±4.1
+95.0±3.0
++ IDPT
+ICCV 23
+97.3±2.1
+97.9±1.1
+92.8±4.1
+95.4±2.9
++ Point-PEFT
+AAAI 24
+95.5±2.9
+97.6±1.7
+91.7±4.3
+94.7±3.0
++ DAPT
+CVPR 24
+96.8±1.8
+98.0±1.0
+93.0±3.5
+95.5±3.2
++ PointGST
+TPAMI 25
+98.0±1.8
+98.3±0.9
+93.7±4.0
+95.7±2.4
++ PointLoRA
+CVPR 25
+96.6±2.6
+97.7±1.3
+92.0±4.2
+95.2±3.3
++ CLoRA
+-
+96.8±1.9
+98.1±1.1
+92.2±4.1
+95.6±2.9
+Pre-trained Point-BERT backbone
++ Full
+CVPR 22
+94.6±3.1
+96.3±2.7
+91.0±5.4
+92.7±5.1
++ IDPT
+ICCV 23
+96.0±1.7
+97.2±2.6
+91.9±4.4
+93.6±3.5
++ Point-PEFT
+AAAI 24
+95.4±3.0
+97.3±1.9
+91.6±4.5
+94.5±3.5
++ DAPT
+CVPR 24
+95.8±2.1
+97.3±1.3
+92.2±4.3
+94.2±3.4
++ PointGST
+TPAMI 25
+96.5±2.4
+97.9±2.0
+92.7±4.2
+95.0±2.8
++ PointLoRA
+CVPR 25
+95.7±2.5
+97.8±1.7
+92.0±4.1
+94.7±3.0
++ CLoRA
+-
+96.1±2.3
+98.0±1.7
+92.4±4.0
+95.1±2.7
+Pre-trained RECON backbone
++ Full
+ICML 23
+93.7±1.9
+98.9±1.2
+93.3±3.9
+95.8±3.0
++ IDPT
+ICCV 23
+96.0±1.7
+97.2±2.6
+91.9±4.4
+93.6±3.5
++ Point-PEFT
+AAAI 24
+95.4±3.0
+97.3±1.9
+91.6±4.5
+94.5±3.5
++ DAPT
+CVPR 24
+95.8±2.1
+97.3±1.3
+92.2±4.3
+94.2±3.4
++ PointGST
+TPAMI 25
+96.5±2.4
+97.9±2.0
+92.7±4.2
+95.0±2.8
++ PointLoRA
+CVPR 25
+96.9±2.7
+98.8±1.2
+92.7±4.4
+95.8±2.9
++ CLoRA
+-
+96.7±2.1
+98.2±1.5
+92.8±4.1
+95.7±3.0
+2) Experiments on Point Cloud Part Segmentation
+TABLE XIII presents the part segmentation results on
+the ShapeNetPart dataset, following the parameter settings
+provided in TABLE XI. Full fine-tuning almost outperforms
+all PEFT methods including CLoRA. However, it requires
+a large number of trainable parameters, which is inefficient
+for adapting pre-trained backbones to downstream tasks and
+imposes significant storage overhead. Therefore, we focus
+on comparing the learning performance of PEFT methods.
+According to the experimental results, CLoRA achieves com-
+parable or superior performance compared to the best among
+IDPT, Point-PEFT, DAPT, PointGST, and PointLoRA. More
+importantly, CLoRA has an obvious advantage in reducing the
+number of trainable parameters.
+TABLE XIII
+PART SEGMENTATION RESULTS ON THE SHAPENETPART DATASET. CLS.
+MIOU (%) AND INST. MIOU (%) REPRESENT THE CLASS-AVERAGED AND
+INSTANCE-AVERAGED MIOU, RESPECTIVELY.
+Method
+Reference
+Params. (M) Cls. mIoU (%) Inst. mIoU (%)
+Pre-trained Point-MAE backbone
++ Full
+ECCV 22
+27.06
+84.19
+86.1
++ IDPT
+ICCV 23
+5.69
+83.79
+85.7
++ Point-PEFT
+AAAI 24
+5.62
+83.20
+85.2
++ DAPT
+CVPR 24
+5.65
+84.01
+85.7
++ PointGST
+TPAMI 25
+5.59
+83.81
+85.8
++ PointLoRA
+CVPR 25
+5.71
+83.74
+85.3
++ CLoRA
+-
+5.29
+84.03
+85.7
+Pre-trained Point-BERT backbone
++ Full
+CVPR 22
+27.06
+84.11
+85.6
++ IDPT
+ICCV 23
+5.69
+83.50
+85.3
++ Point-PEFT
+AAAI 24
+5.62
+81.12
+84.3
++ DAPT
+CVPR 24
+5.65
+83.83
+85.5
++ PointGST
+TPAMI 25
+5.58
+83.87
+85.7
++ PointLoRA
+CVPR 25
+5.68
+82.61
+85.2
++ CLoRA
+-
+5.30
+83.81
+85.5
+Pre-trained RECON backbone
++ Full
+ICML 23
+27.06
+84.52
+86.1
++ IDPT
+ICCV 23
+5.69
+83.66
+85.7
++ Point-PEFT
+AAAI 24
+5.62
+83.10
+85.1
++ DAPT
+CVPR 24
+5.65
+83.87
+85.7
++ PointGST
+TPAMI 25
+5.58
+83.98
+85.8
++ PointLoRA
+CVPR 25
+5.63
+83.98
+85.4
++ CLoRA
+-
+5.29
+83.98
+85.6
+VI. CONCLUSION AND FUTURE WORK
+A novel parameter-efficient fine-tuning method termed col-
+laborative low-rank adaptation (CLoRA) is proposed in this
+paper. CLoRA includes two key components: base-space
+sharing and SADE. In base-space sharing, all LRMs share
+the same down/up-projection spaces to increase their learning
+capacities and reduce the number of trainable parameters. Each
+LRM in CLoRA constructs multiple low-rank matrices from
+the shared spaces and combines the representations extracted
+by these matrices. To further improve the performance of
+LRMs, SADE is applied to regularize the relationship among
+the combined representations. Note that all learned low-rank
+matrices of CLoRA can be seamlessly incorporated into the
+related weights of fine-tuned backbones, without introducing
+extra inference and storage costs. Experimental results on
+image and point cloud benchmarks illustrate that CLoRA
+has an excellent ability to keep a balance between learning
+performance and parameter efficiency. Additionally, CLoRA
+achieves the state-of-the-art inference efficiency on point cloud
+benchmarks.
+Similar to existing PEFT methods, CLoRA performs well
+on downstream tasks when provided with high-quality data.
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+12
+Nevertheless, in some practical application scenarios, such
+as underwater target recognition and autonomous driving, the
+collected samples are often of low quality, posing significant
+challenges for effective fine-tuning. In future work, we will
+focus on designing suitable representation-learning strategies
+to extract robust task-specific representations by leveraging the
+knowledge contained in pre-trained models.
+REFERENCES
+[1] A. Dosovitskiy, L. Beyer, A. Kolesnikov, et al, “An image is worth 16x16
+words: Transformers for image recognition at scale,” in Proceedings of
+the International Conference on Learning Representations (ICLR), 2021.
+[2] Y. Liu, Y. Zhang, Y. Wang, et al, “A survey of visual transformers,”
+IEEE Transactions on Neural Networks and Learning Systems, vol.35,
+no.6, pp.7478-7498, 2024.
+[3] Y. Wu, Y. Li, M. Liu, et al, “Learning an adaptive and view-invariant
+vision transformer for real-time UAV tracking,” IEEE Transactions on
+Circuits and Systems for Video Technology, Early Access, 2025.
+[4] J. Li, L. Yang and Q. Hu, “Enhancing multi-source open-set domain
+adaptation through nearest neighbor classification with self-supervised
+vision transformer,” IEEE Transactions on Circuits and Systems for
+Video Technology, vol.34, no.4, pp.2648-2662, 2024.
+[5] U. Evci, V. Dumoulin, H. Larochelle, et al, “Head2toe: Utilizing
+intermediate representations for better transfer learning,” in Proceedings
+of the International Conference on Machine Learning (ICML), pp.6009-
+6033, 2022.
+[6] M. Dehghani, J. Djolonga, B. Mustafa, et al, “Scaling vision trans-
+formers to 22 billion parameters,” in Proceedings of the International
+Conference on Machine Learning (ICML), pp.7480-7512, 2023.
+[7] C. Xia, X. Wang, F. Lv, et al, “Vit-comer: Vision transformer with
+convolutional multi-scale feature interaction for dense predictions,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp.5493-5502, 2024.
+[8] Z. Liu, J. Zhu, N. Li, et al, “Multiple-Exit Tuning: Towards inference-
+efficient adaptation for vision transformer,” IEEE Transactions on Cir-
+cuits and Systems for Video Technology, Early Access, 2025.
+[9] Y. Liu, Y. Li, X. Lan, et al, “UP-Person: Unified parameter-efficient
+transfer learning for text-based person retrieval,” IEEE Transactions on
+Circuits and Systems for Video Technology, vol.35, no.12, pp.12874-
+12889, 2025.
+[10] Z. Peng, Z. Xu, Z. Zeng, et al, “Parameter efficient fine-tuning via cross
+block orchestration for segment anything model,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp.3743-3752, 2024.
+[11] N. Houlsby, A. Giurgiu, S. Jastrzebski, et al, “Parameter-efficient transfer
+learning for NLP,” in Proceedings of the International Conference on
+Machine Learning (ICML), pp.2790-2799, 2019.
+[12] M. Jia, L. Tang, B.C. Chen, et al, “Visual prompt tuning,” in Proceedings
+of the European Conference on Computer Vision (ECCV), pp.709-727,
+2022.
+[13] E.J. Hu, Y. Shen, P. Wallis, et al, “LoRA: Low-rank adaptation of large
+language models,” in Proceedings of the International Conference on
+Learning Representations (ICLR), 2022.
+[14] S. Liu, C. Wang, H. Yin, et al, “Dora: Weight-decomposed low-rank
+adaptation,” in Proceedings of the International Conference on Machine
+Learning (ICML), pp.1-22, 2024.
+[15] J. Gu, J. Yuan, J. Cai, et al, “La-LoRA: Parameter-efficient fine-
+tuning with layer-wise adaptive low-rank adaptation,” Neural Networks,
+vol.194, 108095, 2026.
+[16] A. Agiza, M. Neseem, S. Reda, “Mtlora: Low-rank adaptation approach
+for efficient multi-task learning,” in Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition (CVPR), pp.16196-
+16205, 2024.
+[17] W. Dong, D. Yan, Z. Lin, et al, “ Efficient adaptation of large vision
+transformer via adapter re-composing,” in Proceedings of the Conference
+on Neural Information Processing Systems (NeurIPS), vol.36, pp.52548–
+52567, 2023.
+[18] S. Jie, H. Wang, Z. Deng, “Revisiting the parameter efficiency of
+adapters from the perspective of precision redundancy,” in Proceedings
+of the IEEE/CVF International Conference on Computer Vision (ICCV),
+pp.17217-17226, 2023.
+[19] J. Hu, J. Zhang, L. Qi, et al, “Learn to preserve and diversify: Parameter-
+efficient group with orthogonal regularization for domain generaliza-
+tion,” in Proceedings of the European Conference on Computer Vision
+(ECCV), pp.198-216, 2024.
+[20] Y. Wang, Z. Huang, X. Hong, “ S-prompts learning with pre-trained
+transformers: An occam’s razor for domain incremental learning,” in
+Proceedings of the Conference on Neural Information Processing Sys-
+tems (NeurIPS), vol.35, pp.5682-5695, 2022.
+[21] W. Pei, T. Xia, F. Chen, et al, “SA2VP: Spatially aligned-and-adapted
+visual prompt,” in Proceedings of the AAAI Conference on Artificial
+Intelligence, vol.38, no.5, pp.4450-4458, 2024.
+[22] C. Tu, Z. Mai, W. Chao, “Visual query tuning: Towards effective usage
+of intermediate representations for parameter and memory efficient
+transfer learning,” in Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), pp.7725-7735, 2023.
+[23] T. Zhang, J. Bai, Z. Lu, et al, “Parameter-efficient and memory-efficient
+tuning for vision transformer: a disentangled approach,” in Proceedings
+of the European Conference on Computer Vision (ECCV), pp.346-363,
+2024.
+[24] X. Nie, B. Ni, J. Chang, et al, “Pro-tuning: Unified prompt tuning for
+vision tasks,” IEEE Transactions on Circuits and Systems for Video
+Technology, vol.34, no.6, pp.4653-4667, 2024.
+[25] M. Karimi, J. Henderson, S. Ruder, “ Compacter: Efficient low-rank
+hypercomplex adapter layers,” in Proceedings of the Conference on
+Neural Information Processing Systems (NeurIPS), vol.34, pp.1022-
+1035, 2021.
+[26] J. Steitz, S. Roth, “Adapters strike back,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp.23449-23459, 2024.
+[27] S. Chen, C. Ge, Z. Tong, et al, “Adaptformer: Adapting vision transform-
+ers for scalable visual recognition,” in Proceedings of the Conference
+on Neural Information Processing Systems (NeurIPS), vol.35, pp.16664-
+16678, 2022.
+[28] Y. Xin, J. Du, Q. Wang, et al, “Vmt-adapter: Parameter-efficient transfer
+learning for multi-task dense scene understanding,” in roceedings of
+the AAAI Conference on Artificial Intelligence, vol.38, no.14, pp.16085-
+16093, 2024.
+[29] Z. Jiang, C. Mao, Z. Huang, et al, “ Res-tuning: A flexible and efficient
+tuning paradigm via unbinding tuner from backbone,” in Proceedings of
+the Conference on Neural Information Processing Systems (NeurIPS),
+vol.36, pp.42689-42716, 2023.
+[30] J. Pan, Z. Lin, X. Zhu, et al, “ St-adapter: Parameter-efficient image-to-
+video transfer learning,” in Proceedings of the Conference on Neural
+Information Processing Systems (NeurIPS), vol.35, pp.26462-26477,
+2022.
+[31] T. Chen, L. Zhu, C. Deng, et al, “Sam-adapter: Adapting segment
+anything in underperformed scenes,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), pp.3367-3375,
+2023.
+[32] Y. Sung, J. Cho, M. Bansal, “LST: Ladder side-tuning for parameter and
+memory efficient transfer learning,” in Proceedings of the Conference
+on Neural Information Processing Systems (NeurIPS), vol.35, pp.12991-
+13005, 2022.
+[33] D. Yin, X. Han, B. Li, et al, “Parameter-efficient is not sufficient:
+Exploring parameter, memory, and time efficient adapter tuning for
+dense predictions,” in Proceedings of the ACM International Conference
+on Multimedia (ACM MM), pp.1398-1406, 2024.
+[34] N. Tang, M. Fu, J. Wu, “Minimal Interaction Seperated Tuning: A New
+paradigm for visual adaptation,” in Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition (CVPR), pp.25208-
+25217, 2025.
+[35] H. Diao, B. Wan, X. Jia, et al, “Sherl: Synthesizing high accuracy and
+efficient memory for resource-limited transfer learning,” in Proceedings
+of the European Conference on Computer Vision (ECCV), pp.75-95,
+2024.
+[36] H. Diao, B. Wan, X. Jia, et al, “Unipt: Universal parallel tuning for
+transfer learning with efficient parameter and memory,” in Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), pp.28729-28740, 2024.
+[37] H. He, J. Cai, J. Zhang, et al, “Sensitivity-aware visual parameter-
+efficient fine-tuning,” in Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV), pp.11825-11835, 2023.
+[38] T. Chen, J. Chen, B. Zhang, et al, “Sensitivity-aware efficient fine-
+tuning via compact dynamic-rank adaptation,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp.9655-9664, 2025.
+
+JOURNAL OF LATEX CLASS FILES, VOL. XX, NO. XX, DECEMBER 2025
+13
+[39] W. Dong, X. Zhang, B. Chen, et al, “Low-rank Rescaled Vision Trans-
+former Fine-Tuning: A residual design approach,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp.16101-16110, 2024.
+[40] H.H. Zhao, P.
+Wang, Y. Zhao, et al, “SCT: A simple baseline
+for parameter-efficient fine-tuning via salient channels,” International
+Journal of Computer Vision, vol.132, no.3, pp.731-749, 2024.
+[41] X. Zhou, D. Liang, W. Xu, et al, “Dynamic adapter meets prompt
+tuning: Parameter-efficient transfer learning for point cloud analysis,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp.14707-14717, 2024.
+[42] Y. Zhang, K. Zhou, Z. Liu, “Neural prompt search,” IEEE Transactions
+on Pattern Analysis and Machine Intelligence, vol.47, no.7, pp.5268-
+5280, 2025.
+[43] S. Hayou, N. Ghosh, B. Yu, “Lora+: Efficient low rank adaptation
+of large models,” in Proceedings of the International Conference on
+Machine Learning (ICML), pp.1-24, 2024.
+[44] L. Li, C. Lin, D. Li, et al, “Efficient fine-tuning of large models
+via nested low-rank adaptation,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), pp.22252-22262,
+2025.
+[45] Y. Yang, H. Luo, Y. Sun, et al, “Efficient adaptation of pre-trained
+vision transformer underpinned by approximately orthogonal fine-tuning
+strategy,” in Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), pp.4878-4887, 2025.
+[46] G. Luo, M. Huang, Y. Zhou, et al, “Towards efficient visual adaption
+via structural re-parameterization,” 2023, arXiv:2302.08106. [Online].
+Available: https://arxiv.org/abs/2302.08106
+[47] W. Cai, J. Jiang, F. Wang, et al, “A survey on mixture of experts in
+large language models,” IEEE Transactions on Knowledge and Data
+Engineering, vol.37, no.7, pp.3896-3915, 2025.
+[48] X. Wu, S. Huang, F. Wei, “Mixture of lora experts,” in Proceedings
+of the International Conference on Learning Representations (ICLR),
+2024.
+[49] C. Tian, Z. Shi, Z. Guo, et al, “Hydralora: An asymmetric lora
+architecture for efficient fine-tuning,” in Proceedings of the Conference
+on Neural Information Processing Systems (NeurIPS), vol.37, pp.9565-
+9584, 2024.
+[50] S. Dou, Z. Zhou, Y. Liu, et al, “LoRAMoE: Alleviating world knowl-
+edge forgetting in large language models via MoE-style plugin,” in
+Proceedings of the Annual Meeting of the Association for Computational
+Linguistics (ACL), pp.1932-1945, 2024.
+[51] Y. Mao, K. Huang, C. Guan, et al, “Dora: Enhancing parameter-
+efficient fine-tuning with dynamic rank distribution,” in Proceedings of
+the Annual Meeting of the Association for Computational Linguistics
+(ACL), pp.11662-11675, 2024.
+[52] Y. Zhang, J. Cai, Z. Wu, et al, “Mixture of experts as representation
+learner for deep multi-view clustering,” in Proceedings of the AAAI
+Conference on Artificial Intelligence, vol.39, no.21, pp.22704-22713,
+2025.
+[53] F. Xu, D. Chen, T. Jia, et al, “CBDMoE: Consistent-but-diverse mixture
+of experts for domain generalization,” IEEE Transactions on Multimedia,
+vol.26, pp.9814-9824, 2024.
+[54] X. Zhai, J. Puigcerver, A. Kolesnikov, et al, “A large-scale study of rep-
+resentation learning with the visual task adaptation benchmark,” 2019,
+arXiv:1910.04867. [Online]. Available: https://arxiv.org/abs/1910.04867
+[55] Y. Zha, J. Wang, T. Dai, et al, “Instance-aware dynamic prompt tuning
+for pre-trained point cloud models,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), pp.14161-14170,
+2023.
+[56] D. Liang, T. Feng, X. Zhou, et al, “Parameter-efficient fine-tuning
+in spectral domain for point cloud learning,” IEEE Transactions on
+Pattern Analysis and Machine Intelligence, vol.47, no.12, pp.10949-
+10966, 2025.
+[57] Z. Wu, S. Song, A. Khosla, et al, “3D shapenets: A deep representation
+for volumetric shapes,” in Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), pp.1912-1920, 2015.
+[58] M.A. Uy, Q.H. Pham, B. Hua, et al, “Revisiting point cloud classifica-
+tion: A new benchmark dataset and classification model on real-world
+data,” in Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pp.1588-1597, 2019.
+[59] L. Yi, V.G. Kim, D. Ceylan, et al, “A scalable active framework
+for region annotation in 3d shape collections,” ACM Transactions on
+Graphics, vol.35, no.6, pp.1-12, 2016.
+[60] X. Yu, L. Tang, Y. Rao, et al, “Point-bert: Pre-training 3D point
+cloud transformers with masked point modeling,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp.19313-19322, 2022.
+[61] Y. Pang, W. Wang, E. Tay, et al, “Masked autoencoders for point cloud
+self-supervised learning,” in Proceedings of the European Conference
+on Computer Vision (ECCV), pp.604-621, 2022.
+[62] Z. Qi, R. Dong, G. Fan, et al, “Contrast with reconstruct: Contrastive
+3D representation learning guided by generative pretraining,” in Pro-
+ceedings of the International Conference on Machine Learning (ICML),
+pp.28223-28243, 2023.
+[63] Y. Tang, R. Zhang, Z. Guo, et al, “Point-peft: Parameter-efficient
+fine-tuning for 3D pre-trained models,” in Proceedings of the AAAI
+Conference on Artificial Intelligence, vol.38, no.6, pp.5171-5179, 2024.
+[64] S. Wang, X. Liu, L. Kong, et al, “PointLoRA: Low-rank adaptation
+with token selection for point cloud learning,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp.6605-6615, 2025.

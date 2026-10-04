@@ -1,0 +1,853 @@
+Adaptive Dependency-aware Prompt Optimization Framework for
+Multi-Step LLM Pipeline
+Minjun Zhao
+Xinyu Zhang
+Shuai Zhang
+Deyang Li
+Ruifeng Shi
+Huawei Poisson Lab
+{zhaominjun1, zhangxinyu35, zhangshuai117, lideyang2, shiruifeng}@huawei.com
+Abstract
+Multi-step LLM pipelines invoke large lan-
+guage models multiple times in a structured se-
+quence and can effectively solve complex tasks,
+but their performance heavily depends on the
+prompts used at each step. Jointly optimizing
+these prompts is difficult due to missing step-
+level supervision and inter-step dependencies.
+Existing end-to-end prompt optimization meth-
+ods struggle under these conditions and often
+yield suboptimal or unstable updates. We pro-
+pose ADOPT, an Adaptive Dependency-aware
+Prompt Optimization framework for multi-step
+LLM pipelines.
+ADOPT explicitly models
+the dependency between each LLM step and
+the final task outcome, enabling precise text-
+gradient estimation analogous to computing
+analytical derivatives.
+It decouples textual
+gradient estimation from gradient updates, re-
+ducing multi-prompt optimization to flexible
+single-prompt optimization steps, and employs
+a Shapley-based mechanism to adaptively allo-
+cate optimization resources. Experiments on
+real-world datasets and diverse pipeline struc-
+tures show that ADOPT is effective and ro-
+bust, consistently outperforming state-of-the-
+art prompt optimization baselines.
+1
+Introduction
+Background and Motivation. Recent years have
+witnessed large language models (LLMs) achieving
+remarkable performance across a broad spectrum
+of tasks (Yang et al., 2024a; Bubeck et al., 2023).
+However, despite the continuous advancement of
+individual LLMs, they still exhibit notable limita-
+tions when solving complex, multi-faceted prob-
+lems. To address these limitations, recent research
+has explored multi-step LLM pipelines (Ma et al.,
+2025; Lin et al., 2025), where a task is decomposed
+into multiple steps and executed through programs
+composed of coordinated LLM calls. Such multi-
+step approaches extend the capability boundaries of
+Figure 1: An example of the optimization problem we
+explore for a multi-step pipeline.
+LLM systems and improve robustness and success
+rates when tackling intricate real-world tasks.
+Nevertheless, current multi-step LLM pipelines
+still face several challenges, particularly in opti-
+mizing multiple prompts. Since the prompts used
+at each step directly shape intermediate outputs
+and error propagation throughout the pipeline, ef-
+fective prompt optimization is crucial for improv-
+ing the end-to-end success rate of such systems.
+On the one hand, manual prompt optimization
+is highly heuristic, labor-intensive, and difficult
+to scale, practitioners often need to iteratively re-
+fine prompts across many steps, and modifying
+the prompt for one step may inadvertently disturb
+the behavior of others, leading to a "robbing Pe-
+ter to pay Paul" effect where local improvements
+do not necessarily yield better end-to-end perfor-
+mance. On the other hand, existing automated
+prompt optimization methods (Pryzant et al., 2023;
+Prasad et al., 2023; Guo et al., 2025; Fernando
+et al., 2023) are primarily designed for optimiz-
+1
+arXiv:2512.24933v1 [cs.CL] 31 Dec 2025
+
+ing prompts in single-step LLM calls. In multi-
+step LLM pipelines, only end-to-end supervision
+is available, and intermediate outputs are further
+processed before producing the final result, making
+it difficult to obtain labels for individual LLM calls
+within the pipeline.
+Limitations of Existing Studies. Recently, sev-
+eral data-driven, end-to-end multi-prompt opti-
+mization methods have been proposed to address
+the aforementioned challenges, such as Dspy-
+MIPRO (Opsahl-Ong et al., 2024), TextGrad (Yük-
+sekgönül et al., 2025), Trace (Cheng et al., 2024),
+and GEPA (Agrawal et al., 2025).
+These ap-
+proaches have demonstrated certain capabilities
+in enabling the automatic optimization of multi-
+step LLM pipelines. However, they also exhibit no-
+table limitations. First, some methods (Opsahl-Ong
+et al., 2024) fail to effectively utilize feedback from
+erroneous cases, resulting in unclear optimization
+directions and inefficient exploration of the prompt
+search space. Second, although methods using
+backpropagation textual gradients (Yüksekgönül
+et al., 2025; Cheng et al., 2024) can propagate feed-
+back signals across steps, they rely on LLMs to
+perform the backward reasoning, which introduces
+model-induced interpretations that often distort or
+attenuate the gradients. Not only that, these meth-
+ods struggle to determine whether an error stems
+from the current step or from upstream steps, lead-
+ing to unstable and unreliable optimization sugges-
+tions. Besides, these methods are difficult to apply
+to pipelines containing looping structures, which
+are commonly used in complex tasks. As a result,
+the improvements achieved by existing end-to-end
+multi-prompt optimization methods are limited.
+Our Solutions. Motivated by these limitations, we
+propose ADOPT, an Adaptive Dependency-aware
+prompt OPTimization framework for multi-step
+LLM pipelines. ADOPT consists of three com-
+ponents. (1) First, it analyzes execution traces to
+identify how each LLM step in the pipeline influ-
+ences the final outcome. Based on these depen-
+dencies, ADOPT examines erroneous cases from
+a global perspective and distributes the high-level
+improvement signals to individual steps, producing
+a step-level adjustment direction that plays a role
+similar to a partial derivative with respect to each
+prompt. This process is analogous to computing an
+analytic gradient based on the functional relation-
+ship between the parameters and the final output. It
+avoids relying on LLMs to reason backward about
+where an error originates, a process that often intro-
+duces interpretation bias or severely weakens the
+signal. The mechanism resembles a team receiv-
+ing general suggestions for improvement, where
+each member naturally identifies the part relevant
+to their own responsibilities. (2) Second, ADOPT
+separates the generation of these adjustment direc-
+tions from the optimization procedure. Each LLM
+step can independently apply an appropriate single-
+prompt optimizer, and the system then searches
+for an effective combination of these local updates
+at the pipeline level. This design makes ADOPT
+flexible and compatible with a broad range of op-
+timization strategies. (3) Third, ADOPT allocates
+optimization effort according to the estimated con-
+tribution of each step. Using a Shapley-based mea-
+sure, LLM steps that provide greater improvement
+receive more optimization resources in subsequent
+iterations. Through dependency-guided adjustment
+signals, flexible local optimization, and principled
+resource allocation, ADOPT offers a stable and ef-
+fective solution for optimizing multiple prompts in
+complex multi-step LLM pipelines.
+Contributions. Our main contributions are as fol-
+lows. (1) We introduce ADOPT, a dependency-
+aware prompt optimization framework that derives
+step-level adjustment directions in multi-step LLM
+pipelines without relying on LLM-based backward
+reasoning. (2) We decouple adjustment-direction
+estimation from prompt optimization, enabling flex-
+ible use of single-prompt optimizers and effective
+combination of local updates. (3) We design a
+Shapley-based strategy that allocates optimization
+resources according to each step’s contribution. (4)
+Experiments on real-world datasets and diverse
+pipeline structures show that ADOPT consistently
+improves end-to-end performance over existing
+methods.
+2
+Preliminaries
+2.1
+Multi-Step LLM Pipelines
+We formalize a multi-step LLM system as
+Φ = (C, M, Π),
+(1)
+where C denotes all executable code in the sys-
+tem other than the LLMs themselves. This in-
+cludes the control-flow logic, tool calls, data prepro-
+cessing and postprocessing routines, conditional
+branches, loops, retries, and any additional oper-
+ations that orchestrate the overall pipeline. The
+2
+
+Figure 2: Dependency-aware Textual Gradient Estimation.
+set M = {M1, . . . , Mm} collects the LLM param-
+eters of each LLM step used in the system, and
+Π = {p1, . . . , pm} denotes the natural language
+prompts associated with these LLM steps. Each
+LLM step is determined by a pair (Mi, pi).
+Given an input x, the system executes C, which
+in turn triggers LLM steps (Mi, pi) whenever their
+corresponding operations are reached. The execu-
+tion may follow arbitrary program logic, including
+sequential execution, branching, iterative refine-
+ment, or tool-augmented steps. After completing
+all operations specified by C, the system produces
+a final output, which we denote by Φ(x; C, M, Π).
+For notational simplicity, since C and M are
+fixed in our setting, we write Φ(x; Π) when only
+the prompts are treated as learnable parameters.
+This formulation remains general and can naturally
+extend to settings in which additional components
+of the system, C and M, are also subject to opti-
+mization.
+2.2
+Problem Formulation
+The multi-step LLM system Φ takes an input x and
+produces a final output Φ(x; Π), where the prompts
+Π = {p1, . . . , pm} serve as the learnable parame-
+ters and all other system components remain fixed.
+Intermediate results generated during execution are
+not supervised, and only the end-to-end output is
+available for evaluation.
+Given a training set Dtrain = {(xj, yj)} and a
+task metric T(·, ·) that evaluates the final output
+relative to the ground-truth label, the goal is to opti-
+mize the prompts so that the overall system perfor-
+mance is maximized on the training set. Formally,
+we define the optimization problem as
+P ∗= arg max
+P∈Sm
+X
+(x,y)∈Dtrain
+T
+ Φ(x; P), y
+
+,
+(2)
+where S denotes the space of natural language
+strings. This problem is challenging because the
+search space Sm is extremely large, supervision is
+available only at the end-to-end level, and the exe-
+cution of Φ is non-differentiable, making it difficult
+3
+
+to determine which LLM steps are responsible for
+errors and how they should be adjusted.
+3
+Methodology
+In this section, we present ADOPT, an adaptive
+dependency-aware prompt optimization framework
+for multi-step LLM pipelines. ADOPT aims to
+improve end-to-end performance by systematically
+determining how each LLM step should adjust its
+prompt based on the dependencies present in the
+pipeline’s execution.
+The framework operates in three stages. First,
+ADOPT analyzes execution traces to derive step-
+specific adjustment directions, which approximate
+analytical partial derivatives with respect to individ-
+ual prompts and do not rely on backward reasoning
+by LLMs. Second, it decouples the estimation
+of these adjustment directions from the optimiza-
+tion procedure, allowing each step to employ an
+appropriate single-prompt optimizer while the sys-
+tem searches for an effective combination of local
+updates at the pipeline level. Third, ADOPT allo-
+cates optimization effort dynamically using Shap-
+ley value–based attribution, focusing computation
+on the steps that contribute most to performance
+improvement.
+Together, these components enable stable, tar-
+geted, and scalable optimization of prompts in com-
+plex multi-step LLM pipelines. We use LLM-based
+optimizers to optimize multi-step LLM pipelines.
+To avoid ambiguity, we will hereafter refer to LLM-
+based optimizers simply as “optimizers.”
+3.1
+Dependency-aware Textual Gradient
+Estimation
+A central challenge in optimizing multi-step LLM
+pipelines is determining how end-to-end supervi-
+sion should be decomposed into step-level update
+directions. ADOPT first analyzes how each step in-
+fluences the final output and derives the final output
+dependency on every step. Based on the feedback
+produced by the optimizers, which describes the
+discrepancy in textual form, ADOPT then gener-
+ates a global optimization direction. Finally, using
+the inferred dependencies, ADOPT decomposes
+this global direction into step-level update direc-
+tions.
+During each training iteration, ADOPT runs the
+pipeline Φ(x; p1, . . . , pm), where pi is the prompt
+of step i, on a minibatch from the training set and
+partitions the resulting examples into good cases
+and bad cases according to the task metric M. We
+refer to the end-to-end inputs and outputs, together
+with the inputs and outputs of each LLM step dur-
+ing execution, as the trace of a case. ADOPT re-
+tains the traces of both good and bad cases for use
+in the subsequent optimization procedure.
+Analyzing Final Output Dependency on Step. To
+simulate the effect of computing analytical partial
+derivatives, ADOPT must first determine how each
+LLM step functionally influences the final pipeline
+output. ADOPT begins with a direct analysis stage,
+in which an optimizer E1 examines the workflow
+code together with the prompts of all steps to infer
+the overall task and the intended role of each step
+within the pipeline.
+Building on this structural understanding,
+ADOPT then performs a data-driven analysis us-
+ing the traces collected from good cases. For each
+LLM step, optimizer E2 is provided with the direct-
+analysis results, the step’s input–output pairs, and
+the corresponding end-to-end traces. The optimizer
+analyzes how variations in the step’s output affect
+the final result, yielding a final output dependency
+on that step. This dependency characterizes the
+step’s functional contribution to successful execu-
+tion and its influence on the end-to-end behavior.
+Computing Global Textual Gradient. For each
+bad case, ADOPT first uses optimizer E3 to iden-
+tify the metric-defined discrepancy L between the
+pipeline output and the ground truth. This dis-
+crepancy, referred to as textual loss or feedback
+in our setting, explicitly enumerates the errors re-
+sponsible for the score reduction and provides a
+fine-grained and interpretable description of the
+mismatch, serving as the natural-language coun-
+terpart of an error signal. In essence, the opti-
+mization objective is to minimize this textual loss
+L = M(F(x; p1, . . . , pm)), that is, to eliminate
+the discrepancy as much as possible.
+ADOPT then invokes optimizer E4 to transform
+this textual loss into a global textual gradient. E4
+performs a diagnostic analysis that explains why
+each discrepancy arises, producing a global descrip-
+tion of the failure mode of the final output. This
+yields a distilled correction direction expressed at
+the level of the final output itself. The resulting
+global textual gradient functions as an analogue of
+the derivative of L with respect to the textual loss,
+that is, gglobal = ∇text
+OutputL.
+Computing Local Textual Gradient. Given the
+global textual gradient and the final output depen-
+4
+
+dencies inferred for each step, ADOPT uses opti-
+mizer E5 to compute a local textual gradient for ev-
+ery node. For each step, E5 receives the global tex-
+tual gradient, the step’s final output dependency, the
+step-level input–output pair, and the final output,
+and then produces a step-specific natural-language
+optimization direction that constitutes the local tex-
+tual gradient. Formally, this direction serves as the
+textual analogue of an analytical partial derivative,
+glocal
+i
+= ∇text
+pi L.
+3.2
+Prompt Optimization for Pipeline
+After deriving step-level local textual gradients,
+the remaining challenge is to convert these textual
+optimization directions into executable prompt up-
+dates while achieving effective coordination across
+a multi-step LLM pipeline. Pipeline-level prompt
+optimization requires not only that each step in-
+dependently updates its prompt according to its
+local signal, but also that the resulting prompts
+interact coherently in an end-to-end manner. To
+address this, ADOPT adopts a prompt optimiza-
+tion strategy that combines step-level prompt op-
+timization guided by local textual gradients with
+pipeline-level prompt selection based on a search
+algorithm.
+Decoupled Step-level Prompt Optimization. For
+each bad case, ADOPT uses the local textual gradi-
+ent of step i to generate a revised step output that
+represents the desired behavior of this step under
+the given input. This revised output specifies how
+the step’s output should change in order to reduce
+the end-to-end loss and correct the final pipeline
+error. Formally, for step i with input xi, the revised
+output ˆyi is generated by optimizer E6 guided by
+the local textual gradient.
+Across multiple bad cases, ADOPT aggregates
+pairs of step-level inputs and their corresponding
+revised step outputs, forming a step-specific dataset
+Di = {(x(k)
+i
+, ˆy(k)
+i
+)}K
+k=1.
+(3)
+This dataset serves as supervision for updating the
+prompt pi of LLM step i using a single-prompt
+optimization procedure.
+Crucially, ADOPT decouples the generation of
+optimization directions from the choice of the
+prompt optimization algorithm. For each LLM
+step, any existing single-prompt optimizer can be
+applied to Di to update pi, without modifying the
+dependency analysis or textual gradient compu-
+tation stages. This design makes the framework
+modular and extensible, allowing different prompt
+optimizers to be incorporated as interchangeable
+components.
+In this work, we consider two representative opti-
+mizers. The first is an instruction optimizer that up-
+dates only the instruction component of the prompt.
+The second jointly optimizes the instruction and au-
+tomatically selects representative examples to be in-
+cluded as in-context learning demonstrations. Each
+round of step-level optimization produces multi-
+ple candidate prompts for each LLM step, which
+are subsequently evaluated and coordinated at the
+pipeline level.
+Global Prompt Selection. The step-level prompt
+optimization procedure produces multiple candi-
+date prompts for each LLM step, which gives rise
+to a pipeline-level selection problem. Let Pi =
+{p(1)
+i , . . . , p(ni)
+i
+} denote the candidate prompt set
+generated for step i. The objective is to select a
+prompt configuration (p1, . . . , pm) ∈P1 × · · · ×
+Pm that maximizes the end-to-end performance of
+the pipeline. Since the effect of a prompt at one step
+may depend on the prompts chosen at other steps,
+this problem cannot be decomposed into indepen-
+dent per-step decisions and instead constitutes a
+combinatorial optimization problem over the joint
+prompt space.
+ADOPT addresses this challenge by formulating
+pipeline-level prompt selection as a global search
+problem and solving it with search-based optimiza-
+tion methods. In this work, Bayesian Optimiza-
+tion is employed to efficiently explore the space of
+prompt configurations under a limited evaluation
+budget.
+3.3
+Shapley-based Resource Allocation
+Prompt updates in multi-step LLM pipelines typi-
+cally yield uneven returns across steps. After sev-
+eral optimization rounds, certain steps may become
+saturated and contribute little additional improve-
+ment, while other steps remain critical to the end-
+to-end metric. Treating all steps equally, therefore,
+wastes optimization budget. ADOPT addresses
+this issue by allocating step-level optimization re-
+sources according to each step’s estimated con-
+tribution to end-to-end performance, and adopts
+Shapley-style attribution as a principled measure
+of contribution.
+Before optimization begins, each step has the
+same optimization resources, i.e., how many can-
+didates can be generated during step-level opti-
+5
+
+mization. At the end of each round, the global
+prompt selector evaluates a set of prompt config-
+urations and records their end-to-end scores un-
+der the task metric M. For each step i, we con-
+sider two prompt states, a weak prompt pweak
+i
+rep-
+resenting the prompt used in the previous round,
+and a strong prompt pstrong
+i
+representing the best-
+performing prompt selected from the current can-
+didate set Pi. Among all evaluated configurations,
+ADOPT considers only those in which each step
+adopts either its weak or strong prompt. These
+configurations can thus be represented by a coali-
+tion S ⊆{1, . . . , m}, where i ∈S indicates that
+step i uses pstrong
+i
+and i /∈S uses pweak
+i
+. Let P(S)
+denote the corresponding prompt assignment, and
+define the value function
+v(S) = M
+ Φ(x; P(S))
+
+.
+(4)
+The Shapley value for step i measures its average
+marginal contribution across all coalitions,
+ϕi =
+X
+S⊆[m]\{i}
+w(S)
+ v(S ∪{i}) −v(S)
+
+,
+(5)
+where w(S) = |S|!(m−|S|−1)!
+m!
+. Computing {ϕi} ex-
+actly requires evaluating v(S) for an exponential
+number of coalitions, which is prohibitively expen-
+sive because each evaluation corresponds to run-
+ning the full pipeline. ADOPT therefore estimates
+step contributions using Kernel SHAP, which ap-
+proximates Shapley values from a limited number
+of observed coalitions. Concretely, ADOPT applies
+Kernel SHAP to the prompt configurations that
+have already been evaluated during the pipeline-
+level search. Each evaluated configuration pro-
+vides a binary indicator vector z ∈{0, 1}m for its
+coalition membership and an observed score v(z).
+Kernel SHAP then fits a weighted linear model
+over these samples and uses the fitted coefficients
+as efficient approximations of Shapley-style contri-
+butions.
+The resulting contribution estimates are used
+only for resource allocation in subsequent rounds.
+Steps with larger estimated contributions are as-
+signed larger candidate budgets, while steps with
+smaller contributions receive fewer candidates.
+This reallocation preserves the overall evaluation
+budget. The number of pipeline-level prompt con-
+figurations evaluated per round is kept fixed, and
+no additional pipeline executions are introduced
+for contribution estimation. In this way, ADOPT
+concentrates optimization effort on the steps that
+most strongly influence end-to-end performance
+while maintaining stable computational cost across
+rounds.
+4
+Experiments
+4.1
+Experimental Setup
+We compare ADOPT with four methods: Chain-
+of-Thought (CoT) (Wei et al., 2022), no COT,
+MIPRO (Opsahl-Ong et al., 2024), GEPA (Agrawal
+et al., 2025). For CoT, we add "let’s think step by
+step" to the prompt of each agent in the tested pro-
+grams.
+We implement two multi-step pipelines to thor-
+oughly evaluate the effectiveness of our proposed
+ADOPT and baselines.
+And we use two real-
+world datasets, i.e., HotPotQA (Yang et al., 2018),
+HoVer (Jiang et al., 2020), as benchmarks for dif-
+ferent multi-step pipelines separately.
+Throughout the experiments, every large lan-
+guage model used in the multi-step pipeline and the
+LLM-based optimizers is Qwen2.5-72B-Instruct.
+We used it with the temperature set to 0, top p to 1.
+4.2
+Main Results
+Table 1 reports the overall performance of ADOPT
+and baseline methods on two real-world multi-
+step benchmarks. ADOPT consistently achieves
+the strongest performance across all evaluated
+datasets, demonstrating its effectiveness for opti-
+mizing multi-step LLM pipelines under end-to-end
+supervision. Compared with prompting-based base-
+lines such as No-CoT and CoT, ADOPT yields sub-
+stantial performance gains, indicating that merely
+encouraging step-by-step reasoning is still insuffi-
+cient to address errors arising from complex interac-
+tions among multiple pipeline steps. ADOPT also
+outperforms existing multi-prompt optimization
+methods, including MIPRO and GEPA. MIPRO
+generates candidate prompts only from correctly
+solved examples and selects an optimal combi-
+nation among them, without iteratively refining
+prompts based on erroneous cases, while GEPA in-
+corporates bad cases but directly optimizes prompts
+using only final feedback, analogous to the textual
+loss in our framework, without explicitly reasoning
+about how individual steps should be adjusted. In
+contrast, ADOPT leverages textual loss to derive
+global textual gradient and uses dependencies to de-
+compose end-to-end supervision into step-specific
+optimization signals, i.e., local textual gradients,
+enabling more precise and coordinated step-level
+6
+
+Table 1: Overall performance of ADOPT and baselines on different real-world datasets.
+Dataset
+No-COT
+COT
+MIPRO
+GEPA
+ADOPT-Instruct
+ADOPT-Joint
+HotPotQA
+0.52
+0.58
+0.62
+0.63
+0.67
+0.68
+HoVer
+0.55
+0.58
+0.62
+0.63
+0.69
+0.71
+Figure 3: Convergence of ADOPT
+optimization across the pipeline, which leads to
+consistently better end-to-end performance. Taken
+together, the results indicate that ADOPT provides
+a more effective mechanism for improving end-to-
+end performance in multi-step LLM systems than
+existing methods.
+4.3
+Convergence Analysis
+To examine the convergence behavior of ADOPT,
+we track the end-to-end accuracy over succes-
+sive optimization iterations.
+As shown in Fig-
+ure 3, ADOPT demonstrates steady performance
+improvements from the initial iteration, with ac-
+curacy increasing rapidly in the early stages and
+continuing to improve over subsequent iterations.
+While minor fluctuations are observed in later it-
+erations, the overall trend remains stable and con-
+vergent, and the performance does not degrade as
+optimization proceeds. This behavior indicates that
+the step-level local textual gradients provide consis-
+tent and informative optimization signals, enabling
+iterative prompt updates to accumulate construc-
+tively at the pipeline level. The results suggest that
+ADOPT supports stable convergence in multi-step
+LLM pipelines despite the discrete and interdepen-
+dent nature of prompt optimization.
+Table 2: Comparison of different resource allocation
+methods.
+Allocation
+Average
+Random
+Shapley
+Iterations
+6.6
+6.7
+3.7
+4.4
+Ablation Studies
+Effect of Step-level Prompt Optimizers. ADOPT
+decouples dependency-aware textual gradient es-
+timation from the choice of the step-level prompt
+optimization algorithm, allowing different single-
+prompt optimizers to be applied without modifying
+the upstream analysis. To assess the effect of this
+design, we instantiate ADOPT with two represen-
+tative optimizers at the step level: an instruction-
+only optimizer that updates the natural-language
+instruction in each prompt, and a joint instruction-
+and-example optimizer that additionally selects rep-
+resentative in-context learning examples based on
+the same step-level supervision constructed from
+revised step outputs. Under identical local tex-
+tual gradients and step-level training data, both
+optimizers consistently improve end-to-end perfor-
+mance over the baselines, while the joint optimizer
+achieves further gains, indicating that enriching
+step prompts with selected examples can better
+capture step-specific behaviors when accurate local
+supervision is available. These results demonstrate
+that ADOPT’s performance is not tied to a particu-
+lar prompt optimizer and that its decoupled formu-
+lation enables the framework to benefit from more
+expressive optimization strategies as they become
+available.
+Effect of resource allocation module. Table 2
+evaluates the effect of different resource alloca-
+tion strategies by measuring the average number
+of optimization iterations required to reach a pre-
+defined target performance. Uniform allocation
+and random allocation exhibit nearly identical con-
+vergence behavior, indicating that naive redistribu-
+tion of optimization resources does not meaning-
+fully improve efficiency. In contrast, the Shapley-
+based resource allocation significantly reduces the
+7
+
+required number of iterations, converging in 3.7 it-
+erations on average compared to over 6.6 iterations
+for the other strategies. This result demonstrates
+that contribution-aware allocation effectively con-
+centrates optimization effort on the most impactful
+steps, substantially accelerating convergence with-
+out increasing the overall optimization budget.
+5
+Related Work
+Prompt Optimization for Single-Step Tasks
+Single-step prompt optimization typically refines a
+static prompt. APE (Zhou et al., 2022) uses Monte
+Carlo search with LLM-generated candidates; Evo-
+Prompt (Guo et al., 2025) evolves prompts via
+LLM-driven mutation and crossover. OPRO (Yang
+et al., 2023) iteratively proposes variants based on
+performance feedback. ProTeGi (Pryzant et al.,
+2023) applies LLM-generated critiques as textual
+gradients to guide beam search. AMPO (Yang
+et al., 2024b) explores multiple prompt trajectories
+in parallel to enhance robustness. While effective
+for static tasks, these methods do not exploit multi-
+step pipeline structures.
+Prompt Optimization in Multi-Step Pipelines
+Recent advances extend prompt optimization to
+multi-step settings. MIPRO (Opsahl-Ong et al.,
+2024) jointly optimizes module instructions and
+examples using a surrogate model and meta-
+optimization to assign inter-module credit. How-
+ever, it assumes a fixed task decomposition,
+limiting its ability to target true bottlenecks.
+TextGrad (Yuksekgonul et al., 2024) introduces
+gradient-like textual feedback propagated across
+components for global optimization, but relies on a
+static pipeline and cannot reassign responsibilities
+or handle loops. Trace (Cheng et al., 2024) lever-
+ages execution traces for structured feedback and
+explicit inter-module dependency modeling, yet
+also assumes a fixed, acyclic workflow, restricting
+its applicability to dynamic or iterative pipelines.
+6
+Conclusion
+We propose ADOPT, a dependency-aware prompt
+optimization framework for multi-step LLM
+pipelines that decomposes end-to-end supervision
+into coherent step-level optimization signals via
+textual gradients. By decoupling local prompt op-
+timization from pipeline-level prompt selection,
+ADOPT enables modular integration of existing
+prompt optimizers while maintaining effective
+global coordination. Experiments demonstrate that
+ADOPT improves end-to-end performance.
+References
+Lakshya A Agrawal, Shangyin Tan, Dilara Soylu,
+Noah Ziems, Rishi Khare, Krista Opsahl-Ong, Ar-
+nav Singhvi, Herumb Shandilya, Michael J Ryan,
+Meng Jiang, and 1 others. 2025.
+Gepa: Reflec-
+tive prompt evolution can outperform reinforcement
+learning. arXiv preprint arXiv:2507.19457.
+Sébastien Bubeck, Varun Chandrasekaran, Ronen El-
+dan, Johannes Gehrke, Eric Horvitz, Ece Kamar, Pe-
+ter Lee, Yin Tat Lee, Yuanzhi Li, Scott Lundberg,
+Harsha Nori, Hamid Palangi, Marco Tulio Ribeiro,
+and Yi Zhang. 2023. Sparks of artificial general in-
+telligence: Early experiments with gpt-4. Preprint,
+arXiv:2303.12712.
+Ching-An Cheng, Allen Nie, and Adith Swaminathan.
+2024. Trace is the next autodiff: Generative optimiza-
+tion with rich feedback, execution traces, and llms.
+In Advances in Neural Information Processing Sys-
+tems 38: Annual Conference on Neural Information
+Processing Systems 2024, NeurIPS 2024, Vancouver,
+BC, Canada, December 10 - 15, 2024.
+Chrisantha
+Fernando,
+Dylan
+Banarse,
+Henryk
+Michalewski, Simon Osindero, and Tim Rock-
+täschel. 2023.
+Promptbreeder:
+Self-referential
+self-improvement via prompt evolution. Preprint,
+arXiv:2309.16797.
+Qingyan Guo, Rui Wang, Junliang Guo, Bei Li, Kaitao
+Song, Xu Tan, Guoqing Liu, Jiang Bian, and Yu-
+jiu Yang. 2025. Evoprompt: Connecting llms with
+evolutionary algorithms yields powerful prompt opti-
+mizers. Preprint, arXiv:2309.08532.
+Yichen Jiang, Shikha Bordia, Zheng Zhong, Charles
+Dognin, Maneesh Singh, and Mohit Bansal. 2020.
+Hover: A dataset for many-hop fact extraction and
+claim verification. arXiv preprint arXiv:2011.03088.
+Xuanrui Lin, Chao Jia, Junhui Ji, Hui Han, and Us-
+man Naseem. 2025. Ask, acquire, understand: A
+multimodal agent-based framework for social abuse
+detection in memes. In Proceedings of the ACM on
+Web Conference 2025, WWW 2025, Sydney, NSW,
+Australia, 28 April 2025- 2 May 2025, pages 4734–
+4744. ACM.
+Jiatong Ma, Linmei Hu, Rang Li, and Wenbo Fu. 2025.
+Local: Logical and causal fact-checking with llm-
+based multi-agents. In Proceedings of the ACM on
+Web Conference 2025, WWW 2025, Sydney, NSW,
+Australia, 28 April 2025- 2 May 2025, pages 1614–
+1625. ACM.
+Krista Opsahl-Ong, Michael J. Ryan, Josh Purtell,
+David Broman, Christopher Potts, Matei Zaharia,
+and Omar Khattab. 2024. Optimizing instructions
+and demonstrations for multi-stage language model
+8
+
+programs. In Proceedings of the 2024 Conference on
+Empirical Methods in Natural Language Processing,
+EMNLP 2024, Miami, FL, USA, November 12-16,
+2024, pages 9340–9366. Association for Computa-
+tional Linguistics.
+Archiki Prasad, Peter Hase, Xiang Zhou, and Mohit
+Bansal. 2023. Grips: Gradient-free, edit-based in-
+struction search for prompting large language models.
+Preprint, arXiv:2203.07281.
+Reid Pryzant, Dan Iter, Jerry Li, Yin Tat Lee, Chen-
+guang Zhu, and Michael Zeng. 2023. Automatic
+prompt optimization with" gradient descent" and
+beam search. arXiv preprint arXiv:2305.03495.
+Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten
+Bosma, Brian Ichter, Fei Xia, Ed H. Chi, Quoc V. Le,
+and Denny Zhou. 2022. Chain-of-thought prompting
+elicits reasoning in large language models. In Ad-
+vances in Neural Information Processing Systems 35:
+Annual Conference on Neural Information Process-
+ing Systems 2022, NeurIPS 2022, New Orleans, LA,
+USA, November 28 - December 9, 2022.
+Chengrun Yang, Xuezhi Wang, Yifeng Lu, Hanxiao Liu,
+Quoc V Le, Denny Zhou, and Xinyun Chen. 2023.
+Large language models as optimizers. arXiv preprint
+arXiv:2309.03409.
+Jingfeng Yang, Hongye Jin, Ruixiang Tang, Xiao-
+tian Han, Qizhang Feng, Haoming Jiang, Shaochen
+Zhong, Bing Yin, and Xia Hu. 2024a. Harnessing the
+power of llms in practice: A survey on chatgpt and
+beyond. ACM Transactions on Knowledge Discovery
+from Data, 18(6):1–32.
+Sheng Yang, Yurong Wu, Yan Gao, Zineng Zhou,
+Bin Benjamin Zhu, Xiaodi Sun, Jian-Guang Lou,
+Zhiming Ding, Anbang Hu, Yuan Fang, Yunsong Li,
+Junyan Chen, and Linjun Yang. 2024b. Ampo: Auto-
+matic multi-branched prompt optimization. Preprint,
+arXiv:2410.08696.
+Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio,
+William Cohen, Ruslan Salakhutdinov, and Christo-
+pher D Manning. 2018. Hotpotqa: A dataset for
+diverse, explainable multi-hop question answering.
+In Proceedings of the 2018 conference on empiri-
+cal methods in natural language processing, pages
+2369–2380.
+Mert Yuksekgonul, Federico Bianchi, Joseph Boen,
+Sheng Liu, Zhi Huang, Carlos Guestrin, and James
+Zou. 2024. Textgrad: Automatic" differentiation" via
+text. arXiv preprint arXiv:2406.07496.
+Mert Yüksekgönül, Federico Bianchi, Joseph Boen,
+Sheng Liu, Pan Lu, Zhi Huang, Carlos Guestrin,
+and James Zou. 2025. Optimizing generative AI by
+backpropagating language model feedback. Nature,
+639(8055):609–616.
+Yongchao Zhou, Andrei Ioan Muresanu, Ziwen Han,
+Keiran Paster, Silviu Pitis, Harris Chan, and Jimmy
+Ba. 2022. Large language models are human-level
+prompt engineers.
+In The Eleventh International
+Conference on Learning Representations.
+9

@@ -1,0 +1,1791 @@
+One-Shot Camera-Based Extrusion Optimization for
+High Speed Fused Filament Fabrication
+Yufan Lina,d, Xavier Guidettia,b,∗, Yannick Nagelc, Efe C. Baltaa,b, John Lygerosa
+aAutomatic Control Laboratory, ETH Zurich, Physikstrasse 3, 8092, Zurich, Switzerland
+bInspire AG, Technoparkstrasse 1, 8005, Zurich, Switzerland
+cNematX AG, Vladimir-Prelog-Weg 5, 8093, Zurich, Switzerland
+dDepartment of Mechanical and Process Engineering, ETH Zurich, Leonhardstrasse 21, 8092, Zurich, Switzerland
+Abstract
+Off-the-shelf Fused Filament Fabrication 3D printers are widely accessible and convenient, yet they exhibit quality
+loss at high speeds due to dynamic mis-synchronization between printhead motion and material extrusion systems,
+notably corner over-extrusion. Existing methods require specialized hardware, extensive calibration, or firmware
+modifications that are inaccessible to most users. This work presents a practical, end-to-end optimization framework
+that enhances high-speed printing using only standard 3D printers and a phone camera, without requiring additional
+complex setup. The method employs a one-shot calibration approach where two simple printed patterns, captured
+by a phone camera, enable identification of extrusion dynamics and cornering behavior. Indentified systems en-
+able a model-based constrained optimal control strategy that generates optimized G-code, synchronizing motion and
+extrusion. Experiments show reduced width tracking error, mitigated corner defects, and lower surface roughness,
+achieving surface quality at 3600 mm/min comparable to conventional printing at 1600 mm/min, effectively doubling
+production speed while maintaining print quality. This accessible, hardware-minimal approach enables a wide range
+of FFF users to achieve high-quality, high-speed additive manufacturing.
+Keywords: Material Extrusion, Fused Filament Fabrication, Fused Deposition Modeling, Trajectory Optimization,
+Optimal Control, Vision-Based Measurement, System Identification, High-Speed Printing
+1. Introduction
+1.1. Background
+Material extrusion Additive Manufacturing (AM), also known as Fused Filament Fabrication (FFF), has become
+one of the most popular 3D printing techniques for thermoplastics. This layer-wise manufacturing process offers
+numerous advantages, such as design flexibility, rapid prototyping and easy accessibility of hardware and software.
+This has attracted a large number of users, both hobbyists and professionals, making FFF widely used in a very
+∗Corresponding author
+Email addresses: yuflin@student.ethz.ch (Yufan Lin), xaguidetti@control.ee.ethz.ch (Xavier Guidetti),
+yannick.nagel@nematx.com (Yannick Nagel), efe.balta@inspire.ch (Efe C. Balta), lygeros@control.ee.ethz.ch (John Lygeros)
+Preprint submitted to Additive Manufacturing
+January 1, 2026
+arXiv:2512.24905v1 [eess.SY] 31 Dec 2025
+
+broad range of applications. Despite its apparent simplicity, FFF is a complex nonlinear process composed of several
+interconnected sub-processes [1]. As shown in Fig. 1, the printing process consists of the heating and melting of the
+materials, the molten materials extrusion and deposition, and the traveling motion of the printhead. This complexity
+leads to challenges in parameters tuning and control design for the printing process. Currently, most desktop 3D
+printers utilize an open-loop control strategy, which produces acceptable results under ideal operation conditions.
+However, 3D printers have limited performance when the real machine behavior deviates from the expected one, for
+example when printing at very high speed. A number of process optimization methods [2, 3, 4, 5] have been developed
+in academia or industry, utilizing high-performance professional equipment and sensors. However, these hardware
+intensive methods are not accessible for most home users of 3D printing. Developing an easily applicable process
+optimization method based on simple hardware would enable a vast number of FFF users to improve the performance
+of their printer under demanding manufacturing conditions.
+: Extrusion velocity
+Print bed
+Filament supply
+Heated nozzle
+Molten filament
+: Extrusion amount
+: Motion distance
+Deposited filament
+: Motion velocity
+: layer height
+Figure 1: The process of 3D printing
+This work aims to control material extrusion and deposition through a practical approach for common printer
+users. During printing, material is extruded and deposited along the printhead’s commanded G-code path, shaping the
+bead cross-section and further impacting print quality [6, 7]. Numerical models [8, 9, 10, 11] have been developed
+and experimentally validated showing that the ratio of the material extrusion velocity to the nozzle motion velocity
+significantly influences the bead shape, determining the bead width when printing at a fixed layer height (i.e. the
+gap between nozzle and substrate). These studies reveal the steady-state effects of the velocity ratio, but transient
+dynamics—influenced by machine motion and extrusion systems behavior—also impact print quality and must be
+considered in control design.
+The motion and extrusion systems exhibit distinct transient responses characterized by different time constants [12,
+6]: the motion system responds rapidly, whereas the extrusion system responds slowly due to the extrusion dynamics
+of the viscous filament. This mismatch leads to poor synchronization in two systems, especially during high accelera-
+tion or deceleration, causing printing defects [13]. A common defect is over-extrusion in corners when printing at high
+2
+
+speeds, where the extrusion system fails to match abrupt velocity changes in the motion system. As Fig 2 shows, high
+speed corners, such as Fig 2b, suffer from over-extrusion compared to those in standard print speeds shown in Fig. 2a.
+These defects not only produce irregular blobs shapes on corners, but also disrupt the deposition of the subsequent
+layer, deteriorating overall print quality. The defects severity increases with printing speed, which limits high-speed
+printing performance of current 3D printers and leading to slower processing times to achieve desirable print quality.
+(a) Corner Printed at 900 mm/min
+(b) Corner Printed at 3600 mm/min
+Figure 2: Comparison of corner printing at different speed
+To coordinate the motion system and extrusion system, in the face of unknown nonlinear transient dynamics of the
+extrusion system, control strategies have been developed, ranging from trajectory optimization to online and feedfor-
+ward control. Trajectory optimization focus on ensuring smooth printhead motion with continuous velocity [14, 15],
+aiming to reduce mis-synchronization by rapid acceleration, and extrusion is regulated proportionally. However, this
+smoothing may compromise geometric accuracy and reduce printing speed. Additionally, the slow response of the
+extrusion system hinders precise proportional control, highlighting the need for further control and optimization based
+on system analysis.
+To advance the understanding and control of the extrusion process in additive manufacturing, researchers have
+increasingly employed in-situ measurement techniques using a variety of sensors, including cameras [16, 17, 18, 19,
+20, 21], laser sensors [22, 23], pressure sensors [24], and force/torque sensors [25, 26]. Among these, cameras are
+particularly attractive due to their accessibility and versatility, and have been extensively used for in-situ monitoring
+and feedback control to detect and correct bead shape defects [27, 28, 29, 30, 18, 19]. Beyond in-situ measurements
+feedback, layer-to-layer (L2L) control strategies have also been explored. For example, L2L spatial height control
+has been implemented using model predictive control [22, 31, 32] and iterative learning control (ILC) [33, 23, 34,
+35, 20, 36]. Similarly, by analyzing bead width and defects in the previous layer with cameras, L2L fuzzy process
+control [16] and ILC [17] have been used to optimize the flow rate for subsequent layers. While these online feedback
+approaches can improve print quality, their reliance on additional hardware increases cost and complexity, limiting
+their accessibility for typical users.
+To address the impracticality of online feedback acquisition, feedforward control methods based on parameter
+tuning or system identification have been developed. A widely adopted method in the 3D printing community is pres-
+3
+
+sure advance (or linear advance), which adjusts the extrusion command based on an experimentally determined gain
+to pre-compensate for the lag in the extrusion system [37, 38, 39]. While these techniques are easy to implement and
+effective in practice, they rely on time-consuming trial-and-error experimental tuning and lack a deep understanding
+of the coupled dynamics between extrusion and motion, leading to limited accuracy and generalizability [39].
+Model-based feedforward control, grounded in system identification,has been widely adopted for printing process
+control. Approximating the the extrusion system as a first-order model, model-inverse feedforward control has shown
+effectiveness in both simulations [40] and practical applications [41]. Iterative learning feedforward control [42]
+further improves width tracking by leveraging nonlinear extrusion models calibrated through multiple experiments
+with fixed camera setups. Additionally, phenomenological models [43] have been developed to enhance extrusion and
+retraction control. More recently, model-based optimal control strategies have emerged, utilizing either state-space
+models identified from experimental data [44] or physics-based formulations [36] to regulate line width. While these
+methods achieve state-of-the-art performance, they often rely on specialized hardware such as laser profilometers [41]
+or dedicated camera setups [42, 36, 44], require extensive calibration iterations, and operate at the firmware level
+rather than through standard G-code-based printing setups. These limitations underscore the need for a more practical,
+accessible, and end-to-end approach for system identification and G-code generation, tailored to the needs of everyday
+3D printing users.
+1.2. Contribution and Outline
+Building on the current development, this paper proposes a practical end-to-end extrusion optimization framework
+for high-speed FFF printing using only a phone camera for measurements and standard G-code for control implemen-
+tation. The proposed method enables users to identify the extrusion and corner dynamics and optimize the extrusion
+control sequence in G-code in a single experimental iteration, without requiring specialized hardware or complex
+calibration procedures. The contributions of this paper are:
+• A dynamic modeling and constrained-optimization framework that captures mis-synchronization the extrusion
+dynamics and cornering behavior, enabling motion–extrusion synchronization for high-speed FFF.
+• A practical one-shot identification and optimization pipeline that, from two simple calibration prints to identify
+parameters and automatically generates optimized G-code for most common 3D printers, facilitating high-speed
+printing optimization without specialized hardware or complex calibration.
+• A robust, hardware-minimal phone-camera measurement method for sub-millimetre bead-width estimation,
+supporting system identification focontrol and optimization without specialized sensors.
+The remainder of this paper is organized as follows. Section 1.1 introduces the relevant background. Section 2
+details the experimental setup, modeling of system and cornering, corresponding control and optimization strategies,
+4
+
+and system identification with the phone-camera-based measurement method. Section 3 showcases measurement val-
+idation, identification and control experimental results and full-part printing tests. Conclusions and future directions
+are discussed in Section 4.
+1.3. Printing dynamics formulation
+Currently, most 3D printers execute fabrication by following G-code, a machine-neutral file generated by slicer
+software from CAD models. G-code defines the printhead’s motion sequence, filament feed rate, and other printing
+parameters.
+Most slicers approximate the desired print path using linear segments. For each segment, the printhead moves a
+distance Dm from its current position to a target point, while simultaneously a filament of length De is extruded and
+deposited, as illustrated in Fig. 1. The extrusion ratio ξ for one linear move is defined as the ratio between the extruded
+length and the motion distance:
+ξ = De
+Dm
+.
+(1)
+The extrusion ratio ξ describes the amount of material deposited per unit motion length. Over a small time interval dt,
+ξ can be expressed in terms of commanded velocities as:
+ξ = dDe
+dDm
+= uedt
+umdt = ue
+um
+, .
+(2)
+where ue and um are the control command for the extrusion and the motion velocities, respectively. This shows that in
+a small time interval, ξ represents the commanded velocity ratio , which regulates the actual velocity ratio ζ = ve/vm.
+The value of ζ directly determines the deposited line width w at a fixed layer height [8, 9, 10]. Therefore, the extrusion
+ratio ξ serves as an effective control handle to regulate the line width by adjusting the actual velocity ratio ζ. In G-
+code, this control is achieved by setting De as ξDm to enforce a desired velocity ratio and thereby produce a target
+width.
+Conventional G-code implementations prescribe a constant extrusion ratio ξc, corresponding to a target constant
+velocity ratio ζc, to produce a uniform line width wc in printing. While effective during constant-speed motion with
+vc
+m and vc
+e = ζcvc
+m, this open-loop strategy neglects the dynamic behavior of the system during transient motion
+phases—such as acceleration or deceleration near corners. Due to the mismatched response characteristics of the
+motion and extrusion subsystems, the actual velocity ratio can significantly deviate from ζc, resulting in localized
+defects such as over- or under-extrusion.
+To characterize and compensate for dynamic extrusion effects, we define spatially varying profiles along the print
+trajectory, parameterized by the distance x from the start or from specific points (e.g., corners). These include the
+commanded extrusion ratio ξ(x), the actual velocity ratio ζ(x), the target width w∗(x), and the printed width w(x). By
+dynamically regulating ξ(x), extrusion can be better synchronized with motion, ensuring accurate velocity ratio and
+width control.
+5
+
+2. Material and methods
+2.1. Experimental setup
+Experiments were conducted on an Ender-3 V2 3D printer equipped with a 0.4 mm diameter nozzle. To enhance
+contrast for vision-based measurements, light ivory-colored PLA filament from Fillamentum [45] with a 1.75 mm
+diameter was used for printing on a dark printing bed. We used a phone equipped with a 108-megapixels Samsung
+S5KHMX camera to capture images of printed curves for line width measurement. We conducted all experiments at
+a fixed layer height of 0.2 mm, a bed temperature of 75 ◦C, and a nozzle temperature of 200 ◦C.
+This study, like the referenced works, assumes fixed process parameters such as material type, temperature, print-
+ing speed range, raster angle, infill density, and layer thickness for the specific part being produced.
+2.2. Process modeling
+To model the mis-synchronization in high-speed printing, this section first derives the extrusion dynamics model,
+and then analyzes cornering behavior and develop a corresponding model.
+2.2.1. Extrusion and deposition system modeling
+At a small printing layer height, the cross-section of a printed bead typically forms an elongated rectangular shape
+with rounded edges [8, 9]. Under this bead shape, increasing the velocity ratio ζ leads to a larger cross-sectional area.
+Given volume conservation and a fixed layer height, this area expansion results in a proportional increase in bead
+width [42] Thus, the line width is approximately proportional to the velocity ratio:
+w(x) = α · ζ(x) ,
+(3)
+where the width coefficient α captures the linear relationship between w and ζ.
+To model transient dynamics, the extrusion system is commonly described using a first-order system that captures
+the dynamics of velocity control ue and extrusion velocity ve and the dynamics of the fast motion system can be
+considered as sufficiently linear [12, 42]. The relationship between velocity ratio ζ and the G-code extrusion ratio ξ
+solely depends on the extrusion dynamics. The corresponding transfer function is expressed as:
+ζ(s)
+ξ(s) =
+1
+1 + τ(·)s ,
+(4)
+where s is the Laplace variable and τ(·) is the system time constant. Consequently, the dynamic model between line
+width w and the extrusion ratio ξ in this work is modeled as:
+w(s)
+ξ(s) =
+α
+1 + τ(·)s .
+(5)
+Due to materials extrusion nonlinearities, the time constant τ(·) is not fixed and varies with the extrusion state [40, 41].
+To simplify the model, we approximate this nonlinearity by defining two separate time constants: τexpand for increasing
+6
+
+ξ, and τshrink for decreasing ξ, over a defined range [ξlow, ξhigh]. These define the expansion and shrinkage models,
+respectively, to capture the asymmetry in the system’s transient response.
+The conventional setting of ξ(x) = ζc is based on the steady-state model in Eq. (3), where ζc satisfies wc∗= αζc
+to print desired constant wc∗. However, this static formulation neglects the dynamics behavior by Eq. (4), and thus a
+model-based approach is required to optimize ξ(x) accordingly.
+2.2.2. Corner modeling
+Standard G-code motion commands prescribe displacements but regulate speed transitions with constant extrusion
+settings, resulting in passive system responses neglecting different system dynamics and leading to motion-extrusion
+mis-synchronization. As printing approaches a corner, sharp deceleration of vm(x) near corners outpaces the slower
+response of ve(x), resulting in ζ(x) > ζc and causing over-extrusion, as illustrated in Fig.3a. This effect is amplified at
+higher speeds, where Fig.3b shows noticeable edge expansion in prints at 3600 mm/min compared to 900 mm/min.
+Acceleration
+Deceleration
+Over-extrusion
+Printing 
+direction
+(a) Over-extrusion induced by mis-synchronization
+0
+10
+20
+30
+40
+Motion distance x [mm]
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+Line width w [mm]
+Line start
+Line End
+F900
+F3600
+(b) Over-extrusion width measurement
+Figure 3: Corner over-extrusion caused by deceleration mismatch at high motion velocity (3600 mm/min)
+To characterize this transient behavior quantitatively, the dynamics of the velocity ratio ζ(x) are modeled assuming
+that the motion system undergoes uniform acceleration or deceleration, while the extrusion system, subject to material
+flow inertia, responds more slowly and is considered quasi-static.
+During deceleration preceding a corner, the motion velocity vm(x) decreases linearly from the constant velocity vc
+m
+to zero under a constant deceleration a, while the extrusion velocity ve(x) remains approximately constant at vc
+e = ζcvc
+m.
+The resulting velocity ratio and printed width along the path are:
+ζdec(x) = ve(x)
+vm(x) =
+ζcvc
+m
+q
+vcm
+2 −2ax
+,
+(6)
+wdec(x) = αζdec(x) =
+αζcvc
+m
+q
+vcm
+2 −2ax
+=
+vc
+m
+q
+vcm
+2 −2ax
+wc*.
+(7)
+where x denotes the spatial distance from the start of deceleration to the corner. Eq. (7) reveals that, as approaching
+a corner, vm(x) drops during deceleration, and the actual width wdec(x) increases with the factor
+vc
+m
+√
+vcm
+2−2ax relative to
+7
+
+the target width wc∗, leading to width expansion at corners and causing over-extrusion due to the slower extrusion
+response.
+Conversely, after a corner, vm(x) accelerates faster than ve(x), resulting in a temporary reduction of line width:
+wacc(x) = αζacc(x) = α ve(x)
+vm(x) = αζcvc
+m
+√
+2ax
+=
+vc
+m
+√
+2ax
+wc∗,
+(8)
+where x represents the spatial distance from the corner to the point where constant motion vc
+m speed is reestablished.
+Although this under-extrusion is less visually apparent—partly masked by the prior over-extrusion—it must be con-
+sidered in compensation design.
+The transient region around a corner spans a distance:
+dtr = vc
+m
+2
+2a ,
+(9)
+determined by vc
+m and a. This modeling framework reveals how motion-extrusion mis-synchronization causes local
+defects, motivating the development of compensation strategies.
+2.3. Process optimization
+Building upon the preceding analysis, this section introduces a transition process compensation and optimization
+strategy to mitigate extrusion defects arising from motion-extrusion mis-synchronization during high-speed printing.
+The approache encodes cornering behavior and system dynamics into the control implementation in G-code. Specif-
+ically, a compensated width reference w∗
+ξ(x) is designed based on the corner modeling, and a model-based optimal
+control is proposed to compute the optimal extrusion control sequence ξ∗for generating optimized G-code of high-
+speed printing.
+2.3.1. Corner transition compensation
+To mitigate the severe mis-synchronization at high-speed corner printing, a compensated width reference is first
+designed to compensate the dynamics of acceleration/deceleration after/before a corner in printing.
+To match the fast motion deceleration before a corner, a decreasing width reference is designed in this region to
+enforce the extrusion deceleration in advance. The width reference in this phase is scaled according to the inverse
+ratio in Eq. (7), yielding:
+w∗′
+dec(x) =
+q
+vcm
+2 −2ax
+vcm
+wc∗.
+(10)
+Similarly, in the acceleration region after the corner, an increasing ratio is applied to encode a in-advance rising in
+extrusion, aligning with the accelerating printhead motion:
+w∗′
+acc(x) =
+√
+2ax
+vcm
+wc∗,
+(11)
+8
+
+With these two compensated design around the corner, for a straight line of length ℓbounded by two corners, with a
+target constant width wc, the complete compensated width reference is constructed as:
+w∗
+ξ(x) =
+
+0,
+if 0 < x ≤wc∗
+2 ,
+Stage I
+√
+2ax
+vcm wc∗,
+if wc∗
+2 < x ≤dtr,
+Stage II
+wc∗,
+if dtr ≤x ≤ℓ−dtr,
+Stage III
+√
+(vcm)2−2a(x−(ℓ−dtr))
+vcm
+wc∗,
+if l −dtr < x ≤ℓ−wc∗
+2
+Stage IV
+0,
+if l −wc∗
+2 < x ≤ℓ
+Stage V .
+(12)
+The compensated width reference w∗
+ξ(x) consists of the following stages:
+(i) Initial trimming (Stage I): Sets the width to zero at the start to suppress over-extrusion at line junctions.
+(ii) Post-corner ramp-up (Stage II): Gradually increases the width after each corner to compensate for under-
+extrusion.
+(iii) Constant-width segment (Stage III): Maintains the target width for steady-state printing.
+(iv) Pre-corner ramp-down (Stage IV): Gradually decreases the width before each corner to reduce over-extrusion.
+(v) Final trimming (Stage V): Sets the width to zero at the end to suppress over-extrusion at line junctions.
+An example of the compensated width profile for a line with ℓ= 40 mm and wc∗= 0.5 mm is illustrated in Fig. 4.
+0
+5
+10
+15
+20
+25
+30
+35
+40
+Motion distance x [mm]
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+Line width w [mm]
+I
+II
+III
+IV
+V
+printing direction
+target constant width
+Optimized reference w∗
+ξ(x)
+I: Initial trimming
+II: Acceleration compensation
+III: Steady printing
+IV: Deceleration compensation
+V: Final trimming
+Figure 4: Compensating width reference for a single line
+Extending this formulation to trajectories composed of multiple connected segments, a global compensated width
+reference w∗
+ξ(x) can be constructed by applying Eq.(12) segment-wise and concatenating the results. This reference
+9
+
+serves as the target width reference in the model-based optimization framework detailed in the subsequent model-
+based optimization framework (Section2.3.2) to compute the optimal extrusion control ξ∗to generate G-code com-
+mands, improving corner transition fidelity and overall print quality at high speeds.
+2.3.2. Optimal constrained control for width tracking
+To track a target width reference, a optimal control framework is formulated based on the extrusion system dy-
+namics introduced in Section 1.3. The objective is to determine the extrusion ratio trajectory ξ that minimizes width
+tracking error while satisfying system constraints.
+To facilitate control design, the G-code path is discretized into segments of spatial length ∆s. After discretization,
+the originally continuous width profile w(x) is represented as a sequence of discrete values w = {w0, w1, . . . , wN},
+where wk denotes the width at the k-th segment along the path. The first-order extrusion dynamics described in Eq. (5)
+are then discretized:
+wk+1 = Awk + Bξk =
+ 
+1 −∆s
+τ
+!
+wk + α∆s
+τ ξk ,
+(13)
+where ξk denote the extrusion ratio at the k-th spatial step, respectively. The system parameters are the width coefficient
+α and the time constant τ, selected as τexpand or τshrink depending on the local width transition direction, or their average
+for mixed cases.
+Let w∗= {w∗
+0, w∗
+1, . . . , w∗
+N} be the discrete desired width sequence sampled from w∗(x) at the same spatial resolu-
+tion. The optimal control problem seeks to minimize the tracking error between the actual and target widths, subject
+to system dynamics and actuation constraints:
+min
+w1..N,ξ1..N−1
+N
+X
+k=1
+ wk −w∗
+k
+2
+subject to
+wk+1 = Awk + Bξk,
+for
+k = 0..N −1
+ξk ∈[ξlow, ξhigh]
+∀k ∈{1, 2, , . . . , N −1}
+w0 =
+
+wprev,
+if continuing from a previous segment,
+0,
+if this is the first segment.
+.
+(14)
+The extrusion ratio bounds [ξlow, ξhigh] enforce extrusion actuator constraints, and ensure the system operates within
+a regime where the approximated model remains valid. The initial condition w0 is defined by the final width of the
+preceding segment, denoted wprev, which ensures continuity across segments and enhances print quality.
+Solving this constrained optimization problem yields the optimal control sequence ξ∗= {ξ∗
+0, ξ∗
+1, . . . , ξ∗
+N}, where
+each ξ∗
+k specifies the extrusion ratio for the k-th path segment of length ∆s with extrusion amount ξ∗
+k∆s along the
+discretized G-code path. For the k-th segment, starting at Pk = (Xk, Yk, Zk) and ending at Pk+1 = (Xk+1, Yk+1, Zk+1)
+with |Pk+1 −Pk| = ∆s, the G-code command is generated as:
+G0 X{Xk+1} Y{Yk+1} Z{Zk+1} E{ξ∗
+k∆s}
+10
+
+Note: the generated G-code specifies relative extrusion increments per segment, ∆Ek = ξ∗
+k ∆s. To use absolute
+extrusion, replace E by its cumulative sum.
+By iteratively applying this process, an optimized G-code file with spatially varying extrusion feedrates is gener-
+ated, improving corner transitions and overall print quality during high-speed printing — without requiring complex
+hardware or firmware modifications and just need upload optimized G-code.
+2.4. End-to-end approach for G-code optimization
+To implement the proposed optimization, an end-to-end framework is developed that integrates system identifica-
+tion using only phone camera measurements to generate optimized G-code, as illustrated in Fig. 5.
+Generate extrusion identification pattern
+with desired setting: [
+] and  
+Print and photo shot the pattern with
+checkboard to identify 
+Generate corner identification pattern
+with  
+ and  
+Print and photo shot the pattern with
+checkboard to identify 
+Optimize convectional Gcode
+based on identified system model
+Optimized Gcode for high-speed printing
+Figure 5: Proposed methods application flowchart
+Users simply need to specify the target printing speed v∗
+m and the working extrusion ratio range [ξlow, ξhigh] includ-
+ing the nominal working point ξc∗for the desired width wc∗to start calibration and optimization:
+• Print a calibration pattern at the target speed v∗
+m to identify the width coefficient ˆα and dynamic time constants.
+• Using ˆα, print a second pattern at v∗
+m to estimate cornering dynamics, specifically ˆvc
+m and ˆa.
+• With the identified parameters, optimize the original G-code for synchronized high-speed printing by computing
+the optimal extrusion ratio sequence ξ∗.
+Phone cameras, as accessible vision sensors, are employed to capture images of printed calibration patterns, providing
+a practical and user-friendly alternative to specialized sensors [42, 43, 44] for system identification.
+This approach enables users with a wide range of conventional 3D printers, to calibrate their extrusion systems and
+generate optimized G-code in a single experimental iteration, without specialized equipment or complex procedures.
+The following sections first detail the design of calibration patterns and the parameter fitting procedure, and then
+introduce the phone-camera-based measurement method.
+11
+
+2.5. System identification for G-code optimization
+2.5.1. Extrusion system identification
+To optimize extrusion, a single calibration print is designed to estimate the time constants τexpand, τshrink, and the
+width coefficient α in Eq. (13), as illustrated in Fig.6. The calibration pattern consists of four lines designed to identify
+both steady-state and transient parameters. Measurement regions, indicated by the gray dotted lines in Fig. 6b, are
+carefully selected to be sufficiently distant from corners to minimize the influence of corner-induced effects.
+Area for 
+Checkboard
+①
+②
+③
+Line ①: Constant line with 
+Line ②: Expansion step line
+Line ③: Constant line with 
+ Line ④: Shrinkage step line
+④
+(a) G-code design
+①
+②
+③
+④
+60mm
+expansion
+shrink
+(b) Printed pattern
+Figure 6: Identification pattern for extrusion system
+Lines 1 and 3 are printed with constant extrusion ratios ξlow and ξhigh to estimate the width coefficient α. As shown
+in Fig. 7, repeated measurements of constant-width lines exhibit consistent and centralized distributions with noise.
+To estimate the constant width, the measurements are modeled as a Gaussian distribution:
+Wmes ∼N(Wµ, σ2
+mes) ,
+(15)
+where Wmes represents the measured width, Wµ the mean, and σmes the standard deviation of measurement noise. The
+Maximum Likelihood Estimator (MLE) is used to compute the estimated widths ˆWMLE,high and ˆWMLE,low. The width
+coefficient ˆα is then calculated as:
+ˆα = 1
+2
+
+ˆWMLE,high
+ξhigh
++
+ˆWMLE,low
+ξlow
+.
+(16)
+Lines 2 and 4 feature step changes in ξ(x) between ξlow and ξhigh to capture transient dynamics, with transition
+points marked in Fig. 6b. The time constants τexpand and τshrink are extracted by fitting the measured width response to
+a first-order model:
+w(x) = W−+ (W+ −W−) ·
+
+1 −e−x
+τ 
+,
+(17)
+where W−and W+ represent pre- and post-transition steady-state widths, derived as ˆαξlow and ˆαξhigh using the pre-
+viously identified ˆα. For the step-up transition (Line 2), (W−, W+) = ( ˆWMLE,low, ˆWMLE,high), and vice versa for the
+12
+
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+Line width w [mm]
+Measurement 1
+Measurement 2
+Estimated Width
+Figure 7: Measurements and estimation of a line of constant width lines.
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Line width w [mm]
+Measured
+Fitted
+Step reference
+(a) Curves of expansion model identification
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Line width w [mm]
+Measured
+Fitted
+Step reference
+(b) Curves of shrinkage model identification
+Figure 8: System identification of transient models
+step-down transition (Line 4). Fig. 8 shows the measured width profiles and fitted curves for both expansion and
+shrinkage transitions.
+2.5.2. High-speed corner printing identification
+To enable effective corner transition compensation, the parameters a and vc
+m are identified using a high-speed
+corner calibration pattern (Fig. 9) featuring four isolated corners. The pattern is printed with a constant extrusion ratio
+ξ(x) = ζc, where ζc is chosen to achieve the target width wc∗based on the relationship ˆαζc = wc∗.
+As shown in Fig. 10a, the width measurement of a line with corners at both ends reveals over-extrusion at the
+corners, while the middle segment achieves the target width wc∗. For parameter identification, the deceleration-induced
+over-extrusion at the end of the line is analyzed. Fig. 10b illustrates the fitting of Eq. (7) to the deceleration regions of
+four corners, yielding the identified parameters ˆvc
+m and ˆa. These fitted parameters, derived under the proposed corner
+modeling assumptions, may exhibit deviations from nominal printing settings.
+13
+
+Area for 
+Checkboard
+①
+②
+③
+④
+Printing direction
+Corners for identification: ① ② ③ ④
+(a) G-code design
+①
+②
+③
+④
+(b) Printed pattern
+Figure 9: Identification pattern for corner modeling
+0
+5
+10
+15
+20
+25
+30
+35
+40
+Motion distance x [mm]
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+Line width w [mm]
+printing direction
+End over-extrusion
+F3600
+(a) Corner measure example
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+Motion distance x after deceleration [mm]
+0.55
+0.60
+0.65
+0.70
+0.75
+Line width w [mm]
+Corner 1 data points
+Corner 2 data points
+Corner 3 data points
+Corner 4 data points
+Fitted curve
+(b) Corner parameters fitting
+Figure 10: Measure and fitting from corner identification pattern with at 3600 mm/min .The identified parameters are ˆa = 406 mm/s2 and ˆv0 =
+66 mm/s.
+The deceleration region is manually segmented at the point where the line width begins to increase. Measurements
+are adjusted to ensure consistent pre-deceleration widths across corners, mitigating the effects of uneven leveling or
+measurement noise.
+2.6. Phone-Camera-Based line width Measurement
+Phone cameras offer high accessibility and resolution, yet achieving precise sub-millimeter line width measure-
+ments remains challenging due to factors such as noise, blurring, perspective and lens distortions, and unknown pixel-
+to-metric scaling. To address these challenges, we propose a robust framework integrating advanced image processing
+and unsupervised clustering techniques, enabling accurate bead width measurements using phone cameras.
+Fig. 11 outlines the proposed measurement workflow. The process begins with perspective and lens distortion
+14
+
+Camera distortion correction
+Perspective correction 
+& noise filtering
+Line localization and cropping
+Yes
+No
+Blur?
+Line rotation via PCA
+& line bounding
+Width measurement in pixels
+& rescaling via pixel scale
+Image segmentation 
+via GMM algorithm 
+Printed pattern image
+Measured line width 
+Image segmentation 
+via K-means method
+Figure 11: Line width measurement flowchart
+correction, followed by denoising and region-of-interest extraction. Unsupervised clustering algorithms, K-means [46,
+47] or Gaussian Mixture Models (GMM) [48, 49], are applied for robust bead segmentation based on image quality.
+Principal Component Analysis (PCA) determines the bead orientation, enabling width measurement orthogonal to the
+print path. Finally, pixel measurements are converted to physical units using the calibrated pixel scale.
+The following sections detail the key steps: perspective correction and image segmentation.
+2.6.1. Perspective Correction and Resizing
+Perspective distortion from by non-ideal camera alignment, introduces spatially varying pixel-to-metric scaling,
+complicating accurate width measurements (Fig. 12a). To address this, we use a printed checkerboard calibration
+pattern on the printer bed for perspective correction and pixel scaling, enabling flexible camera positioning with
+accessible checkerboard-based calibration methods, instead of specialized camera setups [42, 44].
+As shown in Figure 12a, the distorted image Idistorted is rectified using the checkerboard pattern as a reference.
+Assuming the checkerboard lies flat on the printing surface with known geometric specifications, the homography
+matrix H is computed by solving the transformation:
+Pcorrected = H · Pdistorted,
+(18)
+where Pdistorted represents the detected corner points in the checkerboard in Idistorted, and Pcorrected denotes their corre-
+sponding ideal positions in the rectified image Icorrected, as shown in Figure 12c. H is estimated by minimizing the
+15
+
+(a) Printed lines and checkerboard pattern on the printer bed
+(b) Image after Perspective Correction and Resizing
+(c) Homograph projection based on the checkerboard pattern
+Figure 12: Perspective Correction and Resizing
+reprojection error between Pdistorted and Pcorrected, and Idistorted can then be corrected by homography transformation:
+Icorrected = H · Idistorted.
+(19)
+The corrected image Icorrected, as shown in Fig. 12b, is in a top-down perspective with uniform pixel-to-metric scaling.
+The pixel-to-metric scale is determined from the known physical dimensions and corresponding pixel distances of the
+checkerboard pattern.
+2.6.2. Printed Lines Segmentation
+As shown in Fig. 13, central lines appear sharp but are affected by background noise, while off-center lines suffer
+from radial blur due to the lens’s shallow depth of field. To address this, we employ unsupervised clustering methods
+to robustly mitigate noise and blur effects to improve segmentation accuracy for width measurements.
+The pixel value histograms in Fig. 14 reveal distinct clusters corresponding to different regions for both blurry
+and non-blurry lines, and these pixels can be culstered with unsupervised clustering methods by assign each pixel to
+a cluster based on its intensity. The relevant pixel groups for segmentation are categorized as follows:
+• Dark background, µdark, σdark: Pixels of the black background, with low pixel value.
+• Light line, µlight, σlight: Pixel of the white printed lines, with high pixel value.
+16
+
+Non-blurry
+curves with noise
+and no blur
+Blurry curves
+with noise and
+radial blur
+Figure 13: Details of photographied printed lines
+50
+100
+150
+200
+Pixel Value
+0
+1
+2
+3
+4
+5
+6
+7
+8
+Pixel Count
+1e3
+Dark Background
+Blur & Noise
+Light Line
+(a) Non-blurry line
+0
+50
+100
+150
+200
+Pixel Value
+0
+1
+2
+3
+4
+5
+6
+7
+8
+Pixel Count
+1e3
+Dark Background
+Blur & Noise
+Light Line
+(b) Blurry line
+Figure 14: Pixel value histograms
+• Noise or blur, µnoise, σnoise: Pixels with values between the previous two groups.
+Each cluster is characterized by a centroid µ and a variance σ, representing its pixel value distribution. We employ
+both K-means and GMM clustering for pixel classification into three groups.
+K-means clusters pixels by minimizing intra-cluster variance. Following K-means clustering, the segmentation
+threshold is defined as:
+ThresholdK-means = µnoise + n · σnoise ,
+(20)
+where n ∈[1, 2.5] is an adjustable parameter. Pixels with intensities above this threshold are classified as part of the
+line.
+GMM models pixel intensity distributions as a mixture of Gaussians, with parameters estimated using the Expectation-
+17
+
+Maximization algorithm. The cluster with the highest mean intensity is identified as the printed line.
+Based on validation results (Sec. 3.1), K-means is applied to non-blurry images, while GMM is used for blurry
+regions.
+3. Calculation and Resultss
+3.1. Phone-based measurements validation
+The proposed phone-camera-based measurement methods were validated by comparing their results against ground
+truth data obtained using a high-resolution KEYENCE LM-X Series microscope [50]. Measurements were conducted
+on 4 clear and 4 blurry lines to evaluate the accuracy and robustness of the proposed approach under varying image
+quality conditions.
+Figure 15 summarizes the validation results. For non-blurry images (Fig. 15a), both methods closely match the
+microscope ground truth. For blurry images (Fig. 15b), the GMM method remains robust and aligns well with the
+ground truth, whereas the K-means method systematically overestimates widths due to misclassification of blurred
+pixels.
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+Line width w [mm]
+K-means Method
+GMM based Method
+Microscope ground truth
+(a) Clear line measurements validation
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+Line width w [mm]
+K-means based method
+GMM based method
+Microscope ground truth
+(b) Blurry line measurements validation
+Figure 15: Examples of validation of phone-camera-based measurements
+RMSEs and MAPEs between the microscope ground truth and the proposed phone-camera methods are summa-
+rized in Table 1. For non-blurry images, the K-means method attains an RMSE of 0.044 mm and a MAPE of 7.4%, but
+its accuracy degrades on blurred regions. The GMM method is more robust to blur, producing an RMSE of 0.069 mm
+and a MAPE of 12.4% overall. Therefore, we apply K-means on sharp image areas and GMM on blurred areas to
+balance measurement accuracy and robustness.
+18
+
+Scene
+Metric
+K-means Method
+GMM Method
+Non-blurry
+RMSE [mm]
+0.044
+0.073
+MAPE [%]
+7.4
+11.9
+Blurry
+RMSE [mm]
+0.113
+0.069
+MAPE [%]
+22.4
+12.4
+Table 1: Performance comparison between K-means and GMM based methods for line measurement accuracy. Root Mean Square Error (RMSE)
+values are in millimeters (mm), and Mean Absolute Percentage Error (MAPE) values are percentages. Ground truth obtained by microscope.
+These results show the phone-camera measurement yields sufficiently accurate width estimates for reliable one-shot
+system identification and control optimization. The residual error versus the microscope is on the order of 1–2 camera
+pixels, negligible for the intended tasks.
+3.2. Extrusion system identification and optimal control
+This section presents the results of extrusion system identification using the proposed one-shot calibration method
+and evaluates the optimal control strategy for width tracking. The calibration pattern, designed for an extrusion
+ratio range of 0.03–0.05, validated the proposed identification and control’s effectiveness in improving extrusion
+synchronization and print quality.
+3.2.1. Extrusion Identification
+The calibration pattern was designed with ξhigh = 0.05 and ξlow = 0.03, as illustrated in Fig. 8. System identifi-
+cation was conducted at 900 mm/min and 3600 mm/min with repeated experiments were performed using the same
+one-shot calibration pattern. The identified steady-state width coefficient ˆα and transient time constants ˆτexpand and
+ˆτshrink are summarized in Table 2.
+Speed (mm/min)
+ˆα
+ˆτexpand
+ˆτshrink
+900
+16.98 ± 0.36
+37.81 ± 1.17
+8.80 ± 0.82
+3600
+16.67 ± 0.18
+37.04 ± 0.58
+9.98 ± 2.57
+Table 2: Mean and standard deviation of identified extrusion system parameters at two printing speeds. Each value is obtained from two repeated
+experiments using the proposed one-shot calibration pattern. The small variation confirms the robustness and repeatability of the identification
+method.
+Minor variations across repetitions are attributed to measurement noise and slight fluctuations in printing condi-
+tions, such as extrusion pressure or temperature. These deviations are relatively minimal, demonstrating the robustness
+and repeatability of the proposed identification method for subsequent optimal control.
+19
+
+The consistent values of ˆα, ˆτexpand, and ˆτshrink across speeds indicate that the extrusion system dynamics are
+largely invariant within the tested range, validating the applicability of low-speed calibration for high-speed G-code
+optimization.
+3.2.2. Optimal constrained control for desired line width tracking
+Using the identified extrusion system parameters, optimal constrained control is applied to generate the optimal
+extrusion ratio sequence ξ∗for width reference tracking. To track desired reference with width between 0.524 mm
+(ξlow = 0.03) and 0.854 mm (ξhigh = 0.05), the printing path is discretized with ∆s = 0.1 mm and the extrusion ratio is
+constrained within [−2, 2] to limit extruder jerk.
+Solving the optimization problem in Eq. (14), the optimal control sequence is shown in Fig. 16. It can be observed
+that, to compensate the relative slow response of the extruion system, the optimal control ξ∗reaches the upper / lower
+bound in advance of the expansion / shrinkage step change to track the desired width reference.
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+0.0
+0.5
+1.0
+1.5
+2.0
+Line width w [mm]
+Predicted line width
+Optimal control: ξopt · ˆα
+Step reference
+(a) Optimal control for width expansion step
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+−2.0
+−1.5
+−1.0
+−0.5
+0.0
+0.5
+1.0
+1.5
+2.0
+Line width w [mm]
+19
+20
+21
+0.5
+0.6
+0.7
+0.8
+0.9
+Predicted line width
+Optimal control: ξopt · ˆα
+Step reference
+(b) Optimal Control for width shrinkage step
+Figure 16: Optimal constrained control for desired width tracking. ξ∗is scaled by ˆα for clearer visualization, enabling comparison with the
+reference and predicted line widths.
+Fig. 17 shows the lines printed with the proposed control alongside with the baseline lines produced, where the
+extrusion control input directly corresponds to the desired line width step. The optimized lines exhibit faster and more
+precise transitions in both expansion and shrinkage steps.
+Table 3 summarizes the RMSEs between the desired width reference and the printed line widths, highlighting the
+improvements achieved with the proposed optimal control. The method effectively reduces the tracking RMSE for
+both expansion and shrinkage steps to below 0.06 mm, with a notable 69.95% improvement in the expansion step.
+RMSE of baseline [mm]
+RMSE of optimal control [mm]
+Improvement
+Expansion step
+0.166
+0.050
+69.95%
+Shrinkage step
+0.070
+0.059
+15.61%
+Table 3: RMSE of baseline and optimal control cases with respect to the desired width reference
+20
+
+Step Change:
+Step Change:
+Baseline printing:
+Optimized printing:
+(a) Printed lines during width expansion step
+Step Change:
+Step Change:
+Baseline printing:
+Optimized printing:
+(b) Printed lines during width shrinkage step
+Figure 17: Comparison of width steps obtained with the baseline approach and with optimal control. Step change red dash lines indicate the
+location of expansion/shrinkage step change in reference.
+3.3. Corner identification and compensation
+By printed a corner calbration pattern shown in Fig. 9 at 3600 mm/min, the cornering parameters are identified as
+shown in Fig. 10 with ˆa = 406 mm/s2 and ˆv0 = 66 mm/s. Using the identified parameters of extrusion and corner,
+high-speed cornering defects can be compensated with proposed methods as shown in Fig. 19.
+To address high-speed corner printing defects for the pattern in Fig. 19a, a compensating width reference w∗
+ξ(x)
+is designed, as shown in Fig. 19b. By applying the proposed optimal constrained control to track this reference, the
+resulting optimized extrusion input ξ∗is depicted in Fig. 19c.
+Figure 20 compares high-speed printed corners with and without optimization, while Figure 21 presents the cor-
+responding line width measurements. The images and measurements demonstrate that the proposed optimization
+effectively mitigates corner defects.
+Table 4 provides a quantitative analysis of the optimization. The maximum deviation between the measured and
+desired line widths, as well as the variance of the measurements, are reported to assess the quality and consistency
+of the deposited lines. The proposed method reduces the maximum width deviation by 45.92% and the variance by
+50.34%, highlighting its effectiveness in improving corner printing performance.
+3.4. Part printing
+To validate the proposed method, we applied the one-shot optimization framework to print square towers at feed
+rates of 1600 mm/min, 2400 mm/min, and 3600 mm/min. Baseline towers were sliced conventionally and printed at
+900 mm/min and corresponding high speeds for comparative analysis.
+21
+
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Line width w [mm]
+Optimal Ctrl
+Predictive
+Baseline
+Step Reference
+(a) Measurement of expansion step tracking
+0
+10
+20
+30
+40
+50
+60
+Motion distance x [mm]
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Line width w [mm]
+Optimal Ctrl
+Predictive
+Baseline
+Step Reference
+(b) Measurement of shrinkage step tracking
+Figure 18: Measurement of optimal constrained control for width tracking
+Baseline
+Optimized printing
+Improvement
+Max Error [mm]
+0.196
+0.106
+45.92%
+Variance [mm2]
+0.0017
+0.0008
+50.34%
+Table 4: Quantitative evaluation of corner optimization: comparison of maximum width error and variance between baseline and optimized printing.
+Figure 22 visualizes the baseline and optimized G-code commands for towers printed at 3600 mm/min. The
+baseline G-code, shown on the left, employs a constant extrusion ratio throughout the print. In contrast, the optimized
+G-code, depicted on the right, dynamically adjusts the extrusion ratio to synchronize the extrusion and motion systems,
+thereby enhancing print quality at high speeds.
+The printing results are presented in Fig. 23, comparing towers printed at different speeds and methods. The
+baseline and optimized results at 3600 mm/min and 2400 mm/min demonstrate the effectiveness of the proposed
+method. It can be observed that:
+• The tower printed at 900 mm/min using the baseline method (Fig. 23a and Fig. 23f) exhibits a smooth surface
+and no cornering defects, demonstrating that this speed is suitable for high-quality conventional printing.
+• At higher speeds of 3600 mm/min (Fig. 23b and Fig. 23g) and 2400 mm/min (Fig. 23d and Fig. 23i), the base-
+line method results in significant print quality deterioration , characterized by rough surfaces and pronounced
+corner defects.
+• The proposed optimization method significantly improves print quality at high speeds, yielding smoother sur-
+faces: 3600 mm/min in Fig. 23c and Fig. 23h, and 2400 mm/min in Fig. 23e and Fig. 23j, .
+• While the optimized towers at high speeds do not fully match the quality of the low-speed print, the proposed
+22
+
+70
+80
+90
+100 110
+X [mm]
+30
+40
+50
+60
+70
+80
+90
+Y [mm]
+1
+○
+2
+○
+3
+○
+4
+○
+5
+○
+6
+○
+7
+○
+(a) Cornering cornering pattern to be compensated
+0
+50
+100
+150
+200
+250
+Motion distance x [mm]
+0
+1
+2
+3
+4
+5
+Line width w [mm]
+×10−1
+1
+○
+2
+○
+3
+○
+4
+○
+5
+○
+6
+○
+7
+○
+Optimized reference w∗
+ξ (x)
+(b) Compensation width reference for the cornering calibration pattern
+0
+50
+100
+150
+200
+250
+Motion distance x [mm]
+−4
+−2
+0
+2
+4
+Line width w [mm]
+1
+○
+2
+○
+3
+○
+4
+○
+5
+○
+6
+○
+7
+○
+Optimized reference w∗
+ξ (x)
+Optimal control ξ · α
+(c) Optimized constrained control for w∗
+ξ(x) tracking, for the cornering calibration pattern
+Figure 19: Cornering calibration pattern after corner defects compensation reference and control
+method effectively balances high print quality with a fourfold reduction in printing time, further validating the
+effectiveness of the proposed optimization approach.
+A Micro-Epsilon ILD1220-10 laser distance sensor is employed to scan the tower surfaces and evaluate their
+roughness, following the validated protocol in [5, 23]. The side surfaces shown in Fig. 23 were scanned using a raster
+pattern with a 1 mm pass spacing. The scan data zscan(xi, yi) were used to reconstruct the surfaces and fit a plane
+ˆz(xi, yi) representing an ideally smooth surface.
+Fig. 24, Fig. 25, and Fig. 26 present the scan data, fitted surfaces, and deviations for towers printed at 900 mm/min,
+2400 mm/min, and 3600 mm/min, respectively. The reconstructions align with the images in Fig. 23. At 900 mm/min,
+Fig. 24 demonstrates a smooth surface typical of low-speed printing. In contrast, high-speed baseline printing results
+in rougher, uneven surfaces, as shown in Fig. 25a and Fig. 26a, with larger deviations in Fig. 25b and Fig. 26b. The
+23
+
+(a) Baseline Corner Printing
+(b) Optimized Corner Printing
+Figure 20: High-speed corner printing comparison
+0
+10
+20
+30
+40
+Motion distance x [mm]
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+Line width w [mm]
+Optimized Print
+Baseline
+Figure 21: Measurements of high-speed printed corners with and without optimization
+proposed one-shot optimization significantly improves surface quality, as evidenced by the smoother scan data in
+Fig. 25c and Fig. 26c, and reduced deviations in Fig. 25d and Fig. 26d.
+The deviations between the scanned data zscan(xi, yi) and the fitted plane ˆz(xi, yi) were analyzed to quantify surface
+roughness:
+Ra =
+v
+t
+1
+n · m
+n
+X
+i=1
+m
+X
+j=1
+(zscan(xi, yj) −ˆz(xi, yj))2.
+(21)
+The calculated roughness values and mean error for towers printed at different speeds and methods are summarized in
+Table 5.
+The one-shot optimization framework demonstrates significant improvements in surface quality for high-speed
+printing. The surface roughness is reduced at least by 37%, compared to the conventional approach. Notably, the
+optimized towers printed at 2400 mm/min and 3600 mm/min achieve surface quality comparable to that of unopti-
+mized towers printed at 1600 mm/min. Furthermore, applying the optimization to 1600 mm/min printing results in
+surface quality similar to that of unoptimized printing at 900 mm/min. These results highlight the effectiveness of
+the proposed optimization in bridging the quality gap between high-speed and low-speed printing, enabling faster
+production without compromising print quality.
+24
+
+Figure 22: Visualization of G-code design for towers at 3600 mm/min: Baseline vs. Optimized Extrusion Commands. The left side shows the
+baseline tower with constant extrusion, while the right illustrates the optimized tower with dynamic extrusion ratios (ξ). Colors represent extrusion
+ratios along the path, with some sections in the optimized tower exhibiting no extrusion or retraction.
+4. Conclusions and future work
+This paper has introduced a practical end-to-end method to optimize G-code to enhance the performance of con-
+ventional 3D printers operating at high speeds. A modeling approach for extrusion and corner printing dynamics has
+been proposed and utilized to optimize and synchronize the motion of the printhead with the filament extrusion sys-
+tem, ensuring enhanced printing performance. The proposed one-shot method only requires phone cameras to achieve
+the identification of extrusion and cornering dynamics without hardware modifications, and a optimized G-code can
+be generated to improve print quality at high speeds for a wide range of 3D printers.
+The proposed method leverages a single phone-camera photograph to achieve accurate one-shot system identi-
+fication, with an RMSE of 0.03 mm compared to ground truth. By integrating extrusion and cornering dynamics
+into an optimal constrained control framework, the method significantly enhances high-speed printing performance.
+It reduces line width tracking errors, mitigates high-speed corner defects, and enhances surface quality by reduc-
+ing roughness. These results highlight the practicality and effectiveness of the approach, requiring only two simple
+calibration patterns and minimal user effort.
+This work demonstrates the potential of low-cost and user-friendly solutions based on ubiquitous phone cameras
+to improve the 3D print quality for a wide range of 3D printers users. In future works, we plan to apply phone-camera-
+based measurements to the optimization of more printing cases and scenarios (e.g., leveling, retraction, etc), and to
+develop more robust image process methods. We envision to package these solution in a phone application that can
+benefit a wide audience of 3D printing users and enthusiasts.
+25
+
+Front Views
+(a) Baseline tower printed at 900 mm/min
+(b) Baseline tower printed at 3600 mm/min
+(c) Optimized tower printed at 3600 mm/min
+(d) Baseline tower printed at 2400 mm/min
+(e) Optimized tower printed at 2400 mm/min
+Perspective Views
+(f) Baseline tower printed at 900 mm/min
+(g) Baseline tower printed at 3600 mm/min
+(h) Optimized tower printed at 3600 mm/min
+(i) Baseline tower printed at 2400 mm/min
+(j) Optimized tower printed at 2400 mm/min
+Figure 23: Printed towers comparison
+26
+
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+5
+6
+7
+8
+Scan Data
+Fitted Plane
+6.0
+6.2
+6.4
+6.6
+6.8
+7.0
+7.2
+7.4
+Height [mm]
+(a) Scan data and fitted plane
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+Diﬀerence [mm]
+(b) Deviation from fitted plane
+Figure 24: Surface evaluation of the conventional tower printed at 900 mm/min
+Metrics
+Conventional method
+Proposed method
+Improvement
+900 mm/min
+Ra [µm]
+30
+–
+–
+Mean ± std [µm]
+30 ± 20
+1600 mm/min
+Ra [µm]
+60
+40
+37%
+Mean ± std [µm]
+50 ± 60
+30 ± 40
+40%
+2400 mm/min
+Ra [µm]
+140
+60
+51%
+Mean ± std [µm]
+80 ± 140
+40 ± 60
+55%
+3600 mm/min
+Ra [µm]
+130
+70
+43%
+Mean ± std [µm]
+90 ± 130
+50 ± 70
+48%
+Table 5: Comparison of surface by roughness (Ra) and mean ± standard deviation between conventional and proposed methods at different printing
+speeds. Values are reported in micrometers (µm) rounded to a resolution of 10µm.
+Funding
+This work was supported by the Swiss Innovation Agency (Innosuisse, grant №102.617) and by the Swiss National
+Science Foundation under NCCR Automation (grant №180545).
+Acknowledgments
+We acknowledge the support of NematX AG for conducting this work.
+References
+[1] I. 52900, Additive manufacturing—general principles—fundamentals and vocabulary (2021).
+27
+
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+5
+6
+7
+8
+Scan Data
+Fitted Plane
+6.0
+6.2
+6.4
+6.6
+6.8
+7.0
+7.2
+7.4
+Height [mm]
+(a) Scan data and fitted plane of the conventional tower
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+Diﬀerence [mm]
+(b) Deviation from fitted plane of the conventional tower
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+5
+6
+7
+8
+Scan Data
+Fitted Plane
+6.0
+6.2
+6.4
+6.6
+6.8
+7.0
+7.2
+7.4
+Height [mm]
+(c) Scan data and fitted plane of the optimized tower
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+Diﬀerence [mm]
+(d) Deviation from fitted plane of the optimized tower
+Figure 25: Surface evaluation of the conventional and optimized tower printed at 3600 mm/min
+28
+
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+5
+6
+7
+8
+Scan Data
+Fitted Plane
+6.0
+6.2
+6.4
+6.6
+6.8
+7.0
+7.2
+7.4
+Height [mm]
+(a) Scan data and fitted plane of the conventional tower
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+Diﬀerence [mm]
+(b) Deviation from fitted plane of the conventional tower
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+5
+6
+7
+8
+Scan Data
+Fitted Plane
+6.0
+6.2
+6.4
+6.6
+6.8
+7.0
+7.2
+7.4
+Height [mm]
+(c) Scan data and fitted plane of the optimized tower
+0
+3
+6
+9
+12
+15
+18
+0
+3
+6
+9
+12
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+−0.6
+−0.4
+−0.2
+0.0
+0.2
+0.4
+0.6
+Diﬀerence [mm]
+(d) Deviation from fitted plane of the optimized tower
+Figure 26: Surface evaluation of the conventional and optimized tower printed at 2400 mm/min
+29
+
+[2] P. Delfs, M. Tows, H.-J. Schmid, Optimized build orientation of additive manufactured parts for improved surface quality and build time,
+Additive Manufacturing 12 (2016) 314–320.
+[3] A. Dey, N. Yodo, A systematic survey of fdm process parameter optimization and their influence on part characteristics, Journal of Manufac-
+turing and Materials Processing 3 (3) (2019) 64.
+[4] A. Kantaros, D. Piromalis, Employing a low-cost desktop 3d printer: Challenges, and how to overcome them by tuning key process parame-
+ters, International Journal of Mechanics and Applications 10 (1) (2021) 11–19.
+[5] X. Guidetti, M. K¨uhne, Y. Nagel, E. C. Balta, A. Rupenyan, J. Lygeros, Data-driven process optimization of fused filament fabrication based
+on in situ measurements, IFAC-PapersOnLine 56 (2) (2023) 4713–4718.
+[6] B. N. Turner, R. Strong, S. A. Gold, A review of melt extrusion additive manufacturing processes: I. process design and modeling, Rapid
+prototyping journal 20 (3) (2014) 192–204.
+[7] B. N. Turner, S. A. Gold, A review of melt extrusion additive manufacturing processes: Ii. materials, dimensional accuracy, and surface
+roughness, Rapid Prototyping Journal 21 (3) (2015) 250–261.
+[8] R. Comminal, M. P. Serdeczny, D. B. Pedersen, J. Spangenberg, Numerical modeling of the strand deposition flow in extrusion-based additive
+manufacturing, Additive Manufacturing 20 (2018) 68–76.
+[9] M. P. Serdeczny, R. Comminal, D. B. Pedersen, J. Spangenberg, Experimental validation of a numerical model for the strand shape in material
+extrusion additive manufacturing, Additive Manufacturing 24 (2018) 145–153.
+[10] A. Gosset, D. Barreiro-Villaverde, J. C. Becerra Permuy, M. Lema, A. Ares-Pernas, M. J. Abad L´opez, Experimental and numerical in-
+vestigation of the extrusion and deposition process of a poly (lactic acid) strand with fused deposition modeling, Polymers 12 (12) (2020)
+2885.
+[11] E. C. Balta, A. Altınkaynak, Numerical and experimental analysis of bead cross-sectional geometry in fused filament fabrication, Rapid
+Prototyping Journal 28 (10) (2022) 1882–1894.
+[12] A. Bellini, S. u. Gu¨ c¸eri, M. Bertoldi, Liquefier dynamics in fused deposition, J. Manuf. Sci. Eng. 126 (2) (2004) 237–246.
+[13] K. L. Barton, D. J. Hoelzle, A. G. Alleyne, A. J. W. Johnson, Cross-coupled iterative learning control of systems with dissimilar dynamics:
+design and implementation, International Journal of Control 84 (7) (2011) 1223–1233.
+[14] D. S. Ertay, A. Yuen, Y. Altintas, Synchronized material deposition rate control with path velocity on fused filament fabrication machines,
+Additive Manufacturing 19 (2018) 205–213.
+[15] R. Comminal, M. P. Serdeczny, D. B. Pedersen, J. Spangenberg, Motion planning and numerical simulation of material deposition at corners
+in extrusion additive manufacturing, Additive Manufacturing 29 (2019) 100753.
+[16] Y. Cheng, M. A. Jafari, Vision-based online process control in manufacturing applications, IEEE Transactions on Automation Science and
+Engineering 5 (1) (2008) 140–153.
+[17] D. J. Hoelzle, A. G. Alleyne, A. J. W. Johnson, Iterative learning control for robotic deposition using machine vision, in: 2008 American
+Control Conference, IEEE, 2008, pp. 4541–4547.
+[18] E. S. Barjuei, E. Courteille, D. Rangeard, F. Marie, A. Perrot, Real-time vision-based control of industrial manipulators for layer-width setting
+in concrete 3d printing applications, Advances in Industrial and Manufacturing Engineering 5 (2022) 100094.
+[19] C. J. Rojas, C. Portilla, L. ¨Ozkan, Model-based feedback control of filament geometry in extrusion-based additive manufacturing, IFAC-
+PapersOnLine 58 (14) (2024) 403–408.
+[20] N. Farjam, T. Adeshara, D. Tilbury, K. Barton, A framework for modeling and control for extrusion-based additive manufacturing, IFAC-
+PapersOnLine 58 (28) (2024) 138–143.
+[21] A. I. Sadaf, H. Ahmed, Spatiotemporal deep learning using infrared thermography for real-time monitoring and process parameter adjustment
+in material extrusion, Journal of Intelligent Manufacturing (2025) 1–20.
+[22] L. Lu, J. Zheng, S. Mishra, A model-based layer-to-layer control algorithm for ink-jet 3d printing, in: Dynamic systems and control confer-
+ence, Vol. 46193, American Society of Mechanical Engineers, 2014, p. V002T35A001.
+[23] E. C. Balta, D. M. Tilbury, K. Barton, Layer-to-layer stability of linear layerwise spatially varying systems: Applications in fused deposition
+30
+
+modeling, IEEE Transactions on Control Systems Technology 29 (6) (2021) 2517–2532.
+[24] A. A. Adib, D. J. Hoelzle, Hybrid control of flowrate in microextrusion-based direct-write additive manufacturing, IEEE Control Systems
+Letters 6 (2021) 97–102.
+[25] X. Guidetti, N. Mingard, R. Cruz-Oliver, Y. Nagel, M. Rueppel, A. Rupenyan, E. C. Balta, J. Lygeros, Force controlled printing for material
+extrusion additive manufacturing, arXiv preprint arXiv:2403.16042 (2024).
+[26] X. Guidetti, A. Mukne, M. Rueppel, Y. Nagel, E. C. Balta, J. Lygeros, Data-driven extrusion force control tuning for 3d printing, arXiv
+preprint arXiv:2403.16470 (2024).
+[27] Z. Jin, Z. Zhang, G. X. Gu, Autonomous in-situ correction of fused deposition modeling printers using computer vision and deep learning,
+Manufacturing Letters 22 (2019) 11–15.
+[28] Y. Wang, J. Huang, Y. Wang, S. Feng, T. Peng, H. Yang, J. Zou, A cnn-based adaptive surface monitoring system for fused deposition
+modeling, IEEE/ASME Transactions On Mechatronics 25 (5) (2020) 2287–2296.
+[29] A. Petsiuk, J. M. Pearce, Towards smart monitored am: Open source in-situ layer-wise 3d printing image anomaly detection using histograms
+of oriented gradients and a physics-based rendering engine, Additive Manufacturing 52 (2022) 102690.
+[30] D. A. J. Brion, S. W. Pattinson, Generalisable 3d printing error detection and correction via multi-head neural networks, Nature Communica-
+tions 13 (1) (2022) 4657. doi:10.1038/s41467-022-31985-y.
+[31] Y. Guo, S. Mishra, A predictive control algorithm for layer-to-layer ink-jet 3d printing, in: 2016 American Control Conference (ACC), IEEE,
+2016, pp. 833–838.
+[32] U. Inyang-Udoh, Y. Guo, J. Peters, T. Oomen, S. Mishra, Layer-to-layer predictive control of inkjet 3-d printing, IEEE/ASME Transactions
+on Mechatronics 25 (4) (2020) 1783–1793.
+[33] D. Aksoy, E. C. Balta, D. M. Tilbury, K. Barton, A control-oriented model for bead cross-sectional geometry in fused deposition modeling,
+in: 2020 American Control Conference (ACC), IEEE, 2020, pp. 474–480.
+[34] Z. Afkhami, D. J. Hoelzle, K. Barton, Robust higher-order spatial iterative learning control for additive manufacturing systems, IEEE Trans-
+actions on Control Systems Technology 31 (4) (2023) 1692–1707.
+[35] E. C. Balta, D. M. Tilbury, K. Barton, Iterative learning spatial height control for layerwise processes, Automatica 167 (2024) 111756.
+[36] A. Bahrami, C. Watson, D. Tilbury, K. Barton, Optimal feed-forward and iterative learning control framework for enhanced precision in
+extrusion-based additive manufacturing, in: International Manufacturing Science and Engineering Conference, Vol. 89015, American Society
+of Mechanical Engineers, 2025, p. V001T01A012.
+[37] klipper pressure advance, $https://www.klipper3d.org/Pressure_Advance$ (2021).
+[38] Marlin linear advance, $https://marlinfw.org/docs/features/lin_advance$ (2020).
+[39] S. A. Tronvoll, S. Popp, C. W. Elverum, T. Welo, Investigating pressure advance algorithms for filament-based melt extrusion additive
+manufacturing: theory, practice and simulations, Rapid Prototyping Journal 25 (5) (2019) 830–839.
+[40] W. Han, M. A. Jafari, Coordination control of positioning and deposition in layered manufacturing, IEEE Transactions on Industrial Elec-
+tronics 54 (1) (2007) 651–659.
+[41] P. Chesser, B. Post, A. Roschli, C. Carnal, R. Lind, M. Borish, L. Love, Extrusion control for high quality printing on big area additive
+manufacturing (baam) systems, Additive Manufacturing 28 (2019) 445–455.
+[42] P. Wu, K. S. Ramani, C. E. Okwudire, Accurate linear and nonlinear model-based feedforward deposition control for material extrusion
+additive manufacturing, Additive Manufacturing 48 (2021) 102389.
+[43] P. Wu, C. Qian, C. E. Okwudire, Modeling and feedforward control of filament advancement and retraction in material extrusion additive
+manufacturing, Additive Manufacturing 78 (2023) 103850.
+[44] M. L. Fravolini, A. Rossi, M. Moretti, N. Senin, F. Ferrante, Data-driven reference shaping for optimal fused filament fabrication, Control
+Engineering Practice 164 (2025) 106511.
+[45] Fillamentum, High-quality 3d printing filaments, https://fillamentum.com.
+[46] S. P. Lloyd, Least squares quantization in PCM, IEEE Transactions on Information Theory 28 (2) (1982) 129–137. doi:10.1109/TIT.
+31
+
+1982.1056489.
+[47] T. Hastie, R. Tibshirani, J. Friedman, The Elements of Statistical Learning, 2nd Edition, Springer, New York, 2009.
+[48] A. P. Dempster, N. M. Laird, D. B. Rubin, Maximum likelihood from incomplete data via the EM algorithm, Journal of the Royal Statistical
+Society: Series B (Methodological) 39 (1) (1977) 1–22. doi:10.1111/j.2517-6161.1977.tb01600.x.
+[49] C. M. Bishop, Pattern Recognition and Machine Learning, Springer, New York, 2006.
+[50] KEYENCE Corporation, LM-X Series Digital Microscope, https://www.keyence.com/products/measure-sys/image-measure/
+im-x1000 (2025).
+32

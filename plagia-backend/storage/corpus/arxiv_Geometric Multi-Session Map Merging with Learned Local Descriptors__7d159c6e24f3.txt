@@ -1,0 +1,1260 @@
+Geometric Multi-Session Map Merging with Learned Local Descriptors
+Yanlong Ma1, Nakul S. Joshi1, Christa S. Robison2, Philip R. Osteen2, Brett T. Lopez1
+Abstract— Multi-session map merging is crucial for extended
+autonomous operations in large-scale environments. In this
+paper, we present GMLD, a learning-based local descriptor
+framework for large-scale multi-session point cloud map merg-
+ing that systematically aligns maps collected across different
+sessions with overlapping regions. The proposed framework
+employs a keypoint-aware encoder and a plane-based geometric
+transformer to extract discriminative features for loop closure
+detection and relative pose estimation. To further improve
+global consistency, we include inter-session scan matching cost
+factors in the factor-graph optimization stage. We evaluate
+our framework on the public datasets, as well as self-collected
+data from diverse environments. The results show accurate and
+robust map merging with low error, and the learned features
+deliver strong performance in both loop closure detection and
+relative pose estimation.
+I. INTRODUCTION
+In recent years, the field of localization and map construc-
+tion has received significant attention due to the rapid devel-
+opment of autonomous applications such as self-driving ve-
+hicles, infrastructure inspection, and exploration. An accurate
+and reliable map enables comprehensive environmental un-
+derstanding, forming the foundation for autonomous systems
+to plan and navigate effectively in unknown environments.
+Consequently, LiDAR-based Simultaneous Localization and
+Mapping (SLAM) algorithms, such as [1]–[3], have achieved
+state-of-the-art performance in this field. With consistent
+and reliable localization now in reach, the natural next step
+is to address the challenges of multi-session and/or multi-
+agent mapping missions aimed at building large coherent
+representations of complex environments with emphasis on
+robustness and real-time performance.
+To this end, multiple works have proposed methods for
+multi-session and multi-agent map merging [4]–[6]. In such
+methods, maps from multiple agents in their respective local
+frames are combined into one global consistent frame by
+identifying similar environmental information in overlapping
+regions, i.e., inter-session loop closures. This is especially
+challenging for large-scale mapping missions because it
+becomes more challenging to extract highly distinctive ge-
+ometric features to accurately identify overlapping regions
+and estimate relative transformations across multiple maps.
+While recent approaches [7]–[9] have demonstrated superior
+*This research was sponsored by the DEVCOM Army Research Labora-
+tory (ARL) under SARA CRA W911NF-24-2-0017. Distribution Statement
+A: Approved for public release; distribution is unlimited.
+1 University of California, Los Angeles, Los Angeles, CA, USA.
+{yanlong, nakuljoshi, btlopez}@ucla.edu
+2
+DEVCOM
+Army
+Research
+Laboratory
+(ARL),
+Adelphi,
+MD,
+USA.
+{christa.s.robison,
+philip.r.osteen}.civ@army.mil
+Fig. 1: GMLD provides a robust and precise map merging framework
+by detecting and registering point clouds in overlapping regions through
+the utilization of learned discriminative descriptors and scan matching cost
+factors. The example shown illustrates the accurate integration of the quad
+and parkland with an additional corridor map from the Newer College.
+precision and robustness compared to traditional methods
+[10], [11], geometric feature extraction remains an open
+challenge due to the data sparsity (especially with LiDAR
+scans), variations in sensor viewpoints, high computational
+demands for processing dense scans, the absence of a known
+global reference frame, and the presence of false positives
+from geometrically similar features.
+To address this challenge, we present 3D Geometric Multi-
+Session Map Merging with Learned Local Descriptors, a
+robust and precise map merging framework that generates
+globally-consistent maps across multiple mapping sessions
+or with multiple mapping agents in the same session. Specif-
+ically, we develop a point-based learning model capable of
+detecting inter-session loop closures and registering point
+clouds across sessions. Leveraging a robust outlier-rejection
+pipeline and a scan matching cost-aware factor-graph for-
+mulation, the proposed framework enables the online con-
+struction of large-scale maps by combining any number of
+mapping sessions. The main contributions of this work are:
+• A keypoint-aware, learning-based model that encodes
+the local geometry information from dense point clouds
+across varying viewpoints.
+• A
+plane-based
+geometric
+transformer
+encoder
+to
+strengthen the internal geometric relationships between
+keypoints, improving the accuracy of the merged map.
+• A factor graph formulation that supplements relative
+pose factors with inter-session scan matching cost min-
+imization, enabling geometric consistency in merged
+arXiv:2512.24384v1 [cs.RO] 30 Dec 2025
+
+maps via implicit and explicit loop closure handling.
+• A full pipeline that successfully performs 3D large-
+scale map merging tasks with point clouds collected by
+LiDAR in various environments.
+We demonstrate the precision and robustness of MER-
+RLIN by conducting a comprehensive evaluation of the
+proposed framework, both qualitatively and quantitatively,
+on the public SemanticKITTI and Newer College datasets,
+as well as on datasets collected at UCLA and ARL using
+different types of LiDAR sensors.
+II. RELATED WORKS
+A. Map Merging
+Map merging refers to the process of combining maps gen-
+erated independently over multiple sessions or by multiple
+agents with no known global reference frame. Unlike single-
+agent map construction, which primarily minimizes matching
+cost error between consecutive point clouds, multi-session
+map merging aims to identify transformations between over-
+lapping regions in different sessions and use them to align
+maps under a global reference frame.
+Constructing a globally consistent and geometrically ac-
+curate map remains a significant challenge in large-scale
+environments, despite recent advances [12]–[14]. Early stud-
+ies of map merging predominantly used 2D occupancy grid
+maps [15], and computer vision techniques, such as the
+Scale-Invariant Feature Transform (SIFT), were employed
+to identify feature matches between sessions [16]. However,
+because occupancy grids provide only a coarse representation
+of the environment, the applicability of this method is
+inherently limited. Recently, 3D map merging has attracted
+increasing attention, with many efforts focused on LiDAR-
+based maps directly. SegMap [17] applies a 3D convolutional
+neural network to extract features from point clouds, utilizing
+semantic segmentation, which is often unreliable in large-
+scale environments. LAMP [4] presents a multi-robot SLAM
+system that relies on ICP-based point cloud registration but
+lacks outlier rejection mechanisms, making merged maps
+error-prone. Kimera-multi [5] introduces a robust distributed
+multi-robot system with a consistent metric-semantic 3-D
+mesh model, leveraging depth images to extract ORB [18]
+features in order to carry out mesh merging.
+B. Place Recognition and Registration
+In most 3D map-merging approaches discussed above,
+feature extraction serves as the foundation for key com-
+ponents such as loop closure detection and point cloud
+registration between different agents. Typically, this involves
+the generation of a descriptor, which is a compact represen-
+tation of a point cloud or a local region within it. Some
+works handcraft these descriptors by utilizing analytical
+geometry, surface normals, curvature, or point distributions
+[11]. Other heuristic approaches, such as Scan Context [7],
+construct a 2D matrix descriptor by partitioning the point
+cloud along azimuthal and radial directions, where each
+grid cell encodes height information of the contained points.
+BTC [19] proposes a combination of descriptors, including
+a binary descriptor encoding point occupancy along the z-
+axis and a triangle-based descriptor that represents geometric
+relationships among local point pairs.
+Recently, learning-based approaches have dominated the
+study of feature extraction in the fields of both place
+recognition and registration. PointNetVLAD [20] is an early
+work in point-based LiDAR place recognition, combining
+PointNet for local feature extraction with NetVLAD for
+global descriptor aggregation. MinkLoc3D [9] applies a 3D
+Feature Pyramid Network to extract local features, while
+LoGG3D-Net [21] introduces a local consistency loss to
+enhance the local feature extraction. LCDNet [22] designs
+a shared 3D voxel CNN feature extractor, which is applied
+in both place recognition and registration. Projection-based
+methods, like OverlapNet [8] and OverlapTransformer [23],
+project the point clouds into 2D space directly, and use 2D
+vision techniques for feature extraction.
+C. Pose Graph Optimization
+Pose graph optimization is widely used to handle loop
+closures in both single- and multi-session SLAM. In this
+framework, discrete poses within a session are constrained
+by relative pose measurements obtained from odometry
+and loop closure detections, typically modeled as Gaussian
+distributions. By solving for the set of poses that maximize
+posterior probability, trajectory estimates from one or mul-
+tiple sessions can be refined to achieve global consistency
+within a unified coordinate frame. Existing approaches for
+map merging represent inter-session loop closures as relative
+pose constraints between keyframes from different sessions.
+For example, [4] and [13] use relative pose constraints
+to connect subgraphs from multiple sessions, enabling the
+construction of a consistent global map. However, relative
+pose constraints, which are typically obtained by minimizing
+a scan-matching cost function, are poorly represented by
+the unimodal Gaussian distributions that model them in
+factor graphs. To address this limitation, global matching
+cost minimization, which employs factors to minimize scan-
+matching cost between overlapping LiDAR scans, has been
+explored as a way to ensure that the pose graph optimization
+promotes a geometrically consistent well-aligned map [24].
+III. METHODS
+In this section, we detail our proposed framework for
+merging LiDAR maps from multiple mapping sessions or
+from other mapping agents. The framework consists of three
+components: i) a keypoint-aware downsampling strategy, ii)
+a plane-based geometric self-attention module that enhances
+the descriptiveness of local feature extraction, and iii) a scan
+matching cost aware inter-session pose-graph optimization
+that produces a globally consistent merged map. We first
+present an overview of the complete pipeline, followed by
+detailed descriptions of each module.
+A. System Overview
+An overview of the proposed pipeline is shown in Fig. 2.
+The inputs into the proposed pipeline are keyframes—a sub-
+set of every acquired point cloud—from the current mapping
+
+Fig. 2: The proposed map merging framework consists of three modules: (i) Keypoints and Descriptors Generation extracts keypooints and local descriptors
+from dense point clouds; (ii) Loop Closure Detection and Registration identifies potential loop closures by computing the average of the smallest n pairwise
+distances between local descriptors and estimates the relative transformation by aligning the corresponding keypoints; and (iii) Map Merging constructs
+the pose and scan matching cost factor graph using candidates that satisfy the inlier ratio, relative error, and pairwise consistency maximization checks.
+session, along with the associated pose graph that encodes
+relative constraints between keyframe poses. In addition, the
+serialized pose graphs from auxiliary mapping sessions are
+also used as inputs for inter-session map merging.
+In
+the
+keypoint
+and
+descriptor
+generation
+module,
+keyframes extracted by a keyframe-based SLAM algorithm
+(e.g., DLIO [3], [25]) in each session are voxelized to reduce
+computational complexity. The preprocessed point clouds
+are then passed to a keypoint-aware learning module to
+extract the keypoints and corresponding features at multiple
+resolutions. The self-attention module receives the downsam-
+pled keypoints with local features and applies a plane-based
+geometric embedding self-attention mechanism to exploit the
+spatial relations between keypoints.
+In the loop closure detection and registration module,
+potential loop closures between keyframes from the current
+and auxiliary sessions are identified by thresholding the
+average of the smallest local-descriptor distances. The initial
+relative transformation between the two candidate keyframes
+is then estimated by minimizing the distance between key-
+points associated with descriptor correspondences and further
+refined using GICP [26].
+In the map merging module, false loop-closure candidates
+are subsequently rejected by verifying that both the inlier
+ratios and the relative pose errors—quantified by the Maha-
+lanobis distance produced by GICP—remain within accept-
+able thresholds. Outliers are further removed by enforcing
+pairwise consistency and selecting the maximum clique of
+consistent inter-session loop closures [27]. Finally, the vali-
+dated inter-session loop closures are inserted as relative pose
+factors between the factor graphs of the current and auxiliary
+sessions, while additional scan matching cost factors are
+placed between inter-session keyframe pairs in overlapping
+regions. Optimizing the resulting pose graph produces a
+geometrically consistent and globally aligned merged map.
+B. Keypoint-Aware Local Descriptor Generation
+The objective of generating local descriptors is to obtain a
+compact and discriminative representation of a local region
+in a point cloud. A locally consistent keypoint representation
+not only reduces variability in the neighborhood used for
+local descriptor generation but also decreases the Euclidean
+error during keypoint correspondence estimation, thereby im-
+proving the accuracy of the relative transformation estimation
+between keyframes. Therefore, we propose a KPConv-based,
+keypoint-aware local descriptor generation framework [28]
+that incorporates a keypoint detection module to produce
+consistent keypoints and local descriptors. The network
+structure is illustrated in Fig. 3. We utilize the backbone
+to extract multi-level features for the corresponding points
+hierarchically. Point clouds received from LiDAR are usually
+very dense and contain redundant point-wise correspon-
+dences. To carry out real-time pairwise distances computing,
+point clouds must be downsampled into a sparse subset of
+points. However, the voxel-grid-downsampling strategy used
+in KPConv introduces inconsistency in the downsampled
+point cloud; even a small rotation of the input point cloud
+can alter the distribution of downsampled points and distort
+the geometry. To combat this, we introduce a geometry-
+dependent downsampling strategy.
+Sparse Point Downsampling and Feature Extraction.
+Given a point cloud P = {p1, . . . , pN | pi ∈R3}, we apply
+the KPConv-FPN backbone with fixed voxel-grid downsam-
+pling to extract features for both sparse points and dense
+points, doubling the voxel size in each downsampling stage.
+In the encoder’s final stage, the sparse points and their corre-
+sponding features are denoted by ˆP = {ˆp1, . . . , ˆpn | ˆpi ∈R3}
+and ˆF = { ˆf1, . . . , ˆfn | ˆfi ∈R ˆd}, respectively, with ˆd being
+the sparse point feature dimensionality. In the decoder, we
+compute the features of upsampled points until the first
+downsampled layer, since the points in P can fully describe
+the geometry of the original point cloud without additional
+descriptors. We denote the upsampled dense points by ˜P =
+{˜p1, . . . , ˜pm | ˜pi ∈R3} and their corresponding features by
+˜F = { ˜f1, . . . , ˜fm | ˜fi ∈R ˜d}, with ˜d being the dense point
+feature dimensionality.
+Consistent Keypoint Detection. We estimate the position
+of a new keypoint by aggregating the neighboring dense
+points of the sparse points generated from the downsampling
+branch. Given the sparse points ˆP, we first search the k
+
+Fig. 3: The neural network comprises two modules: (i) a Keypoints-
+Aware Downsampling module that identifies consistent keypoints and their
+associated local descriptors, and (ii) a plane-based geometric self-attention
+module that enhances the descriptiveness of the extracted local features.
+nearest neighbors (kNN) from the dense points ˜P, giving
+us | ˆP| groups, each consisting of k dense points. For each
+sparse point ˆpi ∈ˆP with a group of neighboring dense
+points {˜pi
+1, . . . , ˜pi
+k | ˜pi
+j
+∈
+˜P} and their corresponding
+features { ˜f i
+1, . . . , ˜f i
+k | ˜f i
+j ∈˜F}, we compute the positions
+of neighboring dense points relative to each sparse points
+and calculate their corresponding Euclidean distance offsets.
+These relative positions and distances are then concatenated
+with the original point features. This process yields k neigh-
+boring points, each augmented with an enhanced feature
+representation in R ˜d+4.
+The
+weights
+of
+the
+k
+neighboring
+points
+W
+=
+{w1, . . . , wk | wi
+∈
+[0, 1]} in each group are predicted
+by passing the neighboring features through a multilayer
+perceptron (MLP), followed by a pooling layer, and subse-
+quently normalized with a SoftMax function. The keypoint
+is computed as a weighted sum of the neighboring points in
+each group, as described by the equation ¯pi = Pk
+j=1 wj ˜pi
+j.
+In addition, the corresponding feature is updated by concate-
+nating the previous sparse point feature ˆfi with the weighted
+sum of neighboring point features, followed by an MLP.
+Intuitively, keypoints are generated by shifting the down-
+sampled points within the convex hull defined by their neigh-
+boring dense points. Additionally, to mitigate overfitting, we
+employ random dilation grouping as in [29]. Rather than
+selecting the k nearest neighbors of each sparse point, we
+first identify the 2k nearest neighbors and randomly sample
+k points in each iteration. Completing this pipeline, we obtain
+the keypoints ¯P and their corresponding local descriptors ¯F
+as a compressed representation of the point cloud.
+C. Plane-Based Geometrical Transformer Encoder
+The local descriptors
+¯F, computed as previously de-
+scribed, encode the local geometric information around the
+keypoints accurately, but they do so without considering the
+high-level structure of the point cloud. To combat this, we
+apply a plane-based geometrical transformer encoder design
+to enhance the local descriptors with the additional geometric
+information between keypoints.
+Inspired by the [30], which encodes the Euclidean dis-
+tances and angles between points, we design a plane-based
+transformer encoder that not only considers the point-to-
+point but also the plane-to-plane geometric information of the
+keypoints. The proposed transformer encoder is comprised of
+Nsa independently configured plane-based geometric self-
+attention modules. Each module employs the conventional
+self-attention structure augmented with a planar geometric
+embedding component. We consider two metrics to represent
+the planar relationship between the keypoints: Mahalanobis
+distance and surface angle.
+Mahalanobis Distance Embedding. Given any two key-
+points ¯pi, ¯pj ∈¯P, and the dense point cloud ˜P, we first
+compute the covariance matrix of the 20 nearest dense points
+to the keypoints. We denote the two covariance matrices as
+Σi and Σj. The Mahalanobis distance can be computed with
+the equation dij = (¯pi −¯pj)T (Σi + Σj)−1(¯pi −¯pj), and the
+embedding εM
+ij ∈R ¯d via the sinusoidal function
+εM
+ij,2k = sin (βd dij/ck)
+εM
+ij,2k+1 = cos (βd dij/ck)
+(1)
+where the hyper-parameter βd controls the sensitivity of the
+Mahalanobis distance and ck = 100002k/ ¯d with ¯d being the
+dimension of the feature vector.
+Surface Angle Embedding. Given a covariance matrix
+associated with a keypoint, we consider the eigenvector with
+the smallest eigenvalue of the covariance matrix to be the
+surface normal. With the smallest eigenvalues of covariances
+Σi and Σj being ni and nj, we compute the angle of the
+surface normal as αij = arccos (n⊤
+i nj). The embedding εN
+ij
+can then be computed using the same formulation as in (1),
+with the angle αij and hyper-parameter βn replacing dij and
+βd, respectively.
+We also include the point-wise Euclidean distance embed-
+ding εE
+ij and triplet-wise angular embedding εA
+ij proposed in
+[30]. Finally, the geometric information between keypoints
+¯pi and ¯pj in the point cloud is represented as the combination
+of all embeddings
+εij = εM
+ij W M + εE
+ijW E + εN
+ijW N + εA
+ijW A,
+where W M, W E, W N, W A ∈R ¯d× ¯d are the respective pro-
+jection matrices of Mahalanobis distance, Euclidean distance,
+surface angle, and triplet-wise angle embeddings. Given the
+keypoints ¯P and their corresponding features ¯F, the new
+geometric-context aware local descriptor fi of the keypoint
+¯pi can be computed using this equation
+fi =
+| ¯
+P |
+X
+j=1
+1
+√¯d
+( ¯fiW Q) ( ¯fjW K + εijW E)⊤( ¯fjW V ),
+where WQ, WK, WV , and WE are the projection matrices
+of queries, keys, values, and embeddings.
+D. Loop Closure Detection and Registration
+Given local descriptor sets F
+= {f1, . . . , fm}, G =
+{g1, . . . , gn} extracted from point clouds P and Q, respec-
+tively, we compute the pairwise descriptor distance matrix
+D ∈Rm×n, Dij = ∥fi −gj∥2. The inter-scan distance
+between P and Q is defined as d(P, Q) = 1
+s
+Ps
+k=1 dk, where
+dk is the kth smallest element of D and s is the number
+of keypoint pairs selected. Potential loop closures between
+keyframes in the current session and auxiliary sessions
+
+Fig. 4: Each session’s pose graph, containing intra-map odometry factors
+(black), is serialized. When an inter-map loop closure is detected between
+the current and previous sessions, a loop closure factor (green) is added
+based on the relative pose. Scan matching cost factors (orange) are then
+inserted between overlapping keyframes across sessions—both in explicit
+overlap regions near the loop closure and implicit overlaps resulting from
+the loop closure constraint.
+are identified by evaluating whether the inter-scan distance
+between their corresponding local descriptors falls below a
+predefined threshold. When multiple candidates satisfy this
+criterion, the keyframe with the minimum distance is selected
+as the loop closure candidate.
+Let
+¯P
+=
+{¯p1, . . . , ¯pm} and
+¯Q
+=
+{¯q1, . . . , ¯qn} de-
+note the sets of keypoints extracted from point clouds P
+and Q, respectively. Following the loop closure detection
+scheme, initial correspondences are established by selecting
+s keypoint pairs with the minimum descriptor distances.
+The coarse transformation {R, t} is recovered via SVD by
+solving R, t = arg minR∈SO(3),t∈R3 Ps
+i=1 ∥R ¯pi + t −¯qi∥2.
+This alignment is subsequently refined using Generalized
+Iterative Closest Point (GICP), initialized with the SVD
+solution, to achieve high-precision registration.
+E. Outlier Rejection
+Before merging the sequences identified by the neural
+network, false-positive loop closures must be eliminated,
+as even a single misalignment can compromise the result.
+Each loop closure candidate is evaluated by estimating the
+relative transformation using local descriptors and GICP. A
+candidate is rejected if the GICP alignment error exceeds
+a threshold or if the post-alignment inlier ratio falls below
+another threshold. We further prune false positives using
+intra-session poses via Pairwise Consistency Maximization
+(PCM)[27], which identifies the largest subset of pairwise
+consistent loop closures. Consistency is verified by checking
+whether any two loop closures induce compatible sequence
+alignments under their predicted transformations. The final
+set of true-positive loop closures is obtained by solving a
+maximum-clique problem using heuristic methods.
+F. Factor Graph Optimization
+During each mapping session, the back-end constructs a
+pose graph where nodes correspond to keyframes, and be-
+tween factors are added for sequentially adjacent keyframes
+or keyframes with sufficient overlap. These between factors
+are modeled as Gaussian distributions, with covariances
+weighted according to the overlap between the connected
+keyframes [25]. The resulting factor graph can be optimized
+using a standard solver and/or serialized as an auxiliary
+session for inter-session merging. Local descriptor matching
+provides transformations between keyframes (i.e., nodes) in
+the current session and those in auxiliary sessions.
+Existing approaches merge factor graphs from separate
+sessions by placing inter-map factors derived from relative
+pose estimates via place recognition [13]. However, these
+methods cannot handle implicit loop closures, where areas
+mapped by multiple sessions that lack detected inter-map
+loop closures remain misaligned due to missing relative pose
+constraints. Furthermore, representing relative pose estimates
+with unimodal Gaussian distributions does not adequately
+capture the characteristics of scan-matching solutions, which
+typically correspond to local minima.
+To address this, we compute keyframe overlaps in separate
+sessions using the factor graph optimized with inter-map
+relative pose estimates (see Fig. 4). We place scan matching
+cost factors between nodes from different sessions whose
+keyframes overlap beyond 20%. We retain only the top nk
+keyframes with the highest overlap to maintain tractability.
+To implement these scan matching cost factors, we follow
+the formulation of Koide et al. [24]. Let Pi and Pj be two
+point clouds with a set of correspondences C, and let c ∈C.
+Then, with a slight abuse of notation, we define the GICP
+residual as E (TijPi, Pj) = P
+c(pj
+c −Tij pi
+c)⊤Ω−1
+c (pj
+c −
+Tij pi
+c) where pk
+c is the point correspondence in cloud k
+and Ωc = Σj
+c + Tij Σi
+c T ⊤
+ij is the transformed covariance
+matrix with Σi
+c and Σj
+c are the estimated covariance matrices
+for the corresponding points pi
+c and pj
+c, receptively. Finally,
+Tij = T −1
+i
+Tj ∈SE(3) is the relative transformation between
+the point correspondences and are variable pose nodes in
+the factor graph to be found. At each linearization step in
+the factor graph optimization, the residual is computed using
+the updated correspondences, from which a Hessian factor
+is derived to constrain Ti and Tj. The factor is composed of
+Hessian matrices Hii = P
+c A⊤
+c ΩcAc, Hij = P
+c A⊤
+c ΩcBc,
+and Hjj = P
+c B⊤
+c ΩcBc and vectors bi = P
+c A⊤
+c Ωcdc and
+bj = P
+c B⊤
+c Ωcdc where Ac = ∂dc/∂Ti, Bc = ∂dc/∂Tj.
+Note that each Hessian and vector can be scaled by a tunable
+parameter that balances the weighting of GICP residuals with
+between-factor residuals. We set this scaling to 0.01.
+The inclusion of these scan matching cost factors en-
+sures that the factor graph solver enforces both the loop
+closures detected by the place recognition and plane-to-plane
+alignment in implicitly overlapping regions, even in areas
+without detected loop closures. By leveraging the conditional
+dependencies between factor graph variables, a solver such
+as iSAM2 enables efficient, real-time inference on the map.
+G. Network Training and Loss Functions
+We denote the keypoints and local descriptors generated
+as the output of the plane-based geometric transformer as
+¯P,
+¯Q, and F, G, respectively. Correspondences between
+keypoints are established by matching their local descriptors.
+For descriptors in P, the top s nearest descriptors in Q are
+identified in Euclidean space. The rigid-body transformation
+between P and Q is then obtained by minimizing the
+distances of all descriptor correspondences using SVD.
+For each keypoint, a local patch is constructed by selecting
+
+Fig. 5: Map merging results with the proposed algorithm GMLD. The first row shows the unaligned sessions from KITTI 00 and 02; ARL Mout site;
+UCLA Engineering IV and Bunche Hall, while the second row presents the corresponding merged maps.
+TABLE I: RMSE of ATE (m) on KITTI
+Seq
+DLIOM
+FAST
+-LIO2
+DCL
+-SLAM
+LAMM
+Ours w/o Scan
+Matching Cost
+Ours
+00
+1.498
+3.330
+4.182
+2.040
+2.185
+1.140
+02
+5.069
+8.749
+18.564
+4.746
+6.360
+3.709
+05
+1.255
+1.765
+2.277
+1.639
+1.258
+0.964
+06
+0.772
+0.938
+1.690
+0.941
+0.833
+0.612
+07
+0.668
+0.956
+Fail
+0.561
+0.684
+0.713
+all neighboring dense points within a radius r. Ground-
+truth correspondences between keypoints are determined by
+evaluating the average geometric distance between their local
+patches. Keypoints are designated as positive pairs if their
+corresponding local patches exhibit at least 10% overlap;
+otherwise, they are treated as negative pairs.
+To train the model to identify precise correspondences
+between local descriptors, we applied the circle loss Lcircle
+as described in [30], [31]. Additionally, since SVD is differ-
+entiable, we incorporated a transformation loss LT that mini-
+mizes the registration error LT =
+1
+|P|
+P
+pi∈P ∥(T −ˆT) ρi∥2,
+where ρi = (pi, 1)⊤and T, ˆT ∈SE(3) are the ground-
+truth and predicted transformation between point clouds P
+and Q, respectively. We also employed the Chamfer loss Lc
+to supervise keypoint learning by minimizing the distances
+between corresponding keypoints. The overall loss for local
+descriptor training is defined as a weighted combination of
+the three loss terms. Implementation details are provided in
+the Supplemental Materials.
+IV. EXPERIMENTS
+In this section, we comprehensively evaluate the accuracy
+and robustness of the proposed method both qualitatively and
+quantitatively, using the public KITTI and Newer College
+datasets and two self-collected datasets from UCLA and
+ARL’s Graces Quarters facility. We compare our approach
+against other multi-session map merging algorithms and
+single-session SLAM algorithms. Moreover, we demonstrate
+the effectiveness of the learned descriptors on place recog-
+nition and registration.
+A. Implementation and Training Details
+We train the model with sequences 00 - 09 of KITTI using
+the leave-one-out cross-validation strategy and evaluate it on
+the sequences containing loop closures (00, 02, 05, 06, 07).
+In addition, we assess the map merging performance on the
+UCLA and ARL datasets, collected with OUSTER OS-0 and
+OUSTER OS-1 sensors, respectively. The model trained on
+the KITTI dataset, which uses a Velodyne HDL-64E LiDAR,
+is employed for all these evaluations to demonstrate the
+robustness and generalization of the proposed framework.
+The model is trained on a desktop equipped with an
+NVIDIA RTX 4090 GPU. We use the ADAM optimizer
+with an initial learning rate of 5e-5, which is decayed by
+a factor of 0.05 for every 7 steps. The local descriptors F
+have a dimension of 256. We set s = 256 when selecting
+corresponding keypoints and computing pairwise distances to
+evaluate matching scores and transformations. All the point
+clouds are voxelized with a leaf size of 0.3m as the inputs.
+For each keypoint, the number of nearest dense points is
+set to k = 64. The number of self-attention layers Nsa is
+set to 3. The embedding hyper-parameters βm and βn are
+set to 1/4.8 and 1/15◦, respectively. To mitigate overfitting,
+we apply data augmentation to the input point clouds in
+training, including random rotations of up to ±180◦about
+the yaw axis and ±3◦about the roll and pitch axes. Random
+translations of up to ±2 m, ±2 m, and ±1 m are applied along
+the x, y, and z axes, respectively. Additionally, 10% of the
+points are randomly dropped, and Gaussian noise N(0, 0.01)
+is added for point jittering.
+B. Map Merging
+We first evaluate the performance of the proposed map
+merging framework qualitatively. We selected two sequences
+from the KITTI [32] dataset (00, 02), which represent the
+urban environment with several overlapped regions. Each
+sequence is partitioned into multiple sessions such that each
+session maintains overlap with at least one other session. We
+also included another four maps collected from ARL, UCLA,
+and a map of Newer College to represent the office and
+campus scenarios. Qualitatively, our framework merged all
+maps successfully, as seen in Fig. 5 and Fig. 1. Notably, the
+model operates without retraining in new environments, as
+the local descriptors generalize more effectively than global
+descriptors that are typically scenario-dependent. In addition
+to the six maps presented, we evaluated the framework in
+several additional sessions. These results are provided in the
+Supplementary Material VI.
+To assess the quantitative accuracy of the merged map, we
+compare our approach against the multi-session map merg-
+
+ing algorithm LAMM [14], the multi-SLAM system DCL-
+SLAM [33], and maps produced directly by the standard
+single-session SLAM algorithms, including FAST-LIO2 [2]
+and the backbone SLAM module DLIOM [25] used in our
+framework. We evaluated performance using the Root Mean
+Square Error (RMSE) of the Absolute Trajectory Error (ATE)
+on five sequences of the KITTI dataset. Note that sequence
+08 was excluded due to its large ground-truth error.
+The results are shown in Table I. Our framework achieved
+the highest accuracy in four of the five sequences and ranked
+third for sequence 07. Compared with DLIOM, which runs
+the entire trajectory without partitioning, our method attains
+even better performance by effectively mitigating accumu-
+lated errors. Furthermore, Table I confirms the effectiveness
+of adding scan matching cost factors in improving ATE
+accuracy. Note that the accuracy metrics reported for LAMM
+and FAST-LIO2 were taken directly from [14] as we were
+unable to reproduce their results.
+C. Place Recognition
+In this section, we compare the descriptiveness of the
+learned descriptors with several representative place recog-
+nition modules. Specifically, we include BTC [19] used by
+LAMM, Scan Context used by DCL-SLAM, as well as the
+learning-based OverlapTransformer [23], LoGG3D-Net [21],
+and LCDNet [22]. We evaluate the performance of place
+recognition with KITTI sequences 00, 02, 05, 06, 07 in terms
+of loop closure detection.
+For each scan, we compute its similarity to all preceding
+scans and select the one with the minimum descriptor-space
+distance as the loop closure candidate. Precisions and recalls
+are computed by varying the similarity threshold. To avoid
+detecting temporally adjacent scans, we excluded the most
+recent 50 scans from the search. Following [14], we consider
+the detected loop closure as a true positive if the ground truth
+distance is less than 5m, and as a false positive otherwise.
+Additionally, as in [19], the precision–recall curves for BTC
+are obtained by varying the plane overlap threshold. For
+OverlapTransformer, LoGG3D-Net, and LCD-Net, we use
+their released pretrained models for evaluation.
+The precision-recall curves are shown in Fig. 6, with the
+corresponding F1-max scores and Average Precision (AP)
+reported in Table II. The best method is highlighted in bold,
+and the second-best one is underlined. Our method achieves
+the highest F1-max score across most sequences, with the
+exception of sequence 05, where LoGG3D-Net attains the
+best performance. Regarding Average Precision (AP), our
+approach ranks first on sequences 00, 02, and 06, and second
+on the others. Overall, our method achieves the highest
+average scores in both F1-max and AP, demonstrating the
+accuracy of the proposed descriptors.
+D. Relative Pose Estimation
+In this section, we evaluate the accuracy of relative pose
+estimation using the learned local descriptors. Among the
+baseline methods, OverlapTransformer and LoGG3D-Net
+cannot estimate relative poses between point clouds, and
+Fig. 6: Precision-Recall curves for KITTI dataset. The proposed method
+outperforms the baselines in sequences 00, 02, and 07, while LoGG3D-Net
+achieves the best performance in sequence 05.
+Scan Context is limited to yaw estimation. Since the released
+BTC code does not provide the evaluation of pose estimation,
+we compare our proposed method with LCDNet, which also
+performs both loop closure detection and pose estimation
+within a single network. The RANSAC estimator in LCDNet
+and the GICP alignment in our method were removed to
+assess relative pose estimation using only local descriptors.
+We evaluate pose estimation performance using all positive
+loop closures, specifically selecting point cloud pairs whose
+ground-truth distances are within 5m. Following [22], we
+evaluate pose estimation using three metrics: (1) Rotation
+Error (RE) – the geodesic distance between rotation ma-
+trices, (2) Translation Error (TE) – the Euclidean distance
+of relative translation, (3) Recall – the ratio of successful
+registrations where RE < 5◦and TE < 2m.
+The results are presented in Table III. The proposed
+method demonstrates high accuracy in both rotation and
+translation estimation, achieving better results across all
+metrics and sequences compared with LCDNet. In most
+sequences, the translation error is smaller than the voxel
+size (0.3m). We further assess performance using GICP
+refinement, which provides the final estimated transformation
+in the map merging pipeline. With GICP refinement, the
+average translation error decreases from 0.247m to 0.151m,
+the average rotation error decreases from 0.575◦to 0.401◦,
+and average recall improves from 99.05% to 99.78%.
+E. Ablation Studies
+We assessed the contributions of the proposed framework
+via ablation studies. All models are trained and evaluated
+using the same settings in Section IV-A. Sequences 05 and
+07 are chosen due to their greater difficulty in our tests.
+The results are reported in Table IV. Removing the plane-
+based embedding leads to a clear degradation in F1 max
+score, confirming its effectiveness in capturing discrimina-
+tive geometric structure for loop closure detection. Mean-
+
+TABLE II: Evaluation of Place Recognition on KITTI Dataset
+Sequence
+KITTI 00
+KITTI 02
+KITTI 05
+KITTI 06
+KITTI 07
+Average
+F1 MAX
+AP
+F1 MAX
+AP
+F1 MAX
+AP
+F1 MAX
+AP
+F1 MAX
+AP
+F1 MAX
+AP
+BTC
+0.9670
+0.9838
+0.6418
+0.5680
+0.8895
+0.9623
+0.9869
+0.9926
+0.9106
+0.9576
+0.8792
+0.8929
+Scan Context
+0.9183
+0.9388
+0.8151
+0.7762
+0.8679
+0.8699
+0.9811
+0.9836
+0.4319
+0.3861
+0.8029
+0.7909
+OverlapTransformer
+0.9309
+0.9715
+0.8229
+0.8267
+0.8553
+0.9211
+0.9544
+0.9818
+0.5022
+0.4922
+0.8131
+0.8387
+LoGG3D-Net
+0.9352
+0.9733
+0.8440
+0.8637
+0.9819
+0.9918
+0.9871
+0.9922
+0.8291
+0.9038
+0.9155
+0.9450
+LCD-Net
+0.9693
+0.9936
+0.9186
+0.9599
+0.9503
+0.9778
+0.9945
+0.9939
+0.7757
+0.8204
+0.9217
+0.9491
+Ours
+0.9813
+0.9967
+0.9518
+0.9849
+0.9406
+0.9788
+1.0000
+0.9939
+0.9262
+0.9461
+0.9600
+0.9800
+TABLE III: Registration Evaluation on KITTI Sequences
+Approach
+LCDNet
+Ours
+Recall† TE [m] RE†[deg]
+Recall
+TE [m] RE [deg]
+KITTI 00
+13.35%
+0.741
+6.441
+100.00%
+0.115
+0.391
+KITTI 02
+4.17%
+1.136
+7.476
+97.66%
+0.544
+1.095
+KITTI 05
+15.02%
+0.711
+6.264
+98.89%
+0.236
+0.655
+KITTI 06
+10.59%
+1.359
+6.565
+100.00%
+0.091
+0.268
+KITTI 07
+16.02%
+1.083
+6.613
+98.71%
+0.250
+0.469
+† The original implementation reported only the yaw error; we provide
+full rotation error.
+TABLE IV: Ablation Studies on KITTI Sequences
+Methods
+KITTI 05
+KITTI 07
+w/o
+Keypoints
+w/o Plane
+Embedding
+Ours
+w/o
+Keypoints
+w/o Plane
+Embedding
+Ours
+F1 Max
+0.9318
+0.9247
+0.9406
+0.9091
+0.9076
+0.9262
+AP
+0.9769
+0.9762
+0.9788
+0.9343
+0.9374
+0.9461
+Recall
+98.26%
+98.86%
+98.89%
+88.18%
+93.65%
+98.71%
+TE
+0.393
+0.270
+0.236
+0.755
+0.523
+0.250
+RE
+0.795
+0.994
+0.655
+1.718
+0.945
+0.469
+Fig. 7: Ablation study of keypoint detection. Left: No keypoint detection.
+Right: Matching keypoints significantly reduces the residuals between
+corresponding points.
+while, eliminating the keypoint detection module results in
+substantially larger transformation errors, demonstrating its
+importance for reducing registration drift. The residuals of
+matched keypoints are shown in Fig. 7, with a clear reduction
+when the keypoint module is included.
+The impact of the scan matching cost factors is sum-
+marized in Table I, where all sequences exhibit notable
+reductions in ATE. As shown in Fig. 8, omitting the scan
+matching cost factors leads to local misalignments in the
+merged map, further validating its effectiveness. The orange
+lines represent the factor graph nodes with scan matching
+cost factors.
+V. CONCLUSION
+In this paper, we presented a large-scale multi-session map
+merging framework that achieves accurate and consistent
+Fig. 8: Ablation study of scan matching cost factors. Left: No scan matching
+cost factors. Right: Scan matching cost factors. Scan matching cost factors
+effectively correct local misalignments (Engineering IV Loop in Fig. 5).
+map integration across sessions. The proposed keypoint-
+aware downsampling strategy enhances the consistency of lo-
+cal descriptors, while the plane-based geometric transformer
+module improves extraction accuracy by leveraging geomet-
+rical information from downsampled points. In addition, the
+scan matching cost factors effectively reduce local incon-
+sistencies in overlapping regions, ensuring precise global
+map alignment. Experimental results validate the accuracy
+and robustness of the proposed framework across diverse
+environments. Notably, features extracted from point clouds
+are used not only for map merging, but also for a variety of
+other tasks in recent studies [34]. In future work, we plan
+to enhance the efficiency of the multi-stage downsampling
+process to reduce the computational cost of feature extraction
+and enable deployment in a broader range of scenarios.
+REFERENCES
+[1] T. Shan, B. Englot, D. Meyers, W. Wang, C. Ratti, and R. Daniela,
+“Lio-sam: Tightly-coupled lidar inertial odometry via smoothing and
+mapping,” in IEEE/RSJ Int. Conf. Intell. Robots Syst., 2020, pp. 5135–
+5142.
+[2] W. Xu, Y. Cai, D. He, J. Lin, and F. Zhang, “Fast-lio2: Fast direct
+lidar-inertial odometry,” IEEE Trans. Robot., vol. 38, no. 4, pp. 2053–
+2073, 2022.
+[3] K. Chen, R. Nemiroff, and B. T. Lopez, “Direct lidar-inertial odome-
+try: Lightweight lio with continuous-time motion correction,” in IEEE
+Int. Conf. Robot. Autom., 2023, pp. 3983–3989.
+[4] K. Ebadi et al., “Lamp: Large-scale autonomous mapping and posi-
+tioning for exploration of perceptually-degraded subterranean environ-
+ments,” in IEEE Int. Conf. Robot. Autom., 2020, pp. 80–86.
+[5] Y. Tian, Y. Chang, F. H. Arias, C. Nieto-Granda, J. P. How, and
+L. Carlone, “Kimera-multi: Robust, distributed, dense metric-semantic
+slam for multi-robot systems,” IEEE Trans. Robot., vol. 38, no. 4,
+2022.
+[6] Y. Chang et al., “Lamp 2.0: A robust multi-robot slam system for
+operation in challenging large-scale underground environments,” IEEE
+Robot. Autom. Lett., vol. 7, no. 4, pp. 9175–9182, 2022.
+[7] G. Kim and A. Kim, “Scan context: Egocentric spatial descriptor for
+place recognition within 3d point cloud map,” in IEEE/RSJ Int. Conf.
+Intell. Robots Syst., 2018, pp. 4802–4809.
+[8] X. Chen, T. L¨abe, A. Milioto, T. R¨ohling, J. Behley, and C. Stachniss,
+“Overlapnet: A siamese network for computing lidar scan similarity
+with applications to loop closing and localization,” Auton. Robots,
+vol. 46, no. 1, pp. 61–81, 2022.
+
+[9] J. Komorowski, “Minkloc3d: Point cloud based large-scale place
+recognition,” in Proc. IEEE/CVF Winter Conf. Appl. Comput. Vis.,
+2021, pp. 1790–1799.
+[10] R. B. Rusu, N. Blodow, Z. C. Marton, and M. Beetz, “Aligning point
+cloud views using persistent feature histograms,” in IEEE/RSJ Int.
+Conf. Intell. Robots Syst., 2008, pp. 3384–3391.
+[11] R. B. Rusu, N. Blodow, and M. Beetz, “Fast point feature histograms
+(fpfh) for 3d registration,” in IEEE Int. Conf. Robot. Autom., 2009,
+pp. 3212–3217.
+[12] N. Stathoulopoulos, A. Koval, A.-a. Agha-mohammadi, and G. Niko-
+lakopoulos, “Frame: Fast and robust autonomous 3d point cloud map-
+merging for egocentric multi-robot exploration,” in IEEE Int. Conf.
+Robot. Autom., 2023, pp. 3483–3489.
+[13] P. Yin et al., “Automerge: A framework for map assembling and
+smoothing in city-scale environments,” IEEE Trans. Robot., vol. 39,
+no. 5, pp. 3686–3704, 2023.
+[14] H. Wei et al., “Large-scale multi-session point-cloud map merging,”
+IEEE Robot. Autom. Lett., 2024.
+[15] A. Howard, “Multi-robot simultaneous localization and mapping using
+particle filters,” Int. J. Robot. Res., vol. 25, no. 12, pp. 1243–1256,
+2006.
+[16] Z. Jiang, J. Zhu, Y. Li, J. Wang, Z. Li, and H. Lu, “Simultaneous
+merging multiple grid maps using the robust motion averaging,” J.
+Intell. Robot. Syst., vol. 94, no. 3, pp. 655–668, 2019.
+[17] R. Dube et al., “Segmap: Segment-based mapping and localization
+using data-driven descriptors,” Int. J. Robot. Res., vol. 39, no. 2-3, pp.
+339–355, 2020.
+[18] E. Rublee, V. Rabaud, K. Konolige, and G. Bradski, “Orb: An efficient
+alternative to sift or surf,” in Proc. IEEE/CVF Int. Conf. Comput. Vis.,
+2011, pp. 2564–2571.
+[19] C. Yuan, J. Lin, Z. Liu, H. Wei, X. Hong, and F. Zhang, “Btc: A
+binary and triangle combined descriptor for 3-d place recognition,”
+IEEE Trans. Robot., vol. 40, pp. 1580–1599, 2024.
+[20] M. A. Uy and G. H. Lee, “Pointnetvlad: Deep point cloud based
+retrieval for large-scale place recognition,” in Proc. IEEE/CVF Conf.
+Comput. Vis. Pattern Recognit., 2018, pp. 4470–4479.
+[21] K. Vidanapathirana, M. Ramezani, P. Moghadam, S. Sridharan, and
+C. Fookes, “Logg3d-net: Locally guided global descriptor learning
+for 3d place recognition,” in IEEE Int. Conf. Robot. Autom., 2022, pp.
+2215–2221.
+[22] D. Cattaneo, M. Vaghi, and A. Valada, “Lcdnet: Deep loop closure
+detection and point cloud registration for lidar slam,” IEEE Trans.
+Robot., vol. 38, no. 4, pp. 2074–2093, 2022.
+[23] J. Ma, J. Zhang, J. Xu, R. Ai, W. Gu, and X. Chen, “Overlaptrans-
+former: An efficient and yaw-angle-invariant transformer network for
+lidar-based place recognition,” IEEE Robot. Autom. Lett., vol. 7, no. 3,
+pp. 6958–6965, 2022.
+[24] K. Koide, M. Yokozuka, S. Oishi, and A. Banno, “Globally consistent
+3d lidar mapping with gpu-accelerated gicp matching cost factors,”
+IEEE Robot. Autom. Lett., vol. 6, no. 4, pp. 8591–8598, 2021.
+[25] K. Chen, R. Nemiroff, and B. T. Lopez, “Direct lidar-inertial odometry
+and mapping: Perceptive and connective slam,” arXiv:2305.01843,
+2023.
+[26] A. Segal, D. Haehnel, and S. Thrun, “Generalized-icp.” in Rob.: Sci.
+Syst., vol. 2, no. 4, 2009, p. 435.
+[27] J. G. Mangelson, D. Dominic, R. M. Eustice, and R. Vasudevan,
+“Pairwise consistent measurement set maximization for robust multi-
+robot map merging,” in IEEE Int. Conf. Robot. Autom., 2018, pp.
+2916–2923.
+[28] H. Thomas, C. R. Qi, J.-E. Deschaud, B. Marcotegui, F. Goulette,
+and L. J. Guibas, “Kpconv: Flexible and deformable convolution for
+point clouds,” in Proc. IEEE/CVF Int. Conf. Comput. Vis., 2019, pp.
+6411–6420.
+[29] F. Lu, G. Chen, Y. Liu, Z. Qu, and A. Knoll, “Rskdd-net: Random
+sample-based keypoint detector and descriptor,” Adv. Neural Inf.
+Process. Syst., vol. 33, pp. 21 297–21 308, 2020.
+[30] Z. Qin, H. Yu, C. Wang, Y. Guo, Y. Peng, and K. Xu, “Geometric
+transformer for fast and robust point cloud registration,” in Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit., 2022, pp. 11 143–
+11 152.
+[31] Y. Sun et al., “Circle loss: A unified perspective of pair similarity op-
+timization,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit.,
+2020, pp. 6398–6407.
+[32] A. Geiger, P. Lenz, C. Stiller, and R. Urtasun, “Vision meets robotics:
+The kitti dataset,” Int. J. Robot. Res., vol. 32, no. 11, pp. 1231–1237,
+2013.
+[33] S. Zhong, Y. Qi, Z. Chen, J. Wu, H. Chen, and M. Liu, “Dcl-slam: A
+distributed collaborative lidar slam framework for a robotic swarm,”
+IEEE Sens. J., vol. 24, no. 4, pp. 4786–4797, 2023.
+[34] D. Thorne, N. Chan, C. S. Robison, P. R. Osteen, and B. T. Lopez,
+“Optmap: Geometric map distillation via submodular maximization,”
+arXiv:2512.07775, 2025.
+VI. SUPPLEMENTARY MATERIALS
+A. Network Training and Loss Functions
+As explained in the main paper, we apply the overlap-
+aware circle loss outlined in [30], [31]. Given the local
+patches OP of point cloud P, we partition the patches
+of point cloud Q into two sets OQ
+p and OQ
+n , where OQ
+p
+corresponds to the positive local patches and OQ
+n corresponds
+to the negative patches. The loss of descriptors in F is
+LP
+m =
+1
+|OP |
+X
+oP
+i ∈OP
+log
+"
+1 +
+X
+oQ
+j ∈OQ
+p
+eγ (dj
+i −∆p)2 (λj
+i)
+1
+2 ·
+X
+oQ
+k ∈OQ
+n
+eγ (∆n−dk
+i )2
+#
+,
+where dj
+i, dk
+i represent the Euclidean distances between local
+descriptors. We set ∆p = 0.1, ∆n = 1.4, which are the
+margins of positive and negative descriptors, λj
+i is the overlap
+ratio between positive patches, and γ serves as the hyper-
+parameter. The resulting loss of descriptors between P and
+Q is computed by taking the average of LP
+m and LQ
+m as
+Lcircle = 1
+2(LP
+m + LQ
+m).
+The Chamfer loss between point clouds P and Q measures
+the bidirectional distance between each keypoint in the
+downsampled sets ¯P and ¯Q:
+Lc(P, Q) = 1
+2| ¯P|
+X
+¯pi∈¯
+P
+min
+¯qj∈¯
+Q ||¯pi −¯qj|| 2
+2
++
+1
+2| ¯Q|
+X
+¯qi∈¯
+Q
+min
+¯pj∈¯
+P ||¯qi −¯pj|| 2
+2 .
+This loss encourages each keypoint in one set to be close to
+its nearest neighbor in the other set, providing supervision for
+precise keypoint learning and robust point cloud alignment.
+Combined with the transformation loss introduced in the
+main paper, the overall training loss is defined:
+L = βcircleLcircle + βtLt + βcLc,
+where the weighting coefficients βcircle, βt, βc are all set to
+1.0 in the work.
+B. Place Recognition
+The proposed local descriptors are used not only to
+compute scan similarities but also to estimate local trans-
+formations. Incorporating a GICP refinement step allows us
+to obtain the inlier ratio between any two point clouds, which
+serves as an outlier-rejection criterion in our pipeline. Con-
+sequently, instead of generating Precision–Recall curves by
+varying the average descriptor distance, we can alternatively
+
+Fig. 9: Precision-Recall curves of KITTI dataset (Inlier Ratio). By varying
+the inlier-ratio threshold, performance improves on sequences 00, 02, and
+05, but degrades on sequence 07.
+vary the inlier ratio to produce these curves. Similar to [14],
+we select the best candidate based on the descriptor distance
+and use it to compute the inlier ratio for every scan.
+The results are shown in Fig. 9. The precision–recall
+curves show improved performance on sequences 00, 02,
+and 05, but a degradation on sequence 07. This highlights
+the necessity of incorporating the additional outlier-checking
+step based on the inlier ratio within the pipeline.
+C. Map Merging
+Additional merged maps results are shown in Figs. 10
+and 11.
+Fig. 10: Additional KITTI Map merging results. The first column shows
+the unaligned sessions from KITTI 05, 06, 07, and 08, while the second
+column presents the corresponding merged maps.
+Fig. 11: Additional UCLA Map merging results. The first column shows
+the unaligned sessions from UCLA West Campus, Engineering IV West,
+and Bunche Hall East, while the second column presents the corresponding
+merged maps.
